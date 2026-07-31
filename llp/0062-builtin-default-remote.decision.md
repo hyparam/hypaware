@@ -17,7 +17,7 @@
 
 ## Decision
 
-### D1 — A built-in target, shipped in the client
+### D1: A built-in target, shipped in the client
 
 <a id="builtin"></a>The client ships a constant registry of built-in targets
 (`BUILTIN_REMOTES`), currently the single entry `hyperparam →
@@ -38,11 +38,11 @@ whether a plain command goes remote.
 > so a url already ending in `/v1/mcp` is still honored verbatim). Issue #274 was
 > this base 404ing before that derivation existed.
 
-### D2 — Bare `--remote` and bare `remote login` resolve the default
+### D2: Bare `--remote` and bare `remote login` resolve the default
 
 <a id="bare-remote"></a>`--remote` becomes optionally-valued. A bare `--remote`
 parses to an empty-string sentinel (distinct from `undefined`, which stays
-"local"); the command path resolves it to `effectiveDefaultRemote(config)` — an
+"local"); the command path resolves it to `effectiveDefaultRemote(config)`: an
 explicit `query.default_remote` if set, else `BUILTIN_DEFAULT_REMOTE`. A named
 `--remote <name>` is unchanged. Symmetrically, `hyp remote login` with no
 positional target resolves the same default, the companion of bare `--remote`
@@ -52,7 +52,7 @@ The resolver is never empty, so bare `--remote` always resolves to a target;
 this is the behavior LLP 0033's schema comment already anticipated ("`--remote`
 with no arg never silently resolves to nothing").
 
-### D3 — `default_remote` may name a built-in
+### D3: `default_remote` may name a built-in
 
 <a id="validation"></a>Config validation for `query.default_remote` accepts a
 name defined in the user's `remotes` **or** in `BUILTIN_REMOTES`, so a config may

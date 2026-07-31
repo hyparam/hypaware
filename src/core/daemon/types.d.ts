@@ -95,15 +95,15 @@ export interface StatusDiagnostic {
 /**
  * Display state of one reconciler client-action, derived for `hyp status`
  * from the persisted marker store (LLP 0036 / 0041) plus the effective
- * config — `hyp status` never runs a pass. A `failed` entry is
+ * config: `hyp status` never runs a pass. A `failed` entry is
  * informational: it never flips `overall` to `degraded` (the gateway runs
  * fine on a valid config, LLP 0041 §failure-is-surfaced-not-fatal).
  *
- * - `done` — run-once effect completed (carries `rows` + `at`).
- * - `failed` — last attempt failed; retried next pass (carries `reason`,
+ * - `done`: run-once effect completed (carries `rows` + `at`).
+ * - `failed`: last attempt failed; retried next pass (carries `reason`,
  *   `lastAttempt`, `attempts`).
- * - `pending` — desired on this joined host but no marker yet.
- * - `n/a` — suppressed (`on_join: false`) or inert (host never joined).
+ * - `pending`: desired on this joined host but no marker yet.
+ * - `n/a`, suppressed (`on_join: false`) or inert (host never joined).
  */
 export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
 
@@ -111,7 +111,7 @@ export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
 export interface ClientActionReport {
   /** Handler kind / marker namespace, e.g. `backfill`. */
   kind: string
-  /** Request key — the owning plugin name for backfill (LLP 0041). */
+  /** Request key: the owning plugin name for backfill (LLP 0041). */
   requestKey: string
   state: ClientActionState
   /** Rows imported (on `done`). */
@@ -184,7 +184,7 @@ export interface HypAwareStatusReport {
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
-   * single local layer — the V1 surface is unchanged). When set, the
+   * single local layer: the V1 surface is unchanged). When set, the
    * gateway is centrally managed: `centralPlugins` / `centralSinks` name
    * the entries the central layer locks (everything else in
    * `activePlugins` / `sinks` is local), `drops` lists local entries that
@@ -227,7 +227,7 @@ export interface HypAwareStatusReport {
   /**
    * Client-action reconciler state (LLP 0036 / 0041): per-provider
    * backfill-on-join (and future reconciled actions), read from the marker
-   * file via `readClientActionStatus` — `hyp status` never runs a pass.
+   * file via `readClientActionStatus`, `hyp status` never runs a pass.
    * Null when nothing applies, so the V1 status surface is unchanged. A
    * `failed` entry is informational and is deliberately excluded from
    * `overall === 'degraded'`.
@@ -483,7 +483,7 @@ export interface DaemonHandle {
   /** Trigger a config reload (SIGHUP-equivalent). */
   reload(): Promise<void>
   /**
-   * Phase 3 test affordance. The runtime the daemon activated —
+   * Phase 3 test affordance. The runtime the daemon activated:
    * exposed so smoke flows can drive sink instantiation, dispatch,
    * and per-test setup until config-driven sink setup lands.
    */

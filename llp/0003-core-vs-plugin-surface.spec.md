@@ -12,7 +12,7 @@
 
 > **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** MCP hosting
 > is intrinsic too: the kernel assembles an MCP server from the **verbs** active
-> plugins (and core) register, so any host — local gateway or fleet server — can
+> plugins (and core) register, so any host, local gateway or fleet server, can
 > expose its tools. This sits on the same intrinsic/plugin line drawn below: the
 > SQL/dataset surface is intrinsic (a free `query_sql` tool everywhere), other
 > modalities are plugin capabilities (graph/vector tools where present).
@@ -35,7 +35,7 @@ copy-pasted into every plugin, it belongs in core.
 - the Iceberg-backed cache/storage implementation and freshness checks
 - result formatting (table / json / jsonl / markdown)
 - managed state directories, lock files, permission prompts
-- the **config apply engine** — staging a replacement config: validate,
+- the **config apply engine**, staging a replacement config: validate,
   install pinned plugins, persist last-known-good, swap, staged restart,
   rollback bookkeeping. Exposed to plugins as a narrow context facade; the
   document's *transport* (e.g. `@hypaware/central`'s pull loop) is plugin
@@ -52,27 +52,27 @@ never appears in `plugins[]`.
 "Query is intrinsic" means the **SQL/dataset surface** specifically: the
 dataset registry, SQL execution, cursors, freshness, and formatting. Other
 query modalities (e.g. vector similarity search) are **plugin capabilities**
-that build on the intrinsic surface, not kernel surface — decided 2026-06-12
+that build on the intrinsic surface, not kernel surface: decided 2026-06-12
 when scoping `@hypaware/vector-search`
 ([LLP 0024](./0024-vector-search-plugin.decision.md#plugin-not-kernel)).
 
 **Partition-spec derivation is core surface.** The helpers that turn a dataset's
-partitioning declaration into an Iceberg `PartitionSpec` and guard its stability
-— `partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the
-declaration type — began life under `src/core/cache/iceberg/` but are pure
+partitioning declaration into an Iceberg `PartitionSpec` and guard its stability,
+`partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the
+declaration type, began life under `src/core/cache/iceberg/` but are pure
 functions of `(declaration, schema)` consumed across the boundary: the dataset
 registry validates declarations, the public plugin surface types them
 (`DatasetRegistration.cachePartitioning`), the intrinsic cache derives its spec,
 and the `@hypaware/format-iceberg` export derives its own
 ([LLP 0022](./0022-iceberg-export-partitioning.spec.md#shared-core-helpers)).
 They are therefore promoted to a neutral core home re-exported from
-`src/core/index.js`, not buried in the cache — the cache is one consumer, not the
+`src/core/index.js`, not buried in the cache: the cache is one consumer, not the
 owner.
 
 "Query is intrinsic" means the **SQL/dataset surface** specifically: the
 dataset registry, SQL execution, cursors, freshness, and formatting. Other
 query modalities (e.g. vector similarity search) are **plugin capabilities**
-that build on the intrinsic surface, not kernel surface — decided 2026-06-12
+that build on the intrinsic surface, not kernel surface: decided 2026-06-12
 when scoping `@hypaware/vector-search`.
 
 ## Plugins own
@@ -85,7 +85,7 @@ manifest, not a privileged type.
 ## V1 reality
 
 In V1 first-party plugins are bundled in `hypaware-core/plugins-workspace`
-rather than installed from separate repos — a deliberate divergence recorded in
+rather than installed from separate repos: a deliberate divergence recorded in
 [LLP 0002](./0002-v1-scope.decision.md#plugin-packaging-divergence).
 The core/plugin *boundary* is unchanged by where the plugin code physically
 lives.

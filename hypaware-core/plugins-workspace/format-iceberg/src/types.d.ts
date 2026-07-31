@@ -15,7 +15,7 @@ export interface TableState {
  * dataset's declared identity (lookup) columns.
  */
 export interface DatasetPartitioning {
-  /** Synthesized day-grain declaration — kept for the on-append drift check. */
+  /** Synthesized day-grain declaration: kept for the on-append drift check. */
   declaration: CachePartitioningDeclaration
   /** Iceberg partition spec passed to `icebergCreateTable`. */
   partitionSpec: PartitionSpec

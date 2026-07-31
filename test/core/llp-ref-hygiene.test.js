@@ -219,28 +219,68 @@ function documentAnchors(text) {
 }
 
 /**
+ * A gloss does not have to fit on one line, so neither can the scan that
+ * polices it. Everything from the `@ref` line up to the end of the gloss is one
+ * string: the annotation's line plus the wrapped continuation lines under it.
+ *
+ * A continuation is a line that carries on the same comment or paragraph and
+ * says nothing new: not blank, not a fresh `@` tag or a second annotation, not
+ * the close of a block comment, and, in Markdown, not the start of a new list
+ * item, heading, table row or quote. The stripped shape is what is joined, so
+ * the caller sees the gloss and not the comment furniture around it.
+ *
+ * @param {string[]} lines
+ * @param {number} index the `@ref` line
+ * @param {boolean} markdown
+ * @param {('start' | 'end' | 'line' | null)[]} markers
+ * @returns {string}
+ */
+function glossLines(lines, index, markdown, markers) {
+  const strip = (/** @type {string} */ line) =>
+    line.replace(/^\s*(?:\/\/+|\*(?!\/)|>)?\s*/, '').trimEnd()
+  const parts = [lines[index].trim()]
+  for (let i = index + 1; i < lines.length; i++) {
+    const raw = lines[i]
+    if (markers[i] !== null) break
+    if (/^\s*(?:\*\/|\/\*)/.test(raw)) break
+    const body = strip(raw)
+    if (body === '') break
+    if (/^@/.test(body) || body.includes('@ref')) break
+    if (markdown && /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||>)/.test(raw)) break
+    // A source line that left the comment behind ends the gloss.
+    if (!markdown && !/^\s*(?:\/\/|\*)/.test(raw)) break
+    parts.push(body)
+  }
+  return parts.join(' ')
+}
+
+/**
  * Extract the annotations from one file's text, honoring the ignore markers.
  *
  * @param {string} relPath
  * @param {string} text
- * @returns {{ file: string, line: number, text: string, llp: string | null, docPath: string | null, anchor: string | null }[]}
+ * @returns {{ file: string, line: number, text: string, gloss: string, llp: string | null, docPath: string | null, anchor: string | null }[]}
  */
 function extractRefs(relPath, text) {
-  /** @type {{ file: string, line: number, text: string, llp: string | null, docPath: string | null, anchor: string | null }[]} */
+  /** @type {{ file: string, line: number, text: string, gloss: string, llp: string | null, docPath: string | null, anchor: string | null }[]} */
   const refs = []
   let ignoring = false
   const lines = text.split('\n')
+  const markdown = path.extname(relPath) === '.md'
   const markers = markersFor(relPath, lines)
   lines.forEach((line, index) => {
     const marker = markers[index]
     if (marker === 'start') ignoring = true
     else if (marker === 'end') ignoring = false
     else if (!ignoring && marker === null) {
-      for (const m of line.matchAll(REF_PATTERN)) {
+      const matches = [...line.matchAll(REF_PATTERN)]
+      const gloss = matches.length === 0 ? '' : glossLines(lines, index, markdown, markers)
+      for (const m of matches) {
         refs.push({
           file: relPath,
           line: index + 1,
           text: line.trim(),
+          gloss,
           llp: m[1] ? String(Number(m[1])) : null,
           docPath: m[2] ?? null,
           anchor: m[3] ? m[3].slice(1) : null,
@@ -342,11 +382,38 @@ test('a tolerated reference is tolerated only as often as it is listed', () => {
   assert.equal(tolerated({ file: 'b.js', llp: '103', docPath: null, anchor: 'cli' }), false)
 })
 
-test('no @ref annotation separates its gloss with an em dash', () => {
+// The check reads the whole gloss, not the line the `@ref` token happens to sit
+// on. Scanning one line left a standing blind spot: a gloss that wrapped could
+// carry the character on its second line and no gate saw it, which is how three
+// of them survived the sweep that was supposed to remove them.
+test('no @ref annotation carries an em dash, on its first line or a later one', () => {
   const offenders = REFS
-    .filter(ref => ref.text.includes(EM_DASH))
-    .map(ref => `${ref.file}:${ref.line}  ${ref.text}`)
+    .filter(ref => ref.gloss.includes(EM_DASH))
+    .map(ref => `${ref.file}:${ref.line}  ${ref.gloss}`)
   assert.deepEqual(offenders, [], `${offenders.length} annotations carry an em dash:\n  ${offenders.join('\n  ')}`)
+})
+
+test('a gloss spans its continuation lines, and stops where the gloss stops', () => {
+  const gloss = (/** @type {string} */ file, /** @type {string[]} */ lines) =>
+    extractRefs(file, lines.join('\n'))[0].gloss
+  // A JSDoc gloss wrapped over three lines is one gloss.
+  assert.equal(
+    gloss('x.js', [' * @ref LLP 0001#tooling: the extractor', ' * plus the resolver,', ' * wired into `npm test`', ' */']),
+    '* @ref LLP 0001#tooling: the extractor plus the resolver, wired into `npm test`',
+  )
+  // It stops at the next tag, at a blank line, and at the end of the comment.
+  assert.equal(gloss('x.js', ['// @ref LLP 0001#tooling: short', '// @param {string} x']), '// @ref LLP 0001#tooling: short')
+  assert.equal(gloss('x.js', [' * @ref LLP 0001#tooling: short', ' *', ' * unrelated']), '* @ref LLP 0001#tooling: short')
+  assert.equal(gloss('x.js', ['// @ref LLP 0001#tooling: short', 'const x = 1']), '// @ref LLP 0001#tooling: short')
+  // In Markdown the next bullet is a new thought, not a continuation.
+  assert.equal(
+    gloss('x.md', ['- @ref LLP 0001#tooling: the extractor', '  plus the resolver', '- something else']),
+    '- @ref LLP 0001#tooling: the extractor plus the resolver',
+  )
+  // The regression the widening exists for: the character on a later line.
+  const wrapped = ['// @ref LLP 0001#tooling: the extractor', `// plus the resolver ${EM_DASH} wired in`]
+  assert.equal(extractRefs('x.js', wrapped.join('\n'))[0].gloss.includes(EM_DASH), true)
+  assert.equal(extractRefs('x.js', wrapped.join('\n'))[0].text.includes(EM_DASH), false)
 })
 
 // @ref LLP 0156#renumber [tests]: a collision is repaired by renumbering the later claimant, so every number has exactly one document

@@ -17,8 +17,8 @@ export interface ParseResult {
 }
 
 // The result of resolving a `cwd` against the shared usage-policy resolver
-// (LLP 0050/0070): the nearest governing `.hypignore`, and — when the
-// resolver was constructed with `localOnlyListPath` — the machine-local
+// (LLP 0050/0070): the nearest governing `.hypignore`, and, when the
+// resolver was constructed with `localOnlyListPath`, the machine-local
 // `local-only` list (LLP 0071), whichever verdict is more restrictive.
 // `class` is the resolved, implemented class (`full` when nothing governs);
 // `governedBy` is the absolute path of the governing source (a `.hypignore`
@@ -53,7 +53,7 @@ export interface LocalOnlyListFile {
 // A single class-per-entry record in the machine-local list (LLP 0103):
 // `dir` is normalized absolute; `class` is the explicit usage class the user
 // (or a review flow) assigned this directory, independent of any `.hypignore`
-// dotfile. An explicit `full` entry is not the same as "unlisted" — it
+// dotfile. An explicit `full` entry is not the same as "unlisted": it
 // records "asked; syncs" so the classification hook (LLP 0106) can tell
 // "answered" from "never asked".
 export interface LocalOnlyEntry {

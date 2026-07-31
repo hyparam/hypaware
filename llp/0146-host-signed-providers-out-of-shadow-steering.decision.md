@@ -18,9 +18,9 @@ LLP 0144 makes coverage a function of API shape. That holds for transport
 but not for authentication. Two provider families in OpenClaw's catalog
 authenticate in a way that is tied to where the request is sent:
 
-- `amazon-bedrock` — AWS SigV4, where the signature covers the `Host` header
+- `amazon-bedrock`: AWS SigV4, where the signature covers the `Host` header
   and the credential scope derives from the endpoint's region and service.
-- `anthropic-vertex` and Google providers — GCP credentials scoped to the
+- `anthropic-vertex` and Google providers: GCP credentials scoped to the
   Vertex endpoint.
 
 There is reason to expect retargeting `baseUrl` at a local gateway breaks
@@ -36,7 +36,7 @@ The scope choice stands on its own.
 
 ## Options considered
 
-1. **Steer them and re-sign at the gateway.** Deferred, not rejected —
+1. **Steer them and re-sign at the gateway.** Deferred, not rejected:
    this is what "support Bedrock/Vertex" would eventually mean. Out of
    scope for the first cut on cost grounds alone.
 2. **Steer them and find out what happens.** Attractive while the installed
@@ -49,8 +49,8 @@ The scope choice stands on its own.
 ## Decision
 
 - The plugin maintains an explicit **deferred set** naming host-signed
-  provider families — `amazon-bedrock`, `anthropic-vertex`, and Google
-  providers — and passes them through unsteered and uncaptured.
+  provider families, `amazon-bedrock`, `anthropic-vertex`, and Google
+  providers, and passes them through unsteered and uncaptured.
 - Each pass-through emits the uncaptured-provider warning, so a deferred
   provider is visible in logs rather than silently absent. (The general
   pass-through-vs-refuse rule is not settled here; see Open questions.)
@@ -79,13 +79,13 @@ The scope choice stands on its own.
   **before picking this work up**, not before accepting this decision. Some
   SDKs sign for a configured service endpoint independent of the transport
   target, which would make part of this cheaper than expected.
-- ~~`cloudflare-ai-gateway` and `vercel-ai-gateway`~~ — resolved: deferred,
+- ~~`cloudflare-ai-gateway` and `vercel-ai-gateway`~~, resolved: deferred,
   for a mechanical reason rather than a signing one. Their base URLs are
   per-user (Cloudflare's is built from the user's `accountId` +
   `gatewayId`, verified in OpenClaw's `extensions/cloudflare-ai-gateway/
   onboard.ts`), so no static gateway preset can represent them; they fall
   into LLP 0149's `no_preset` pass-through automatically and join the
-  deferred set. Supporting them would need per-user preset registration —
+  deferred set. Supporting them would need per-user preset registration:
   same revisit trigger as the host-signed families.
 - What is the revisit trigger? Fleet volume on these providers is the
   obvious candidate, and HypAware can measure it once anything is captured.

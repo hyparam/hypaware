@@ -3,7 +3,7 @@
 // The central forward sink honours the export-seam `local-only` drop
 // (LLP 0070/0080, task T3): a withheld row is never POSTed, but its `after`
 // still advances the per-(sink, partition) watermark so the tail is durably
-// passed — not re-scanned each tick, not re-sent if the directory is later
+// passed, not re-scanned each tick, not re-sent if the directory is later
 // un-excluded. A failed chunk still never checkpoints, even amid drops.
 
 import test from 'node:test'
@@ -160,7 +160,7 @@ test('a directory un-excluded AFTER a drop-only checkpoint is not re-sent (durab
 
   // Tick 2: the same two rows are now `full` (directory un-excluded). Because the
   // watermark already advanced past them, `readRowsSince({ since })` never re-reads
-  // them, so they are not re-sent — LLP 0069 non-goal 1 (no re-send of passed history).
+  // them, so they are not re-sent: LLP 0069 non-goal 1 (no re-send of passed history).
   const s2 = makeStorage([{ seq: 1, id: 'a' }, { seq: 2, id: 'b' }])
   const t2 = makeSink({ storage: s2, watermarks })
   const result = await t2.sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
@@ -172,7 +172,7 @@ test('a directory un-excluded AFTER a drop-only checkpoint is not re-sent (durab
 test('a failed chunk never checkpoints, even when the partition also dropped rows', async () => {
   // A drop precedes two full rows; the single chunk POST fails. The watermark
   // write is after the loop and after every chunk acks, so a failed chunk throws
-  // before it — no checkpoint, despite the earlier drop having advanced lastAfter.
+  // before it: no checkpoint, despite the earlier drop having advanced lastAfter.
   const storage = makeStorage([
     { seq: 1, drop: true },
     { seq: 2, id: 'a' },

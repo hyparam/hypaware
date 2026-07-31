@@ -26,7 +26,7 @@ const HYPIGNORE_FILENAME = '.hypignore'
 const CACHE_TTL_MS = 5_000
 
 // Class precedence for merging the two usage-policy sources: `ignore` (never
-// recorded — moot at the export seam, but total for completeness) beats
+// recorded, moot at the export seam, but total for completeness) beats
 // `local-only` (recorded, withheld from forwarding) beats `full` (the
 // default). Exported so CLI callers (LLP 0103 #cli marking verbs) compare
 // classes without a second copy of the ranking (R8's "one shared thing"),
@@ -45,8 +45,8 @@ const LOCAL_ONLY_LIST_VERSION_V2 = 2
 /**
  * Create a usage-policy resolver: given an exchange's `cwd`, walk ancestor
  * directories to the nearest `.hypignore` and resolve it to a usage class,
- * optionally merged with a second source — the machine-local `local-only`
- * directory list (LLP 0071) — when `localOnlyListPath` is supplied.
+ * optionally merged with a second source, the machine-local `local-only`
+ * directory list (LLP 0071), when `localOnlyListPath` is supplied.
  *
  * The `.hypignore` walk finds the nearest governing file (empty/`ignore`
  * token => `ignore`; the newly-implemented `local-only` token => `local-only`;
@@ -373,7 +373,7 @@ function emitDebug(name, fields) {
  *
  * Exported for reuse by the `hyp ignore --local-only` / `hyp unignore
  * --local-only` CLI (R8: the single shared matcher, never a second copy of
- * path logic) — it needs the same equal-or-ancestor test to find which
+ * path logic), it needs the same equal-or-ancestor test to find which
  * machine-local list entries govern a target directory.
  *
  * @ref LLP 0069#requirements [implements]: R8, shared equal-or-descendant path logic

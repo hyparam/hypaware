@@ -14,7 +14,7 @@ each. Run it after every change. It also accepts `--json` for use by
 agents and scripts.
 
 > The dry-run imports and runs your entrypoint **in-process**, isolating
-> only its state/cache/temp paths to a throwaway directory — it is not a
+> only its state/cache/temp paths to a throwaway directory: it is not a
 > security sandbox. Run the doctor only on plugin code you trust, just as
 > you would before installing it.
 
@@ -36,7 +36,7 @@ declare in the manifest must actually be registered in `activate()`.
 # 1. Scaffold (kinds: source | sink | dataset)
 hyp plugin new @yourorg/widget --kind source --dir hypaware-core/plugins-workspace
 
-# 2. Edit src/index.js — fill in the TODOs in activate()
+# 2. Edit src/index.js - fill in the TODOs in activate()
 
 # 3. Validate
 hyp plugin doctor hypaware-core/plugins-workspace/widget
@@ -63,8 +63,8 @@ fields (validated by `src/core/manifest.js`):
 | `node_engine` | no | e.g. `">=20"`. |
 | `description` | no | One line; shown in help. |
 | `permissions` | no | String array, e.g. `["network", "read_env"]`. |
-| `requires` | no | `{ plugins?, capabilities? }` — see [Capabilities](#capabilities). |
-| `provides` | no | `{ capabilities? }` — see [Capabilities](#capabilities). |
+| `requires` | no | `{ plugins?, capabilities? }`: see [Capabilities](#capabilities). |
+| `provides` | no | `{ capabilities? }`: see [Capabilities](#capabilities). |
 | `contributes` | no | What the plugin adds: `sources`, `sinks`, `datasets`, `commands`, `skills`, `agents`, `init_presets`, `config_sections`, `client`. |
 
 Each entry under `contributes.{sources,sinks,datasets,commands,skills,agents,init_presets}`
@@ -87,7 +87,7 @@ const PLUGIN_NAME = '@yourorg/widget'
 
 export async function activate(ctx) {
   // Register everything the manifest declares. Do NOT do real work
-  // (open sockets, read large config, hit the network) here — defer
+  // (open sockets, read large config, hit the network) here - defer
   // that to a source's start() or a sink's create().
 }
 ```
@@ -97,12 +97,12 @@ on the registries hanging off `ctx`. The kernel handles dependency
 order, paths, logging, and lifecycle. `ctx` gives you:
 
 - `ctx.sources`, `ctx.sinks`, `ctx.query`, `ctx.commands`, `ctx.skills`,
-  `ctx.agents`, `ctx.initPresets`, `ctx.configRegistry` — the registries.
+  `ctx.agents`, `ctx.initPresets`, `ctx.configRegistry`: the registries.
 - `ctx.requireCapability(name, range)` / `ctx.provideCapability(name, version, value)`.
-- `ctx.config` — the validated config slice for this plugin.
-- `ctx.paths` — `{ rootDir, stateDir, cacheDir, tempDir }`, created for you.
-- `ctx.log` — structured logger; `ctx.log.info('event', { ... })`.
-- `ctx.permissions` — check declared permissions.
+- `ctx.config`: the validated config slice for this plugin.
+- `ctx.paths`: `{ rootDir, stateDir, cacheDir, tempDir }`, created for you.
+- `ctx.log`: structured logger; `ctx.log.info('event', { ... })`.
+- `ctx.permissions`: check declared permissions.
 
 > **Style** (see `CLAUDE.md`): JavaScript, no semicolons, JSDoc types.
 > Declare type imports with `@import` at the top of the file; never use
@@ -291,7 +291,7 @@ ctx.configRegistry.registerSection({
 })
 ```
 
-Registering a validator is optional — a declared section without one is
+Registering a validator is optional: a declared section without one is
 documented but unvalidated.
 
 ---
@@ -326,7 +326,7 @@ throw err
 ```
 
 Keep dev telemetry local and secret-safe: no credentials, raw prompts,
-or private data — hash or redact when identity matters (see `CLAUDE.md`).
+or private data, hash or redact when identity matters (see `CLAUDE.md`).
 
 ---
 
@@ -354,6 +354,6 @@ and how to fix it:
 
 ## See also
 
-- [`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts) — the full plugin API surface.
-- `hypaware-core/plugins-workspace/gascity/` — a complete worked example (source + dataset + commands + init preset + skill).
-- `hypaware-core/plugins-workspace/s3/` — a blob-store sink that provides a capability.
+- [`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts): the full plugin API surface.
+- `hypaware-core/plugins-workspace/gascity/`: a complete worked example (source + dataset + commands + init preset + skill).
+- `hypaware-core/plugins-workspace/s3/`: a blob-store sink that provides a capability.

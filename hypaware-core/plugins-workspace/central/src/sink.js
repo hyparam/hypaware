@@ -167,14 +167,14 @@ function signalForPartition(query, partition) {
  * chunk POSTs with an `X-Hyp-Batch-Id` derived from the signal, the
  * partition identity, the chunk's position, and its bytes (see
  * {@link batchIdForChunk}): stable across retries of that exact chunk,
- * yet distinct for any other chunk — so two byte-identical chunks never
+ * yet distinct for any other chunk, so two byte-identical chunks never
  * collide. When the driver re-hands a partition after a transport
  * failure, re-streaming from the same watermark reproduces the same chunk
  * boundaries, so the unchanged prefix chunks hash to the same ids and the
  * server's idempotency ledger (server LLP 0001) acks them `202` without
  * re-storing. The watermark advances ONCE, after the whole partition's chunks
- * are acked (ship first, advance second), to the partition's high-water `after`
- * — never mid-partition. A partial partition (an early chunk acked, a later one
+ * are acked (ship first, advance second), to the partition's high-water `after`,
+ * never mid-partition. A partial partition (an early chunk acked, a later one
  * failed) therefore never checkpoints, so a crash/failure re-reads the whole
  * partition next tick and the server ledger dedupes the already-acked prefix.
  * Mid-partition advance is unsafe because the scan is NOT seq-ordered (LLP 0040
@@ -244,7 +244,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // is acked.
   /** @type {SinkContinuation | undefined} */
   let lastAfter
-  // The seq this chunk starts AFTER — the `since` watermark for the first
+  // The seq this chunk starts AFTER: the `since` watermark for the first
   // chunk, then the previous chunk's last `after` seq. The idempotency key is
   // derived from THIS (not the per-tick `chunkIndex`) so a chunk's id is stable
   // across watermark advances: once an earlier chunk is acked and the watermark
@@ -291,7 +291,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     chunkIndex += 1
     shippedRowCount += rows
     // The next chunk starts after this chunk's last row, so its batch id keys
-    // off this chunk's `after` — keeping ids stable whether a tick streams the
+    // off this chunk's `after`: keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
     if (after) chunkStartSeq = after.seq
     lines = []
@@ -342,7 +342,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // only dropped rows (shipped nothing) still checkpoints: otherwise a partition
   // ending in a run of local-only rows would never advance past them and every
   // tick would re-scan-and-re-drop the same tail forever. `exportedRowCount`
-  // still counts only rows actually shipped — a dropped row was never exported.
+  // still counts only rows actually shipped: a dropped row was never exported.
   if (watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
     await watermarks.write(watermarkKey, {
       continuation: lastAfter,
@@ -367,7 +367,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
  * Keying on `chunkStartSeq` (the watermark the chunk resumes from) rather than a
  * per-tick ordinal is what keeps the id stable across a watermark advance: when
  * an earlier chunk is acked the watermark moves, and a respool re-reads only the
- * un-acked suffix — which reproduces the same `[startSeq, body]` and so the same
+ * un-acked suffix, which reproduces the same `[startSeq, body]` and so the same
  * id, letting the server ledger dedupe a chunk that committed but whose ack was
  * lost. (An ordinal would re-number the suffix from 0 and mint a fresh id for an
  * already-stored chunk, double-storing it.) Two byte-identical chunks at

@@ -6,7 +6,7 @@
 
 /**
  * Read a client adapter plugin entry's `attach` policy block (LLP 0044) as a
- * tri-state. The single source of truth for interpreting the block — shared
+ * tri-state. The single source of truth for interpreting the block: shared
  * by the reconciler (`action_attach.js`, which decides whether to attach a
  * client on join) and the status surface (`status.js`, which renders the
  * declared-attach `pending`/`n/a` derivation) so the two can never disagree
@@ -22,7 +22,7 @@
  * an opt-out (`onJoin: false`), never as "default on". The operator clearly
  * intended to set the flag, and silently editing a user-owned client settings
  * file is the wrong thing to do on a malformed opt-out. (With the per-plugin
- * validator live — T8 — such a config is rejected at apply time anyway; this
+ * validator live, T8, such a config is rejected at apply time anyway; this
  * is the belt-and-braces read both consumers share.)
  *
  * Consumers test the off switch as `readAttachPolicy(entry).onJoin !== false`,

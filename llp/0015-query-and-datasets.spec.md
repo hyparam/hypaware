@@ -13,7 +13,7 @@
 > **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** Because the
 > SQL/dataset surface is intrinsic, the kernel projects it as a `query_sql` MCP
 > tool (and dataset schemas as MCP resources) on every host with a registered
-> dataset — no plugin work. Remote SQL ([LLP 0033](./0033-remote-query-attach.spec.md))
+> dataset: no plugin work. Remote SQL ([LLP 0033](./0033-remote-query-attach.spec.md))
 > calls that tool over MCP and renders with the same formatters.
 
 > **Extended by [LLP 0054](./0054-bounded-query-execution.spec.md).** The
@@ -46,19 +46,19 @@ query helpers.
 
 **Core does not hard-code dataset names.** `hypaware query` asks the registry;
 `hypaware schema gascity_messages` works because the gascity source registered
-its schema — not because core knows what gascity is.
+its schema, not because core knows what gascity is.
 
 ## Multi-partition union
 
 A dataset whose `createDataSource` spans several committed partitions returns a
 single union `AsyncDataSource` that concatenates the per-partition scans. Core
-ships the canonical pair — `unionSources` and `emptySource` — from
+ships the canonical pair, `unionSources` and `emptySource`, from
 `hypaware/core/query`; every plugin imports them rather than re-implementing the
 concatenation (otel, ai-gateway, s3, context-graph, context-graph-enrich).
 
 The union reports `appliedWhere: false` and `appliedLimitOffset: false`, so the
 SQL engine re-applies both over the merged stream. **`limit`/`offset` are
-stripped** from the sub-scans — they are not distributive across a
+stripped** from the sub-scans: they are not distributive across a
 concatenation. A sub-source that honors limit/offset pushdown (an Iceberg
 partition) would otherwise drop its first `offset` rows per partition, and the
 engine would skip the offset again on the joined stream, silently losing rows
@@ -72,7 +72,7 @@ union (partitions with additive schema drift) can otherwise push a filter on a
 column a given partition physically lacks, and a parquet-backed source throws
 `parquet filter columns not found` rather than reading it as null; when a
 partition can't satisfy the predicate the union drops `where` for it and lets
-the engine filter. `columns` is always forwarded — projecting an absent column
+the engine filter. `columns` is always forwarded: projecting an absent column
 reads as null, never throws.
 
 ## Collect: the ad-hoc on-ramp
@@ -82,7 +82,7 @@ has on disk as a queryable table **without writing a plugin**. It is a **core
 command**, not a plugin contribution, because the collection lands in the
 intrinsic cache and rides the same dataset registry, partition discovery, and
 refresh machinery as any plugin-owned dataset. The only difference is who
-registers the dataset entry — the user at the CLI, instead of a plugin at
+registers the dataset entry: the user at the CLI, instead of a plugin at
 activation.
 
 ```text
@@ -101,7 +101,7 @@ name and a ready-to-run query.
 ### Collections are per-host state
 
 Collections are stored under the recording root, **not in the v2 config file**.
-They are per-host state (analogous to the lock file) — a collection points at
+They are per-host state (analogous to the lock file): a collection points at
 paths/globs only meaningful on the machine that ran `collect`. A team that wants
 the same table everywhere should ship a plugin that registers the dataset, not a
 synced collections list.
@@ -112,5 +112,5 @@ synced collections list.
 daemon lifecycle. The `--timestamp-column` hint is what lets `--from`/`--to`/
 `--since` filtering work; without it the column is opaque. A workload that
 outgrows `collect` (normalization, a live source, redaction, custom schema)
-graduates to a source plugin that registers its own dataset — and nothing about
+graduates to a source plugin that registers its own dataset, and nothing about
 the query surface changes when it does.

@@ -61,7 +61,7 @@ export function createKernelRuntime(opts = {}) {
     getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
     // @ref LLP 0070#enforce [implements]: every kernel boot enforces `local-only`
     // at the shared export read. The resolver's second source is the
-    // machine-local list under `<stateDir>/usage-policy/` — and `cacheRoot` is
+    // machine-local list under `<stateDir>/usage-policy/`, and `cacheRoot` is
     // `<stateDir>/cache`, so its parent is the state dir the list lives beside.
     usagePolicyResolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(path.dirname(cacheRoot)) }),
     // @ref LLP 0132#source-scoped-withholding [implements]: caller-supplied

@@ -13,7 +13,7 @@
 > **Numbering note:** the proposed map in this doc was authored before
 > scaffolding. During execution an `0002 V1 scope` Decision was inserted (lifting
 > live decisions out of the tombstoned `finish-v1` plan), shifting subsystem
-> numbers up by one — e.g. Sources is **0012**, not 0011. The authoritative
+> numbers up by one: e.g. Sources is **0012**, not 0011. The authoritative
 > final numbering is the subsystem map in [LLP 0000](./0000-hypaware.explainer.md#subsystem-map).
 
 ## Summary
@@ -51,21 +51,21 @@ Decisions already taken (this session):
 | `hypaware-implementation-plan.md` | 46k | **Tombstone.** Phased build plan, v1.0.0 shipped → `Type: Plan`, `Status: Tombstoned`. Historical, still useful for migration context. |
 | `finish-v1.md` | 21k | **Tombstone.** Same: executed v1 plan. The `## Decisions` block (L16) is worth lifting into live Decision LLPs before tombstoning. |
 | `CONTEXT.md` | 2.4k | **Keep + promote.** Already a `[[wiki-link]]` glossary. Becomes the canonical terms feeding the `Systems` vocabulary and several Spec LLPs (esp. Sources). Stays as the glossary; LLPs link into it. |
-| `.feature-flow/*.md` | — | **Leave.** Process/integration artifacts on a different axis from design rationale. Out of LLP scope. |
+| `.feature-flow/*.md` | - | **Leave.** Process/integration artifacts on a different axis from design rationale. Out of LLP scope. |
 | `AGENTS.md` | 3.7k | **Extend.** Add the LLP section (read-before-change, `@ref` policy, living-doc rule). |
 
 Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
 `docs/adr/` tree that does not exist here. LLP's `Decision` type subsumes ADRs.
-**Decision (this session): ignore those skills** — they are not repointed and
+**Decision (this session): ignore those skills**, they are not repointed and
 `docs/adr/` stays absent. LLP `Decision` LLPs are the home for that content.
 
 ## Conventions adopted (spec-faithful)
 
 - **Location & filename:** `llp/NNNN-slug.type.md`, zero-padded to 4 digits.
   Flat to start; subdirectory buckets only once a subsystem spawns multiple LLPs.
-- **Metadata header:** plain markdown block (not YAML) — `Type`, `Status`,
+- **Metadata header:** plain markdown block (not YAML), `Type`, `Status`,
   `Systems`, `Author`, `Date` required; `Role`, `Revised`, `Related` optional.
-- **Anchors:** heading slugs (`#token-strategy`) as default — they survive
+- **Anchors:** heading slugs (`#token-strategy`) as default, they survive
   restructuring, which matters because these are living docs. Numbered anchors
   only for settled Spec docs.
 - **`@ref` syntax:** `// @ref LLP NNNN#anchor: gloss` (≤80-char gloss).
@@ -101,7 +101,7 @@ Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
 
 ## Proposed Systems vocabulary
 
-Drawn from the design-doc subsystems and `src/` layout. **Needs your sign-off —
+Drawn from the design-doc subsystems and `src/` layout. **Needs your sign-off:
 this becomes the controlled vocabulary every LLP tags against.**
 
 `Core`, `Plugins`, `CLI`, `Config`, `Onboarding`, `Sources`, `Cache`, `Sinks`,
@@ -110,7 +110,7 @@ this becomes the controlled vocabulary every LLP tags against.**
 ## Proposed decomposition map
 
 One row ≈ one LLP. Source column is the section of `hypaware-design.md` (by
-heading) it's lifted from. Numbers are a **proposal** — easy to renumber before
+heading) it's lifted from. Numbers are a **proposal**: easy to renumber before
 anything references them.
 
 | LLP | Title | Type | Systems | Source section |
@@ -131,16 +131,16 @@ anything references them.
 | 0014 | Query, datasets & collect | Spec | Query | Query and Datasets, Collect Command |
 | 0015 | AI gateway as a plugin | Decision | Gateway | AI Gateway as a Plugin |
 | 0016 | Daemon runtime & installers | Decision | Daemon | (finish-v1 Phases 3–4) |
-| — | Implementation plan (v1) | Plan · Tombstoned | Process | whole file |
-| — | Finish-v1 plan | Plan · Tombstoned | Process | whole file |
+| - | Implementation plan (v1) | Plan · Tombstoned | Process | whole file |
+| - | Finish-v1 plan | Plan · Tombstoned | Process | whole file |
 
 **Judgement calls applied:** merged Query + Collect into 0014 (`collect` is a
 query verb). Kept Core-vs-plugin (0002) separate from activation/paths (0003),
-and install/lock (0006) separate from runtime deps (0007) — each pair is two
+and install/lock (0006) separate from runtime deps (0007), each pair is two
 genuinely distinct concerns, and over-merging just rebuilds the monolith we're
 breaking up. Net: 17 active LLPs (0000–0016) + 2 tombstones.
 
-Sinks sub-topics that shipped recently (s3 / parquet / iceberg — cf. the
+Sinks sub-topics that shipped recently (s3 / parquet / iceberg: cf. the
 `.feature-flow/` docs and the `feat/s3-query-sources` branch) likely become
 child LLPs under a `llp/sinks/` bucket once 0013 exists, rather than crowding
 the flat tree now.
@@ -151,27 +151,27 @@ You chose full decomposition; LLP 0002 (retrofit) warns against converting
 everything in a single pass. Reconciliation: **plan the whole map now, execute
 in waves, validate the pattern on one exemplar before the bulk.**
 
-- **Wave 0 — scaffold (1 PR).** `llp/`, `tombstones/`, LLP 0000 root from
+- **Wave 0: scaffold (1 PR).** `llp/`, `tombstones/`, LLP 0000 root from
   Mission+Summary, AGENTS.md LLP section. Move the two plan docs into
   `llp/tombstones/` with `Tombstoned` status. No code `@ref`s yet.
-- **Wave 1 — exemplar (1 PR).** **Decided: Sources (0011)** — it already has
+- **Wave 1: exemplar (1 PR).** **Decided: Sources (0011)**, it already has
   glossary scaffolding in CONTEXT.md and active S3/iceberg work. Write the LLP,
   add `@ref`s to the real source files, confirm the loop feels right. This is
   the dogfood test before scale.
-- **Wave 2 — bulk decomposition (batched PRs).** Remaining rows, grouped by
+- **Wave 2: bulk decomposition (batched PRs).** Remaining rows, grouped by
   Systems, reviewed in small batches. Module-level `@ref`s at each subsystem
   entry point; function-level only where non-obvious.
-- **Wave 3 — boy-scout maintenance.** No more bulk passes. References added/
+- **Wave 3: boy-scout maintenance.** No more bulk passes. References added/
   updated when code is touched, per the spec's agent policy.
 
 ## Tooling
 
 `ref-check` (extract/resolve/index/annotate) is **specified but unbuilt** in the
-LLP repo — the `ref-check` skill is a prompt, not a validator binary.
+LLP repo: the `ref-check` skill is a prompt, not a validator binary.
 
 **State:** only `llp-init` is currently vendored into `~/.claude/skills/`. The
 other five (`llp-create`, `llp-list`, `llp-review`, `ref-check`, `ref-story`)
-still need copying from `~/workspace/llp/skills/`. Do that first — it's the
+still need copying from `~/workspace/llp/skills/`. Do that first: it's the
 zero-build path to the agent-facing workflow.
 
 Then: build a **minimal extractor + resolver** (~a few hundred lines JS,
@@ -197,12 +197,12 @@ leave a stale `@ref`.
 
 ## Resolved this session
 
-- **Numbering:** no constraint — assigned at scaffolding time, freely renumbered.
+- **Numbering:** no constraint, assigned at scaffolding time, freely renumbered.
 - **Exemplar:** Sources.
 - **ADR skills:** ignored, not repointed.
 - **Tooling:** all seven LLP skills vendored into `~/.claude/skills/`; build the
   validator later.
-- **Decomposition map:** finalized (my judgement) — 17 active + 2 tombstones,
+- **Decomposition map:** finalized (my judgement), 17 active + 2 tombstones,
   Query/Collect merged, the other two borderline pairs kept split.
 - **Tombstone vs supersede:** **tombstone** both plan docs. v1.0.0 shipped, so
   they are executed history, not live guidance. Lift `finish-v1`'s `## Decisions`

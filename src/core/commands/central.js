@@ -175,13 +175,13 @@ export async function runJoin(argv, ctx) {
 /**
  * Enroll this machine from an attended `hyp remote login` (LLP 0063 D2/D5):
  * provision the `@hypaware/central` forward sink and finish exactly the way
- * `runJoin` finishes. This is join's enrollment minus the bootstrap token —
+ * `runJoin` finishes. This is join's enrollment minus the bootstrap token:
  * the login-minted gateway credential (LLP 0061), seeded here into the fresh
  * sink's `identity.json`, is the identity, so the written block carries no
  * `identity.bootstrap_token`. Written to the same central-seed layer join uses
  * (LLP 0031): this is server-authored config (server-minted credential,
- * server-owned org), not something the human typed, so provenance — not who
- * ran the command — picks the layer.
+ * server-owned org), not something the human typed, so provenance, not who
+ * ran the command, picks the layer.
  *
  * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean }} args
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
@@ -197,7 +197,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   // D4 re-check just before the write: if a central sink targeting a different
   // origin appeared since login's pre-auth gate (a concurrent first login to
   // another server), abort rather than provision a second enrollment. This is
-  // the non-locked flavor of D4's seed-time check — it closes the common race;
+  // the non-locked flavor of D4's seed-time check: it closes the common race;
   // the cross-process credentials lock (LLP 0065) is a follow-up.
   const connectedOrigins = await readCentralSinkOrigins({ stateDir: stateRoot, configPath: localPath })
   const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
@@ -209,7 +209,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
     // `identity: {}` (not absent): the central plugin's own validator requires
     // an identity object (`central.identity is required`), but bootstrap_token
-    // is optional — the login-minted gateway seeded into identity.json is the
+    // is optional, the login-minted gateway seeded into identity.json is the
     // credential (LLP 0063 D2), so the block carries an empty identity, not a
     // token.
     /** @type {HypAwareV2Config} */
@@ -231,7 +231,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   //
   // The seed config is on disk but its credential is not, so a failure here
   // (throw, or nothing seeded) would leave a committed sink with no
-  // identity.json — the daemon would then demand a `hyp join` bootstrap token
+  // identity.json: the daemon would then demand a `hyp join` bootstrap token
   // the login user does not have. Roll the seed back so the machine is cleanly
   // unenrolled rather than half-enrolled and broken.
   let seeded
@@ -294,16 +294,16 @@ function parseJoinArgs(argv) {
 }
 
 /**
- * `hyp leave`: disconnect this machine from its central server — the
+ * `hyp leave`: disconnect this machine from its central server, the
  * level-3 exit verb, the single inverse of both enrollment paths
  * (`hyp join` and an enrolling `hyp remote login`). Reverses what
  * enrollment did to the machine, in dependency order:
  *
- *   1. remove the central config layer — the join/login seed and any
+ *   1. remove the central config layer: the join/login seed and any
  *      applied central slots (the inverse of join's seed write, reusing
  *      the #139 reset machinery);
- *   2. restart the installed daemon service, so the central sink — and
- *      with it the config-pull loop — stops before markers and
+ *   2. restart the installed daemon service, so the central sink, and
+ *      with it the config-pull loop, stops before markers and
  *      credentials are torn down;
  *   3. reverse the centrally-driven client attaches through the single
  *      core disk undo (the LLP 0044 leave contract). Manual attaches
@@ -315,7 +315,7 @@ function parseJoinArgs(argv) {
  * Cascades down, never up: it does NOT log the human out (the
  * query-session store is theirs, not the fleet's), does NOT touch the
  * user-owned local config layer, and does NOT uninstall the daemon
- * service — local-only capture keeps working. Teardown is local-only:
+ * service, local-only capture keeps working. Teardown is local-only:
  * the server-side gateway row is not revoked (the credential expires;
  * revocation is the operator's server-side act).
  *
@@ -362,7 +362,7 @@ export async function runLeave(argv, ctx) {
   if (centralLayerPath === null && attachedNames.length === 0) {
     ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
-    // and leave never edits the local layer (#111 doctrine) — but a user
+    // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
     writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
     return 0
@@ -389,14 +389,14 @@ export async function runLeave(argv, ctx) {
 
       // 1. Central layer teardown: drop the seed, then clear the applied
       // slots / pointer / apply state. With both gone the machine has no
-      // central layer at all — the exact inverse of join's write.
+      // central layer at all: the exact inverse of join's write.
       await fs.rm(centralSeedPath(stateRoot), { force: true })
       resetCentralLayerToSeed(stateRoot)
       ctx.stdout.write('✓ removed the central config layer\n')
 
       // 2. Restart the service so the running daemon reboots without the
       // central sink: forwarding and the config-pull loop stop here. Restart,
-      // never uninstall — local-only capture keeps working.
+      // never uninstall: local-only capture keeps working.
       const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
       const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
       if (svc.installed) {
@@ -533,7 +533,7 @@ export async function runLeave(argv, ctx) {
  * Read a config layer file and list its `@hypaware/central` sink blocks:
  * instance name, target url, and the resolved forward-identity path (the
  * sink's `identity.persisted_path`, defaulting to the per-plugin state
- * path — the same resolution `seedLoginGateway` uses). Lenient: a missing
+ * path; the same resolution `seedLoginGateway` uses). Lenient: a missing
  * or malformed file is simply no sinks, because `leave` tears down
  * best-effort and must not wedge on a corrupt layer.
  *

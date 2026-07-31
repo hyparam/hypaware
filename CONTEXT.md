@@ -1,7 +1,7 @@
-# HypAware — Context & Glossary
+# HypAware: Context & Glossary
 
 This file is a glossary of the domain language used in HypAware. It is not a
-spec or a design doc — it defines terms so that code, docs, and conversation
+spec or a design doc: it defines terms so that code, docs, and conversation
 use the same words to mean the same things.
 
 ## Glossary
@@ -12,16 +12,16 @@ A thing HypAware can capture signals from. In the first-run wizard the
 user-facing sources are `claude`, `codex`, `raw-anthropic`, `raw-openai`, and
 `otel`. Sources divide into two kinds:
 
-- **Client source** — a known tool HypAware configures for you. `claude` and
+- **Client source**: a known tool HypAware configures for you. `claude` and
   `codex` are the client sources. Picking one adds its gateway upstream *and*
   its adapter plugin (`@hypaware/claude` / `@hypaware/codex`), which attaches
   the tool (rewrites its base URL), installs hooks/skills, and can backfill
   its local history. Client sources are the only sources that can be
   [[autodetect]]ed.
-- **Raw proxy source** — `raw-anthropic` / `raw-openai`. Picking one opens the
+- **Raw proxy source**: `raw-anthropic` / `raw-openai`. Picking one opens the
   gateway with that provider upstream but configures no client; the user
   points their own SDK app or script at the local gateway by hand. Serves the
-  "observe my own AI app" persona. Not autodetectable — there is no installed
+  "observe my own AI app" persona. Not autodetectable: there is no installed
   tool to find.
 
 `otel` is a third shape: a local OTLP receiver for apps that export

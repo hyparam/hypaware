@@ -6,10 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-26
 **Related:** LLP 0011, LLP 0016, LLP 0025, LLP 0031, LLP 0036, LLP 0037, LLP 0041
-**Designed-by:** LLP 0045 — client attach implementation design
-**Extended-by:** LLP 0086 — attach tracks the gateway's ephemeral port (the "attach once, done forever" model becomes endpoint-aware: re-attach on a daemon rebind, and manual `hyp attach` discovers the live port)
+**Designed-by:** LLP 0045, client attach implementation design
+**Extended-by:** LLP 0086, attach tracks the gateway's ephemeral port (the "attach once, done forever" model becomes endpoint-aware: re-attach on a daemon rebind, and manual `hyp attach` discovers the live port)
 
-> When a machine joins a fleet the central config pulls and the gateway binds —
+> When a machine joins a fleet the central config pulls and the gateway binds,
 > but nothing is captured until someone runs `hyp attach claude` / `hyp attach
 > codex` by hand. Daemon healthy, gateway bound, **nothing recorded**: the
 > silent-gap failure [#126](https://github.com/hyparam/hypaware/issues/126)
@@ -21,7 +21,7 @@
 > the local gateway) and **reverses it on leave/detach**. It resolves the
 > attach-specific open questions [LLP 0036](./0036-central-config-driven-client-actions.decision.md#open-questions)
 > and [LLP 0041](./0041-central-config-client-actions.design.md#risks--open-questions)
-> deferred — consent, conflict, opt-out — and is the sibling of
+> deferred, consent, conflict, opt-out, and is the sibling of
 > [LLP 0037](./0037-backfill-on-join.decision.md) (backfill on join, the
 > run-once instance).
 
@@ -29,8 +29,8 @@
 
 `hyp attach` does two things ([LLP 0016](./0016-ai-gateway.decision.md)): the
 **config-layer** half (the `@hypaware/claude` plugin entry) is already
-fleet-expressible and applied by the engine; the **machine-effect** half —
-editing a user-owned client file so the agent routes to the gateway — the apply
+fleet-expressible and applied by the engine; the **machine-effect** half,
+editing a user-owned client file so the agent routes to the gateway, the apply
 engine deliberately never touches ([LLP 0025 §apply engine is kernel surface](./0025-remote-config-join-flow.spec.md#apply-engine-is-kernel-surface)).
 That second half is exactly what the [LLP 0036](./0036-central-config-driven-client-actions.decision.md)
 action reconciler exists to carry.
@@ -39,7 +39,7 @@ Attach is the **reconciled / reversible** flavour the seam was built for but had
 not yet exercised: the marker records the *currently-applied* state, `perform()`
 attaches when the config names a client, and `reverse()` detaches when it stops
 naming it (config drop or `hyp leave`). It reuses the **same `client.attach()`
-machine-effect** the manual command calls — auto-attach is a new *caller* of the
+machine-effect** the manual command calls: auto-attach is a new *caller* of the
 adapter, not a new effect.
 
 This decision settles the three attach-specific questions LLP 0036/0041 left
@@ -67,17 +67,17 @@ existing `plugins[]` surface and locking with **no new merge rule**.
 
 ## Decision
 
-Add an **attach** action handler — the reversible instance of the
+Add an **attach** action handler: the reversible instance of the
 [LLP 0036](./0036-central-config-driven-client-actions.decision.md) seam.
 
 ### Where attach is declared
 
 Attach rides the **client adapter's own plugin entry** (the entry the config
-already names — #126), so the central-vs-local locking
+already names, #126), so the central-vs-local locking
 ([LLP 0031 §Merge model](./0031-layered-config.decision.md#merge-model)) falls
 out: a central-named `@hypaware/claude` entry is authoritative; a colliding
 local entry is dropped at the boot merge. There is **no generic `actions[]`
-schema** and no top-level attach section — consistent with
+schema** and no top-level attach section: consistent with
 [LLP 0036 §Where actions are declared](./0036-central-config-driven-client-actions.decision.md#where-actions-are-declared).
 
 ```jsonc
@@ -91,7 +91,7 @@ schema** and no top-level attach section — consistent with
 plugin's** config-section validator ([LLP 0005](./0005-plugin-manifest.spec.md)),
 the same path that validates `backfill`. Core validates nothing new.
 
-### `desired()` — which clients
+### `desired()`, which clients
 
 The attach handler enumerates **every registered gateway client whose owning
 plugin is enabled in the effective config**, minus those whose plugin entry set
@@ -99,28 +99,28 @@ plugin is enabled in the effective config**, minus those whose plugin entry set
 (`claude`, `codex`). On a non-joined host there is no central layer, the
 reconciler never runs, and attach stays the manual `hyp attach` command.
 
-### `perform()` / `reverse()` — the effect
+### `perform()` / `reverse()`: the effect
 
 Attach is **in-process** (a bounded settings-file edit, unlike backfill's
-unbounded subprocess import — [LLP 0041 §Execution isolation](./0041-central-config-client-actions.design.md#execution-isolation)):
+unbounded subprocess import: [LLP 0041 §Execution isolation](./0041-central-config-client-actions.design.md#execution-isolation)):
 
-- `perform()` calls the gateway client's `attach({ endpoint, … })` — the exact
-  effect `hyp attach` invokes — in JSON mode, recording the adapter's reported
+- `perform()` calls the gateway client's `attach({ endpoint, … })`: the exact
+  effect `hyp attach` invokes, in JSON mode, recording the adapter's reported
   `settings_path` and prior base URL (`prev_value`) into the marker.
 - `reverse(client)` calls the client's `detach(…)` when `desired()` stops
   naming it (the config dropped the client, or `hyp leave` cleared the central
   layer). The adapter restores the backed-up prior base URL (below).
 
-A `done` marker short-circuits re-attach on every subsequent pass — the effect
+A `done` marker short-circuits re-attach on every subsequent pass: the effect
 is already in place; the reconciler does not re-edit the file each tick.
 
-### Consent — `join` implies consent (default-on)
+### Consent: `join` implies consent (default-on)
 
 A joined machine **self-attaches with no prompt** when the central config names
 a client. Rationale:
 
-- It is the issue's acceptance criterion — *"becomes attached with no manual
-  step"* ([#126](https://github.com/hyparam/hypaware/issues/126)) — and reaches
+- It is the issue's acceptance criterion, *"becomes attached with no manual
+  step"* ([#126](https://github.com/hyparam/hypaware/issues/126)), and reaches
   parity with the interactive `init` finale, which already attaches every picked
   client ([LLP 0011](./0011-setup-and-onboarding.decision.md)).
 - The blast radius is narrow and **fully reversible**: the effect edits the
@@ -128,32 +128,32 @@ a client. Rationale:
   machine that *already joined*, and `reverse()` restores the prior state on
   leave. This is the same consent footing backfill stands on
   ([LLP 0036 §Consent](./0036-central-config-driven-client-actions.decision.md#consent)).
-- The operator retains an **off switch** — `attach.on_join: false` in the
-  locked central plugin entry — so a fleet that wants the gateway up but clients
+- The operator retains an **off switch**, `attach.on_join: false` in the
+  locked central plugin entry, so a fleet that wants the gateway up but clients
   attached by hand can have it. Consent is therefore *operator-scoped*, not a
   per-invocation prompt.
 
-### Conflict — back up & override, restore on leave
+### Conflict: back up & override, restore on leave
 
 When a machine already has a base URL pointing somewhere that is **not** the
 gateway (a deliberate third-party proxy), auto-attach **records the prior value
 and overrides**, then **restores the original on detach/leave**. The backup
 lives in the adapter's own marker (`_hypaware.prev_base_url` for Claude; the
-Codex marked-block metadata), so restoration is the adapter's job — the
+Codex marked-block metadata), so restoration is the adapter's job: the
 reconciler stays client-agnostic. This makes **both** the auto path and the
 manual `hyp detach` fully round-trip; previously `detach` removed the gateway
 URL only when it still matched and never restored a pre-existing one. Chosen over
 *skip-and-warn* because the feature's whole point is zero-touch capture, and over
 *override-without-backup* because clobbering a deliberate setting with no undo is
-not reversible — the seam's core promise.
+not reversible: the seam's core promise.
 
-### Opt-out — operator-only, no local override
+### Opt-out: operator-only, no local override
 
 A machine **cannot** locally suppress an attach the central config mandates.
 Attach policy lives in the `plugins[]` entry, which is locked under
 [LLP 0031 §Merge model](./0031-layered-config.decision.md#merge-model); a
 colliding local entry is dropped, exactly as for backfill
-([LLP 0037 §No local opt-out](./0037-backfill-on-join.decision.md#no-local-opt-out--the-operator-owns-it))
+([LLP 0037 §No local opt-out](./0037-backfill-on-join.decision.md#no-local-opt-out-the-operator-owns-it))
 and the central sink. If a particular machine should not attach, that is an
 **operator scoping decision** (`attach.on_join: false`, or a different
 config/token), not a local flag. This rides the existing locking with no new
@@ -183,8 +183,8 @@ central config or flip `overall` to `degraded`
 
 `hyp attach` / `hyp detach` are untouched as commands. Auto-attach is a **new
 caller** of the same adapter `attach()`/`detach()`, parameterised by the central
-config instead of argv. The one change to the adapters — recording and restoring
-the prior base URL — is a **strict improvement** that the manual `hyp detach`
+config instead of argv. The one change to the adapters, recording and restoring
+the prior base URL, is a **strict improvement** that the manual `hyp detach`
 inherits too: a manual round-trip now restores a pre-existing base URL it
 previously left in place with a warning.
 
@@ -198,11 +198,11 @@ previously left in place with a warning.
   omits it (imported data stays); attach is the reversible handler the seam was
   designed around ([LLP 0041 §Undo on leave](./0041-central-config-client-actions.design.md#undo-on-leave-reversible-handlers)).
 - **The reconcile context gains a client seam.** The handler needs the gateway's
-  client registry and endpoint, which only the daemon has live — keeping attach
+  client registry and endpoint, which only the daemon has live: keeping attach
   daemon-only by construction (a plain CLI boot has no gateway capability and no
   `configControl`, so `hyp status` performs no machine effect).
 - **Join does more.** A joined machine self-attaches its clients (subject to the
-  operator off switch) — an onboarding-surface change from
+  operator off switch): an onboarding-surface change from
   [LLP 0011](./0011-setup-and-onboarding.decision.md)'s manual-attach finale,
   reached without editing that record.
 
@@ -226,13 +226,13 @@ previously left in place with a warning.
 
 ## References
 
-- [LLP 0036](./0036-central-config-driven-client-actions.decision.md) — the action seam (the decision this instantiates)
-- [LLP 0037](./0037-backfill-on-join.decision.md) — backfill on join (the run-once sibling instance)
-- [LLP 0041](./0041-central-config-client-actions.design.md) — client-actions implementation design (the reconciler this extends)
-- [LLP 0045](./0045-client-attach.design.md) — client attach implementation design (the design realizing this decision)
-- [LLP 0011](./0011-setup-and-onboarding.decision.md) — setup and onboarding (the attach finale this reaches parity with)
-- [LLP 0016](./0016-ai-gateway.decision.md) — AI gateway / client adapters (`registerClient`, `attach`/`detach`)
-- [LLP 0025](./0025-remote-config-join-flow.spec.md) — join flow, apply, probation (the confirmation trigger)
-- [LLP 0031](./0031-layered-config.decision.md) — layered config / merge model (plugin-entry locking; the deferred attach question)
-- [LLP 0005](./0005-plugin-manifest.spec.md) — plugin manifest / config_sections (per-plugin `attach` validation)
-- [#126](https://github.com/hyparam/hypaware/issues/126) — config-driven client attach
+- [LLP 0036](./0036-central-config-driven-client-actions.decision.md): the action seam (the decision this instantiates)
+- [LLP 0037](./0037-backfill-on-join.decision.md): backfill on join (the run-once sibling instance)
+- [LLP 0041](./0041-central-config-client-actions.design.md): client-actions implementation design (the reconciler this extends)
+- [LLP 0045](./0045-client-attach.design.md): client attach implementation design (the design realizing this decision)
+- [LLP 0011](./0011-setup-and-onboarding.decision.md): setup and onboarding (the attach finale this reaches parity with)
+- [LLP 0016](./0016-ai-gateway.decision.md): AI gateway / client adapters (`registerClient`, `attach`/`detach`)
+- [LLP 0025](./0025-remote-config-join-flow.spec.md): join flow, apply, probation (the confirmation trigger)
+- [LLP 0031](./0031-layered-config.decision.md): layered config / merge model (plugin-entry locking; the deferred attach question)
+- [LLP 0005](./0005-plugin-manifest.spec.md): plugin manifest / config_sections (per-plugin `attach` validation)
+- [#126](https://github.com/hyparam/hypaware/issues/126), config-driven client attach

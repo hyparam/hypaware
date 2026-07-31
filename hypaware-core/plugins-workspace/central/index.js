@@ -64,7 +64,7 @@ export async function activate(ctx) {
 
       // Per-(sink instance, partition) incremental-read watermarks. The plugin
       // `stateDir` is per-PLUGIN, so two `@hypaware/central` instances would
-      // share — and clobber — one watermark file and skip each other's rows;
+      // share, and clobber, one watermark file and skip each other's rows;
       // `createInstanceWatermarkStore` namespaces by the instance name, matching
       // local-fs/s3. Each forward instance then reads only rows added since its
       // own last successful export.

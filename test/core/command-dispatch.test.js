@@ -717,7 +717,7 @@ test('unattach alias routes a positional client through the core disk undo', asy
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
-  // Detach no longer dispatches to a per-adapter hook — it is the single
+  // Detach no longer dispatches to a per-adapter hook: it is the single
   // core disk-driven undo (LLP 0045 §Part 3), so the fake client's
   // detach() is never called.
   assert.deepEqual(calls, [])

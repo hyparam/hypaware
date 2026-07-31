@@ -1,7 +1,7 @@
 // @ts-check
 
 // The Iceberg table-format sink used to read committed rows through
-// `storage.readRows` — a plain full scan that bypasses the shared,
+// `storage.readRows`: a plain full scan that bypasses the shared,
 // filtered export seam (`storage.readRowsSince`). Every other sink
 // (central forward, blob/local-fs incremental) already honors a
 // `local-only` cwd by reading through that seam; the Iceberg writer was
@@ -99,7 +99,7 @@ async function makeSink({ storage, blobStore }) {
 /**
  * Rows land under a client-routed segment (`source=<client>`) the cache
  * derives at flush time (`resolveClientName` / `resolveSourceSegments`),
- * not under the path `appendRows` was called with — so the partition's
+ * not under the path `appendRows` was called with, so the partition's
  * real `tablePath` must be discovered after flushing, exactly as the sink
  * driver does.
  *
@@ -162,7 +162,7 @@ test('unaffected when no local-only list is configured: every row commits, as be
     const { cacheRoot, blobStore } = await freshFixture(baseDir)
     const cwd = path.join(baseDir, 'repos', 'only-repo')
 
-    // No `usagePolicyResolver` at all — mirrors every caller that predates
+    // No `usagePolicyResolver` at all: mirrors every caller that predates
     // LLP 0070/local-only, and every existing iceberg-export test/smoke.
     const storage = createQueryStorageService({ cacheRoot })
     await storage.appendRows(storage.cacheTablePath(DATASET), /** @type {any} */ (COLUMNS), [

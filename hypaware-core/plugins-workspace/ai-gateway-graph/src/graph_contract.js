@@ -20,7 +20,7 @@ export const PROJECTOR = 'ai-gateway.t0'
  * Projector version, stamped into provenance to mark which projector generation
  * minted a row (not a re-projection trigger: ids are content-addressed; see
  * LLP 0023 §inline-provenance). Bumped `1 → 2` with the additive `Program` /
- * `invoked` rules (LLP 0073 §additive-no-migration): provenance only — existing
+ * `invoked` rules (LLP 0073 §additive-no-migration): provenance only, existing
  * rows and ids are untouched, there is no re-key and therefore no migration.
  */
 export const PROJECTOR_VERSION = 2
@@ -182,7 +182,7 @@ export function createAiGatewayGraphContract(kit) {
     },
 
     // Skill nodes from the four activation surfaces: three Claude surfaces
-    // (1-3, below) plus Codex's own (4, LLP 0075 — Codex shares zero signal
+    // (1-3, below) plus Codex's own (4, LLP 0075; Codex shares zero signal
     // with Claude). Each surface is its own rule pair (node + ran edge from
     // the same match, so an edge never dangles). Surfaces 1-3 each sit under
     // a strict filter: only role='user'/part_type='text' with a leading
@@ -239,7 +239,7 @@ export function createAiGatewayGraphContract(kit) {
 
     // Surface 4: Codex shares none of the Claude signals (no marker, no
     // `Skill` tool, no `<command-name>` tag), so its activation trace is a
-    // plain shell read of the SKILL.md — an `exec_command` whose command
+    // plain shell read of the SKILL.md, an `exec_command` whose command
     // string matches `.codex/skills/<name>/SKILL.md`.
     // @ref LLP 0073#codex-skill-derivation [implements]: path-pattern on the
     // exec_command SKILL.md read; Codex shares no Claude signal (LLP 0075).

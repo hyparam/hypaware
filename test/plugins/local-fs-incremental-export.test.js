@@ -96,7 +96,7 @@ async function buildSink({ rows, exportsDir, stateDir }) {
 
 /**
  * Storage stub yielding a described entry sequence: a payload `{ seq, id }` or a
- * drop `{ seq, drop: true }` — a `local-only` row the export seam withheld
+ * drop `{ seq, drop: true }`, a `local-only` row the export seam withheld
  * (LLP 0070), carrying only the advancing `after`, no row.
  *
  * @param {Array<{ seq: number, id?: string, drop?: boolean }>} entries

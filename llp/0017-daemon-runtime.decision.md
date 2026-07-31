@@ -17,10 +17,10 @@ V1 introduces a primary daemon that boots the kernel and runs the steady state:
 - boot the kernel and activate the configured plugin set
 - **start all configured sources** ([LLP 0012](./0012-sources.spec.md)) and keep
   them running
-- run the **sink export loop** — tick each configured sink on its cron schedule
+- run the **sink export loop**: tick each configured sink on its cron schedule
   ([LLP 0014](./0014-sinks.spec.md))
 - watch config and reload sources in place on change (same-shape reload, see
-  [LLP 0004](./0004-activation-and-paths.spec.md#same-shape-reload)) — this
+  [LLP 0004](./0004-activation-and-paths.spec.md#same-shape-reload)): this
   path covers **same-shape** changes only; config *replacement* takes the
   [staged restart](#staged-restart-for-config-replacement) below
 - report health for `hypaware status` ([LLP 0009](./0009-cli-registry.spec.md#core-rendered-status))
@@ -39,15 +39,15 @@ degraded boot.
 
 ## Staged restart for config replacement
 
-When the operative config is **replaced wholesale** — remote config apply
+When the operative config is **replaced wholesale**: remote config apply
 ([LLP 0025](./0025-remote-config-join-flow.spec.md#apply-semantics-staged-restart)),
-or any change to the plugin set or installed plugin code — the daemon does
+or any change to the plugin set or installed plugin code, the daemon does
 **not** reload in place. It persists the new config and **exits; the service
 manager relaunches it** onto the new config.
 
 Process restart is the only correct model here, not a simplification target:
 install-on-config can upgrade a plugin that is already loaded, and Node's ESM
-module cache cannot be invalidated — an in-process re-activate would run stale
+module cache cannot be invalidated, an in-process re-activate would run stale
 code against the new config, defeating the artifact hash verification that
 just passed. Restarting the process guarantees executed code = pinned artifact.
 
@@ -57,8 +57,8 @@ Consequences:
   (`KeepAlive` / `Restart=always`). This is now a requirement of the
   installers, not a nicety.
 - A foreground (non-service) daemon cannot relaunch itself: it exits with a
-  distinct restart exit code — **75** (`EX_TEMPFAIL`,
-  `DAEMON_RESTART_EXIT_CODE`) — and the invoker (smoke harness, dev shell)
+  distinct restart exit code, **75** (`EX_TEMPFAIL`,
+  `DAEMON_RESTART_EXIT_CODE`), and the invoker (smoke harness, dev shell)
   loops on that code.
 - Same-shape reload ([LLP 0004](./0004-activation-and-paths.spec.md#same-shape-reload))
   remains the path for in-place source config changes; there are exactly two
@@ -68,10 +68,10 @@ Consequences:
 
 When daemon install is requested from `npx hypaware`, **install a persistent
 global package first, then point the service manager at the stable global
-binary** — never at an ephemeral npx path:
+binary**, never at an ephemeral npx path:
 
-- **macOS** — a launchd user LaunchAgent
-- **Linux** — a systemd user service
+- **macOS**: a launchd user LaunchAgent
+- **Linux**: a systemd user service
 
 This is the decision recorded in [LLP 0002](./0002-v1-scope.decision.md#daemon-install).
 Pointing the service at the stable global binary is what makes the installed
@@ -86,13 +86,13 @@ can bootstrap into a half-removed state and fail with
 booting out an already-loaded agent, **polls `launchctl print` until launchd has
 released the label** before writing the new plist and bootstrapping, and
 **retries the transient EIO (`error 5`) a bounded number of times**. A genuine
-load/config error (any non-EIO failure) is *not* retried — it surfaces
+load/config error (any non-EIO failure) is *not* retried: it surfaces
 immediately as a `LaunchAgentError`. This makes "reinstall over a live agent"
 reliable without masking real failures.
 
 ## Attach is idempotent and reversible
 
 Client attach/detach (Claude Code, Codex) performed during install must be
-**idempotent and reversible** — re-running attach is a no-op, and detach fully
+**idempotent and reversible**: re-running attach is a no-op, and detach fully
 restores prior client settings. This is a V1 acceptance criterion
 ([LLP 0002](./0002-v1-scope.decision.md#v1-acceptance-criteria-summary)).

@@ -15,8 +15,8 @@
 
 ## Context
 
-LLP 0109 listed this as a known v1 limitation — "OpenClaw auth-alias/keychain
-credentials are not visible to a custom provider" — and had attach warn when
+LLP 0109 listed this as a known v1 limitation, "OpenClaw auth-alias/keychain
+credentials are not visible to a custom provider", and had attach warn when
 `ANTHROPIC_API_KEY` was unset.
 
 In practice this is not an edge case. OpenClaw's own Anthropic provider docs
@@ -29,7 +29,7 @@ failing rather than as an attach error.
 It also compounds with LLP 0144: extending capture to every API shape means
 every vendor's credential, not just Anthropic's. `${OPENROUTER_API_KEY}`,
 `${GROQ_API_KEY}` and so on multiply the same problem, and the environment
-is the wrong place to look for any of them — OpenClaw supports SecretRef
+is the wrong place to look for any of them: OpenClaw supports SecretRef
 sources and auth profiles precisely so credentials need not sit in the
 environment.
 
@@ -43,7 +43,7 @@ A seam exists, and it is verified (openclaw source, 2026-07-29):
 - Because the plugin owns the `hypaware-*` provider ids (LLP 0144), its
   `prepareRuntimeAuth` hook runs for them, and its return value
   `{ apiKey, baseUrl?, expiresAt? }` becomes the runtime credential.
-  GitHub Copilot's bundled plugin uses exactly this pattern — resolve one
+  GitHub Copilot's bundled plugin uses exactly this pattern: resolve one
   credential, exchange it, return key + endpoint + expiry
   (`extensions/github-copilot/index.ts`).
 
@@ -59,7 +59,7 @@ must happen inside `prepareRuntimeAuth`, not through the profile store.
 1. **Keep requiring vendor env vars.** Rejected: excludes subscription and
    keychain users, and the failure mode is a broken turn rather than a clear
    refusal.
-2. **Have HypAware read OpenClaw's credential storage directly** — auth
+2. **Have HypAware read OpenClaw's credential storage directly**: auth
    profiles, keychain, `models.json`. Rejected: reaching into another
    product's private credential storage from outside its process is exactly
    the kind of coupling that breaks on upgrade, and it would mean HypAware
@@ -79,10 +79,10 @@ must happen inside `prepareRuntimeAuth`, not through the profile store.
 - No vendor API key is ever required in the environment as a precondition
   of capture.
 - If the credential cannot be resolved for a given provider, the plugin
-  **does not steer that provider** — the turn passes through and a warning
+  **does not steer that provider**, the turn passes through and a warning
   is emitted, per the general rule in LLP 0149 (cause: `no_credential`).
 - HypAware never persists a borrowed credential. It is passed through for
-  the request and not written to HypAware state or recordings — the gateway
+  the request and not written to HypAware state or recordings: the gateway
   already strips `x-hypaware-*` request headers before proxying and must
   likewise never project credential material into
   `ai_gateway_messages`.

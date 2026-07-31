@@ -22,25 +22,25 @@ This is the LLP-aware variant of `grill-with-docs`: the documents you challenge 
 Before grilling, build a map of the existing design rationale.
 
 - Find the `llp/` tree. Read the root document (`LLP 0000`, `**Role:** Root`) for the project overview, the **subsystem map**, and the **Systems vocabulary**.
-- Identify the Active LLPs whose `**Systems:**` tags overlap what the plan touches. Read them — these are the decisions the plan has to live with or consciously overturn.
-- Note status. Only **Active** LLPs are current guidance. If the plan revives something **Superseded** or **Tombstoned** (under `llp/tombstones/`), surface that explicitly — it may be a sign the decision was already considered and rejected.
+- Identify the Active LLPs whose `**Systems:**` tags overlap what the plan touches. Read them: these are the decisions the plan has to live with or consciously overturn.
+- Note status. Only **Active** LLPs are current guidance. If the plan revives something **Superseded** or **Tombstoned** (under `llp/tombstones/`), surface that explicitly: it may be a sign the decision was already considered and rejected.
 - If the project also has a `CONTEXT.md` glossary, treat it as the term authority alongside the `Systems` vocabulary.
 
-If there is no `llp/` tree yet, this is the wrong skill — point the user at `/llp-init` or `/llp-init-retrofit` first, then grill.
+If there is no `llp/` tree yet, this is the wrong skill: point the user at `/llp-init` or `/llp-init-retrofit` first, then grill.
 
 ## During the session
 
 ### Challenge against existing decisions
 
-When the plan contradicts an Active LLP — a Spec's "must", a Decision's chosen option, a Principle's "always/never" — call it out immediately and force the choice:
+When the plan contradicts an Active LLP, a Spec's "must", a Decision's chosen option, a Principle's "always/never", call it out immediately and force the choice:
 
-> "LLP 0014#queryable-sinks says queryability is a property of the writer/destination pair, but your plan assumes any S3 sink is queryable. Either the plan changes, or LLP 0014 does — which?"
+> "LLP 0014#queryable-sinks says queryability is a property of the writer/destination pair, but your plan assumes any S3 sink is queryable. Either the plan changes, or LLP 0014 does, which?"
 
 Cite the LLP number and section anchor so the conflict is precise. A plan that silently diverges from an Active LLP is the exact failure LLP exists to prevent: the next agent reads the LLP, writes code to it, and contradicts your plan.
 
 ### Sharpen terminology against the Systems vocabulary
 
-When the plan uses a term that conflicts with the project's established language, stop and resolve it. Keep `Systems` names consistent — don't let the plan introduce `Auth` when the corpus says `Authentication`, or coin a new system name for something an existing tag already covers. If a new `System` is genuinely needed, name it and note that `LLP 0000`'s vocabulary must be updated.
+When the plan uses a term that conflicts with the project's established language, stop and resolve it. Keep `Systems` names consistent: don't let the plan introduce `Auth` when the corpus says `Authentication`, or coin a new system name for something an existing tag already covers. If a new `System` is genuinely needed, name it and note that `LLP 0000`'s vocabulary must be updated.
 
 ### Discuss concrete scenarios
 
@@ -52,9 +52,9 @@ When the user states how something works, check whether the code agrees. If the 
 
 > "`src/sinks/driver.js` is annotated `@ref LLP 0014#export-contract [implements]`, which says sinks ack per-batch. Your plan acks per-row, which breaks the referenced contract."
 
-### Capture decisions inline — into the LLP corpus
+### Capture decisions inline: into the LLP corpus
 
-When a decision crystallises, dispose of it **right there**. Don't batch. Unlike ADRs, LLP documents are *living* — you edit, supersede, and delete freely — so the bar to capture is lower, but the discipline is to put each decision in the right place. Use the disposition tree in [DECISION-DISPOSITION.md](./DECISION-DISPOSITION.md):
+When a decision crystallises, dispose of it **right there**. Don't batch. Unlike ADRs, LLP documents are *living*, you edit, supersede, and delete freely, so the bar to capture is lower, but the discipline is to put each decision in the right place. Use the disposition tree in [DECISION-DISPOSITION.md](./DECISION-DISPOSITION.md):
 
 - **Refines an existing Active LLP** → edit that LLP in place.
 - **A new non-obvious decision** → create a new LLP. Use the next available number and the `NNNN-slug.type.md` convention with a full metadata header (follow `/llp-create`). Pick the `Type` deliberately (Decision vs Spec vs Principle).
@@ -62,7 +62,7 @@ When a decision crystallises, dispose of it **right there**. Don't batch. Unlike
 - **Retires guidance entirely** → move the LLP to `llp/tombstones/` with `**Status:** Tombstoned`.
 - **An implementation constraint, not a standalone decision** → don't write an LLP. Note it as an `@ref` to add when the code lands, pointing at the LLP section that explains the constraint.
 
-Keep each captured LLP edit scoped to the decision — stable heading anchors, tight prose, no implementation dumps.
+Keep each captured LLP edit scoped to the decision: stable heading anchors, tight prose, no implementation dumps.
 
 ### Keep the corpus honest
 

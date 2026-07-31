@@ -1,4 +1,4 @@
-# LLP 0040: Incremental sink reads — design
+# LLP 0040: Incremental sink reads (design)
 
 **Type:** design
 **Status:** Active
@@ -24,7 +24,7 @@ Three facts from the code shape every decision below:
    batch id.** `createSinkDriver.runSink` (`src/core/sinks/driver.js`) calls
    `discoverReadyPartitions` (every partition for the sink's datasets, scope
    limit 1000) and mints `nextBatchId = instance-<iso>-<seq>` per tick. So
-   nothing batch-id-keyed can be a *cross-tick* cursor — a cross-tick cursor
+   nothing batch-id-keyed can be a *cross-tick* cursor: a cross-tick cursor
    must be keyed by `(sink instance, partition)` and persist outside the batch.
 
 2. **The cache rewrites partitions out from under any positional reference.**
@@ -41,7 +41,7 @@ Three facts from the code shape every decision below:
      verbatim; dedup only drops exact `_hyp_cache_row_id` matches.
 
    The **logical partition directory** (`<cacheRoot>/datasets/<dataset>/source=<source>/`,
-   i.e. `partition.tablePath`) is **stable** across both — only the `tableDir`
+   i.e. `partition.tablePath`) is **stable** across both: only the `tableDir`
    inside it changes on compaction.
 
 3. **Every cache row already passes one kernel write chokepoint.**
@@ -58,32 +58,32 @@ criteria add:
 
 - **(A)** survives a retention front-prune,
 - **(B)** survives a compaction generation swap,
-- **(C)** a tick reads ≈ *N* rows for *N* new rows — bounded reads, not just
+- **(C)** a tick reads ≈ *N* rows for *N* new rows, bounded reads, not just
   bounded sends (acceptance: "reads/sends ≈N rows, independent of total
   partition size").
 
-### Candidate A — snapshot ancestry, as `format-iceberg` does it
+### Candidate A: snapshot ancestry, as `format-iceberg` does it
 
 What it actually is today: the iceberg sink's marker
 (`format-iceberg/src/state.js`, `markerSubsumedBySnapshot`) is keyed by
 `(prefix, sink, dataset, batchId)` and records the **destination archive**
 snapshot id; the ancestry walk proves "this batch already committed into the
 archive" so a respool doesn't double-append. It is **destination-side,
-batch-id-scoped retry idempotency** — not a source-read cursor.
+batch-id-scoped retry idempotency**, not a source-read cursor.
 
 Why it does not generalize to the forward/blob source-read problem:
 
 - It is batch-id-keyed, and batch ids are minted fresh per tick (fact 1), so it
-  can never match across ticks — exactly the cross-tick reuse we need.
+  can never match across ticks: exactly the cross-tick reuse we need.
 - Even reframed as "remember the last *source* snapshot exported and
-  incrementally scan files appended since it": that survives retention (A —
+  incrementally scan files appended since it": that survives retention (A,
   delete-only, linear lineage) but **fails (B)**. Compaction starts a fresh
   lineage, so the recorded snapshot id is absent from the new table's metadata;
   `markerSubsumedBySnapshot` would correctly judge it stale and fall back to a
-  **full re-read after every compaction** — and compaction fires on routine
+  **full re-read after every compaction**, and compaction fires on routine
   file-count thresholds. Rejected on (B).
 
-### Candidate B — monotonic per-row ingest sequence column (**recommended**) {#ingest-seq-column}
+### Candidate B: monotonic per-row ingest sequence column (**recommended**) {#ingest-seq-column}
 
 Add a kernel-assigned, append-monotonic `int64` column `_hyp_ingest_seq`,
 stamped at the same chokepoint as `_hyp_cache_row_id` (fact 3) and carried as an
@@ -101,8 +101,8 @@ read yields rows with `seq > watermark`.
   **As built, the predicate is a yielded-row filter** over the partition's
   current snapshot (see §2): the scan still visits every surviving row, so a tick
   reads ≈ the *surviving-partition* size, not ≈*N_new*. Retention front-prunes
-  already-exported rows, so "surviving" is bounded and shrinks — reads do not grow
-  with total history — but the stronger O(*N_new*) bound is **not yet delivered**.
+  already-exported rows, so "surviving" is bounded and shrinks, reads do not grow
+  with total history, but the stronger O(*N_new*) bound is **not yet delivered**.
   A numeric `min/max` column statistic *can in principle* let icebird skip whole
   data files whose `max(seq) ≤ watermark` (seq correlates with append order, and
   numeric stats dodge the string-stats truncation hazard); landing that
@@ -114,11 +114,11 @@ It is the **only** shape that meets (A) and (B) and is the right basis for (C):
 row-resident (survives every cache rewrite), totally ordered (a strict `>` is
 exactly-once), and stats-prunable *once icebird gains null-aware seq pushdown*.
 
-### Candidate C — content-addressed continuation (seen-set over `_hyp_cache_row_id`)
+### Candidate C: content-addressed continuation (seen-set over `_hyp_cache_row_id`)
 
 Persist the set of exported row ids; skip any row already in it.
 
-- Correct across (A) and (B) — the row id is preserved through compaction.
+- Correct across (A) and (B): the row id is preserved through compaction.
 - But **fails (C)**: to decide which ids are new you must scan the **whole**
   partition every tick (O(*N*) read per tick → O(*N·K*) cumulative; only the
   *send* shrinks), and the id set grows unboundedly (needs GC coupled to
@@ -126,7 +126,7 @@ Persist the set of exported row ids; skip any row already in it.
 
 ### Decision
 
-**Recommend Candidate B — a monotonic `_hyp_ingest_seq` watermark.** The
+**Recommend Candidate B: a monotonic `_hyp_ingest_seq` watermark.** The
 mechanism iceberg proves (snapshot ancestry) is destination-side, batch-scoped,
 and does not survive a source compaction; the content-addressed set is correct
 but cannot meet the bounded-read goal even in principle. A row-resident,
@@ -161,9 +161,9 @@ readRowsSince(tablePath: string, opts: { since?: SinkContinuation, columns?: str
 ```
 
 - **Back-compat:** `opts` absent ⇒ identical to today (full scan). Every current
-  caller — `central/sink.js`, `local-fs`, `s3`, `format-iceberg`,
+  caller, `central/sink.js`, `local-fs`, `s3`, `format-iceberg`,
   `ai-gateway` projector & dataset, `vector-search`, backfill, and the query
-  `dataSourceForTable` path — passes nothing and is byte-for-byte unchanged.
+  `dataSourceForTable` path, passes nothing and is byte-for-byte unchanged.
 - **`since` semantics:** yields only rows with `_hyp_ingest_seq > since.seq`.
   The token is **opaque and versioned** so the mechanism can change later
   without invalidating persisted watermarks; `seq` is a decimal string to dodge
@@ -173,7 +173,7 @@ readRowsSince(tablePath: string, opts: { since?: SinkContinuation, columns?: str
   seq to persist. `readRowsSince` pairs each clean (internal-stripped) row with
   the `after` token to store *once this row is durably shipped*. Internally both
   share one scan; the kernel reads `_hyp_ingest_seq`, emits the token, then
-  strips it — so the seq never reaches the wire payload or query results.
+  strips it, so the seq never reaches the wire payload or query results.
 - Implementation point: both route through `scanRowsFromTable`
   (`src/core/cache/iceberg/store.js`), which already projects columns over the
   latest snapshot; `since` becomes a predicate (ideally pushed to icebird as a
@@ -202,16 +202,16 @@ readRowsSince(tablePath: string, opts: { since?: SinkContinuation, columns?: str
   iceberg sink's destination-side marker is a separate concern and stays where
   it is.)
 - **Advances only after a successful, durable export, ONCE per partition:**
-  - forward sink — after **every** chunk of the partition has been acked
+  - forward sink: after **every** chunk of the partition has been acked
     (`202`/`2xx`), advance to the partition's high-water `after` token (the last
     row read). The advance is **end-of-partition, never per-chunk**: the scan is
-    not seq-ordered (§4 risk #3), so `after` is a running max — a chunk that
+    not seq-ordered (§4 risk #3), so `after` is a running max, a chunk that
     physically precedes a lower-seq chunk would, if checkpointed, advance the
     watermark past rows still un-acked in a later chunk and skip them forever on a
     between-chunk failure. A partial partition therefore never checkpoints; a
     crash/failure re-reads the whole partition next tick and the server ledger
     dedupes the already-acked prefix (stable per-chunk batch ids, §4).
-  - blob sink — after the encoded blob is durably PUT, advance to the `after`
+  - blob sink: after the encoded blob is durably PUT, advance to the `after`
     token of the **last row in that blob**.
 - **Crash-safety:** atomic write-rename (the `writeCursor` / `writeProgress`
   idiom). **Invariant: ship/PUT first, advance watermark second.** A crash
@@ -237,10 +237,10 @@ for await (const { row, after } of storage.readRowsSince(tablePath, { since })) 
 keep the existing `MAX_CHUNK_ROWS` / `MAX_CHUNK_BYTES` chunking and the
 backpressure/`Retry-After` loop (LLP 0014) untouched; once **every** chunk is
 acked, persist the partition's high-water `after` as the new watermark
-(end-of-partition, never per-chunk — see §3). The
+(end-of-partition, never per-chunk: see §3). The
 `batchIdForChunk(signal, tablePath, chunkStartSeq, body)` derivation keys each
 chunk by the **seq it starts after** (the prior chunk's `after`, or `since` for
-the first chunk) plus its bytes — **not** a per-tick `chunkIndex` ordinal. Keying
+the first chunk) plus its bytes: **not** a per-tick `chunkIndex` ordinal. Keying
 on the start seq keeps an id stable across a watermark advance: a respool
 re-reads from the (unchanged) watermark, reproduces the same `[startSeq, body]`,
 and so the same id, so the server ledger (server LLP 0001) dedupes the redelivered
@@ -256,7 +256,7 @@ row stream into the unchanged `encoder.encodePartition` contract; after the blob
 is PUT, advance the watermark to the blob's last `after`. An empty new-row set
 writes **no blob** (skip, 0 bytes). The output filename embeds the
 `[sinceSeq, lastSeq]` range so a crash-retry re-PUTs the **same object key**
-(idempotent overwrite) — the blob sink's stand-in for the server ledger.
+(idempotent overwrite): the blob sink's stand-in for the server ledger.
 
 The `format-iceberg` sink is unchanged (it already has destination-side
 idempotency); it may later adopt the same source watermark to bound its reads,
@@ -274,10 +274,10 @@ instead of the whole partition.
   the surviving partition** and filters to *N* (a yielded-row filter, §2/§1(C));
   file-level `max(seq) ≤ watermark` pruning to make the *read* ≈*N* is a pending
   icebird-pushdown optimization. The watermark advances to `max(seq)`.
-  *(acceptance 2 — sends bounded now; reads bounded by surviving partition,
+  *(acceptance 2: sends bounded now; reads bounded by surviving partition,
   O(N_new) reads pending pushdown)*
 - **Across a retention prune.** The prune deletes only rows with `seq` far below
-  the watermark (already exported). A `> watermark` read is blind to them — no
+  the watermark (already exported). A `> watermark` read is blind to them: no
   skip, no dup. *(acceptance 3a)*
 - **Across a compaction generation swap.** The seq rides the row into the new
   `tableDir`; the watermark is keyed by the stable logical partition path; the
@@ -288,7 +288,7 @@ instead of the whole partition.
 - **Mid-batch retry.** The watermark advances only after a durable export
   completes (forward: every chunk acked, end-of-partition; blob: blob PUT), so a
   crash leaves it at the last *fully* exported seq. The next tick re-reads from
-  there — the forward sink re-streams the whole partition and the server ledger
+  there: the forward sink re-streams the whole partition and the server ledger
   dedupes the already-acked chunks (stable `chunkStartSeq` batch ids); the blob
   sink re-PUTs the same `[sinceSeq,lastSeq]` object key (idempotent overwrite).
   *(acceptance 4)*
@@ -312,13 +312,13 @@ instead of the whole partition.
    a watermark it passes `includeLegacy: false`, so the backlog is re-exported
    **exactly once** instead of on every tick (which also dodges duplicates after
    a compaction reorders the body). This is safe because no NEW null-seq row can
-   appear post-upgrade — `decorateRow` stamps a real seq on every flushed row —
+   appear post-upgrade, `decorateRow` stamps a real seq on every flushed row,
    so a row that is null after the first export is always one already shipped.
 2. **Seq allocator durability is the most delicate piece.** `decorateRow` runs
    in the spool reader, which resumes from a byte offset
    (`streamFlushFile` / `writeProgress`). The monotonic counter (e.g. `nextSeq`
    reserved in blocks in `cursor.json`) must **never go backwards** across a
-   crash/resume — a new row stamped `≤ watermark` would be skipped forever.
+   crash/resume: a new row stamped `≤ watermark` would be skipped forever.
    Duplicate seqs across a crash boundary are tolerable (strict `>` plus row-id
    dedup); regressions are not. The allocator that satisfies this is specified
    in [§7](#seq-allocator).
@@ -333,13 +333,13 @@ instead of the whole partition.
    [LLP 0013](./0013-local-query-cache.decision.md#open-question)): a durable
    per-sink watermark finally makes "evict only past the minimum exported
    watermark" (`wait_for_sink_ack`) implementable. This design does **not**
-   change retention — a lagging sink can still have un-exported rows pruned
+   change retention: a lagging sink can still have un-exported rows pruned
    (data loss). Decide whether to wire ack-coupled eviction alongside this.
 6. **Watermark vs. driver outbox. (TESTED.)** The driver's outbox respool and
-   the watermark are two retry mechanisms; they compose — the outbox replays the
-   partition, the watermark bounds the replay to the un-acked work — and the
+   the watermark are two retry mechanisms; they compose, the outbox replays the
+   partition, the watermark bounds the replay to the un-acked work, and the
    end-to-end acceptance suite exercises it (`sink-incremental-acceptance`).
-7. **Watermark-write-lost + new-arrivals duplication. (OPEN — escalated.)** The
+7. **Watermark-write-lost + new-arrivals duplication. (OPEN: escalated.)** The
    narrow exactly-once gap detailed in §5: a unit commits, its watermark write is
    lost in the commit→advance window, and new rows append before the retry, so
    the resumed in-flight unit grows past what committed and the dedup net (server
@@ -355,13 +355,13 @@ instead of the whole partition.
 
 Refines risk #2. The `_hyp_ingest_seq` counter is **cache-global**, persisted at
 `<cacheRoot>/_hyp_ingest_seq.json` (`{ v, nextSeq, updatedAt }`, atomic
-write-rename) — **not** in a per-partition `cursor.json`. Two reasons:
+write-rename): **not** in a per-partition `cursor.json`. Two reasons:
 
 - `decorateRow` runs **before** rows are grouped into `source=<…>` destination
   partitions (fact 3 + the flush re-grouping in `appendChunk`), so at the stamp
   point there is no destination partition cursor to write.
-- Two distinct spool table paths — live capture (`datasets/<ds>`) and `backfill`
-  (`datasets/<ds>/<backfill-seg>`) — flush into the **same** destination
+- Two distinct spool table paths, live capture (`datasets/<ds>`) and `backfill`
+  (`datasets/<ds>/<backfill-seg>`), flush into the **same** destination
   partition. Only a single cache-wide counter guarantees every partition
   observes a strictly-increasing seq subsequence; a per-partition counter would
   interleave two independent sequences and could regress.

@@ -15,13 +15,13 @@ import type { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types
  */
 export interface IncrementalRowReader {
   /**
-   * True when there is no PAYLOAD row to encode since the watermark — the sink
+   * True when there is no PAYLOAD row to encode since the watermark: the sink
    * writes no blob. A partition of only `local-only` (dropped) rows is `empty`
    * yet still exposes `droppedRowCount > 0` and an advanced `lastAfter`, so the
    * caller checkpoints past the withheld tail instead of re-scanning it.
    */
   empty: boolean
-  /** Incoming watermark seq (decimal string; `'0'` when none) — the range lower bound. */
+  /** Incoming watermark seq (decimal string; `'0'` when none): the range lower bound. */
   sinceSeq: string
   /** Clean (internal-stripped) rows to feed the encoder. Single-use; do not re-iterate. */
   rows: AsyncIterable<Record<string, unknown>>
@@ -44,7 +44,7 @@ export interface IncrementalRowReader {
 /**
  * Stable logical identity of a partition for watermark storage: the partition's
  * directory relative to `<cacheRoot>/datasets/`, split into the dataset and the
- * (sanitized, `/`-joined) partition path — never the physical `tableDir`.
+ * (sanitized, `/`-joined) partition path, never the physical `tableDir`.
  */
 export interface SinkWatermarkKey {
   dataset: string

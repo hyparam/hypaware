@@ -90,7 +90,7 @@ test('listCapturedDirectories: a cwd is not offered when it has never been captu
   assert.deepEqual(result, [])
 })
 
-test('listCapturedDirectories: best-effort — a broken registry resolves to null, never throws', async () => {
+test('listCapturedDirectories: best-effort - a broken registry resolves to null, never throws', async () => {
   const query = /** @type {any} */ ({
     getDataset: () => undefined,
     listDatasets: () => [],

@@ -8,23 +8,23 @@
 **Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0066, LLP 0083
 
 > The `.hypignore` capture-seam drop ([LLP 0049](./0049-hypignore-usage-policy.spec.md))
-> lives in the `@hypaware/claude` and `@hypaware/codex` adapters — the only
-> places that resolve a `cwd` — not in `@hypaware/ai-gateway`. The shared
+> lives in the `@hypaware/claude` and `@hypaware/codex` adapters, the only
+> places that resolve a `cwd`, not in `@hypaware/ai-gateway`. The shared
 > matcher lives in `src/core/usage-policy/`.
 
 ## Context
 
 `ignore` must drop a row at the **capture seam**, before it reaches the cache
 ([LLP 0049](./0049-hypignore-usage-policy.spec.md#enforcement)). The question is
-*which component* does the drop. The obvious candidate — the AI gateway, since it
-sees all live traffic — is the wrong one.
+*which component* does the drop. The obvious candidate, the AI gateway, since it
+sees all live traffic, is the wrong one.
 
 ## Decision
 
 **Enforcement lives in the client adapters; the gateway stays `cwd`-blind.**
 
 The `@hypaware/ai-gateway` source is provider-agnostic: it proxies bytes and
-writes whatever a projector returns, and it reads **no** session context — it has
+writes whatever a projector returns, and it reads **no** session context, it has
 no concept of `cwd`. All folder knowledge lives in the two client adapters, which
 already resolve `cwd` at four call sites:
 
@@ -38,13 +38,13 @@ already resolve `cwd` at four call sites:
 The live exchange projector already reads `session-context.jsonl` and stamps
 `cwd`/`git_branch`/`git_remote`/`repo_root` onto each projected row
 (`claude/src/projector.js`). (**Extended-by:
-[LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)** — the Codex live
+[LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)**, the Codex live
 projector had no equivalent `cwd` source on the ChatGPT-subscription route, so it
 now enriches `cwd` from the session rollout the same way; the drop mechanics here
 are unchanged.) It runs **before** the cache write: the gateway
 source does `projectExchange(row)` → `if (messageRows.length > 0) appendRows(...)`
 (`ai-gateway/src/source.js`). So an ignored exchange is dropped by having the
-projector **return `[]`** — the existing write guard then persists nothing. **No
+projector **return `[]`**: the existing write guard then persists nothing. **No
 gateway change is required.** The response has already been streamed to the
 client by this point, so the live call is untouched
 ([LLP 0049](./0049-hypignore-usage-policy.spec.md#requirements) R2).
@@ -52,7 +52,7 @@ client by this point, so the live call is untouched
 This is purely a projection-time decision; settlement (`claude/src/settle.js`,
 [LLP 0027](./0027-cache-settlement.decision.md)) only upgrades the identity of
 already-written rows and is irrelevant to ignore. (**Extended-by:
-[LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — this holds for
+[LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)**, this holds for
 the *common* case, where the projector resolved `cwd` and applied the drop. But
 when `cwd` was *unknown at projection* (the Claude session-start race: the
 `session-context.jsonl` record had not landed, so the row was written with
@@ -71,8 +71,8 @@ sessions ignored live.
 
 ### Shared matcher in core
 
-Only the matcher — *given a `cwd`, walk ancestors → nearest `.hypignore` →
-class*, with a per-`cwd` cache — is common to all four call sites. It is a small,
+Only the matcher, *given a `cwd`, walk ancestors → nearest `.hypignore` →
+class*, with a per-`cwd` cache, is common to all four call sites. It is a small,
 **`cwd`-agnostic** unit of path logic and lives in **`src/core/usage-policy/`**,
 imported by both adapters exactly as they already import
 `src/core/observability`. Core gains a reusable matcher; it gains **no** `cwd`
@@ -207,7 +207,7 @@ while the canonicalization described here does not.
   Teaching it about `cwd`/`.hypignore` would push client-specific domain logic
   into a component whose whole point is not to have any.
 - The backfills do **not** flow through the gateway at all, so gateway-side
-  enforcement could not cover them — the matcher would have to live somewhere
+  enforcement could not cover them: the matcher would have to live somewhere
   shared regardless.
 - It makes the [LLP 0049](./0049-hypignore-usage-policy.spec.md#non-goals)
   raw-proxy/OTEL folder-blindness a **structural consequence** (those paths have
@@ -445,7 +445,7 @@ a directory rather than about a pair of spellings, so they stay unfolded.
   matcher in core in the first place.
 - The gateway source and recorder are not modified.
 - A future caller-supplied `cwd` for raw-proxy traffic would add a *new* call
-  site that reuses the same core matcher — no change to this decision.
+  site that reuses the same core matcher: no change to this decision.
 - The ephemeral per-session opt-out ([LLP 0066](./0066-session-opt-out.spec.md))
   reuses this same adapter drop with a *different key*: it matches on the
   `session_id` the adapter resolves instead of on `cwd`, and returns the same

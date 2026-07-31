@@ -51,7 +51,7 @@ function gatewaySession() {
 
 /**
  * Enroll a machine by writing a central-layer seed (what `hyp join` / an
- * enrolling login writes), so the D4 gate sees a real enrollment — as opposed
+ * enrolling login writes), so the D4 gate sees a real enrollment, as opposed
  * to a hand-authored sink in the local config, which is not an enrollment.
  * @param {string} hypHome @param {string} url
  */
@@ -329,8 +329,8 @@ test('waitForClientAttach returns empty on timeout without hanging', async () =>
 
 test('waitForClientAttach swallows a probe that throws mid-poll and still times out to empty (Major 1)', async () => {
   let calls = 0
-  // A transient fs error (EMFILE/EACCES/EIO) during a poll — the exact throw the
-  // full-collector cache walk could surface — must not escape as a login failure.
+  // A transient fs error (EMFILE/EACCES/EIO) during a poll, the exact throw the
+  // full-collector cache walk could surface, must not escape as a login failure.
   const probe = /** @type {any} */ (async () => {
     calls += 1
     throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' })

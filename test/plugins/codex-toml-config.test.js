@@ -43,7 +43,7 @@ test('prepareAttach is idempotent for an already managed config', () => {
 })
 
 // T1 (LLP 0045/0046): the codex `# BEGIN/END hypaware` marked block is a
-// self-describing undo record — the block is self-delimiting and records
+// self-describing undo record, the block is self-delimiting and records
 // the prior `model_provider` as `# previous_model_provider`, so the
 // format-aware core undo (task 4) can strip the block and restore the
 // pointer without loading the codex plugin.

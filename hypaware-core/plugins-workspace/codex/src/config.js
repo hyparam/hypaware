@@ -3,8 +3,8 @@
 /**
  * Config validation for the `@hypaware/codex` plugin's own `config`
  * block. v1 validates the optional `backfill` sub-object that drives
- * backfill-on-join — `{ on_join, window_days }` — and the optional
- * `attach` sub-object that drives attach-on-join — `{ on_join }`. Every
+ * backfill-on-join, `{ on_join, window_days }`, and the optional
+ * `attach` sub-object that drives attach-on-join, `{ on_join }`. Every
  * other key passes through untouched so existing configs keep working;
  * there is no top-level `backfill`/`attach` section and nothing new for
  * core to validate.
@@ -93,10 +93,10 @@ export function validateBackfillSection(value, pointer) {
  * config: `on_join` (whether the daemon auto-attaches this client when a
  * joined host confirms a central config that enables it, boolean,
  * default true). Optional; unknown keys are rejected so a typo
- * (`on_joins`) surfaces instead of being silently ignored. Pure — the
+ * (`on_joins`) surfaces instead of being silently ignored. Pure: the
  * caller chooses where the returned pointers mount.
  *
- * @ref LLP 0045#part-4--per-plugin-attach-config--status-surface [implements]:
+ * @ref LLP 0045#part-4-per-plugin-attach-config--status-surface [implements]:
  *   attach.on_join rides the client adapter's own config block, validated
  *   by this plugin's config-section validator beside validateBackfillSection;
  *   no top-level/core schema.

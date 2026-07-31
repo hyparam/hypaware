@@ -14,7 +14,7 @@ export type CredentialSourceKind =
  * plugin config as `query_sources[]`. `prefix` is the path to the data
  * (a directory of `.parquet` objects for `format: 'parquet'`, or an
  * Iceberg table root for `format: 'iceberg'`) relative to the BlobStore
- * root — the plugin-level `prefix` when reading the plugin's own bucket,
+ * root, the plugin-level `prefix` when reading the plugin's own bucket,
  * matching where the sink writes; the full in-bucket path when `bucket`
  * is overridden. Connection fields default to plugin-level config.
  */
@@ -89,7 +89,7 @@ export interface S3SinkConfig {
   bucket: string
   /** Key prefix under the bucket. Trailing slashes are stripped; default `""`. */
   prefix: string
-  /** AWS region (e.g. `us-east-1`). Optional — falls through to the SDK chain. */
+  /** AWS region (e.g. `us-east-1`). Optional: falls through to the SDK chain. */
   region?: string
   /** Named AWS shared-config profile. */
   profile?: string

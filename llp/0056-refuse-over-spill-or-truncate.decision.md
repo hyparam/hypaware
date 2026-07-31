@@ -17,9 +17,9 @@ After streaming removes the aggregate crashers
 ([LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md)), three operators
 still **must** buffer to produce a correct answer over an unbounded input:
 
-- `ORDER BY` — needs the whole input before it can emit the first sorted row;
-- high-cardinality `GROUP BY` — its hash table grows with the number of groups;
-- `COUNT(DISTINCT content_text)` — its distinct set grows with the number of
+- `ORDER BY`: needs the whole input before it can emit the first sorted row;
+- high-cardinality `GROUP BY`: its hash table grows with the number of groups;
+- `COUNT(DISTINCT content_text)`: its distinct set grows with the number of
   distinct (large) values.
 
 The execution budget ([LLP 0054](./0054-bounded-query-execution.spec.md)
@@ -28,19 +28,19 @@ happens at the cap. Three behaviours are possible.
 
 ## Options considered
 
-1. **Refuse** — abort mid-stream (via the threaded signal,
+1. **Refuse**: abort mid-stream (via the threaded signal,
    [LLP 0054](./0054-bounded-query-execution.spec.md) `#signal-threading`) and
    return a distinct, typed error naming the limit hit. Correct, cheap, and
    never returns a wrong answer. The query simply does not run to completion.
-2. **Spill to disk** — external-merge `ORDER BY` / on-disk hash for `GROUP BY` /
+2. **Spill to disk**: external-merge `ORDER BY` / on-disk hash for `GROUP BY` /
    `DISTINCT`. Correct **and** completes, at the cost of temp-file lifecycle,
    disk IO, and real operator complexity in squirreling.
-3. **Truncate** — return a partial result with a `truncated` flag. For
+3. **Truncate**: return a partial result with a `truncated` flag. For
    aggregates this is **a wrong answer, not a correct prefix**: a partial
    `COUNT(DISTINCT …)` or `GROUP BY` undercounts silently. For `ORDER BY` a
    sorted prefix could in principle be correct, but only *after* the full input
-   has been buffered and sorted — which is exactly the memory we are trying not
-   to spend — so it does not actually bound anything.
+   has been buffered and sorted, which is exactly the memory we are trying not
+   to spend, so it does not actually bound anything.
 
 ## Decision
 
@@ -54,7 +54,7 @@ This refusal is deliberately distinct from HypAware Server LLP 0006
 result trimmed at the response edge after the engine finished; this is a
 **refusal to produce a result at all** because finishing would exhaust memory.
 Surfacing them as the same thing would tell a user "showing first N rows" when
-in fact the query never ran. Callers render the refusal as actionable guidance —
+in fact the query never ran. Callers render the refusal as actionable guidance,
 "query exceeded its execution budget; add a `WHERE`/`date` filter or aggregate":
 HypAware Server maps it to a 4xx; the local CLI prints it to stderr with a
 non-zero exit.
@@ -73,7 +73,7 @@ illusory for `ORDER BY`.
   that makes the [LLP 0054](./0054-bounded-query-execution.spec.md)
   `#memory-invariant` actually hold for the operators streaming cannot help.
 - Some queries that *would* have completed (given unbounded memory) now refuse;
-  the user's recourse is a filter, an aggregate, or — for bulk extraction —
+  the user's recourse is a filter, an aggregate, or, for bulk extraction,
   reading the Iceberg archive directly, the same escape hatch HypAware Server
   LLP 0006 already points bulk consumers at.
 - The typed error is part of the `hypaware/core/query` contract

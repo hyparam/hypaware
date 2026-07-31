@@ -29,27 +29,27 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *      marker + the gateway `ANTHROPIC_BASE_URL` land in the client settings,
  *      and the `attach.claude` client-action marker reads `done`.
  *   3. a second confirmed boot pass (a fresh relaunch on the same rev-1) is a
- *      **no-op** — the `done` marker short-circuits, so the attach is not
+ *      **no-op**: the `done` marker short-circuits, so the attach is not
  *      re-applied (the marker timestamp is unchanged).
  *   4. the server drops `@hypaware/claude` (rev-2) → apply → staged restart →
  *      relaunch without the adapter → the reconcile **reverse gap** runs the
  *      disk-driven undo: the marker is removed and the client settings are
- *      restored to their pre-attach state — the Part 5 config-drop trigger,
+ *      restored to their pre-attach state, the Part 5 config-drop trigger,
  *      exercised post-restart with the adapter already unloaded.
  *
  * The daemon runs in-process; the smoke plays the foreground invoker, relaunching
  * `runDaemon` whenever `handle.done` resolves with the restart exit code.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [tests]: the daemon threads clientDescriptors/clients/endpoint onto the reconcile context; a confirm-edge pass reaches the attach handler
- * @ref LLP 0045#part-5--reverse-triggers-config-drop-not-hyp-leave [tests]: a central config drop reverses the attach post-restart via the disk-driven undo
- * @ref LLP 0044#consent--join-implies-consent-default-on [tests]: a joined host confirming a config that names @hypaware/claude auto-attaches (default-on)
+ * @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [tests]: the daemon threads clientDescriptors/clients/endpoint onto the reconcile context; a confirm-edge pass reaches the attach handler
+ * @ref LLP 0045#part-5-reverse-triggers-config-drop-not-hyp-leave [tests]: a central config drop reverses the attach post-restart via the disk-driven undo
+ * @ref LLP 0044#consent-join-implies-consent-default-on [tests]: a joined host confirming a config that names @hypaware/claude auto-attaches (default-on)
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'client_attach_on_join: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'client_attach_on_join: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -146,7 +146,7 @@ export async function run({ harness, expect }) {
     // ----- smoke_step: no_reattach (a second confirmed boot pass is a no-op) -----
     // A fresh relaunch on the *same* rev-1 runs the after-activation
     // already-confirmed pass (probation is cleared), so desired() names claude
-    // again — but the `done` marker short-circuits, so nothing is re-applied.
+    // again, but the `done` marker short-circuits, so nothing is re-applied.
     const steadyHandle = await runDaemonHandle(harness)
     try {
       await waitFor(
@@ -183,7 +183,7 @@ export async function run({ harness, expect }) {
         (v) => v === DAEMON_RESTART_EXIT_CODE
       )
     } finally {
-      // `steadyHandle.done` already resolved (restart) — stop() is idempotent.
+      // `steadyHandle.done` already resolved (restart): stop() is idempotent.
       await steadyHandle.stop()
     }
 
@@ -278,7 +278,7 @@ function rev1Config(baseUrl) {
   }
 }
 
-/** rev-2 is rev-1 minus the claude client plugin — the fleet-drop trigger. @param {string} baseUrl */
+/** rev-2 is rev-1 minus the claude client plugin: the fleet-drop trigger. @param {string} baseUrl */
 function rev2Config(baseUrl) {
   return {
     version: 2,
@@ -317,7 +317,7 @@ function centralSink(baseUrl) {
 /* ---------- daemon lifecycle helpers ---------- */
 
 /**
- * Boot the daemon once and await its `done` — used for a boot that is expected
+ * Boot the daemon once and await its `done`, used for a boot that is expected
  * to apply a served revision and request a staged restart.
  * @param {{ hypHome: string, devRunId: string }} harness
  * @returns {Promise<number>}

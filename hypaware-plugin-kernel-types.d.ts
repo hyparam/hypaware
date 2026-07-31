@@ -27,25 +27,25 @@ export interface JsonObject {
 export type PluginName = string
 /**
  * Versioned capability identifier. Well-known capabilities at V1:
- * - `hypaware.ai-gateway` — local HTTP/SSE AI gateway, provided by
+ * - `hypaware.ai-gateway`: local HTTP/SSE AI gateway, provided by
  *   `@hypaware/ai-gateway`. Consumed by client adapter plugins.
- * - `hypaware.blob-store` — object-store API (put/get/list/delete),
+ * - `hypaware.blob-store`: object-store API (put/get/list/delete),
  *   provided by blob destination plugins (`@hypaware/local-fs`,
  *   `@hypaware/s3`). The capability VALUE is a `BlobStore`; consumers
  *   call its methods directly. Consumed by table-format plugins.
- * - `hypaware.encoder` — per-batch byte encoder, provided by writer
+ * - `hypaware.encoder`: per-batch byte encoder, provided by writer
  *   plugins (`@hypaware/format-parquet`, `@hypaware/format-jsonl`).
  *   Consumed by table-format plugins and blob destinations.
- * - `hypaware.table-format` — directory layout + manifests on top of a
+ * - `hypaware.table-format`: directory layout + manifests on top of a
  *   blob store and encoder. Provided by `@hypaware/format-iceberg`.
  *   The capability VALUE is a `TableFormatProvider`.
- * - `hypaware.http-endpoint` — request destination capability, provided
+ * - `hypaware.http-endpoint`: request destination capability, provided
  *   by request sinks (`@hypaware/central`, future `@hypaware/webhook`).
- * - `hypaware.embedder` — text embedding production, provided by
+ * - `hypaware.embedder`: text embedding production, provided by
  *   embedder plugins (`@hypaware/embedder-openai`, future local
  *   embedders). The capability VALUE is an `EmbedderCapability`.
  *   Consumed by `@hypaware/vector-search`.
- * - `hypaware.vector-search` — vector similarity search over cached
+ * - `hypaware.vector-search`: vector similarity search over cached
  *   datasets, provided by `@hypaware/vector-search`. The capability
  *   VALUE is a `VectorSearchCapability`.
  *
@@ -395,7 +395,7 @@ export type PluginSkillClient = 'claude' | 'codex' | 'all'
 /**
  * Short-name resolver kinds. The kernel tries first-party, then scoped
  * third-party, then unscoped third-party. All three resolve down to a
- * git source — the kernel fetches a prebuilt artifact from git and
+ * git source: the kernel fetches a prebuilt artifact from git and
  * never runs `npm install` on the user's machine. npm is a naming
  * authority (and metadata lookup for third-party), not an install
  * source.
@@ -483,7 +483,7 @@ export interface PluginActivationContext {
   verbs: VerbRegistry
   /**
    * Intrinsic storage handle for the kernel-managed query cache.
-   * Plugins reach the local Iceberg-backed cache through this — they
+   * Plugins reach the local Iceberg-backed cache through this: they
    * never construct paths or open files themselves. The kernel owns
    * `cacheDir`; plugins ask the storage for a `tablePath` and call
    * `appendRows` / `readRows`.
@@ -495,7 +495,7 @@ export interface PluginActivationContext {
   /**
    * Backfill provider registry (kernel-owned). Plugins register
    * `BackfillContribution`s during activation; `hyp backfill` selects
-   * providers from this registry. The shape is intentionally narrow —
+   * providers from this registry. The shape is intentionally narrow:
    * provider authors keep dataset-specific behavior in their `run`
    * implementation rather than expanding the kernel surface.
    */
@@ -513,7 +513,7 @@ export interface PluginActivationContext {
    * present when the host process runs an apply engine (the daemon);
    * absent in plain CLI boots, so transport plugins must treat it as
    * optional and skip their pull loops when it is missing. The facade
-   * is the only channel a plugin has into config application — the
+   * is the only channel a plugin has into config application: the
    * kernel owns validation, install, persistence, restart, probation,
    * and rollback.
    */
@@ -614,7 +614,7 @@ export interface CapabilityRegistration {
 
 /**
  * Breaking v2 config shape. There is no `mode` field and no
- * architectural role label — a host is described entirely by its
+ * architectural role label: a host is described entirely by its
  * plugins, sinks, and cache retention settings.
  */
 export interface HypAwareV2Config {
@@ -704,7 +704,7 @@ export interface RequestSinkConfigInstance {
 }
 
 export type SinkInstanceConfig = JsonObject & {
-  /** Export cadence — standard 5-field cron expression (e.g. "0 * * * *"). */
+  /** Export cadence: standard 5-field cron expression (e.g. "0 * * * *"). */
   schedule?: string
   /**
    * For table-format writers (writer provides `hypaware.table-format`),
@@ -1103,7 +1103,7 @@ export interface DeleteObjectInput {
  * `createSink`.
  *
  * Unlike encoder writers (which run via the destination's sink
- * contribution), a table-format writer is the sink itself — the
+ * contribution), a table-format writer is the sink itself: the
  * destination's contribution is bypassed. The destination still has to
  * provide `hypaware.blob-store` so the table-format sink can write
  * bytes.
@@ -1339,7 +1339,7 @@ export interface ReadRowsOptions {
 /**
  * Intrinsic storage service exposed by core to plugins that materialize
  * rows into the local Iceberg-backed cache. Plugins do not configure
- * storage — the cache root is HypAware-managed.
+ * storage: the cache root is HypAware-managed.
  *
  * `cacheRoot` and `cacheTablePath` let plugins discover the layout
  * convention without baking the `datasets/<name>` segment into
@@ -1364,7 +1364,7 @@ export interface QueryStorageService {
    * Cursor-aware sibling of `readRows` for sinks that must advance a
    * per-(sink instance, partition) watermark. Pairs each internal-stripped row
    * with the `after` continuation to persist ONCE that row is durably exported.
-   * The internal `_hyp_ingest_seq` never reaches the row payload — it is read to
+   * The internal `_hyp_ingest_seq` never reaches the row payload: it is read to
    * derive `after`, then stripped. `after` is a monotonic high-water mark, so a
    * null-seq legacy row carries the prior watermark forward unchanged. See
    * LLP 0040 §2.
@@ -1372,11 +1372,11 @@ export interface QueryStorageService {
    * The element type is a discriminated union so the shared export read can
    * withhold `local-only` rows (LLP 0070 #enforce) without wedging the
    * watermark: a `{ dropped: true }` entry carries the running high-water
-   * `after` but **no** row payload — the row was recorded locally and stays
+   * `after` but **no** row payload, the row was recorded locally and stays
    * locally queryable, but no sink can forward it because the payload never
    * leaves the cache read. Every consumer still advances its cursor across the
    * drop, so a partition tail of withheld rows checkpoints once and is durably
-   * passed — not re-scanned each tick, not re-sent if the directory is later
+   * passed, not re-scanned each tick, not re-sent if the directory is later
    * un-excluded (LLP 0070 #incremental: drop-but-advance).
    */
   readRowsSince(
@@ -1404,7 +1404,7 @@ export interface CachePartitionMeta {
  * Where a verb is reachable. The default (`cli+mcp`) projects both a CLI
  * command and an MCP tool. `cli-only` suppresses the tool; `local-only`
  * keeps the tool on the local stdio host but withholds it from the
- * remote/HTTP transport — for operations that shouldn't be remotely
+ * remote/HTTP transport, for operations that shouldn't be remotely
  * invokable. See LLP 0034 §tool-exposure-emergent.
  */
 export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
@@ -1413,15 +1413,15 @@ export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
  * Credential scope a verb's MCP tool requires. `read` (read/compute) is
  * reachable by the query-scoped credential; `operator` (mutating) needs
  * the operator token and is never reachable by a query-scoped client.
- * Gating only applies on an authed (remote/HTTP) transport — the local
+ * Gating only applies on an authed (remote/HTTP) transport: the local
  * stdio host is local-user trust and exposes both. See LLP 0034
  * §tool-auth-class.
  */
 export type VerbAuthClass = 'read' | 'operator'
 
 /**
- * A single typed input property. A deliberately small JSON-Schema subset
- * — the argv↔schema codec coerces CLI tokens to these types, and the
+ * A single typed input property. A deliberately small JSON-Schema subset:
+ * the argv↔schema codec coerces CLI tokens to these types, and the
  * same object is emitted (minus the CLI-only `positional`/`greedy`
  * hints) as the MCP tool's `inputSchema`.
  */
@@ -1486,7 +1486,7 @@ export interface VerbRenderResult {
 }
 
 /**
- * A query-shaped operation — typed params in, structured result out —
+ * A query-shaped operation, typed params in, structured result out,
  * declared once. The kernel projects a CLI command (argv→params via
  * `inputSchema`, run `operation`, `render` to stdout) and an MCP tool
  * (`inputSchema` + `operation` → structured result) from the same
@@ -1533,7 +1533,7 @@ export interface VerbRegistry {
  * use these hooks to:
  *
  * - register upstream presets (`registerUpstreamPreset`) that own
- *   routing — the gateway no longer has any hardcoded provider routing
+ *   routing: the gateway no longer has any hardcoded provider routing
  *   such as Anthropic-header or `/v1/messages` matching;
  * - register a client `attach()` helper (`registerClient`) so the
  *   shared `hyp attach` CLI can dispatch without coupling core to
@@ -1548,7 +1548,7 @@ export interface VerbRegistry {
  *
  * The gateway owns the `ai_gateway_messages` dataset and its schema.
  * Removed in 2.0.0: `registerExchangeContextProjector` and
- * `registerMessageEnricher` — both are subsumed by the full exchange
+ * `registerMessageEnricher`, both are subsumed by the full exchange
  * projector hook.
  */
 export interface AiGatewayCapability {
@@ -1627,7 +1627,7 @@ export interface AiGatewayUpstreamPreset {
  * Read-only view of the inbound request handed to a preset's
  * `match()`. Header names are lowercased; values are arrays so callers
  * never have to special-case the `IncomingHttpHeaders` string-or-array
- * union. The body is intentionally not exposed here — matching is
+ * union. The body is intentionally not exposed here: matching is
  * supposed to be cheap and head-only.
  */
 export interface AiGatewayRouteInput {
@@ -1648,7 +1648,7 @@ export interface AiGatewayEndpointOptions {
  * through, so there is no per-adapter detach for the one undo to drift
  * from.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
 export interface AiGatewayClientRegistration {
   name: string
@@ -1718,8 +1718,8 @@ export interface AiGatewayExchangeProjectorContext {
    * Read-only membership test against the gateway's in-memory
    * ignored-session set (LLP 0066). The gateway holds only opaque
    * session-id tokens and answers this set-membership question; the
-   * adapter — which alone knows which wire/body field is the canonical
-   * `session_id` — resolves that id and, when it is ignored, returns the
+   * adapter, which alone knows which wire/body field is the canonical
+   * `session_id`, resolves that id and, when it is ignored, returns the
    * terminal `USAGE_POLICY_DROP` sentinel. Absent (backfill materialization,
    * unit-test stubs) → treat as `() => false`. @ref LLP 0066#enforcement
    */
@@ -1771,7 +1771,7 @@ export interface AiGatewayExchangeInput {
  * each `messages[]` entry into part rows in `ai_gateway_messages`.
  *
  * Provider-defined fields (`provider`, `session_id`, `conversation_id`,
- * identity) are authoritative — the gateway never overrides them when
+ * identity) are authoritative: the gateway never overrides them when
  * present.
  */
 export interface AiGatewayProjectedExchange {
@@ -1856,7 +1856,7 @@ export interface AiGatewayProjectedMessage {
    * request, one model) and the gateway stamps it on every row of the
    * exchange, user rows included. A backfilled exchange spans a whole session
    * that can switch models mid-stream, so backfill stamps the model per
-   * assistant message instead, mirroring the transcript — which records
+   * assistant message instead, mirroring the transcript, which records
    * `message.model` on assistant lines only. Backfilled user-prompt and
    * tool_result rows therefore carry no model (model fidelity in backfill is
    * assistant-output-only). The gateway prefers this per-message value over
@@ -2009,7 +2009,7 @@ export interface VectorShardStatus {
  * `@hypaware/completion-anthropic` and `@hypaware/completion-openai`).
  * Consumers (e.g. `@hypaware/context-graph-enrich`) require this
  * capability rather than binding to a specific provider, so swapping the
- * model backend is a config decision — which plugin is installed — not a
+ * model backend is a config decision, which plugin is installed, not a
  * refactor. This is the same separable-capability split as
  * `hypaware.embedder`; a localhost `base_url` keeps generation on-machine.
  *
@@ -2035,7 +2035,7 @@ export interface CompletionCapability {
    * Async batch generation, when the provider offers it (Anthropic Message
    * Batches: 50% off, asynchronous, results within ≤24h). Latency-insensitive
    * callers submit many requests at once, poll, and collect. Absent on
-   * providers without a batch API — callers feature-detect and fall back to
+   * providers without a batch API: callers feature-detect and fall back to
    * sequential {@link complete}.
    */
   batch?: CompletionBatch
@@ -2047,7 +2047,7 @@ export interface CompletionCapability {
  * `customId`; `poll` reports job progress; `results` returns one outcome per
  * `customId` (a normalized {@link CompletionResult} or an error). A `refusal`
  * is a *successful* per-request result with `stopReason: "refusal"`, not an
- * error — the same contract as {@link CompletionCapability.complete}.
+ * error, the same contract as {@link CompletionCapability.complete}.
  */
 export interface CompletionBatch {
   submit(requests: CompletionBatchRequest[], opts?: CompletionOptions): Promise<CompletionBatchStatus>
@@ -2099,9 +2099,9 @@ export interface CompletionRequest {
   /**
    * Provider-neutral tool-choice control. Each provider translates to its
    * native shape, so a caller forcing structured output stays portable:
-   *   - `'auto'` — the model decides whether to call a tool.
-   *   - `'required'` — the model must call some tool.
-   *   - `{ name }` — the model must call this specific tool.
+   *   - `'auto'`: the model decides whether to call a tool.
+   *   - `'required'`: the model must call some tool.
+   *   - `{ name }`: the model must call this specific tool.
    * Prefer this over a provider-specific `params.tool_choice`; when both are
    * set, `toolChoice` wins. Leave unset for the provider default.
    */
@@ -2109,7 +2109,7 @@ export interface CompletionRequest {
   /** JSON-schema structured-output request, when the provider supports it. */
   responseFormat?: JsonValue
   /**
-   * Provider-specific passthrough merged into the request body — e.g.
+   * Provider-specific passthrough merged into the request body: e.g.
    * Anthropic `thinking` / `output_config.effort`. Portable callers leave
    * this unset and use the neutral fields above.
    */

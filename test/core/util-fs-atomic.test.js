@@ -81,7 +81,7 @@ test('atomicWriteFile enforces expectedMtimeMs (CONCURRENT_EDIT)', async () => {
 
     // Stale mtime: rejected, file untouched. Force a guaranteed-distinct
     // on-disk mtime instead of relying on the write above having landed in
-    // a later filesystem mtime tick — on a fast runner both writes can share
+    // a later filesystem mtime tick: on a fast runner both writes can share
     // one tick, leaving the mtime unchanged so the guard never fires (#272).
     const bumped = new Date(mtimeMs + 1000)
     await fs.utimes(target, bumped, bumped)

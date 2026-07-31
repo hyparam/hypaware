@@ -24,8 +24,8 @@ import {
 // `hyp ignore --local-only` / `hyp unignore --local-only` (LLP 0081 T6,
 // LLP 0072 #cli): the durable, non-login authoring path over the
 // machine-local `local-only` list (LLP 0071). Unlike `test/core/ignore-command.test.js`
-// (the dotfile verbs), these commands never touch the repo tree — the write
-// target is a `HYP_HOME`-state JSON file — so every test roots the repo tree
+// (the dotfile verbs), these commands never touch the repo tree, the write
+// target is a `HYP_HOME`-state JSON file, so every test roots the repo tree
 // and the `HYP_HOME` state tree at two distinct temp directories, asserting
 // the repo tree is never touched (R4).
 

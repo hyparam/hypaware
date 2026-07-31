@@ -263,7 +263,7 @@ function reattach(config, provider, opts) {
   // `port`/`attached_at`/`version` and hence `baseUrl`. The ORIGINAL
   // `managed` block rides through unchanged, so `prev` still names the
   // user's own pre-attach values, never one of ours.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
+  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
   const samePort = record.port === opts.port
   const attachedAt = samePort && typeof record.attached_at === 'string' ? record.attached_at : opts.attachedAt
   const version = samePort && typeof record.version === 'string' ? record.version : opts.version

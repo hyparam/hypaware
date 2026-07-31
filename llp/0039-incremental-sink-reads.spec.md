@@ -16,11 +16,11 @@
 ## Problem
 
 Every scheduled tick, the request (central forward) sink and the blob sink read
-the **entire** partition and re-stream all of it — there is no per-sink cursor or
+the **entire** partition and re-stream all of it: there is no per-sink cursor or
 watermark that skips already-exported rows:
 
 - `forwardPartition` iterates the whole table each tick
-  (`hypaware-core/plugins-workspace/central/src/sink.js` — `for await (const row of
+  (`hypaware-core/plugins-workspace/central/src/sink.js`: `for await (const row of
   storage.readRows(tablePath))`).
 - the core blob/encoder path does the same full-partition `readRows`
   (`src/core/sinks/encoder.js`, driven from `src/core/sinks/materialize.js`).
@@ -30,10 +30,10 @@ Correctness today leans entirely on the **server-side idempotency ledger**
 client still **reads and transmits everything** on every run. Cumulative work is
 **O(N²)** while data grows (tick *k* moves ≈ *k·c* rows: 1+2+…+K ≈ K²/2); with
 retention it plateaus to "re-read and re-send the whole retention window every
-minute" — wasteful by roughly retention-window-many re-sends per row versus the
+minute", wasteful by roughly retention-window-many re-sends per row versus the
 ideal of once.
 
-The local **iceberg** table-format sink is already incremental — snapshot
+The local **iceberg** table-format sink is already incremental: snapshot
 ancestry / `markerSubsumedBySnapshot` skips already-exported data (O(N)
 amortized; `format-iceberg/src/table-format.js`, `state.js`). The forward and
 blob sinks never got the equivalent.
@@ -45,14 +45,14 @@ is **not** exactly-once here, because two cache behaviours move rows underneath
 any positional watermark:
 
 - **Retention** permanently position-deletes rows from the *front* of each
-  partition's table ([LLP 0013](./0013-local-query-cache.decision.md) — retention
+  partition's table ([LLP 0013](./0013-local-query-cache.decision.md): retention
   is the central trade-off), so a physical offset silently skips or re-counts
   rows after the first prune.
 - **Compaction** rewrites tables into fresh epoch generations, invalidating any
   offset keyed to a prior generation.
 
 Choosing a watermark that survives retention **and** compaction is a real design
-decision with several viable shapes — snapshot ancestry (as iceberg already
+decision with several viable shapes: snapshot ancestry (as iceberg already
 does), a monotonic per-row sequence/ingest column, or a content-addressed
 continuation token. The chosen shape also revises the documented designs in
 [LLP 0014](./0014-sinks.spec.md) (forward-sink backpressure currently specifies
@@ -81,14 +81,14 @@ retry safety net, not removed.
 - A tick after **N new rows** reads/sends ≈N rows, independent of total partition
   size.
 - **Exactly-once is preserved across retention prunes and compaction generation
-  swaps** — no row is skipped or duplicated after the front of a partition is
+  swaps**: no row is skipped or duplicated after the front of a partition is
   pruned or a table is compacted into a new epoch.
 - The server idempotency ledger still covers mid-batch retries.
 
 ## Origin
 
 Escalated by the neutral reconciler from GitHub issue
-[#122](https://github.com/hyparam/hypaware/issues/122) — the bug-fix worker
+[#122](https://github.com/hyparam/hypaware/issues/122), the bug-fix worker
 determined a test-provable localized fix was not credible without first making
 the watermark design decision above, so the work re-enters the pipeline family as
 a request rather than the maintenance family as a fix.

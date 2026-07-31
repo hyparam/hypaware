@@ -3,7 +3,7 @@
  *
  * The graph capability's surface is typed structurally here (a minimal
  * `GraphKit` / `ContextGraphCapabilityLike`) so this plugin does not import
- * from another plugin's sources — it depends on the capability by shape,
+ * from another plugin's sources: it depends on the capability by shape,
  * resolved at activation via `ctx.requireCapability`.
  */
 
@@ -78,7 +78,7 @@ export interface ProposeConfig {
   max_sessions_per_tick: number
   /**
    * A session is "settled" once its latest source part is older than this many
-   * minutes — the ongoing regime's selector. This is a run-time SQL/JS predicate
+   * minutes: the ongoing regime's selector. This is a run-time SQL/JS predicate
    * over the latest part, not a per-session idle timer. @ref LLP 0028#two-regimes
    */
   settle_cutoff_minutes: number
@@ -108,7 +108,7 @@ export interface CurateConfig {
    */
   cluster_similarity: number
   /**
-   * Upper bound on prospects per curator call — clusters are chunked to this
+   * Upper bound on prospects per curator call: clusters are chunked to this
    * size so the decisions JSON stays inside the output-token budget.
    * @ref LLP 0028#curate-clustering
    */
@@ -168,8 +168,8 @@ export interface CurateJob {
 
 /**
  * The persisted enrichment watermark sidecar (see state.js). Holds one
- * {@link SessionMark} per session keyed by its anchor key (session_id) — the
- * per-session model that **replaces** the single global keyset cursor — plus the
+ * {@link SessionMark} per session keyed by its anchor key (session_id), the
+ * per-session model that **replaces** the single global keyset cursor, plus the
  * in-flight ongoing curate batch job, if any.
  * @ref LLP 0028#per-session-watermark
  */
@@ -211,7 +211,7 @@ export interface EnrichRuntime {
    * vector-search + completion are resolved LAZILY (see runtime.js
    * getVector/getCompletion). The dependency resolver orders by
    * `requires.plugins`, not `requires.capabilities`, so their providers can
-   * activate after this plugin — and the completion provider is swappable,
+   * activate after this plugin, and the completion provider is swappable,
    * so it can't be named in `requires.plugins`. Resolving on first use
    * (tick/command time, after boot completes) sidesteps both.
    */

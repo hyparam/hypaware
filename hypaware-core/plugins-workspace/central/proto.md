@@ -12,7 +12,7 @@ partitions forwarded as NDJSON, per signal).
 All endpoints are HTTPS in production. Bodies are UTF-8 JSON unless
 explicitly NDJSON (`application/x-ndjson`). Errors return a JSON object
 with at least `{ "error": "<kind>" }`; `<kind>` is a short snake_case
-tag the client uses for diagnostics — humans read the HTTP status.
+tag the client uses for diagnostics, humans read the HTTP status.
 
 ## Versioning
 
@@ -103,13 +103,13 @@ install and treats a mismatch as an apply failure (LLP 0025).
 
 `ETag: <hex>` accompanies every 200 response. Clients persist the etag
 of the *running* config in kernel-managed state (it transitions
-atomically with the operative config on apply and rollback — LLP 0025)
+atomically with the operative config on apply and rollback: LLP 0025)
 so a restart short-circuits to 304 instead of re-pulling and
 re-validating.
 
 Response 304: no body. The gateway keeps its current config.
 
-Response 404: legacy-only branch — every token now references a config
+Response 404: legacy-only branch, every token now references a config
 at mint (server LLP 0009), so gateways enrolled under that flow always
 resolve. Kept for conformance against older servers: back off to
 5 minutes and log once until the state clears.
@@ -127,7 +127,7 @@ Bearer-authenticated. Body is NDJSON (one row per line, terminated by
 `\n`). One request carries one signal. The kernel forwards each cache
 partition independently, resolving its signal from the dataset's
 `sourceSignal` (defaulting to the dataset name) and streaming the
-partition's rows as one or more bounded chunks — one POST per chunk (see
+partition's rows as one or more bounded chunks: one POST per chunk (see
 "Batch boundaries").
 
 `{signal}` is one of:
@@ -143,7 +143,7 @@ Headers (request):
 
 - `Authorization: Bearer <jwt>`
 - `Content-Type: application/x-ndjson`
-- `X-Hyp-Batch-Id: <hash>` — idempotency key for this chunk. The client
+- `X-Hyp-Batch-Id: <hash>`, idempotency key for this chunk. The client
   derives it from the signal, the partition identity, the chunk's
   position within the partition, and the chunk's exact bytes: a re-sent
   chunk reproduces the same key, but two byte-identical chunks at
@@ -157,7 +157,7 @@ Response 202: batch accepted for processing. Body is empty.
 
 Response 401: see "Refresh window".
 
-Response 400 / 422 (4xx that is not 401 or 429): the batch is poison —
+Response 400 / 422 (4xx that is not 401 or 429): the batch is poison,
 the server saw the request but cannot store it. The gateway drops the
 batch from its outbox and counts it as a permanent failure rather than
 retrying forever.
@@ -166,13 +166,13 @@ Response 429 / 503: server is rate-limiting or temporarily unavailable.
 Client retries the same batch. A *positive* `Retry-After` (seconds or
 HTTP date) is honored; an absent, unparseable, or **non-positive** value
 (a literal `0` or a past date carries no useful pacing) falls back to the
-client's linear backoff ladder — a zero is never taken as an immediate
+client's linear backoff ladder: a zero is never taken as an immediate
 retry.
 
 Response 5xx (other): transient transport failure. Client retries with
 exponential backoff capped at 5 minutes.
 
-> **Client status:** `429`/`503` are now handled as specified — the sink
+> **Client status:** `429`/`503` are now handled as specified, the sink
 > honors a positive `Retry-After` (falling back to the linear ladder when
 > it is absent, garbage, or non-positive) and **retries the same chunk in
 > place**, sleeping whenever the server's byte-rate
@@ -184,8 +184,8 @@ exponential backoff capped at 5 minutes.
 > `close()` / daemon shutdown is never wedged by a paused chunk.
 >
 > Two gaps remain, tracked as follow-up: poison (`400`/`422`) is still
-> **not** dropped — it throws like any other failure and the driver
-> retries it — and there is no **forward cursor** or proactive client
+> **not** dropped, it throws like any other failure and the driver
+> retries it, and there is no **forward cursor** or proactive client
 > pacing yet, so each tick re-streams the whole partition (the server
 > dedup keeps that correct and, post the ledger-before-backpressure fix,
 > cheap).
@@ -212,7 +212,7 @@ byte-identical chunks never alias onto one ledger entry.
 The body of each NDJSON line is the row as materialized in the local
 Iceberg cache. The server is expected to reconcile dataset schemas by
 name (`logs`, `traces`, …); the gateway does not annotate rows with a
-dataset header. When two datasets map to the same signal (uncommon —
+dataset header. When two datasets map to the same signal (uncommon,
 the canonical mapping is 1:1), the gateway sends one POST per dataset.
 
 `dev_run_id` is preserved end-to-end as a payload attribute so smoke

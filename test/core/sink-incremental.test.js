@@ -116,7 +116,7 @@ test('openIncrementalRows reports empty when since already covers every row', as
 
 test('openIncrementalRows: null-seq legacy rows are emitted but never advance lastAfter', async () => {
   // Null-seq (pre-upgrade) rows are always yielded but carry the watermark
-  // forward unchanged — the one-time migration is a re-export, never a skip.
+  // forward unchanged: the one-time migration is a re-export, never a skip.
   const tablePath = '/cache/datasets/d/source=x'
   const storage = makeStorage({ [tablePath]: [{ _seq: null, id: 'legacy' }] })
   const reader = await openIncrementalRows(/** @type {any} */ (storage), { dataset: 'd', partition: {}, tablePath }, { v: 1, seq: '4' })

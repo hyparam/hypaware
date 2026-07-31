@@ -42,8 +42,8 @@ the retention window comes from the pathway chosen at the fork
 ([LLP 0137](./0137-onboarding-retention-defaults.decision.md#pathway-defaults)).
 
 The walkthrough is the canonical first-run experience. It composes
-**plugin-contributed picks** — each source/client plugin registers what it
-collects; each sink plugin registers what it exports to — and writes a config
+**plugin-contributed picks**, each source/client plugin registers what it
+collects; each sink plugin registers what it exports to, and writes a config
 the daemon can load.
 
 ## Returning to a configured install
@@ -88,13 +88,13 @@ repair of a broken file.
 The user describes **what** they want to collect and **where** it should go;
 HypAware picks the plugin set. There are no names like "standalone" or
 "gateway." The written config enumerates the chosen plugins explicitly
-([LLP 0010](./0010-config-model.spec.md#explicit-plugin-set)) — never an implicit
+([LLP 0010](./0010-config-model.spec.md#explicit-plugin-set)), never an implicit
 "defaults" mode.
 
 ## Autodetect vs default
 
 - **Autodetect** pre-checks a *client source* (`claude`, `codex`) when its tool
-  is found on the system. It sets only the initial checkbox state — never forces
+  is found on the system. It sets only the initial checkbox state, never forces
   a source on, never hides one. Raw proxy sources and OTEL are never
   autodetected (no installed tool to find). See [LLP 0012](./0012-sources.spec.md#source-kinds).
 - **Default** is a fixed starting selection not derived from system state:
@@ -119,7 +119,7 @@ config file + install the daemon", not a separate path. See
 
 The interactive walkthrough seeds a source's local history with a one-shot
 backfill in its finale; `join` reaches the same parity without a finale via
-**backfill on join** — once the joined config is confirmed, the daemon imports
+**backfill on join**, once the joined config is confirmed, the daemon imports
 each backfill-capable source's pre-join history once, driven by the source
 plugin's own `config.backfill`. See [LLP 0037](./0037-backfill-on-join.decision.md),
 an instance of the central-config-driven client-action seam in

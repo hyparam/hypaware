@@ -41,7 +41,7 @@ no injection marker (a Claude-shaped rule returns **zero** for Codex), no
 `Skill` tool call, no `<command-name>` tag, and the message-shape assumptions
 differ (`role='tool'` results vs Claude's `role='user'`). Codex's only
 activation trace is a plain shell read of the skill file. Forcing one shared
-rule would either silence Codex or loosen Claude's filters — both worse than
+rule would either silence Codex or loosen Claude's filters, both worse than
 two small per-client rules living side by side in the same contract.
 
 ## Accepted ambiguity: read ≡ activation {#read-is-activation}
@@ -58,8 +58,8 @@ laundering it into the Claude-grade signals. The honest fix is capture-side
 ## Rejected alternative: `<skills_instructions>` roster {#rejected-roster}
 
 Codex's `developer`-role `<skills_instructions>` block is a clean
-per-conversation **availability** roster — but availability is not activation;
+per-conversation **availability** roster, but availability is not activation;
 minting `ran` edges from it would assert usage that never happened. It stays
 unused here. (It is the natural future source for an `offered` edge / the
-adoption-gap denominator — out of scope for #229, noted for the capture-side
+adoption-gap denominator: out of scope for #229, noted for the capture-side
 design LLP 0076 anticipates.)

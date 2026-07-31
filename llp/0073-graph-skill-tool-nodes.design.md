@@ -1,4 +1,4 @@
-# LLP 0073: graph Skill & Program nodes — bounded facets from `tool_args`
+# LLP 0073: graph Skill & Program nodes: bounded facets from `tool_args`
 
 **Type:** design
 **Status:** Active
@@ -9,14 +9,14 @@
 
 > Buildable design for two new graph node types and their Session-rooted edges:
 > **`Session -ran-> Skill`** and **`Session -invoked-> Program`**. Both are the
-> same root move — extract a *bounded* facet from `tool_args` (or a
-> skill-activation surface) and make it first-class in the activity graph —
+> same root move, extract a *bounded* facet from `tool_args` (or a
+> skill-activation surface) and make it first-class in the activity graph,
 > applied to the two questions the graph cannot answer today.
 >
-> Implements [issue #229](https://github.com/hyparam/hypaware/issues/229) —
+> Implements [issue #229](https://github.com/hyparam/hypaware/issues/229),
 > query the activity graph by skill: a `Skill` node keyed on skill name,
 > reached by a `ran` edge, with a per-surface `dispatch_source`.
-> Implements [issue #230](https://github.com/hyparam/hypaware/issues/230) —
+> Implements [issue #230](https://github.com/hyparam/hypaware/issues/230),
 > tool nodes stop at the tool name: a `Program` node keyed on
 > `basename(argv[0])`, reached by an `invoked` edge.
 >
@@ -45,11 +45,11 @@
 ## Overview
 
 The graph already does exactly this once: `Read`/`Edit`/`Write` tool calls
-don't collapse into a "Read" blob — the contract pulls `file_path` out of
+don't collapse into a "Read" blob, the contract pulls `file_path` out of
 `tool_args` and mints `File` nodes (`fileTargetFrom` in
 [`graph_contract.js`](../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js)).
 This design applies that established pattern to the two facets issues #229/#230
-need — skill names and program names — as **contract rules in the existing
+need, skill names and program names, as **contract rules in the existing
 connector**, not a parallel mechanism. Four change surfaces:
 
 1. **Contract rules** (`ai-gateway-graph/src/graph_contract.js`): node + edge
@@ -72,10 +72,10 @@ connector**, not a parallel mechanism. Four change surfaces:
 
 | kind | type | natural key | label | props |
 |---|---|---|---|---|
-| node | `Skill` | skill name, verbatim (validity-gated, §skill-key) | the name | — |
-| node | `Program` | `basename(argv[0])`, lowercased (validity-gated, LLP 0077) | the key | — |
-| edge | `ran` | `Session -> Skill` | — | dispatch flags (§dispatch-source) |
-| edge | `invoked` | `Session -> Program` | — | — |
+| node | `Skill` | skill name, verbatim (validity-gated, §skill-key) | the name | - |
+| node | `Program` | `basename(argv[0])`, lowercased (validity-gated, LLP 0077) | the key | - |
+| edge | `ran` | `Session -> Skill` | - | dispatch flags (§dispatch-source) |
+| edge | `invoked` | `Session -> Program` | - | - |
 
 - **Distinct edge types** `ran` vs `invoked`, exactly as both issues specify,
   so skills and programs never collide under one `edge_type` filter.
@@ -92,7 +92,7 @@ connector**, not a parallel mechanism. Four change surfaces:
 ### Skill key {#skill-key}
 
 The `Skill` natural key is the **bare skill name** (`hypaware-query`,
-`hypaware-ai-improvement-report`), preserved verbatim (no lowercasing — skill
+`hypaware-ai-improvement-report`), preserved verbatim (no lowercasing, skill
 directory names are the identity and are conventionally already lowercase;
 plugin-namespaced names like `plugin:skill` keep the namespace). This makes the
 node **cross-client convergent by construction**: the same skill installed in
@@ -109,7 +109,7 @@ flag. All three false-positive filters follow the issue's measurement: only
 `role='user'`/`part_type='text'` with a **leading anchor** is clean; loose
 matching pulls ~23% false positives.
 
-**Surface 1 — `Skill` tool call** (`dispatch_tool: true`):
+**Surface 1: `Skill` tool call** (`dispatch_tool: true`):
 
 ```sql
 SELECT session_id, tool_args, message_created_at FROM ai_gateway_messages
@@ -120,7 +120,7 @@ SELECT session_id, tool_args, message_created_at FROM ai_gateway_messages
 takes `tool_args.skill` (the issue-confirmed identifier), gated by
 `SKILL_NAME_RE`.
 
-**Surface 2 — SKILL.md injection marker** (`dispatch_marker: true`):
+**Surface 2: SKILL.md injection marker** (`dispatch_marker: true`):
 
 ```sql
 SELECT session_id, content_text, message_created_at FROM ai_gateway_messages
@@ -129,7 +129,7 @@ SELECT session_id, content_text, message_created_at FROM ai_gateway_messages
 ```
 
 The prefix-`LIKE` is the leading anchor in SQL; `toRow` re-verifies it at
-**offset 0** with `/^Base directory for this skill: (\S+)/` (defense in depth —
+**offset 0** with `/^Base directory for this skill: (\S+)/` (defense in depth,
 the anchor is the whole false-positive defense, so it is enforced twice). The
 skill name is the `basename` of the captured path after trimming a trailing
 slash; if the basename is `SKILL.md` (a file rather than a base directory), the
@@ -137,7 +137,7 @@ parent directory's basename is used. A marker that appears mid-message
 (assistant quoting, query output echoes, pasted transcripts) fails the offset-0
 anchor and mints nothing.
 
-**Surface 3 — slash command** (`dispatch_slash: true`):
+**Surface 3: slash command** (`dispatch_slash: true`):
 
 ```sql
 SELECT session_id, content_text, message_created_at FROM ai_gateway_messages
@@ -147,7 +147,7 @@ SELECT session_id, content_text, message_created_at FROM ai_gateway_messages
 
 `toRow` matches `/^<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-name>/`
 at offset 0, strips the optional leading `/`, and **drops the name when it is
-in `CLAUDE_BUILTIN_COMMANDS`** — the static exclusion list LLP 0074
+in `CLAUDE_BUILTIN_COMMANDS`**, the static exclusion list LLP 0074
 §builtin-exclusion settles (`model`, `compact`, `clear`, `help`, `config`,
 `cost`, `doctor`, `init`, `login`, `logout`, `memory`, `status`, `review`,
 `resume`, `agents`, `bug`, `mcp`, `permissions`, `hooks`, `ide`, `vim`,
@@ -156,14 +156,14 @@ in `CLAUDE_BUILTIN_COMMANDS`** — the static exclusion list LLP 0074
 `privacy-settings`, `release-notes`, `pr-comments`, `install-github-app`,
 `migrate-installer`). Every real skill invocation via slash *also* injects the
 surface-2 marker, so a built-in that drifts past this list is the only spurious
-mint this surface can produce — the accepted residual LLP 0074 records.
+mint this surface can produce: the accepted residual LLP 0074 records.
 
 **What deliberately does not count** (all cited from LLP 0074): assistant-role
 text mentioning skills; `grep`/`cat`/`Read` of a SKILL.md in a Claude session
-(that is inspection, not activation — note the asymmetry with Codex, where the
+(that is inspection, not activation; note the asymmetry with Codex, where the
 shell read *is* the activation signal, LLP 0075); markers not at offset 0. A
 hand-pasted SKILL.md at offset 0 of a user message remains indistinguishable
-from a real activation — accepted until the capture-side signal (LLP 0076).
+from a real activation: accepted until the capture-side signal (LLP 0076).
 
 ## Codex skill derivation {#codex-skill-derivation}
 
@@ -189,7 +189,7 @@ The captured `<name>` (first match, `SKILL_NAME_RE`-gated) is the skill. The
 pattern requires the `.codex/skills/<name>/SKILL.md` shape specifically, so a
 Codex session inspecting some *other* repo's `.claude/skills/...` tree or an
 arbitrary SKILL.md does not mint. Reading-for-inspection vs activation is
-otherwise indistinguishable — the accepted trade LLP 0075 records, which is why
+otherwise indistinguishable: the accepted trade LLP 0075 records, which is why
 the flag is the distinct `dispatch_shell_read` (consumers can weight it).
 
 ## Program derivation {#program-derivation}
@@ -204,10 +204,10 @@ SELECT session_id, tool_name, tool_args, message_created_at FROM ai_gateway_mess
 
 `tool_facets.js` provides two pure functions:
 
-- **`commandStringFrom(toolName, toolArgs)`** — `Bash` → `tool_args.command`;
+- **`commandStringFrom(toolName, toolArgs)`**: `Bash` → `tool_args.command`;
   `exec_command` → `tool_args.cmd ?? tool_args.command`. Null when absent or
   non-string.
-- **`programFrom(command)`** — deterministic, fail-closed extraction:
+- **`programFrom(command)`**: deterministic, fail-closed extraction:
   1. Cut the string at the first `|`, `&&`, `||`, `;`, or newline and keep the
      **first segment** only. This split is quote-blind, and that is safe *for
      this facet*: only the head of the first segment is consumed, so a
@@ -229,12 +229,12 @@ SELECT session_id, tool_name, tool_args, message_created_at FROM ai_gateway_mess
      invocations converge: `/opt/homebrew/bin/duckdb` ≡ `duckdb`).
   7. Gate with `PROGRAM_RE = /^[a-z0-9][a-z0-9._+-]{0,63}$/` and reject
      all-numeric tokens. Anything failing any step returns null and **mints
-     nothing** — fall back rather than mis-key, the LLP 0032 discipline.
+     nothing**: fall back rather than mis-key, the LLP 0032 discipline.
 
 **First-command-only is deliberate** (LLP 0077): it is the facet the issue
 measured (1,568 Codex `exec_command` calls → 29 distinct `argv[0]` programs),
 and a contract rule's `toRow` emits at most one row per source row, so
-per-pipeline-stage extraction would need a `toRow → rows[]` engine change —
+per-pipeline-stage extraction would need a `toRow → rows[]` engine change,
 deferred, recorded in LLP 0077, not smuggled in here. Subcommand nodes
 (`git commit`, `hyp query`) are likewise deferred behind a dispatcher
 whitelist (LLP 0077 §deferred).
@@ -245,18 +245,18 @@ The guardrail issue #230 proposes, adopted here as the rule for this connector
 and the precedent for future facets: a `tool_args`-derived value may become a
 graph **node key** only if it is
 
-1. a **pure deterministic function of the single source row** — no
-   data-window-dependent thresholds, no cross-row state — so projection stays
+1. a **pure deterministic function of the single source row**: no
+   data-window-dependent thresholds, no cross-row state, so projection stays
    content-addressed and idempotent (LLP 0023 §content-addressed-ids); and
 2. a projection into a domain **bounded by syntax and observed usage**,
    enforced by an explicit validity gate (`SKILL_NAME_RE`, `PROGRAM_RE`): the
    gates cap pathological tokens from mis-parses and, in the fleet observed so
    far, skill names track installed skill directories and program basenames
-   track installed binaries (~29 observed for Codex) — not a syntactic
+   track installed binaries (~29 observed for Codex), not a syntactic
    guarantee, since a hashed or generated basename (`foo.test`,
    `tool-4f8e2a1b9c0d`) still passes the gate and mints its own node.
 
-Anything unbounded — raw command strings, arbitrary path fragments — stays
+Anything unbounded, raw command strings, arbitrary path fragments, stays
 queryable in `ai_gateway_messages`, or at most rides as an **edge prop** for
 drill-in. Never a node.
 
@@ -269,7 +269,7 @@ seen; when it is the *only* flag, the activation was prompt-driven or
 otherwise ambiguous), `dispatch_shell_read` (Codex exec read). Each surface's
 rule stamps only its own flag; because edge ids hash `(src, type, dst)` only,
 all surfaces' rows collapse onto one edge and `mergeRow`'s props-key union
-combines the flags **order-independently** — a single enum prop would instead
+combines the flags **order-independently**: a single enum prop would instead
 resolve by earliest-wins and silently drop "both slash and tool" truth.
 
 **Known accepted limitation:** the pre-write dedup (LLP 0023 §pre-write-dedup)
@@ -288,12 +288,12 @@ no props field. The change is the minimal additive widening:
   `ai-gateway-graph/src/types.d.ts` (the connector re-declares capability
   shapes rather than importing provider internals).
 - `buildEdge` sets `props: spec.props && Object.keys(spec.props).length > 0 ?
-  spec.props : null` — byte-for-byte the `buildNode` treatment.
+  spec.props : null`, byte-for-byte the `buildNode` treatment.
 
 Ids do not hash props, so **every existing edge id is unchanged**; contracts
 that pass no props behave identically; the `edge` dataset already has the
 `props` column and `mergeRow` already merges props generically. The
-`hypaware.context-graph` capability stays at `1.0.0` — the widening is
+`hypaware.context-graph` capability stays at `1.0.0`, the widening is
 backward- and forward-compatible (a provider without it simply yields
 `props: null`, which the contract must tolerate anyway on old graphs). The
 engine (`project.js`) is untouched, keeping the LLP 0023 ownership split
@@ -303,7 +303,7 @@ intact.
 
 `PROJECTOR_VERSION` bumps `1 → 2` as **provenance only** (LLP 0023
 §inline-provenance: it marks which projector generation minted a row and
-triggers nothing). Every change here is a purely additive rule — the LLP 0032
+triggers nothing). Every change here is a purely additive rule, the LLP 0032
 §repo-commit-nodes posture: existing rows and ids are untouched, there is no
 re-key and therefore **no migration**; a `hyp graph project` run over an
 existing cache mints only the new `Skill`/`Program` nodes and `ran`/`invoked`
@@ -344,10 +344,10 @@ headline queries**, not new surface.
 
 ## Test plan {#test-plan}
 
-Traditional tests (tier 1, deterministic — the house rule home for contract
+Traditional tests (tier 1, deterministic: the house rule home for contract
 and transform logic):
 
-- **`test/plugins/ai-gateway-graph-facets.test.js`** (new) — table-driven unit
+- **`test/plugins/ai-gateway-graph-facets.test.js`** (new), table-driven unit
   tests for `tool_facets.js`: env prefixes, each wrapper, `bash -lc` unwrap
   (incl. nested depth cap), pipelines/connectors take-first, quoted-connector
   head safety, subshell parens, path basenames, lowercasing, `PROGRAM_RE` /
@@ -356,15 +356,15 @@ and transform logic):
   mid-text rejection); `<command-name>` parsing (leading `/`, namespaced
   names, built-in exclusion); Codex path pattern (match, non-`.codex` paths
   rejected, quoting variants).
-- **`test/plugins/ai-gateway-graph-contract.test.js`** (extend) — the new
+- **`test/plugins/ai-gateway-graph-contract.test.js`** (extend): the new
   rules exist with the declared SQL filters; node/edge ids, labels, props, and
   `source_keys` for each surface; each surface stamps only its own dispatch
   flag; aux-tagged rows (`attributes.claude.aux_kind`) mint nothing through
   the new rules; `PROJECTOR_VERSION === 2`.
-- **`test/plugins/context-graph-contract.test.js`** (extend) — `buildEdge`
+- **`test/plugins/context-graph-contract.test.js`** (extend): `buildEdge`
   props passthrough (present, empty → null, absent → null) and edge-id
   stability with and without props.
-- **`test/plugins/context-graph-project-e2e.test.js`** (extend) — fixture rows
+- **`test/plugins/context-graph-project-e2e.test.js`** (extend), fixture rows
   covering all four skill surfaces + Bash/exec_command programs projected
   through `projectGraph`: `Skill`/`Program` nodes and `ran`/`invoked` edges
   materialize; a session sighted via marker *and* slash yields one `ran` edge

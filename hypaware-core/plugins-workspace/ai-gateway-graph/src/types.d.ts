@@ -27,7 +27,7 @@ export interface ContractRule {
 /**
  * The per-node spec a contract's `toRow` hands `buildNode` (graph identity +
  * optional display + provenance keys). Mirrors `context-graph`'s `NodeSpec`
- * structurally — like the rest of this file, the connector re-declares the
+ * structurally: like the rest of this file, the connector re-declares the
  * capability's shape rather than importing the provider's internal types.
  */
 export interface NodeSpec {
@@ -62,7 +62,7 @@ export interface GraphRowBuilders {
  * `Repo`/`Commit`/`File` recipes are byte-identical to
  * `github-hyp-plugin/src/keys.js`; the remote-URL / absolute-path
  * reconciliation is host-only. A null return means "not bridgeable" (non-github
- * remote, abbreviated sha, path outside the repo) — the contract keeps its own
+ * remote, abbreviated sha, path outside the repo): the contract keeps its own
  * fallback key.
  */
 export interface GraphKeys {

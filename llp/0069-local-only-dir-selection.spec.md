@@ -15,7 +15,7 @@
 > ones that must **never leave this machine**, and persist that choice so the
 > export pipeline forwards everything *except* those directories. The selected
 > directories become [`local-only`](./0051-usage-policy-future-extensions.decision.md#local-only):
-> still recorded to the local cache — fully queryable here — but never exported
+> still recorded to the local cache, fully queryable here, but never exported
 > or forwarded.
 
 ## Motivation
@@ -23,11 +23,11 @@
 [LLP 0063](./0063-login-auto-provision-forward-sink.decision.md) closes the
 one-command enrollment loop: a member of a domain-claimed org runs `hyp remote
 login` and the machine immediately forwards captured logs to the org server,
-including — via [LLP 0037](./0037-backfill-on-join.decision.md) backfill,
-default-on — pre-existing local history. LLP 0063 calls this out plainly as the
+including, via [LLP 0037](./0037-backfill-on-join.decision.md) backfill,
+default-on, pre-existing local history. LLP 0063 calls this out plainly as the
 **BYOD consequence**: a *personal* machine that matched a claimed email domain
 now ships its local Claude/Codex history to the org, and the pre-auth notice
-(LLP 0063 D3) is the *one* moment a user can decline — but declining there is
+(LLP 0063 D3) is the *one* moment a user can decline, but declining there is
 all-or-nothing (`--no-forward` opts out of enrollment entirely).
 
 A developer routinely runs Claude and Codex across a mix of directories: the
@@ -53,12 +53,12 @@ selected directories are recorded locally but never forwarded.
 
 Each half is a settled choice recorded as its own decision:
 
-- **`local-only` enforced at the export seam, derived from `cwd`** —
+- **`local-only` enforced at the export seam, derived from `cwd`**:
   [LLP 0070](./0070-local-only-export-seam.decision.md).
 - **A machine-local private list, not committable dotfiles and not central
-  config** — [LLP 0071](./0071-machine-local-exclusion-list.decision.md).
+  config**: [LLP 0071](./0071-machine-local-exclusion-list.decision.md).
 - **The picker is a post-enrollment refinement, not an enrollment consent
-  gate** — [LLP 0072](./0072-enrollment-dir-picker.decision.md).
+  gate**: [LLP 0072](./0072-enrollment-dir-picker.decision.md).
 
 ## Relationship to the neighbouring mechanisms {#neighbours}
 
@@ -74,7 +74,7 @@ machinery rather than competing with them:
 The distinctions that make this a separate mechanism, not a variant:
 
 - **Versus `.hypignore` / session opt-out (both `ignore`-class):** those *drop
-  the row at the capture seam* — nothing is recorded, so nothing is queryable
+  the row at the capture seam*, nothing is recorded, so nothing is queryable
   locally either. This spec's `local-only` keeps the row: the user retains full
   local HypAware value (query, graph, backfill) for the excluded directory and
   only withholds it from the *remote*. "Do not send this to my employer" is a
@@ -89,7 +89,7 @@ The distinctions that make this a separate mechanism, not a variant:
 
 The mechanisms are **independent at enforcement time** and compose: a directory
 governed by both a `.hypignore` (`ignore`) and the `local-only` list resolves to
-the most restrictive class (`ignore` wins — it is never recorded, so the question
+the most restrictive class (`ignore` wins, it is never recorded, so the question
 of forwarding never arises). See [LLP 0070 §resolver](./0070-local-only-export-seam.decision.md#resolver).
 
 ## The trigger: after login, before provisioning {#trigger}
@@ -109,7 +109,7 @@ Forwarding (and backfill export) begins only when the daemon `enrollCentralSink`
 installs starts materializing the central sink, so persisting the `local-only`
 list *before* `enrollCentralSink` guarantees the export read sees the exclusions
 on its very first pass. Running the picker before provisioning has a second
-benefit: if it is dismissed or abandoned, nothing has been provisioned yet — there
+benefit: if it is dismissed or abandoned, nothing has been provisioned yet, there
 is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./0072-enrollment-dir-picker.decision.md#default)).
 
 > **Revisited-by [issue #281] (fresh-enroll ordering).** As shipped, running the
@@ -137,16 +137,16 @@ is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./00
 > #281 reordering above fixed *when* the picker runs but left *what it queries
 > with* stale: `hyp remote login` boots its kernel before enrollment, and on a
 > first-run box the local config names no plugins, so the login process's
-> query-registry snapshot never registers `ai_gateway_messages` — that
+> query-registry snapshot never registers `ai_gateway_messages`, that
 > registration arrives with `@hypaware/ai-gateway`, which the org config-control
 > pull enables only after `enrollCentralSink` installs the daemon. The
 > [enumeration](#enumerate) then failed as "unknown dataset" (best-effort null),
 > the capture wait read null as "cannot run, stop", and the picker still
 > silently skipped on every genuinely fresh enroll. The fix
 > (`freshenCaptureEnumeration`, `src/core/cli/remote_commands.js`) re-boots one
-> fresh kernel after a client attaches — attach markers land only after the
+> fresh kernel after a client attaches, attach markers land only after the
 > confirmed config apply, so the pulled central layer is on disk by then and the
-> re-boot's merged config registers the dataset — and hands its enumeration to
+> re-boot's merged config registers the dataset, and hands its enumeration to
 > the capture wait. Best-effort: a failed re-boot falls back to the durable
 > hint, never an error. Requirements and R6 semantics are unchanged.
 
@@ -185,7 +185,7 @@ The candidate list is the **distinct set of working directories the user has run
 Claude or Codex in**, read from the local cache. Every captured exchange carries
 its `cwd` as a first-class column on the `ai_gateway_messages` dataset
 (`hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js`; the
-client hook records it into `session-context.jsonl` and the projector stamps it —
+client hook records it into `session-context.jsonl` and the projector stamps it:
 [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)). Enumeration is a
 read-only query over the local cache via the core query engine
 ([LLP 0015](./0015-query-and-datasets.spec.md), `executeQuerySql`), conceptually:
@@ -202,7 +202,7 @@ ORDER BY last_seen DESC
   [LLP 0033](./0033-remote-query-attach.spec.md)); enumeration reads this
   machine's own cache, never the remote.
 - `repo_root`, row counts, and last-seen are carried so the picker can present a
-  useful, ranked list (most-recent-first) with enough context to decide — not a
+  useful, ranked list (most-recent-first) with enough context to decide, not a
   bare list of paths (R3).
 - The set is derived from **whatever is already captured** at login time. A
   directory the user starts working in *after* enrollment is not in the list;
@@ -211,40 +211,40 @@ ORDER BY last_seen DESC
 ## Persistence: the machine-local `local-only` list {#persist}
 
 Selections are written to a **single machine-local file** under `HYP_HOME`, not
-to any repo and not to layered/central config — the persistence-form decision is
+to any repo and not to layered/central config: the persistence-form decision is
 [LLP 0071](./0071-machine-local-exclusion-list.decision.md). The file holds a
 versioned set of absolute directory paths; a captured `cwd` is `local-only` when
 it equals, or is a path-segment descendant of, any listed directory (ancestor
-match, mirroring `.hypignore` semantics — [LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope)).
+match, mirroring `.hypignore` semantics: [LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope)).
 
 ## Enforcement: the shared export read drops local-only rows {#enforce}
 
 Enforcement is [LLP 0070](./0070-local-only-export-seam.decision.md): the shared
 export read (`storage.readRowsSince`, the one seam the `@hypaware/central` forward
-sink and every blob/Iceberg sink funnel through — [LLP 0014](./0014-sinks.spec.md))
+sink and every blob/Iceberg sink funnel through; [LLP 0014](./0014-sinks.spec.md))
 consults the shared usage-policy resolver
 ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)) for **each row's**
 `cwd` and drops the ones that resolve to `local-only` before they reach any sink.
 It is a **per-row** filter, not a partition skip: the physical cache partition is
-`source=<client>` and mixes many directories, so `cwd` cannot select a partition
-— but every sink already scans every row, so the resolver call (memoized per
+`source=<client>` and mixes many directories, so `cwd` cannot select a partition,
+but every sink already scans every row, so the resolver call (memoized per
 `cwd`) is nearly free. Local *query* uses a different read path
 ([LLP 0015](./0015-query-and-datasets.spec.md)), so `local-only` rows stay locally
-queryable — the essence of `local-only` vs `ignore`. The verdict is **derived at
+queryable: the essence of `local-only` vs `ignore`. The verdict is **derived at
 export time** from the row's existing `cwd` and the machine-local list, needing
 **no cache-schema change** and no capture-time marker.
 
 This is what makes the semantics correct for **already-captured history**: rows
 recorded (or backfilled) before the user made the selection sit in the cache with
 their `cwd`, and the export read simply never forwards the ones that now resolve
-to `local-only`. No purge, no retroactive rewrite — the backlog is withheld by
+to `local-only`. No purge, no retroactive rewrite: the backlog is withheld by
 construction ([LLP 0051 §local-only](./0051-usage-policy-future-extensions.decision.md#local-only)).
 
 ## Consent and the fleet-policy doctrine {#consent}
 
 Two settled positions bear on this feature and neither is overturned:
 
-- **LLP 0063 D3 — "login never prompts `y/n`."** That rule governs *consent to
+- **LLP 0063 D3: "login never prompts `y/n`."** That rule governs *consent to
   enroll*: enrollment must not be gated behind an interactive confirm (it would
   break the one-command promise and hang piped flows). This picker is **not** a
   consent gate ([LLP 0072](./0072-enrollment-dir-picker.decision.md)): enrollment
@@ -252,7 +252,7 @@ Two settled positions bear on this feature and neither is overturned:
   pressing Enter / Ctrl-C proceeds with zero exclusions, and it is skipped
   entirely when stdin/stderr is not a TTY. It refines a decision already made; it
   never blocks or re-litigates it.
-- **LLP 0037 / 0044 — "no local opt-out" of locked fleet policy.** Those forbid a
+- **LLP 0037 / 0044: "no local opt-out" of locked fleet policy.** Those forbid a
   machine from locally overriding *central-owned topology* (dropping the central
   sink, skipping backfill). `local-only` is not that: it is a **local privacy
   control** in the [LLP 0049](./0049-hypignore-usage-policy.spec.md) family, which
@@ -260,7 +260,7 @@ Two settled positions bear on this feature and neither is overturned:
   places *outside* the layered-config/central-authority model ("honored whenever
   found," never merged or pushed by central). The decisive precedent: `.hypignore`
   `ignore` **already** withholds directories from an enrolled machine's
-  forwarding, so `local-only` (which withholds *less* — it still records locally)
+  forwarding, so `local-only` (which withholds *less*, it still records locally)
   opens no new hole. The central sink still exists and still forwards everything
   the user did *not* mark private; the user drops no fleet machinery. The full
   reconciliation is [LLP 0071 §doctrine](./0071-machine-local-exclusion-list.decision.md#doctrine).
@@ -313,27 +313,27 @@ Two settled positions bear on this feature and neither is overturned:
   of any listed directory MUST be treated as `local-only`: recorded to the local
   cache as normal and remaining **locally queryable**, but **dropped from the
   shared export read** so it reaches no sink
-  ([LLP 0070](./0070-local-only-export-seam.decision.md)) — central forward, blob,
+  ([LLP 0070](./0070-local-only-export-seam.decision.md)), central forward, blob,
   and Iceberg export alike. This MUST hold for already-cached rows (including
   backfilled history), with no cache-schema change and no purge. The export cursor
   MUST advance past a dropped row so it is neither re-scanned each tick nor re-sent
   if the directory is later un-excluded ([LLP 0070 §incremental](./0070-local-only-export-seam.decision.md#incremental)).
-- **R6.** The selection MUST be persisted **before** `enrollCentralSink` — the
+- **R6.** The selection MUST be persisted **before** `enrollCentralSink`, the
   step that provisions the sink and installs the forwarding daemon together
   ([LLP 0063 D5](./0063-login-auto-provision-forward-sink.decision.md),
-  `remote_commands.js:428`) — so no excluded-directory row is forwarded even once,
+  `remote_commands.js:428`), so no excluded-directory row is forwarded even once,
   and so a dismissed/abandoned picker leaves no half-enrolled machine (see
   [trigger](#trigger)).
 - **R7.** A durable, non-login authoring path MUST exist so a user can review and
   edit the `local-only` list later (directories worked in after enrollment, or a
-  mistaken selection) without re-running login — e.g. `hyp ignore --local-only
+  mistaken selection) without re-running login: e.g. `hyp ignore --local-only
   [path]` / a list-management command
   ([LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli)).
 - **R8.** `local-only` matching MUST reuse the single shared resolver in
   `src/core/usage-policy/` ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md#shared-matcher-in-core),
-  [LLP 0049 R4](./0049-hypignore-usage-policy.spec.md#requirements)) — the same
+  [LLP 0049 R4](./0049-hypignore-usage-policy.spec.md#requirements)), the same
   matcher `.hypignore` uses, extended with the machine-local list as a second
-  source — never a second copy of path logic.
+  source, never a second copy of path logic.
 - **R9.** `hyp status` MUST surface the presence and size of the `local-only`
   list (how many directories are withheld from forwarding), so an "enrolled but
   withholding" machine is never a silent state

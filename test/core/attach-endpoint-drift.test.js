@@ -13,7 +13,7 @@ import { createAttachHandler } from '../../src/core/config/action_attach.js'
 /**
  * Issue #277 Gap 2: the daemon's gateway rebinds to a fresh ephemeral port on
  * every restart, but the attach reconcile pass is level-triggered on marker
- * existence — a `done` attach marker short-circuits forever, so the client's
+ * existence, a `done` attach marker short-circuits forever, so the client's
  * ANTHROPIC_BASE_URL keeps pointing at the old port and capture silently stops.
  *
  * The fix makes the attach marker endpoint-aware: it records the endpoint it

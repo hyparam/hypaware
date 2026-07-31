@@ -25,7 +25,7 @@ const ENUMERATE_SQL = `SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS las
 /**
  * Enumerate the distinct working directories the user has captured
  * Claude/Codex exchanges in, read from this machine's local cache only
- * (R2 — never contacts the remote). One `executeQuerySql` call
+ * (R2, never contacts the remote). One `executeQuerySql` call
  * (`refresh: 'never'`, so enumeration never triggers a partition
  * refresh/backfill of its own); results are collapsed to one candidate per
  * distinct `cwd` (a `cwd` seen under several `repo_root`s keeps the

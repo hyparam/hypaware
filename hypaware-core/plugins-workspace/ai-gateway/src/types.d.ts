@@ -70,7 +70,7 @@ export interface SseEvent {
 
 /**
  * Runtime shape shared by TOML-config upstreams and adapter-registered
- * `AiGatewayUpstreamPreset`s — both flow through this one structural type.
+ * `AiGatewayUpstreamPreset`s, both flow through this one structural type.
  */
 export interface UpstreamConfig {
   name: string
@@ -120,7 +120,7 @@ export interface ProxyOptions {
    * Handle a request under the reserved `/_hypaware/` control prefix. The
    * proxy short-circuits control requests BEFORE upstream matching (they
    * are never proxied and start no exchange) and delegates the full
-   * request lifecycle — body read and response — to this callback. Absent,
+   * request lifecycle, body read and response, to this callback. Absent,
    * the proxy 404s the control request locally.
    * @ref LLP 0066#control-path: the control prefix is reserved and answered
    * locally, so an opt-out can never be forwarded upstream as a real request.
@@ -141,7 +141,7 @@ export type RegisteredProjector = AiGatewayExchangeProjector & { _seq: number }
 /**
  * Mutable state owned by the ai-gateway plugin instance. Both the
  * `AiGatewayCapability` facade (what adapter plugins see) and the running
- * source read from this object — the API mutates it via `register*` calls,
+ * source read from this object: the API mutates it via `register*` calls,
  * the source consumes it when compiling the upstream table and dispatching
  * projectors over a finalized exchange.
  */
@@ -154,8 +154,8 @@ export interface GatewayState {
   /**
    * In-memory set of opaque session-id tokens the local control route has
    * been asked to ignore. Lives on `GatewayState` (created once per plugin
-   * activation, NOT per listener) so a config `reload()` — which tears down
-   * and relaunches the listener — does not silently re-enable recording
+   * activation, NOT per listener) so a config `reload()`, which tears down
+   * and relaunches the listener, does not silently re-enable recording
    * mid-session. No file, no cache column: dies with the daemon process.
    * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
    * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.

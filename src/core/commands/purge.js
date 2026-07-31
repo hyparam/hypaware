@@ -22,7 +22,7 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
  * `hyp purge <path> | --session <id> | --ignored | --all [--yes] [--json]`
  *
  * The destructive verb (LLP 0104): delete already-cached rows from this
- * machine's local query cache, cache-only — purge never contacts a sink or the
+ * machine's local query cache, cache-only, purge never contacts a sink or the
  * remote and never deletes exported copies. Exactly one target is required;
  * bare `hyp purge` errors (no implicit scope for a destructive verb). The
  * marking verbs (`hyp ignore` in any form) stay non-destructive; purge is the

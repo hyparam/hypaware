@@ -9,11 +9,11 @@ Use this skill when the user wants to see what LLPs exist in the repo, or filter
 
 Invoke as:
 
-- `/llp-list` — show all LLPs grouped by status
-- `/llp-list <status>` — show only LLPs with that status (e.g., `/llp-list draft`, `/llp-list active`)
-- `/llp-list type=<type>` — show only LLPs of a given type (e.g., `/llp-list type=rfc`)
-- `/llp-list system=<system>` — show only LLPs tagged with a given system
-- `/llp-list author=<name>` — show LLPs by a specific author
+- `/llp-list`: show all LLPs grouped by status
+- `/llp-list <status>`: show only LLPs with that status (e.g., `/llp-list draft`, `/llp-list active`)
+- `/llp-list type=<type>`: show only LLPs of a given type (e.g., `/llp-list type=rfc`)
+- `/llp-list system=<system>`: show only LLPs tagged with a given system
+- `/llp-list author=<name>`: show LLPs by a specific author
 
 Filters can combine: `/llp-list draft type=rfc system=auth`.
 
@@ -51,10 +51,10 @@ Normalize values:
 
 If the user specified filters, remove LLPs that don't match. Supported filters:
 
-- Status — case-insensitive exact match after normalization
-- Type — case-insensitive exact match
-- System — case-insensitive substring match against the Systems list
-- Author — case-insensitive substring match against the Author field
+- Status: case-insensitive exact match after normalization
+- Type: case-insensitive exact match
+- System: case-insensitive substring match against the Systems list
+- Author: case-insensitive substring match against the Author field
 
 If no filter is provided, show everything.
 
@@ -116,9 +116,9 @@ Or for filtered results:
 
 By default, render as plain text. Support format flags:
 
-- `/llp-list --format=json` — emit a JSON array of LLP metadata for programmatic use
-- `/llp-list --format=markdown` — emit a markdown-formatted list, suitable for pasting into another document
-- `/llp-list --format=table` — emit a markdown table with Number / Title / Type / Status / Systems columns
+- `/llp-list --format=json`: emit a JSON array of LLP metadata for programmatic use
+- `/llp-list --format=markdown`: emit a markdown-formatted list, suitable for pasting into another document
+- `/llp-list --format=table`: emit a markdown table with Number / Title / Type / Status / Systems columns
 
 ## Edge cases
 
@@ -129,5 +129,5 @@ By default, render as plain text. Support format flags:
 ## Scope limits
 
 - Do not create, modify, or delete LLPs. This skill is read-only.
-- Do not interpret LLP content — just metadata. For content analysis, use `/llp-search` or `/llp-review`.
+- Do not interpret LLP content: just metadata. For content analysis, use `/llp-search` or `/llp-review`.
 - Do not follow cross-references (`Related:` fields). For cross-reference traversal, use `/llp-related`.

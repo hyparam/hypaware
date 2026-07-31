@@ -181,7 +181,7 @@ export interface MaintenanceOptions {
   /**
    * Resolve the flush-time settlement hook for a dataset, if any. Threaded
    * through from the runtime that built the cache so compaction can re-run
-   * the same upgrade-and-dedupe over already-committed fallback rows — the
+   * the same upgrade-and-dedupe over already-committed fallback rows: the
    * backstop for a fallback row that flushed before its uuid twin arrived
    * (LLP 0027 "Re-settle sweep").
    */
@@ -310,7 +310,7 @@ export type ExtendedQueryStorageService = QueryStorageService & {
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   /**
    * Yield rows currently pending in the spool for every table belonging
-   * to `dataset` — rows captured live but not yet flushed to Iceberg, so
+   * to `dataset`: rows captured live but not yet flushed to Iceberg, so
    * invisible to `discoverCachePartitions`/`readRows`. Read-only; degrades
    * to an empty stream on any error.
    */

@@ -1,4 +1,4 @@
-# LLP 0043: Central-config-driven client actions — plan
+# LLP 0043: Central-config-driven client actions (plan)
 
 **Type:** plan
 **Status:** Active
@@ -17,46 +17,46 @@
 ## How this refines the design
 
 The design's "Module / seam breakdown" lists six modules. This plan keeps that
-exact decomposition — it is already minimal and each seam is independently
-testable — and only makes the dependency edges explicit so neutral can schedule
+exact decomposition, it is already minimal and each seam is independently
+testable, and only makes the dependency edges explicit so neutral can schedule
 them.
 
 The shape of the graph:
 
 - **Foundational / independent (deps `[]`).** Three tasks have no in-repo
   dependency on each other and form the first wave:
-  - **T1 — reconciler core + marker store.** The new
+  - **T1: reconciler core + marker store.** The new
     `src/core/config/action_reconciler.js` (`createActionReconciler`, the
     `ActionHandler` interface, level-triggered `reconcile()`), the atomic
     marker read/write into `config-control/client-actions.json`,
     `readClientActionStatus({ stateRoot })`, and the new types
     (`ClientActionStatus`, `ActionMarker`, `ActionHandler`) in
     `src/core/config/types.d.ts`. Unit-testable with an injected fake handler
-    and clock — no daemon, no HTTP, no real spawn. This is the contract every
+    and clock: no daemon, no HTTP, no real spawn. This is the contract every
     other action task binds to, so it is the spine of the graph.
-  - **T2 — confirmation-edge hook.** Add `onConfirmed` to
+  - **T2: confirmation-edge hook.** Add `onConfirmed` to
     `CreateConfigControlOptions` (`src/core/config/types.d.ts`) and invoke it
     from `confirmPoll()` in `src/core/config/apply.js` *only on the probation
     active→cleared transition*. Self-contained edit to the apply engine; existing
     apply tests are unaffected because no caller wires the hook yet. Independent
-    of T1 — it touches a different surface and ships a no-op edge event until the
+    of T1: it touches a different surface and ships a no-op edge event until the
     daemon (T4) consumes it.
-  - **T5 — per-plugin `backfill` config validation.** Extend `@hypaware/claude`
+  - **T5: per-plugin `backfill` config validation.** Extend `@hypaware/claude`
     and `@hypaware/codex` to accept `{ on_join, window_days }` inside their own
-    plugin `config` block — a `config_sections` manifest entry plus the section
+    plugin `config` block, a `config_sections` manifest entry plus the section
     validator the kernel `ConfigRegistry` drives via
     `runPerPluginSectionValidators` (LLP 0005). Plugin-local; no core schema
     change; no dependency on the reconciler. It only needs to land before the
     end-to-end smoke proves an opt-out, not before the handler compiles.
 
-- **Handler (deps `[T1]`).** **T3 — backfill action handler.** `backfillHandler`
+- **Handler (deps `[T1]`).** **T3: backfill action handler.** `backfillHandler`
   (`desired()` over `selectProviders` + per-plugin `config.backfill`; `perform()`
   resolving `window_days`→`--since` and spawning `hyp backfill <plugin> --json`
   via the `runSmoke` spawn pattern). It implements the `ActionHandler` interface
   defined in T1, so it depends on T1 and nothing else (the spawn is injected for
   tests; it does not need the daemon or the plugin schema to compile).
 
-- **Status (deps `[T1]`).** **T6 — status surface.** Add a `clientActions`
+- **Status (deps `[T1]`).** **T6: status surface.** Add a `clientActions`
   section to `HypAwareStatusReport` in `src/core/daemon/status.js`, read via
   `readClientActionStatus`, rendered per-provider (`done` / `failed` / `pending`
   / `n/a`) and explicitly excluded from `overall === 'degraded'`; types in
@@ -64,14 +64,14 @@ The shape of the graph:
   T1 and is otherwise independent of the handler and the daemon wiring (it reads
   the marker file, it never runs a pass).
 
-- **Integration (deps `[T1, T2, T3]`).** **T4 — daemon wiring.** In
+- **Integration (deps `[T1, T2, T3]`).** **T4: daemon wiring.** In
   `src/core/daemon/runtime.js`: construct the reconciler with `[backfillHandler]`,
   wire `configControl`'s `onConfirmed` to schedule a pass, run the
   after-activation already-confirmed pass, and add the single-flight guard +
   off-tick async task; pass `boot.runtime.backfills` and `boot.config` into
   `reconcile()`. This is the only task that needs all three of the reconciler
   core (T1), the confirmation edge (T2), and the handler it runs (T3). It does
-  **not** depend on T5 (validation) or T6 (status) — an unvalidated `backfill`
+  **not** depend on T5 (validation) or T6 (status): an unvalidated `backfill`
   block or a missing status line does not stop the daemon from running a pass,
   and the end-to-end smoke that exercises the full join→backfill flow rides on
   T4 with T5 already merged in the first wave.
@@ -116,7 +116,7 @@ inert until T4 connects them.
 
 ## References
 
-- [LLP 0041](./0041-central-config-client-actions.design.md) — the implementation design this plan schedules
-- [LLP 0036](./0036-central-config-driven-client-actions.decision.md) — the action seam
-- [LLP 0037](./0037-backfill-on-join.decision.md) — backfill on join (the first instance)
-- [`src/core/config/apply.js`](../src/core/config/apply.js), [`src/core/daemon/runtime.js`](../src/core/daemon/runtime.js), [`src/core/daemon/status.js`](../src/core/daemon/status.js), [`src/core/commands/backfill.js`](../src/core/commands/backfill.js), [`src/core/registry/backfills.js`](../src/core/registry/backfills.js) — the code these tasks build on
+- [LLP 0041](./0041-central-config-client-actions.design.md): the implementation design this plan schedules
+- [LLP 0036](./0036-central-config-driven-client-actions.decision.md): the action seam
+- [LLP 0037](./0037-backfill-on-join.decision.md): backfill on join (the first instance)
+- [`src/core/config/apply.js`](../src/core/config/apply.js), [`src/core/daemon/runtime.js`](../src/core/daemon/runtime.js), [`src/core/daemon/status.js`](../src/core/daemon/status.js), [`src/core/commands/backfill.js`](../src/core/commands/backfill.js), [`src/core/registry/backfills.js`](../src/core/registry/backfills.js): the code these tasks build on

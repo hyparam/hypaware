@@ -11,7 +11,7 @@
 > corpus and is kept for provenance only. Its content now lives in:
 > Mission/Summary → [LLP 0000](../0000-hypaware.explainer.md); Design Decisions →
 > LLP 0003–0017 (see the [subsystem map](../0000-hypaware.explainer.md#subsystem-map)).
-> Where this doc and the active LLPs disagree, **the LLPs win** — and note this
+> Where this doc and the active LLPs disagree, **the LLPs win**, and note this
 > doc describes a target architecture that V1 deliberately diverged from
 > ([LLP 0002](../0002-v1-scope.decision.md)).
 >
@@ -70,21 +70,21 @@ provide or consume:
 
 - **Source plugins.** Produce normalized rows and own a daemon lifecycle.
   Examples: proxy listener, OTLP receiver, gascity supervisor subscriber.
-- **Sink plugins.** *Export targets* — not the write path. Every
+- **Sink plugins.** *Export targets*, not the write path. Every
   HypAware instance lands captured data in a **local Iceberg query
   cache** (intrinsic to core, not a plugin, at a HypAware-managed
   location) where it is queryable until a configurable retention
   window elapses. The cache is not a user-controllable destination;
   if you want data in a layout, location, or format you control, you
   configure a sink. Sinks receive scheduled exports out of the cache.
-  Sinks come in two shapes — *blob destinations*
+  Sinks come in two shapes: *blob destinations*
   (`@hypaware/local-fs`, `@hypaware/s3`) paired with a *writer plugin*
   (`@hypaware/format-parquet`, `@hypaware/format-jsonl`,
   `@hypaware/format-iceberg`) that encodes batches into the destination,
   and *request destinations* (`@hypaware/central` forwarding to a HypAware
   enterprise server, `@hypaware/webhook` pushing to an external HTTP
   endpoint) whose wire format is intrinsic. A source plugin never
-  depends on a sink — if no sink is configured, data simply lives in
+  depends on a sink, if no sink is configured, data simply lives in
   the cache until it expires. A blob sink whose writer produces a
   format HypAware can read back (Parquet locally or on S3, Iceberg
   on either) can additionally serve as a query target for data beyond
@@ -93,8 +93,8 @@ provide or consume:
   capability. Claude Code and Codex are adapters that depend on the
   `hypaware.ai-gateway` capability; they write client settings, install
   client-side skills, and may enrich the dataset they feed.
-- **Composition plugins.** Things like init presets and skill scaffolds —
-  small surface, no daemon — that contribute to the user-facing experience
+- **Composition plugins.** Things like init presets and skill scaffolds,
+  small surface, no daemon, that contribute to the user-facing experience
   without owning data flow.
 
 Every plugin ships the same manifest shape regardless of category. The
@@ -108,27 +108,27 @@ lives in its own repository and is installed by the kernel like any
 other external plugin. The local query cache is intrinsic to core and
 does not appear in this list.
 
-- **`@hypaware/ai-gateway`** — HTTP/SSE AI gateway source. Provides
+- **`@hypaware/ai-gateway`**: HTTP/SSE AI gateway source. Provides
   `hypaware.ai-gateway`, registers the `ai_gateway_messages` dataset, owns
   redaction and SSE state.
-- **`@hypaware/claude`** — Claude Code adapter. Requires `hypaware.ai-gateway`.
+- **`@hypaware/claude`**: Claude Code adapter. Requires `hypaware.ai-gateway`.
   Settings writer, transcript enricher, Claude skills.
-- **`@hypaware/codex`** — Codex adapter. Requires `hypaware.ai-gateway`.
+- **`@hypaware/codex`**: Codex adapter. Requires `hypaware.ai-gateway`.
   OpenAI-compatible upstream preset, provider writer, Codex skills.
-- **`@hypaware/otel`** — OTLP HTTP listener. Registers `logs`, `traces`,
+- **`@hypaware/otel`**: OTLP HTTP listener. Registers `logs`, `traces`,
   `metrics`.
-- **`@hypaware/local-fs`** — blob destination on the local
+- **`@hypaware/local-fs`**: blob destination on the local
   filesystem; provides `hypaware.blob-store`. Pairs with a writer
   plugin (default `@hypaware/format-parquet`) to land data in a layout
   and location you own. The cache itself is not user-controllable;
   this is how you escape it.
-- **`@hypaware/format-parquet`** — writer plugin that encodes batches
+- **`@hypaware/format-parquet`**: writer plugin that encodes batches
   as Parquet. Requires `hypaware.blob-store`. Default writer for
   queryable sinks.
-- **`@hypaware/format-jsonl`** — writer plugin that encodes batches
+- **`@hypaware/format-jsonl`**: writer plugin that encodes batches
   as JSONL. Requires `hypaware.blob-store`. Useful for grep-friendly
   archives and downstream tools that don't speak Parquet.
-- **`@hypaware/central`** — export sink that forwards cache contents
+- **`@hypaware/central`**: export sink that forwards cache contents
   to a central HypAware server on a configurable schedule. Replaces
   the role of the old Gateway mode. The server itself lives in a
   separate `@hypaware/server` package; the kernel only ever talks to
@@ -139,8 +139,8 @@ required for cutover but the design leaves room for them and for
 per-source export routing.
 
 `@hypaware/gascity` is intentionally outside the V1 first-party set.
-It ships as the **first external plugin** after cutover — same
-authoring path any third party would take — and serves as our
+It ships as the **first external plugin** after cutover, same
+authoring path any third party would take, and serves as our
 dogfood proof that the plugin model works end to end for use cases
 the kernel does not bundle. The example plugin walkthrough in the
 next section uses it precisely because it is external.
@@ -150,12 +150,12 @@ The full feature-to-plugin parity matrix is in the appendix.
 ## Example Plugin: `@hypaware/gascity`
 
 The canonical external plugin example. Not part of the V1 first-party
-set — it is the first plugin shipped through the same install path
+set: it is the first plugin shipped through the same install path
 any third party would use, and serves as proof that the plugin model
 works for use cases the kernel does not bundle.
 
 It registers a source, registers a dataset, contributes a few
-commands, contributes an init preset, and installs a skill — roughly
+commands, contributes an init preset, and installs a skill: roughly
 the maximum surface area a single plugin is expected to touch. It
 depends on no other plugin; rows land in the local query cache via
 core.
@@ -270,14 +270,14 @@ looks the way it does.
 Each plugin has a manifest. First-party plugins use the same manifest
 shape as third-party plugins; there is no privileged variant.
 
-The manifest is declarative — what the plugin *requires*, *provides*,
+The manifest is declarative: what the plugin *requires*, *provides*,
 and *contributes*. It enumerates the surfaces the plugin will populate
 at activation, which is enough for core to resolve the dependency
 graph, route argv to the owning plugin, and list available datasets
 and commands before any plugin code has been loaded. Concrete
 implementations (callbacks, schemas, render functions) only exist at
-activation time, so anything that depends on them — schema validation,
-SQL execution, command dispatch into a plugin's `run` — requires the
+activation time, so anything that depends on them, schema validation,
+SQL execution, command dispatch into a plugin's `run`, requires the
 plugin to be activated first.
 
 ```json
@@ -296,7 +296,7 @@ plugin to be activated first.
 
 ### Dependencies and Capabilities
 
-The example plugin has no dependencies — the most common case. Source
+The example plugin has no dependencies: the most common case. Source
 plugins do not depend on sinks (the cache is intrinsic) and they do not
 depend on each other unless they're an adapter wired to another
 plugin's capability. When a plugin *does* need cross-plugin behavior,
@@ -393,7 +393,7 @@ architectural role label. A host is described entirely by the plugins
 it loads, the sinks (if any) it exports to, and its cache retention
 settings.
 
-Example config — proxy + claude + gascity, data lives in the cache:
+Example config: proxy + claude + gascity, data lives in the cache:
 
 ```json
 {
@@ -457,8 +457,8 @@ validates cross-plugin references after all manifests are loaded.
 
 The config does not yet expose per-source export routing (e.g. "send
 `ai_gateway_messages` to S3 but `logs` to a webhook"). The sinks block
-applies to all datasets at V1. This is by design — V1 doesn't need it
-— but the shape leaves room for a future `sinks.<name>.datasets` or
+applies to all datasets at V1. This is by design, V1 doesn't need it,
+but the shape leaves room for a future `sinks.<name>.datasets` or
 top-level `exports` block without breaking changes.
 
 ### Setup and Onboarding
@@ -476,7 +476,7 @@ What do you want to collect? (Space to toggle, Enter to confirm)
   ◯ OpenTelemetry (traces, metrics, logs)
 
 Where should HypAware export captured data?
-  ◉ Keep local only — query against the cache for the retention window
+  ◉ Keep local only - query against the cache for the retention window
   ◯ Export to a local directory (Parquet)
   ◯ Forward to a HypAware enterprise server
   ◯ Configure later
@@ -494,12 +494,12 @@ The walkthrough is the canonical first-run experience. It composes
 plugin-contributed picks (each source/client plugin registers what it
 collects; each sink plugin registers what it exports to) and writes a
 config the daemon can load. There are no architectural names like
-"standalone" or "gateway" — the user describes what they want to
+"standalone" or "gateway": the user describes what they want to
 collect and where they want it to go, and HypAware picks the plugin
 set.
 
 The written config enumerates the chosen plugins explicitly in
-`plugins[]` — there is no implicit "use defaults" mode. This keeps
+`plugins[]`: there is no implicit "use defaults" mode. This keeps
 `hypaware status` and any future diff against the live config trivially
 grep-able and avoids the failure mode where the default set drifts
 between releases and silently changes a user's running install. Query
@@ -524,7 +524,7 @@ may also surface these presets as picks where they apply.
 
 Source plugins produce normalized rows and own a daemon lifecycle. Core
 provides state dirs, the cache write path, query registration APIs,
-lifecycle hooks, reload context, and logging — the plugin just
+lifecycle hooks, reload context, and logging: the plugin just
 implements `start` and returns a `StartedSource` handle. Rows go to the
 intrinsic local query cache; the source does not see sinks at all.
 
@@ -557,7 +557,7 @@ parameter conventions. Whether the source is a long-lived listener
 ### Local Query Cache
 
 The cache is the always-on intrinsic store for captured data. It is
-not a plugin and not configurable as a destination — its location is
+not a plugin and not configurable as a destination: its location is
 HypAware-managed (under `~/.hyp/hypaware/` by default; an admin can
 relocate the root, but the layout inside it is fixed) and its on-disk
 format is an implementation detail.
@@ -565,7 +565,7 @@ format is an implementation detail.
 Every row a source produces is written into the cache. `hypaware
 query` runs against it. Retention is **configurable per dataset**;
 rows older than the retention window are deleted from the cache
-permanently — if the data wasn't exported to a sink before then, it's
+permanently, if the data wasn't exported to a sink before then, it's
 gone. This is the central tradeoff to surface to users: the cache is
 recent-data only by design.
 
@@ -593,14 +593,14 @@ only, the export pipeline reads from the cache and pushes to sinks.
 There are two sink shapes, because "destination" is two different
 kinds of thing:
 
-1. **Blob destinations** — local filesystems and object stores
+1. **Blob destinations**: local filesystems and object stores
    (`@hypaware/local-fs`, `@hypaware/s3`, future `@hypaware/gcs`).
    Accept "put these bytes at this path." Format is a separable
    concern: you can write Parquet, JSONL, or Iceberg to any of them.
-2. **Request destinations** — endpoints with their own wire protocol
+2. **Request destinations**: endpoints with their own wire protocol
    (`@hypaware/webhook`, `@hypaware/central`). Accept "send this
    structured payload via my protocol." Format is bound to the
-   destination — there is no "Parquet to a webhook" use case.
+   destination: there is no "Parquet to a webhook" use case.
 
 For blob destinations, format is factored out into **writer plugins**
 that require a destination capability:
@@ -632,7 +632,7 @@ file, or an Iceberg manifest. Iceberg-on-S3 and Parquet-on-S3 share
 the same S3 plugin. Adding GCS later is one plugin and every existing
 writer works.
 
-A sink plugin implements an export contract — not a per-row writer:
+A sink plugin implements an export contract, not a per-row writer:
 
 ```ts
 interface Sink {
@@ -647,22 +647,22 @@ interface Sink {
 
 Concrete plugins shipped or planned:
 
-- **`@hypaware/local-fs`** — blob destination on the local
+- **`@hypaware/local-fs`**: blob destination on the local
   filesystem. Provides `hypaware.blob-store`. Queryable.
-- **`@hypaware/s3`** (post-V1) — blob destination on S3. Provides
+- **`@hypaware/s3`** (post-V1): blob destination on S3. Provides
   `hypaware.blob-store`. Queryable.
-- **`@hypaware/format-parquet`** — Parquet encoder. Requires
+- **`@hypaware/format-parquet`**: Parquet encoder. Requires
   `hypaware.blob-store`. Default writer for queryable sinks.
-- **`@hypaware/format-jsonl`** — JSONL encoder. Requires
+- **`@hypaware/format-jsonl`**: JSONL encoder. Requires
   `hypaware.blob-store`.
-- **`@hypaware/format-iceberg`** (post-V1) — Iceberg table format.
+- **`@hypaware/format-iceberg`** (post-V1): Iceberg table format.
   Requires `hypaware.blob-store` and `hypaware.encoder` (typically
   Parquet). Owns directory layout, manifests, and snapshot commits;
   delegates byte writes to the underlying blob store.
-- **`@hypaware/central`** — request destination forwarding cache
+- **`@hypaware/central`**: request destination forwarding cache
   contents to a HypAware enterprise server. Not queryable on the
   forwarding host; queries against historical data run on the server.
-- **`@hypaware/webhook`** (post-V1) — request destination pushing
+- **`@hypaware/webhook`** (post-V1): request destination pushing
   batches to an external HTTP endpoint. Write-only.
 
 Config has two shapes, matching the two sink kinds. Blob sinks
@@ -708,16 +708,16 @@ Request sinks are one-piece (their wire format is intrinsic):
 }
 ```
 
-`schedule` is a standard 5-field cron expression — chosen over a
+`schedule` is a standard 5-field cron expression, chosen over a
 friendly DSL because cron expresses "02:00 UTC nightly" naturally
 and the kernel only needs to parse one grammar. The cron field lives
 on the sink instance regardless of shape.
 
 The kernel validates writer/destination compatibility at config-load
 time. A misconfigured sink like `format-parquet` + `@hypaware/webhook`
-is rejected with an explicit message — writer `format-parquet`
+is rejected with an explicit message, writer `format-parquet`
 requires `hypaware.blob-store`; `@hypaware/webhook` provides
-`hypaware.http-endpoint` instead — so the failure is configuration,
+`hypaware.http-endpoint` instead, so the failure is configuration,
 not runtime.
 
 Sinks (and destinations, and writers) declare what they support in
@@ -789,7 +789,7 @@ A dataset contribution owns:
 
 Core does not hard-code dataset names. `hypaware query` asks the dataset
 registry. `hypaware schema gascity_messages` works because the gascity
-source registered its schema — not because core knows what gascity is.
+source registered its schema, not because core knows what gascity is.
 
 ### Collect Command
 
@@ -800,7 +800,7 @@ It is a **core command**, not a plugin contribution, because the
 collection lands in the intrinsic local query cache and rides the same
 dataset registry, partition discovery, and refresh machinery as any
 plugin-owned dataset. The only thing that differs is who registers the
-dataset entry — the user, at the CLI, instead of a plugin at activation.
+dataset entry: the user, at the CLI, instead of a plugin at activation.
 
 Surfaces:
 
@@ -828,12 +828,12 @@ What core does on `collect <add>`:
 `collect list` and `collect remove` operate on the persisted entries;
 removal drops the dataset registration but does not delete the source
 files on disk. The `--timestamp-column` hint is what lets `--from` /
-`--to` / `--since` filtering work on a user-registered table — without
+`--to` / `--since` filtering work on a user-registered table, without
 it the column is treated as opaque.
 
 Collections are stored under the recording root, not in the v2 config
 file. They are per-host state (analogous to the lock file), not part of
-the configuration a team would commit and share — a collection points
+the configuration a team would commit and share: a collection points
 at paths or globs that are only meaningful on the machine that ran
 `collect`. If a team wants the same table everywhere, the right
 mechanism is a plugin that registers the dataset, not a synced
@@ -841,8 +841,8 @@ collections list.
 
 The collect command is intentionally narrow: it does not transform
 rows, infer schemas beyond what the JSON shape provides, or own a
-daemon lifecycle. If a workload outgrows it — needs normalization, a
-live source, redaction, or a custom schema — the next step is to wrap
+daemon lifecycle. If a workload outgrows it, needs normalization, a
+live source, redaction, or a custom schema, the next step is to wrap
 the same work in a source plugin that registers its own dataset. The
 shared registry means nothing about the query surface changes when
 that happens.
@@ -883,8 +883,8 @@ contribute to. This keeps schema ownership unambiguous: the producing
 plugin evolves its own shape without cross-plugin coordination, and
 adapter enrichers/skills compile against a stable, single-owner table.
 
-A different source for similar data — e.g. a `@hypaware/litellm` plugin
-that ingests from a LiteLLM gateway's webhook or log API — registers
+A different source for similar data, e.g. a `@hypaware/litellm` plugin
+that ingests from a LiteLLM gateway's webhook or log API, registers
 its own table (`litellm_messages`) under its own name. It is free to
 adopt the same column shape as `ai_gateway_messages` if it wants to, but
 that is a stylistic convergence between unrelated plugins, not a shared
@@ -901,14 +901,14 @@ not the table.
 
 ### Plugin Install and Locking
 
-All plugins — first-party and third-party — install through a single
+All plugins, first-party and third-party, install through a single
 CLI surface (`hypaware plugin install <name>`). The resolver tries:
 
-1. `@hypaware/<name>` — first-party scope, resolved to
+1. `@hypaware/<name>`, first-party scope, resolved to
    `github:hyperparam/hypaware-<name>`
-2. `@scope/hypaware-plugin-<name>` — third-party scoped, resolved via
+2. `@scope/hypaware-plugin-<name>`: third-party scoped, resolved via
    the npm registry to its `repository` URL
-3. `hypaware-plugin-<name>` — third-party unscoped, same path as above
+3. `hypaware-plugin-<name>`: third-party unscoped, same path as above
 
 Scoped community plugins (`@acme/hypaware-plugin-foo`) must be
 installed by full name; short-name resolution can't guess the scope.
@@ -947,7 +947,7 @@ update check.
 `@hypaware/format-jsonl`, `@hypaware/central`) lives
 in its own `github:hyperparam/hypaware-<name>` repository and is
 installed by the kernel through the same code path third-party plugins
-use. No first-party monorepo, no privileged workspace resolution — the
+use. No first-party monorepo, no privileged workspace resolution: the
 kernel cannot tell at install time whether a plugin is first-party
 beyond the `@hypaware/` scope check. Kernel CI installs the full
 default plugin set from its release tags on every kernel release as
@@ -974,7 +974,7 @@ plugin runtime that isn't pure JS in-process.
 
 **Version conflicts** dissolve with bundled output: each plugin's
 bundle carries its own copy of its deps. The duplication is real but
-predictable — the same tradeoff browser and VS Code extensions make.
+predictable: the same tradeoff browser and VS Code extensions make.
 
 **Private files.** Plugins must not reach into each other's
 filesystem. The kernel loads each plugin only through its manifest
@@ -986,9 +986,9 @@ loader error, not a successful coupling.
 ## Open Questions
 
 - **Per-source export routing.** V1 applies the configured sinks to
-  all datasets. The intended shape for per-source routing — extra key
+  all datasets. The intended shape for per-source routing, extra key
   on the sink (`"datasets": ["ai_gateway_messages"]`) or a separate
-  top-level `exports` block — should be decided before a second sink
+  top-level `exports` block, should be decided before a second sink
   ships, so the V1 config doesn't paint us into a corner.
 - **Cache eviction vs. export coupling.** Should the cache wait to
   evict a partition until all configured sinks have acked their
@@ -1052,7 +1052,7 @@ Draft for iteration.
 
 This replaces the earlier incremental plugin plan as the target
 architecture. The intent is a breaking v2 shape: HypAware becomes a
-plugin host. Every plugin — first-party included — lives in its own
+plugin host. Every plugin, first-party included, lives in its own
 repository and is installed by the kernel through the same code path,
 while core keeps the platform services that all plugins share. The
 central server moves out of the main package entirely and ships as a
@@ -1166,7 +1166,7 @@ is missing a deliberate extension point.
 #### `@hypaware/local-fs`
 - Blob destination on the local filesystem
 - Provides the `hypaware.blob-store` capability
-- `supports: ["queryable"]` — pairs with a queryable writer (Parquet,
+- `supports: ["queryable"]`, pairs with a queryable writer (Parquet,
   Iceberg) to extend the query horizon beyond cache retention
 - Distinct from the intrinsic cache: the cache is HypAware-managed
   and not user-controllable, this destination lets users land data
@@ -1187,7 +1187,7 @@ is missing a deliberate extension point.
 
 #### `@hypaware/central`
 - Export sink that forwards cache batches to a central HypAware server
-- `supports: []` — not queryable from the gateway side; queries
+- `supports: []`, not queryable from the gateway side; queries
   against historical data run on the server
 - Owns outbox semantics: batching, retry, backpressure, credentials
   for the central server endpoint
@@ -1198,7 +1198,7 @@ is missing a deliberate extension point.
   repository and is versioned independently
 - Receives forwarded batches from `@hypaware/central` and persists
   them to server-managed storage
-- The local kernel never imports or loads this package — the only
+- The local kernel never imports or loads this package: the only
   cross-boundary contract is the HTTP/wire format that
   `@hypaware/central` speaks to it
 
@@ -1275,6 +1275,6 @@ current code as donor code.
 13. Delete old direct wiring once first-party plugin tests cover the
     behavior.
 14. Ship `@hypaware/gascity` as the first external plugin (separate
-    repo, installed through the external plugin install path) — proves
+    repo, installed through the external plugin install path): proves
     the install/lock/update flow against a non-bundled plugin and
     re-establishes gascity capture.

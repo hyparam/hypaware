@@ -28,10 +28,10 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  */
 
 /**
- * The attach action handler — the reversible instance of the generic
+ * The attach action handler: the reversible instance of the generic
  * client-action reconciler (LLP 0036 / LLP 0044). When a joined machine
  * confirms a central config that enables a client adapter, the daemon performs
- * that client's attach machine-effect (a bounded settings write, in-process —
+ * that client's attach machine-effect (a bounded settings write, in-process:
  * *not* a subprocess like backfill); when the config later drops the client it
  * reverses it. It is the `action_backfill.js` twin, the first handler to
  * implement `reverse()`.
@@ -45,7 +45,7 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  * enabled?"; the registry is consulted only to reach `perform()`.
  *
  * `perform()` is adapter-driven (it needs a live `attach()`); `reverse()` is
- * **disk-driven** — it runs after the staged restart has already unloaded the
+ * **disk-driven**: it runs after the staged restart has already unloaded the
  * adapter, so `ctx.clients` no longer has the dropped client and there is no
  * live `detach()` to call. The undo is the single core routine
  * `detachClientFromDisk` (LLP 0045 §Part 3), injectable so tests assert it runs
@@ -53,7 +53,7 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  *
  * @param {CreateAttachHandlerOptions} [opts]
  * @returns {ActionHandler}
- * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: createAttachHandler(opts) → ActionHandler { kind:'attach', desired/perform/reverse }, mirroring action_backfill.js
+ * @ref LLP 0045#part-2-the-attach-handler-srccoreconfigaction_attachjs [implements]: createAttachHandler(opts) → ActionHandler { kind:'attach', desired/perform/reverse }, mirroring action_backfill.js
  * @ref LLP 0044: client attach on join (the instance this realizes)
  */
 export function createAttachHandler(opts = {}) {
@@ -78,15 +78,15 @@ export function createAttachHandler(opts = {}) {
      *
      * @param {ActionContext} ctx
      * @returns {DesiredAction[]}
-     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
-     * @ref LLP 0044#consent--join-implies-consent-default-on [constrained-by]: default-on; only `attach.on_join:false` in the locked central plugin entry opts out
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
+     * @ref LLP 0045#part-2-the-attach-handler-srccoreconfigaction_attachjs [implements]: desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
+     * @ref LLP 0044#consent-join-implies-consent-default-on [constrained-by]: default-on; only `attach.on_join:false` in the locked central plugin entry opts out
+     * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
      */
     desired(ctx) {
       const descriptors = ctx.clientDescriptors
       const clients = ctx.clients
       // Daemon-only: with no client catalog or no gateway registry there is
-      // nothing to attach (LLP 0045 §Part 1 — attach is daemon-only by
+      // nothing to attach (LLP 0045 §Part 1, attach is daemon-only by
       // construction).
       if (!descriptors || !clients) return []
 
@@ -123,7 +123,7 @@ export function createAttachHandler(opts = {}) {
     },
 
     /**
-     * Attach one client. In-process (a bounded settings write — LLP 0041
+     * Attach one client. In-process (a bounded settings write: LLP 0041
      * §Execution isolation), not a subprocess like backfill. Resolves the
      * runtime registration, calls `attach({ endpoint, config:{}, stdout,
      * stderr, json:true })`, parses the one-line JSON the adapter emits, and
@@ -134,7 +134,7 @@ export function createAttachHandler(opts = {}) {
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: perform() calls attach(json:true), parses the one-line JSON, records the marker detail (settings_path, prev_value)
+     * @ref LLP 0045#part-2-the-attach-handler-srccoreconfigaction_attachjs [implements]: perform() calls attach(json:true), parses the one-line JSON, records the marker detail (settings_path, prev_value)
      */
     async perform(action, ctx) {
       const client = attachActionClient(action)
@@ -275,7 +275,7 @@ export function createAttachHandler(opts = {}) {
      * no live `detach()` to call. Instead it reads the descriptor's
      * `attachProbe` + the settings-file marker (the self-describing undo
      * record `attach()` wrote) and replays the single core undo
-     * (`detachClientFromDisk`) — the same one `hyp detach` uses. It needs
+     * (`detachClientFromDisk`): the same one `hyp detach` uses. It needs
      * `ctx.clientDescriptors` and the filesystem, **never** `ctx.clients`.
      *
      * A descriptor with **no `attachProbe`** cannot be honestly reversed: the
@@ -299,7 +299,7 @@ export function createAttachHandler(opts = {}) {
      * @param {ActionContext} ctx
      * @param {ActionMarker} [marker]  The undo record `perform()` wrote.
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
+     * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
      * @ref LLP 0107#reversal [implements]: org-driven asset copies reverse from the marker; unmarked (manual) ones stay
      */
     async reverse(requestKey, ctx, marker) {
@@ -393,14 +393,14 @@ export function createAttachHandler(opts = {}) {
       }
 
       // Idempotent: a no-op (file already clean / marker absent) is still a
-      // successful undo — the reconciler drops the marker either way.
+      // successful undo, the reconciler drops the marker either way.
       return { status: 'done' }
     },
   }
 }
 
 /**
- * The default `attachHandler` the daemon registers the reconciler with — first
+ * The default `attachHandler` the daemon registers the reconciler with: first
  * in the `[attachHandler, backfillHandler]` order so in-process live-capture
  * wiring starts ahead of the (possibly multi-minute) backfill subprocess
  * (LLP 0045 §Module / seam breakdown item 7). Uses the real
@@ -510,7 +510,7 @@ async function materializeAttachedAssets(client, ctx) {
 }
 
 /**
- * A capturing `WriteStream` — accumulates every `write(chunk)` so the handler
+ * A capturing `WriteStream`, accumulates every `write(chunk)` so the handler
  * can parse the adapter's machine-readable `json: true` output after the
  * in-process `attach()` returns. (The real CLI hands the adapter `ctx.stdout`;
  * the handler instead captures it.)

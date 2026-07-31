@@ -104,7 +104,7 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   assert.equal(m.get('@hypaware/codex')?.state, 'n/a') // backfill on_join:false → suppressed
 
   // The backfill rows are namespaced under the backfill handler kind, keyed by
-  // owning-plugin name; the only other kind present is `attach` (T9 — the
+  // owning-plugin name; the only other kind present is `attach` (T9: the
   // joined claude/codex client adapters are default-on attach targets with no
   // marker, so they surface `pending`, keyed by *client* name).
   const backfillRows = report.clientActions.actions.filter((a) => a.kind === 'backfill')
@@ -290,7 +290,7 @@ test('text renderer prints the client actions section with per-state detail', as
   assert.match(text, /backfill @hypaware\/codex\s+\[n\/a\]/)
 })
 
-// T9 — the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
+// T9: the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
 // backfill but keyed by *client* name (the attach handler's request key). Status
 // reads the marker file and never runs a pass; a failed/pending attach is loud
 // but never flips `overall` to `degraded`.
@@ -327,7 +327,7 @@ test('attach declared targets read mixed done/failed/pending/n-a cleanly (T9)', 
 
   // Attach markers from a prior pass, keyed by CLIENT name (the attach handler's
   // request key). A done (= attached) and a failed entry, even for a client
-  // whose descriptor is not in the catalog — markers surface regardless.
+  // whose descriptor is not in the catalog: markers surface regardless.
   await writeMarkers(hypHome, {
     attach: {
       'acme-done': { status: 'done', request_key: 'acme-done', at: '2026-06-25T00:00:00.000Z' },
@@ -419,7 +419,7 @@ test('a failed attach does not flip overall to degraded (T9)', async () => {
   assert.ok(!report.diagnostics.some((d) => d.message.includes('boom')))
 })
 
-test('a done attach marker renders attached and collapses with the declared target — no double row (T9)', async () => {
+test('a done attach marker renders attached and collapses with the declared target - no double row (T9)', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
   const seedPath = centralSeedPath(stateRoot)
@@ -436,7 +436,7 @@ test('a done attach marker renders attached and collapses with the declared targ
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
 
   // claude is a declared (default-on) attach target AND has a done marker keyed
-  // by client name. The two must collapse into a single `done` row — proving the
+  // by client name. The two must collapse into a single `done` row: proving the
   // declared-target key matches the handler's request key (the client name), so
   // the marker is not double-counted as both done and pending.
   await writeMarkers(hypHome, {

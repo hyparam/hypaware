@@ -26,7 +26,7 @@ export const DEFAULT_SEQ_BLOCK_SIZE = 1024
 /**
  * Read the persisted `nextSeq` watermark. The value is stored as a decimal
  * string so the int64 range survives JSON without bigint/precision hazards.
- * Returns `null` when the file is missing or unparseable — the caller then
+ * Returns `null` when the file is missing or unparseable: the caller then
  * starts from 1 (a fresh cache), which never collides with a previously
  * issued seq because a real cache always has a `nextSeq >= 1` on disk.
  *
@@ -47,7 +47,7 @@ async function readNextSeq(statePath) {
 }
 
 /**
- * Persist the `nextSeq` watermark with atomic write-rename — the same
+ * Persist the `nextSeq` watermark with atomic write-rename: the same
  * crash-safety idiom as `writeCursor` / `writeProgress`.
  *
  * @param {string} statePath
@@ -70,21 +70,21 @@ async function writeNextSeq(statePath, nextSeq) {
  * `<=` one already stamped (and possibly already exported). Duplicate content
  * across a crash boundary is tolerable (strict `>` watermark + row-id dedup);
  * a *regression* would let a never-exported row slip below an advanced
- * watermark and be skipped forever — which this allocator makes impossible.
+ * watermark and be skipped forever, which this allocator makes impossible.
  *
  * **Cache-global, not per-partition.** The chokepoint runs in the spool reader
  * before rows are grouped into `source=<...>` destination partitions, and two
  * distinct spool table paths (e.g. live capture vs. `backfill`) can feed the
  * SAME destination partition. A single cache-wide counter therefore guarantees
  * that every partition only ever observes a strictly increasing subsequence of
- * seqs — the property the sink watermark relies on — which a per-partition
+ * seqs, the property the sink watermark relies on, which a per-partition
  * counter (interleaving two independent sequences into one partition) would
  * break. Gaps between consecutively-appended rows in one partition are fine.
  *
  * Concurrency: in-process calls are serialized through a promise-chain mutex so
  * two concurrent flushes (different `tablePath`s share one allocator) never
  * double-reserve the same block. Cross-process concurrent flush of one cache is
- * not a supported scenario — the daemon owns the cache, matching the existing
+ * not a supported scenario: the daemon owns the cache, matching the existing
  * single-writer write-rename idiom.
  *
  * @ref LLP 0040#seq-allocator [implements]: cache-global never-regressing reserve-before-stamp allocator

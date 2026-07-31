@@ -251,7 +251,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // cwd-less, the filter would treat it as cwd-less, and a local-only row
       // would be FORWARDED. So when a resolver is configured, force `cwd` into
       // the scan regardless of `columns`, then strip it back off the yielded row
-      // if the caller didn't ask for it — the projection contract is honored,
+      // if the caller didn't ask for it: the projection contract is honored,
       // but the guarantee never rides on callers remembering to include `cwd`.
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
@@ -291,7 +291,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
         // A corrupt/unreadable list makes `resolve` throw; we let it propagate
         // so the partition read fails and the sink's per-partition retry leaves
-        // the watermark untouched (LLP 0080 #fail-safe) — never a silent skip.
+        // the watermark untouched (LLP 0080 #fail-safe), never a silent skip.
         const cwd = row.cwd
         if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') {
           droppedRowCount += 1

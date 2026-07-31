@@ -68,7 +68,7 @@ test('session_id whitespace only gates non-emptiness; the STORED token is the ra
     assert.equal(out.status, 200)
     assert.equal(out.body.session_id, '  sess-pad  ', 'the response echoes the raw, untrimmed token')
     assert.ok(set.has('  sess-pad  '), 'the set stores the raw, untrimmed token')
-    assert.equal(set.has('sess-pad'), false, 'a trimmed lookup key must NOT hit — the token is opaque, not normalized')
+    assert.equal(set.has('sess-pad'), false, 'a trimmed lookup key must NOT hit - the token is opaque, not normalized')
   })
 })
 

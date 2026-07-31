@@ -53,7 +53,7 @@ function makeStorage(rowsByTable = {}) {
 
 /**
  * Storage stub yielding a described entry sequence for one table: a payload
- * `{ seq, id }` or a drop `{ seq, drop: true }` — a `local-only` row the export
+ * `{ seq, id }` or a drop `{ seq, drop: true }`, a `local-only` row the export
  * seam withheld (LLP 0070), carrying only the advancing `after`.
  *
  * @param {string} tablePath
@@ -324,7 +324,7 @@ test('exportBatch embeds the [sinceSeq,lastSeq] range in the object key and adva
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
   const tablePath = `${CACHE_ROOT}/datasets/p1/source=x`
   const storage = makeStorage({ tablePath: [] }) // placeholder, replaced below
-  // @ts-ignore — install two rows with seqs 5 and 7 under the real key.
+  // @ts-ignore: install two rows with seqs 5 and 7 under the real key.
   storage.tableExists = (tp) => tp === tablePath
   // @ts-ignore
   storage.readRowsSince = (tp, opts) => {
