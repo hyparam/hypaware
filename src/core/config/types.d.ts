@@ -294,7 +294,7 @@ export interface CreateConfigControlOptions {
  * - `done`: run-once terminal state; the action is never auto-run again
  *   (the marker is what makes every subsequent boot cheap). See LLP 0036
  *   §Idempotency.
- * - `failed`, not terminal; the next reconcile pass retries it.
+ * - `failed`: not terminal; the next reconcile pass retries it.
  * - `applied`: current applied state of a reconciled/reversible handler
  *   (attach, future); `reverse()` runs on leave when the config stops
  *   naming the effect.

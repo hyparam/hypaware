@@ -103,7 +103,7 @@ export interface StatusDiagnostic {
  * - `failed`: last attempt failed; retried next pass (carries `reason`,
  *   `lastAttempt`, `attempts`).
  * - `pending`: desired on this joined host but no marker yet.
- * - `n/a`, suppressed (`on_join: false`) or inert (host never joined).
+ * - `n/a`: suppressed (`on_join: false`) or inert (host never joined).
  */
 export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
 
