@@ -473,6 +473,17 @@ for whatever token it is handed. Counting an unvouchable header is not trusting
 it, exactly as [§cli-legacy-rollout](#cli-legacy-rollout) reads the raw line
 without trusting it.
 
+**The rule holds for this verb only, and the Codex `hypaware-privacy` skill body
+is now the exception.** Its Step 1 disk scan still drops an id-less header
+before its own count (`not payload.get('id')`), so on the two-rollouts fixture
+above the verb refuses while the script resolves and POSTs the survivor. That is
+the divergence round 4 of [#456](https://github.com/hyparam/hypaware/pull/456)
+predicted, live now rather than hypothetical, and it is a fail-open on the
+script path alone. It is left standing because
+[#435](https://github.com/hyparam/hypaware/issues/435) retires that script onto
+this verb rather than repairing it, so until then the skill body must not be
+read as a second implementation of the rule above.
+
 The rollout walk is bounded so a very large history cannot turn a privacy check
 into a long directory scan. **A truncated walk also refuses**: "exactly one cwd
 match" over a partial listing is an artefact of the bound, not a fact, since
