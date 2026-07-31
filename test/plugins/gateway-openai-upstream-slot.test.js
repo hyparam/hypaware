@@ -92,6 +92,11 @@ const ROUTES = [
   { label: 'codex api-key chat completions', path: '/v1/chat/completions', headers: {}, expect: 'openai' },
   { label: 'codex api-key responses', path: '/v1/responses', headers: {}, expect: 'openai' },
   { label: 'openai path anchor itself', path: '/v1', headers: {}, expect: 'openai' },
+  // The two sides of the segment boundary `pathMatchesPrefix(path, '/v1')`
+  // draws. A `match()` supersedes `path_prefix`, so these pin that the
+  // hand-written anchor did not widen or narrow the prefix it replaced.
+  { label: 'openai path anchor with a trailing slash', path: '/v1/', headers: {}, expect: 'openai' },
+  { label: 'one byte past the openai anchor', path: '/v1x', headers: {}, expect: undefined },
   { label: 'codex chatgpt subscription', path: '/backend-api/codex/responses', headers: {}, expect: 'chatgpt' },
   { label: 'anthropic messages', path: '/v1/messages', headers: {}, expect: 'anthropic' },
   { label: 'anthropic count_tokens', path: '/v1/messages/count_tokens', headers: {}, expect: 'anthropic' },
@@ -144,27 +149,41 @@ test('the header rung does not divert anthropic traffic that never sends it', as
  * `hyp init` writes gateway upstreams from the picker `compose` blocks, which
  * carry no `priority` (`composePickerConfig`), and a config upstream beats a
  * preset of the same name. So an install that declares `anthropic` in config
- * and leaves `openai` to Codex's preset compiles a table where the only thing
- * keeping `/v1/messages` on Anthropic is that `openai` does not outrank it.
- * Raising Codex's `openai` preset to `priority: 100` silently steals that
- * route, which is why the registration keeps the default priority and hardens
- * only its `match()`.
+ * and leaves `openai` to a preset compiles a table where the only thing
+ * keeping `/v1/messages` on Anthropic is that `openai` does not outrank it: a
+ * `/v1` anchor at `priority: 100` sorts above the config entry and swallows
+ * Anthropic's Messages API, prompts and `x-api-key` and all.
+ *
+ * The assertion runs against whichever registration won the name-keyed slot,
+ * under every activation order, because the constant is hazardous wherever it
+ * is written. Pinning only the copy in the Codex plugin would let a sibling
+ * adapter reintroduce it through the same slot and stay green.
  */
-test('codex\'s openai preset does not outrank a config-declared anthropic upstream', async () => {
-  const codexOpenai = await presetsFromActivate([CODEX]).then((presets) => presets.get('openai'))
-  assert.ok(codexOpenai, 'codex activate() registered no `openai` upstream preset')
+for (const order of [[CODEX], [CODEX, OPENCLAW], [OPENCLAW, CODEX]]) {
+  test(`the surviving openai preset does not outrank a config-declared anthropic upstream (${order.join(' then ')})`, async () => {
+    const presets = await presetsFromActivate(order)
+    const openai = presets.get('openai')
+    assert.ok(openai, `activation order ${order.join(',')} registered no \`openai\` upstream preset`)
 
-  /** @type {UpstreamConfig} */
-  const configAnthropic = {
-    name: 'anthropic',
-    base_url: 'https://api.anthropic.com',
-    path_prefix: '/v1/messages',
-    provider: 'anthropic',
-  }
-  const table = compileUpstreams([configAnthropic, presetAsUpstream(codexOpenai)])
-  assert.equal(matchUpstream(table, 'POST', '/v1/messages', {})?.name, 'anthropic')
-  assert.equal(matchUpstream(table, 'POST', '/v1/chat/completions', {})?.name, 'openai')
-})
+    /** @type {UpstreamConfig} */
+    const configAnthropic = {
+      name: 'anthropic',
+      base_url: 'https://api.anthropic.com',
+      path_prefix: '/v1/messages',
+      provider: 'anthropic',
+    }
+    // The merge the source layer performs: config first, presets filling only
+    // the names config left open (`mergeUpstreams`).
+    const table = compileUpstreams([configAnthropic, presetAsUpstream(openai)])
+    assert.equal(matchUpstream(table, 'POST', '/v1/messages', {})?.name, 'anthropic')
+    assert.equal(
+      matchUpstream(table, 'POST', '/v1/messages', { 'anthropic-version': ['2023-06-01'] })?.name,
+      'anthropic'
+    )
+    assert.equal(matchUpstream(table, 'POST', '/v1/messages/count_tokens', {})?.name, 'anthropic')
+    assert.equal(matchUpstream(table, 'POST', '/v1/chat/completions', {})?.name, 'openai')
+  })
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
