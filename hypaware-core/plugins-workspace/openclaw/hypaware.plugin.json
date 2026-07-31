@@ -10,8 +10,7 @@
   "permissions": [
     "read_home",
     "write_home",
-    "read_state",
-    "write_openclaw_settings"
+    "read_state"
   ],
   "requires": {
     "capabilities": {
@@ -22,12 +21,6 @@
     "client": {
       "name": "openclaw",
       "skill_dir": ".openclaw/skills",
-      "attach_probe": {
-        "format": "json_path",
-        "settings_file": ".openclaw/openclaw.json",
-        "marker_path": "models.providers.hypaware",
-        "marker_record": "headers.x-hypaware-marker"
-      },
       "required_upstreams": ["anthropic"]
     },
     "picker": [
@@ -46,7 +39,7 @@
     "config_sections": [
       {
         "section": "openclaw",
-        "summary": "OpenClaw adapter config, including the optional attach-on-join policy { on_join }."
+        "summary": "OpenClaw adapter config, including the optional attach-on-join policy { on_join } and the optional backfill policy { on_join, window_days }."
       }
     ]
   }
