@@ -350,7 +350,7 @@ export interface ClientResult {
   removed?: string
   /**
    * Prior value restored on detach. Emitted by every core undo format that
-   * records a prior (`json`, `toml`, `json_path`), not just codex.
+   * records a prior (`json`, `toml`), not just codex.
    *
    * Single-primary only: an undo that restores several priors restores them
    * all on disk but reports one unspecified value here (LLP 0109

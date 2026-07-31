@@ -53,7 +53,7 @@ export const configSection = {
  * That surface being real does *not* make it core-reversible, so the client
  * descriptor deliberately carries **no `attach_probe`**: the plist is XML at
  * an absolute root-owned system path and holds no self-describing undo
- * record, none of which the core probe/undo (`json`/`toml`/`json_path`) can
+ * record, none of which the core probe/undo (`json`/`toml`) can
  * read or replay. Its state surface is `claude-desktop verify` and its undo is
  * removing the plist with sudo, not `hyp detach` (#444).
  *
