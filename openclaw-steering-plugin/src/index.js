@@ -33,11 +33,13 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runtime'
 
 import { resolveGatewayEndpoint } from './gateway_endpoint.js'
+import { createPrepareRuntimeAuth, normalizeBorrowedCredential, resolveShadowSyntheticAuth } from './runtime_auth.js'
 import { resolveSteering } from './steering.js'
 import { createWarningLedger } from './warning_ledger.js'
+import { wrapAnthropicShadowStream } from './wire_parity.js'
 
 /**
- * @import { OpenclawPluginApi } from './types.js'
+ * @import { OpenclawPluginApi, ProviderPrepareRuntimeAuthContext, ResolvedProviderAuth } from './types.js'
  */
 
 /** Must match the `id` in `openclaw.plugin.json` (OpenClaw plugin-manifest requirement). */
@@ -47,20 +49,64 @@ export const SHADOW_ANTHROPIC_PROVIDER_ID = 'hypaware-anthropic'
 export const SHADOW_OPENAI_PROVIDER_ID = 'hypaware-openai'
 
 /**
+ * Adapts OpenClaw's `resolveApiKeyForProvider` to the "one credential or
+ * nothing" contract `resolveSteering` and `createPrepareRuntimeAuth` both
+ * branch on. The SDK resolves to a `ResolvedProviderAuth` record
+ * (`{ apiKey?, profileId?, source, mode }`), never a bare key, so the object
+ * itself is always truthy and unwrapping it here is what makes "no credential
+ * for this provider" a distinguishable outcome at all.
+ *
+ * @param {{ provider: string, context?: ProviderPrepareRuntimeAuthContext }} params
+ * @returns {Promise<ResolvedProviderAuth>}
+ */
+function borrowShadowedCredential(params) {
+  return resolveApiKeyForProvider({
+    provider: params.provider,
+    cfg: params.context?.config,
+    agentDir: params.context?.agentDir,
+    workspaceDir: params.context?.workspaceDir,
+  })
+}
+
+/**
  * Registers both shadow providers (LLP 0144#decision) with `baseUrl` at the
- * local HypAware AI gateway, and the `before_model_resolve` steering hook
- * (LLP 0161#steering-precedence). No apiKey is supplied here: credential
- * borrowing rides `prepareRuntimeAuth` on the registered provider object
- * (LLP 0161#credentials-and-wire, LLP 0145#decision), which is a separate
- * task (LLP 0162 T2) layered onto this same registration.
+ * local HypAware AI gateway, and the credential/wire hooks that make a steered
+ * turn indistinguishable from an unsteered one.
+ *
+ * The registration carries no apiKey: a `hypaware-*` provider has none, and
+ * must never acquire one. `resolveSyntheticAuth` supplies a non-secret
+ * placeholder purely so OpenClaw's runtime reaches `prepareRuntimeAuth`
+ * (which throws `MissingProviderAuthError` first otherwise), and
+ * `prepareRuntimeAuth` swaps in the shadowed provider's real credential for
+ * that one request (LLP 0145#decision).
+ *
+ * `wrapStreamFn` is Anthropic-only: LLP 0148's scope note makes parity
+ * mirroring per API shape, and `openai-completions` has no OpenClaw-side
+ * shaping to mirror in v1.
  *
  * @ref LLP 0157#steering-plugin [implements]: the two shadow providers are
  * registered programmatically with `baseUrl` at the local gateway, never
  * writing to the user's `openclaw.json`.
  *
  * @param {OpenclawPluginApi} api
+ * @param {string} baseUrl
+ * @param {ReturnType<typeof createWarningLedger>} ledger
  */
-function registerShadowProviders(api, baseUrl) {
+function registerShadowProviders(api, baseUrl, ledger) {
+  const prepareRuntimeAuth = createPrepareRuntimeAuth({
+    baseUrl,
+    resolveCredential: borrowShadowedCredential,
+    onError: ({ provider, error }) => {
+      ledger.warn({
+        provider,
+        cause: 'no_credential',
+        operation: 'prepare_runtime_auth',
+        status: 'borrow_failed',
+        detail: describeError(error),
+      })
+    },
+  })
+
   api.registerProvider({
     id: SHADOW_ANTHROPIC_PROVIDER_ID,
     label: 'HypAware capture (Anthropic)',
@@ -74,6 +120,20 @@ function registerShadowProviders(api, baseUrl) {
         }
       },
     },
+    resolveSyntheticAuth: resolveShadowSyntheticAuth,
+    prepareRuntimeAuth,
+    wrapStreamFn: (ctx) =>
+      wrapAnthropicShadowStream(ctx, {
+        onSkipped: (reason) => {
+          ledger.warn({
+            provider: SHADOW_ANTHROPIC_PROVIDER_ID,
+            cause: 'wire_parity_skipped',
+            operation: 'wrap_stream_fn',
+            status: 'degraded',
+            detail: reason,
+          })
+        },
+      }),
   })
 
   api.registerProvider({
@@ -89,7 +149,17 @@ function registerShadowProviders(api, baseUrl) {
         }
       },
     },
+    resolveSyntheticAuth: resolveShadowSyntheticAuth,
+    prepareRuntimeAuth,
   })
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -110,8 +180,17 @@ function registerSteeringHook(api, ledger) {
     const candidate = { provider: event.provider, api: event.api }
 
     const result = await resolveSteering(candidate, {
-      resolveCredential: (provider) =>
-        resolveApiKeyForProvider({ provider, sessionKey: ctx?.sessionKey, agentId: ctx?.agentId }),
+      // Same borrow `prepareRuntimeAuth` performs, unwrapped to the bare key.
+      // `resolveSteering` refuses to steer a provider whose credential cannot
+      // be resolved (LLP 0157 R3), so the probe and the borrow have to agree
+      // on what "resolvable" means or the ledger's coverage claim is wrong.
+      resolveCredential: async (provider) => {
+        const resolved = await borrowShadowedCredential({
+          provider,
+          context: { provider, agentDir: ctx?.agentDir, workspaceDir: ctx?.workspaceDir },
+        })
+        return normalizeBorrowedCredential(resolved)?.apiKey
+      },
     })
 
     if (result.steer) {
@@ -135,7 +214,7 @@ export default definePluginEntry({
     const baseUrl = resolveGatewayEndpoint()
     const ledger = createWarningLedger()
 
-    registerShadowProviders(api, baseUrl)
+    registerShadowProviders(api, baseUrl, ledger)
     registerSteeringHook(api, ledger)
   },
 })
