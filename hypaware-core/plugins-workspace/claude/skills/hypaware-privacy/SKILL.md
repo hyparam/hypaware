@@ -50,7 +50,9 @@ print("opt-out confirmed for session %s (total ignored: %s)" % (r.get("session_i
 '
 ```
 
-If the `curl` fails (gateway not running, wrong port) or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk. This opt-out is held in memory by the running gateway; a gateway restart drops it, so if the review spans a restart, re-run this step. Reverse later with `/hypaware-unignore`.
+If the `curl` fails (gateway not running, wrong port) or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk.
+
+The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`claude --fork-session`; a plain `--resume` / `--continue` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point. Reverse later with `/hypaware-unignore`.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 
