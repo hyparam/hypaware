@@ -15,10 +15,6 @@ import {
   runSessionStatus,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
 
-/**
- * @import { IncomingMessage, ServerResponse } from 'node:http'
- */
-
 // Regression suite for issue #451: `hyp session` cannot prove the control
 // responder is the real gateway.
 //

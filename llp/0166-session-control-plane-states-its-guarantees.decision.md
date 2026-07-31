@@ -138,9 +138,13 @@ rather than here:
 This document is the joint record; the code lands in two places, and this half
 is the **#451** half:
 
-- **Here (#451):** `RESPONDER_TRUST_NOTE` and `endpoint_authenticated: false` in
+- **Here (#451):** `responderTrustNote(endpoint)` and
+  `endpoint_authenticated: false` in
   `hypaware-core/plugins-workspace/ai-gateway/src/session_command.js`, on
-  `status` and both mutation verbs, human and `--json`.
+  `status` and both mutation verbs, human and `--json`. The note is a function
+  of the endpoint rather than a constant string because it names the address it
+  trusted, which on the `daemon_status` path is the only line about the endpoint
+  at all.
 - **In its own change set (#460):** the membership-not-grain wording on the CLI
   and skill surfaces, and the shell-path echo check.
 
