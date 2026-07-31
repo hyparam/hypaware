@@ -92,8 +92,9 @@ export async function purgeCache({ cacheRoot, target, deps }) {
  * @param {{ rows: number, cwds: Set<string> }} retainedAliases sink for the
  *   `subtree` near-misses: rows whose `cwd` is spelled as if it were inside the
  *   target without this filesystem confirming the two spellings are one
- *   directory, whether because they are two directories with two inodes or
- *   because a spelling could not be `stat`ed at all
+ *   directory, whether because they are two directories with two inodes,
+ *   because a spelling is no longer on disk, or because the `stat` could not be
+ *   taken at all (any errno, not only `ENOENT`)
  * @param {{ realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } }} [deps]
  * @returns {{ predicate: (row: Record<string, unknown>) => boolean, columns: string[] }}
  */
