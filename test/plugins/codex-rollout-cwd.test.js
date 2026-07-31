@@ -170,6 +170,100 @@ test('an in-band cwd stays the fast path and short-circuits the rollout lookup',
 })
 
 // ---------------------------------------------------------------------
+// A `workspaces` key must not preempt the rollout (#480)
+//
+// @ref LLP 0083#workspace-key-ranks-last [tests]: the order is in-band, rollout,
+// workspace key.
+// The key is a GUESS whenever it did not match a stated cwd (`selectCodexWorkspace`
+// substitutes the first key), and `session_meta.cwd` is what Codex itself wrote
+// at session start, so the guess must rank below it. Ranking it above turned a
+// correct `.hypignore` drop into a record on the subscription route, the exact
+// route the rollout fallback exists for.
+// ---------------------------------------------------------------------
+
+test('a workspaces key does not preempt the rollout session_meta.cwd (#480)', () => {
+  let lookups = 0
+  const rolloutCwd = {
+    /** @param {string} _threadId */
+    resolve(_threadId) { lookups += 1; return '/work/ignored/real' },
+  }
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd,
+  })
+  // The request states NO cwd, so the workspace key is a substitution, not a
+  // match. The session really ran in `/work/ignored/real` (the rollout says so
+  // and Codex wrote that line), and `/work/ignored/.hypignore` covers it.
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: { '/work/clean/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the opted-out tree the session actually ran in decides the verdict')
+  assert.equal(lookups, 1, 'a declared workspaces map must not skip the rollout lookup')
+})
+
+test('the rollout cwd is stamped on the row while the workspace key still enriches it (#480)', () => {
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_THREAD_ID]: '/work/clean/real' }),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: {
+          '/work/clean/proj': {
+            associated_remote_urls: { origin: 'git@github.com:acme/clean.git' },
+            latest_git_commit_hash: 'deadbeef',
+          },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  // Demoting the key costs it the cwd, not its enrichment role (LLP 0032#capture).
+  assert.equal(projection.cwd, '/work/clean/real', 'the row records where the session actually ran')
+  assert.equal(projection.attributes.codex.workspace, '/work/clean/proj')
+  assert.equal(projection.git_remote, 'git@github.com:acme/clean.git')
+  assert.equal(projection.head_sha, 'deadbeef')
+})
+
+test('the workspace key still gates when there is no rollout to outrank it (#480)', () => {
+  // The floor under the demotion: with no rollout configured the key is once
+  // more the only cwd there is, so the subscription route keeps its `.hypignore`
+  // coverage rather than failing open.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: fakeRolloutCwd({}),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: { '/work/ignored/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the key is the last resort, not a discarded value')
+})
+
+// ---------------------------------------------------------------------
 // createRolloutCwdResolver: reads session_meta.cwd from the thread's rollout
 // file (the same source backfill reads), keyed by the thread id embedded in
 // the rollout filename, cached per thread id (LLP 0049 R6).

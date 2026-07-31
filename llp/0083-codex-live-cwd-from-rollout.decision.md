@@ -79,12 +79,13 @@ has the symmetric fallback.
   in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
   in-band path out of its own mandate, because in-band is a separate source with
   its own trust story whose value is also stamped on the row for workspace/git
-  enrichment. So the two checks are restated locally, in `usableInBandCwd`. One
-  limit of the rule, stated rather than implied: on the Codex route the value the
-  predicate sees is usually not the request's `cwd` but the workspace key
-  `selectCodexWorkspace` selected for it, which substitutes the first workspace
-  when none matches, so an absolute-but-unrelated directory can still reach the
-  gate (#476).
+  enrichment. So the two checks are restated locally, in `usableInBandCwd`. The
+  same predicate also guards the workspace key, which is a third source with the
+  same trust problem, and it is applied to it separately (the key no longer
+  arrives folded into the in-band value, #480). It only bounds the *shape* of
+  either value, never its provenance: an absolute-but-unrelated directory passes
+  both checks, which is why the ranking below, not this predicate, is what keeps
+  a substituted key from deciding a verdict (#476).
 - **Keyed on the codex thread id, and the rollout must confirm it.** A rollout is
   one **thread's** file: its name embeds `session_meta.payload.id` (the thread),
   matched via the `sessionIdFromPath` helper shared with the backfill (a helper
@@ -225,27 +226,39 @@ has the symmetric fallback.
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
   and the two halves of the policy agree (closes the live/backfill inconsistency).
-- **A substituted workspace key never decides the verdict** (amended, #476). The
-  Codex projector picks a `workspaces` turn-metadata key for enrichment, falling
+- **A substituted workspace key never decides the verdict** (amended, #476,
+  #480). {#workspace-key-ranks-last} The Codex projector picks a `workspaces`
+  turn-metadata key for enrichment, falling
   back to the *first* key when none matches the request's `cwd`. That substituted
   key is a guess about a directory the session may never have run in, so it does
-  not supply the one resolved `cwd`: an explicit in-band `cwd` outranks it for
+  not supply the one resolved `cwd` while any better-founded source exists. The
+  order is **in-band, rollout, key**: an explicit in-band `cwd` outranks it for
   both the gate and the stamp, and the refusal is reported as
   `plugin.codex.usage_policy_workspace_cwd_refused`
-  (`error_kind: workspace_cwd_mismatch`, paths hashed). The key keeps its
+  (`error_kind: workspace_cwd_mismatch`, paths hashed); the rollout's
+  `session_meta.cwd` outranks it too, because that line is what Codex itself
+  wrote at session start rather than a guess this projector made. The key keeps its
   enrichment role (`attributes.codex.workspace`, `git_remote`, `git_commit`,
-  `has_changes`) and still supplies the `cwd` on the subscription route, where
-  the request states none and the key is the only in-band source there is.
+  `has_changes`) and remains the **last resort** for the `cwd` on the
+  subscription route: when the request states none and no rollout is found, it is
+  the only source there is, and refusing it outright would remove `.hypignore`
+  coverage from that whole route.
   Consequence: for a session running in a *subdirectory* of its workspace the
   row now stamps the subdirectory rather than the workspace root, which is the
   directory the policy is actually scoped to.
-  Three limits, stated rather than implied, and each one filed so it does not
-  live only here. The key still outranks the **rollout** fallback (it resolves
-  before the `??`), so a subscription-route session that declares a `workspaces`
-  map never consults `session_meta.cwd` and a first-key guess can still decide
-  its verdict (#480). That one is pre-existing, verified byte-identical before
-  and after this amendment; ranking the guess below the rollout is a separate
-  call, not taken in the lines PRs #467/#474 rewrite. Because the key keeps
+  The key is offered as a last-resort `cwd` **only when the request stated no
+  `cwd` at all**, not merely when what it stated was unusable: a relative or
+  blank in-band value is still a statement about where the session ran, and
+  letting the key stand in for it is exactly the substitution this bullet
+  refuses (#476 case c).
+  Three limits, stated rather than implied. A key outranked by the **rollout**
+  is discarded silently: `usage_policy_workspace_cwd_refused` fires only for the
+  in-band contradiction, because that predicate compares the key against a value
+  the request stated, and the rollout arrives after it. Widening it would put a
+  warn on every turn of an ordinary session whose `session_meta.cwd` is a
+  subdirectory of its workspace, which is the frequency objection already open
+  against the existing signal, so the two want settling together rather than
+  separately. The other two are filed so they do not live only here. Because the key keeps
   enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
   declared workspace) carries that workspace's identity even though the
   directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
@@ -258,9 +271,11 @@ has the symmetric fallback.
   misses symlinked spellings here). What this amendment changes is which of two
   symmetric spellings trips it, by taking the client's honest `cwd` over the
   key's: it closes the case where the *key* held the non-canonical spelling and
-  opens the case where the *request* does. The widest case is untouched, a
-  declared symlinked key on a subscription-route request that states no `cwd` at
-  all, which leaks the same before and after. Canonicalizing belongs in the
+  opens the case where the *request* does. The widest case is narrowed but not
+  closed: a declared symlinked key on a subscription-route request that states no
+  `cwd` at all now loses to the rollout, whose value came from `getcwd(2)` and is
+  therefore canonical, but it still reaches the gate uncanonicalized whenever no
+  rollout is found. Canonicalizing belongs in the
   shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
   where it must also canonicalize the `local-only` list entries or it un-governs
   an entry a user marked by its symlink spelling.
