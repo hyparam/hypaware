@@ -21,7 +21,7 @@
     "client": {
       "name": "openclaw",
       "skill_dir": ".openclaw/skills",
-      "required_upstreams": ["anthropic"]
+      "required_upstreams": ["anthropic", "openai"]
     },
     "picker": [
       {

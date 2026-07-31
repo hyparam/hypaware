@@ -129,7 +129,11 @@ test('activate() registers the settlement enricher right after the exchange proj
 
   await activate(ctx)
 
-  assert.deepEqual(calls, ['preset', 'projector', 'enricher', 'client'])
+  // Assert the ADJACENCY this test is about, not the preset count: how many
+  // upstream presets activate() registers is Section 3.4's business (one per
+  // wire shape) and grows independently of this placement.
+  assert.deepEqual(calls.slice(calls.indexOf('projector')), ['projector', 'enricher', 'client'])
+  assert.ok(calls.every((call, i) => i >= calls.indexOf('projector') || call === 'preset'))
   assert.equal(enricher.name, 'openclaw-settlement')
   assert.equal(enricher.clientName, 'openclaw')
 })
