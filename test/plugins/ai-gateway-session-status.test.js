@@ -362,6 +362,85 @@ test('refuses (never guesses newest) when several Codex rollouts match the cwd',
   assert.match(out.ok ? '' : out.error, /codex-bbb/)
 })
 
+test('a cwd match with NO thread id still makes the answer ambiguous: it is not discarded before the count', () => {
+  // Issue #499 §1, round 4's `x1` fixture, executed rather than reasoned about.
+  //
+  // The cwd path's whole claim is uniqueness: "exactly one rollout records this
+  // cwd, so it is the session I am in". `readRolloutMeta` used to return
+  // `undefined` for a `session_meta` header stating no `payload.id`, which the
+  // scan loop reads as "not a rollout" - so a header that demonstrably recorded
+  // this cwd never reached the candidate list. Two sessions had run here, and
+  // the resolver answered with whichever of them happened to carry a thread id,
+  // at `ok: true`, with no disclosure that it had thrown a rival away. That is
+  // the artefact-of-the-bound failure LLP 0067 refuses on for a truncated scan,
+  // arriving through a discard the bound never touched, and it lands on the
+  // privacy verb: `hyp session ignore` opts out one of two indistinguishable
+  // sessions and prints success.
+  //
+  // The thread id is not what this path resolves (it returns the container, and
+  // carries the thread only as provenance), so requiring one to be *counted*
+  // was never load-bearing - only to be *resolved*, which the next test pins.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', noThread: true, sessionId: 'container-noid', cwd: '/repo/here' },
+    { file: 'rollout-2026-01-02-bbb.jsonl', id: 'thread-bbb', sessionId: 'container-bbb', cwd: '/repo/here' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'two rollouts record this cwd, so neither is the unique match')
+  assert.equal(
+    (out.ok ? '' : out.error).includes('container-bbb'),
+    false,
+    'the survivor must not be resolved just because its rival lacked a thread id'
+  )
+  assert.match(out.ok ? '' : out.error, /2 Codex rollouts record cwd/)
+  assert.match(
+    out.ok ? '' : out.error,
+    /rollout-2026-01-01-aaa\.jsonl/,
+    'the id-less candidate is a reason for the refusal, so it has to be named'
+  )
+  assert.match(out.ok ? '' : out.error, /rollout-2026-01-02-bbb\.jsonl/)
+})
+
+test('a LONE cwd match with no thread id refuses rather than resolving the container it states', () => {
+  // Issue #499 §1, round 4's `x2` fixture: the other half of the trade the
+  // issue put on record. Counting an id-less header (above) must not turn into
+  // resolving one. Every `session_meta` Codex writes states `payload.id`, so a
+  // header without one is a file nothing accounts for, and its `session_id`
+  // would go to a control route that reports `ignored: true` for any token.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', noThread: true, sessionId: 'container-noid', cwd: '/repo/here' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'an unvouchable header is unresolvable, not an answer')
+  assert.equal(
+    (out.ok ? '' : out.error).includes('container-noid'),
+    false,
+    'the container off an unvouchable header must not be offered as the id'
+  )
+  assert.match(out.ok ? '' : out.error, /payload\.id/, 'say which field is missing')
+  assert.match(
+    out.ok ? '' : out.error,
+    /rollout-2026-01-01-aaa\.jsonl/,
+    'the refusal names the file, unlike the old "no rollout records cwd" message which denied it existed'
+  )
+  assert.match(out.ok ? '' : out.error, /explicitly/, 'point at the escape hatch')
+})
+
+test('a stated thread ignores an id-less rollout entirely: that path is identity, not counting', () => {
+  // The counting change above must not leak into `resolveFromStatedThread`.
+  // There a header stating no thread names nothing to compare against, so it is
+  // neither a match nor a missing one, and the stated thread still resolves.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', noThread: true, sessionId: 'container-noid', cwd: '/repo/here' },
+    { file: 'rollout-2026-01-02-bbb.jsonl', id: 'thread-live', sessionId: 'container-live', cwd: '/repo/here' },
+  ])
+  const out = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-live' },
+    cwd: '/repo/here',
+  })
+  assert.equal(out.ok && out.sessionId, 'container-live')
+  assert.equal(out.ok && out.source, 'codex_env_rollout')
+})
+
 test('refuses when no Codex rollout matches the cwd', () => {
   const home = tempCodexHome([
     { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-aaa', cwd: '/repo/elsewhere' },
@@ -1019,7 +1098,11 @@ function dropContext(ignored) {
  * `type` overrides the first line's envelope type, so a test can present a
  * record that carries `id`/`session_id`/`cwd` but is not the session header.
  *
- * @param {{ file: string, id: string, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
+ * `noThread: true` omits `payload.id` - the mirror of `legacy`, and the shape
+ * round 4 of #456's review used to probe whether a header the resolver cannot
+ * vouch for is discarded before the cwd count or refused after it (#499 §1).
+ *
+ * @param {{ file: string, id?: string, noThread?: boolean, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
@@ -1027,7 +1110,8 @@ function tempCodexHome(rollouts) {
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {
     /** @type {Record<string, unknown>} */
-    const payload = { id: r.id, cwd: r.cwd }
+    const payload = { cwd: r.cwd }
+    if (!r.noThread) payload.id = r.id
     // `in` rather than `??` so an explicit null survives as a null: a field
     // present with an unusable value is a distinct case from an absent one.
     if (!r.legacy) payload.session_id = 'sessionId' in r ? r.sessionId : r.id

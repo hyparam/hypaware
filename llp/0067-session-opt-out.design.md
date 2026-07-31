@@ -451,6 +451,28 @@ the `hypaware-privacy` skill body does. Guessing here would opt out the wrong
 session while telling the user they are covered: the same fail-open shape this
 change exists to remove.
 
+**Recording the cwd is the whole of what makes a rollout a candidate.** The
+count *is* the uniqueness claim, so nothing else may filter the list before it
+is taken: a `session_meta` header dropped for a field this path does not resolve
+on takes the ambiguity with it and leaves a confident answer behind. Whether a
+candidate is *usable* (a live enough mtime, a readable container, a header the
+resolver can vouch for) is decided after the count, on the one candidate. This
+was wrong in the first implementation, which discarded a header stating no
+`payload.id` inside the reader wrapper: two rollouts recording one cwd resolved
+at `ok: true` to whichever of them carried a thread id, with no disclosure that
+a rival had been thrown away
+([issue #499](https://github.com/hyparam/hypaware/issues/499) §1). That is the
+artefact failure of the paragraph below, reached by a discard rather than by the
+bound.
+
+A lone such header still **refuses** rather than resolving the container it
+states: every `session_meta` Codex writes carries `payload.id`, so a header
+without one is a file nothing accounts for, there is no second field left to
+check its `session_id` against, and the control route reports `ignored: true`
+for whatever token it is handed. Counting an unvouchable header is not trusting
+it, exactly as [§cli-legacy-rollout](#cli-legacy-rollout) reads the raw line
+without trusting it.
+
 The rollout walk is bounded so a very large history cannot turn a privacy check
 into a long directory scan. **A truncated walk also refuses**: "exactly one cwd
 match" over a partial listing is an artefact of the bound, not a fact, since
