@@ -36,3 +36,25 @@ export interface OpenclawSessionMessage {
   usage?: Record<string, unknown>
   record: Record<string, unknown>
 }
+
+/**
+ * One session file's flush-time settlement view (LLP 0161 Section 6): the
+ * header facts that govern the whole file (`sessionId`, `cwd`) plus the two
+ * lookup structures the enricher's two match passes need. `byContentKey`
+ * holds only unambiguously-owned {@link OpenclawSessionMessage} keys;
+ * `ordinalIndex` is the `(role, same-role ordinal)` index the LLP 0161
+ * Section 5 fallback matcher consumes, and `positions` is its parallel
+ * per-file-position `(role, ordinal)` table, so a row's `message_index` can
+ * be turned into the ordinal to look up. `path`/`mtimeMs` identify the file
+ * the view was built from (candidate ordering and telemetry).
+ */
+export interface OpenclawSessionIndex {
+  path: string
+  mtimeMs: number
+  sessionId?: string
+  cwd?: string
+  messageCount: number
+  byContentKey: Map<string, OpenclawSessionMessage>
+  ordinalIndex: Map<string, Array<{ timestampMs: number, value: OpenclawSessionMessage }>>
+  positions: Array<{ role: string, ordinal: number }>
+}

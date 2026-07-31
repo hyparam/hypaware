@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 
 import { isPlainObject, parseMaybeJson } from 'hypaware/core/util'
+import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 
 /**
  * @import { OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
@@ -131,6 +132,77 @@ export function readOpenclawSessionHeader(filePath) {
 export function openclawSessionCwd(value) {
   const cwd = nonBlankString(value)
   return cwd !== undefined && path.isAbsolute(cwd) ? cwd : undefined
+}
+
+/**
+ * The `agents/` root of an OpenClaw install, the parent of every
+ * `<agentId>/sessions/*.jsonl` this module reads. HOME-relative, with
+ * `OPENCLAW_HOME` replacing the leading `.openclaw` component, resolved
+ * through the same generic core seam the retired settings write and the
+ * daemon status probe used, so no consumer of this reader can grow a
+ * second opinion about where an OpenClaw install lives.
+ *
+ * @ref LLP 0158#decision [implements]: the session-file *location* is part
+ * of the one reader's knowledge, not something each consumer re-derives
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @param {string} homeDir
+ * @returns {string}
+ */
+export function defaultOpenclawAgentsDir(env, homeDir) {
+  return resolveClientSettingsPath('openclaw', '.openclaw/agents', env, homeDir)
+}
+
+/**
+ * Enumerate the session files under an OpenClaw `agents/` root
+ * (`<agentsDir>/<agentId>/sessions/*.jsonl`), each with its `mtimeMs` so a
+ * caller can order or window candidates by recency without a second stat
+ * pass.
+ *
+ * Best-effort throughout, like every other read here: a missing root, an
+ * unreadable agent directory, or a file that vanished between the readdir
+ * and the stat contributes nothing instead of aborting the enumeration.
+ * The result is unsorted (directory order); callers that care sort it.
+ *
+ * @ref LLP 0158#decision [implements]: the shared enumeration both the
+ * settlement enricher and the backfill provider walk, so neither grows its
+ * own copy of the `agents/<id>/sessions/*.jsonl` layout
+ * @param {string} agentsDir
+ * @returns {Promise<Array<{ path: string, mtimeMs: number }>>}
+ */
+export async function listOpenclawSessionFiles(agentsDir) {
+  /** @type {Array<{ path: string, mtimeMs: number }>} */
+  const files = []
+  /** @type {string[]} */
+  let agents
+  try {
+    agents = (await fsp.readdir(agentsDir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    return files
+  }
+  for (const agent of agents) {
+    const sessionsDir = path.join(agentsDir, agent, 'sessions')
+    /** @type {string[]} */
+    let names
+    try {
+      names = await fsp.readdir(sessionsDir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue
+      const filePath = path.join(sessionsDir, name)
+      try {
+        const stat = await fsp.stat(filePath)
+        if (!stat.isFile()) continue
+        files.push({ path: filePath, mtimeMs: stat.mtimeMs })
+      } catch {
+        continue
+      }
+    }
+  }
+  return files
 }
 
 /**

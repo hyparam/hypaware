@@ -485,6 +485,21 @@ every row that session settles. This removes an entire class of Claude's
 logic (time-slicing across multiple candidate records) rather than porting
 it unnecessarily.
 
+**Which file is "the session file" (resolved at implementation time).** A
+live row's `session_id` is the prompt-head hash (LLP 0144); the session file
+never sees it, so the row-group-to-file binding has to be established rather
+than read. It is established by CONTENT, the same evidence the identity
+upgrade itself rests on: candidate files are the session JSONLs under the
+`agents/` root whose `mtime` is not older than the batch's earliest row (a
+bounded, newest-first candidate set, since a flush must not pay to index an
+install's whole history), and a hash-keyed group binds to the candidate whose
+transcript holds the most of that group's match keys, ties to the newer file.
+A group no candidate matches binds to nothing: it settles nothing and drops
+nothing. Weaker signals (recency, time overlap) are deliberately not enough
+to bind, because the cwd verdict that follows the binding DROPS rows, so a
+wrong binding is silent data loss while an absent one is only an unsettled
+row. Once bound, everything below is scoped to that one file, as stated.
+
 Per session (grouped by `session_id`, mirroring Claude's `bySession` Map):
 
 1. Read the session file once via the LLP 0158 reader:
@@ -502,7 +517,19 @@ Per session (grouped by `session_id`, mirroring Claude's `bySession` Map):
    it up (content match, then the ordinal/time fallback, Section 5). On a
    hit, upgrade the row's native identity (recompute `message_id`/`part_id`,
    strip the spent `openclaw.match_key`/`gateway.identity_source` attributes,
-   mirroring `upgradeRow`/`cleanAttributes` in the Claude precedent).
+   mirroring `upgradeRow`/`cleanAttributes` in the Claude precedent). The
+   second pass reads the row's `(role, ordinal)` off the FILE, indexed by
+   the row's `message_index`: OpenClaw re-sends the whole conversation on
+   every request, so a row's index in its exchange is its position in the
+   session, and the file is the only side that knows how many same-role
+   messages precede that position (a mid-session flush holds only the turns
+   the gateway had not already seen). A position whose recorded role
+   disagrees with the row's declines rather than guessing, which is what
+   notices a session whose file and wire shapes disagree about message
+   boundaries. A content key two session messages share is treated as owned
+   by neither: handing two rows one native `message_id` would hand them one
+   `part_id` too, and `part_id` dedupe would then collapse two distinct
+   messages into one committed row.
 4. Independent of match success, apply the session's single header `cwd`
    through the shared usage-policy resolver. When `policy.class === 'ignore'`,
    return `USAGE_POLICY_DROP` at that row's array position, logging
