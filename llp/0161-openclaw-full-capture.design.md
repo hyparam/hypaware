@@ -663,8 +663,25 @@ genuinely differs:
   replacement asserts the shadow providers registered: a steering-plugin
   debug/status surface (if OpenClaw exposes one) or, failing that, a probe
   request through the gateway confirming `x-hypaware-upstream` arrives.
-  Exact mechanics depend on what OpenClaw's own plugin API exposes for
-  introspection, verified at implementation time.
+  ~~Exact mechanics depend on what OpenClaw's own plugin API exposes for
+  introspection, verified at implementation time.~~ **Resolved at
+  implementation (LLP 0162 T11).** OpenClaw exposes the surface:
+  `openclaw plugins inspect <id> --runtime --json` imports the module in a
+  live gateway and reports the tools, hooks, services, gateway methods and
+  commands it actually registered, as against plain `inspect`, which is a
+  cold manifest and registry read that would pass on a plugin that never
+  loaded. The step uses it, but asserts by *token presence* in the report
+  rather than by key path: OpenClaw documents the report's contents in
+  prose and publishes no key schema, so a `jq` selector written against
+  guessed field names would fail as a missing key rather than as a missing
+  registration - a false negative aimed at the wrong system. Both fallbacks
+  survive in the procedure for builds without `--runtime`: the probe route
+  this design named, which is the acceptance step that observes an `openai`
+  row (only reachable through a registered shadow provider and a hook that
+  steered). Two host preconditions the surface made visible are now in
+  **Requires**: the `plugins.entries.<id>.hooks.allowConversationAccess`
+  gate, which drops a non-bundled plugin's `before_model_resolve`
+  registration silently, and the OpenClaw version floor that gate implies.
 - A new step exercises the warning ledger: configure OpenClaw against a
   deferred-family provider (e.g. `anthropic-vertex`, if reachable without
   real cloud credentials, else simulated) and confirm a `deferred`-caused
