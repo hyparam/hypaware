@@ -458,7 +458,7 @@ const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_malformed']
  * fall back to the convention `attach()` used before the record existed:
  * remove `env.ANTHROPIC_BASE_URL` only when it still equals the recorded
  * `http://127.0.0.1:${port}` gateway URL (never clobbering a later user edit),
- * and strip the session-context hooks by the `claude-hook session-context`
+ * and strip the managed hooks by their {@link LEGACY_CLAUDE_HOOK_PATTERN}
  * command pattern. Legacy JSON markers were only ever written by Claude, so the
  * key/pattern are safe to assume here. Moved from the retired claude-adapter
  * `detach()` so the one core undo owns this reversal too.
@@ -568,9 +568,11 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
 }
 
 /**
- * Strip the legacy Claude session-context hooks — matched by the
- * `claude-hook session-context` command pattern rather than the marker's undo
- * record (a legacy marker recorded no hook entries). Empty groups, emptied
+ * Strip the managed Claude hooks matched by {@link LEGACY_CLAUDE_HOOK_PATTERN}
+ * rather than by the marker's undo record (a legacy marker recorded no hook
+ * entries). The pattern covers every `hyp claude-hook` sub-command attach has
+ * installed, not only `session-context`, because a damaged-record marker also
+ * lands here with `classify-cwd` entries on disk. Empty groups, emptied
  * event arrays, and an emptied `hooks` root are pruned, so no orphaned `hyp …`
  * hooks survive. Preserves a user's own non-managed handlers for the same event.
  *

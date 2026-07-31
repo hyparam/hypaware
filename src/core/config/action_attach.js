@@ -347,6 +347,26 @@ export function createAttachHandler(opts = {}) {
         })
       }
 
+      // A restore that fired rewrote a block of the user's settings file. On
+      // the `hyp detach` path they read a line about it; here nobody is at a
+      // terminal - this reverse is an org config drop - so the log is the only
+      // place it can be said, and the failure half of the same replay is
+      // already said one branch up. Silence here is the defect #500 finding 3
+      // closed for the command, left open for the reconciler.
+      //
+      // Paths, never values: the backed-up block is where an API key ends up,
+      // and this is exported telemetry (LLP 0163).
+      // @ref LLP 0163#a-restore-that-happened-is-reported-by-path-and-never-by-value [implements]: the reconciler-driven undo reports a replayed backup too, by path
+      if (result.restoredPaths !== undefined && result.restoredPaths.length > 0) {
+        ctx.log.info('client_action.attach_reverse_restored', {
+          [Attr.COMPONENT]: 'action-attach',
+          [Attr.OPERATION]: 'client_action.reverse',
+          client: descriptor.name,
+          [Attr.STATUS]: 'ok',
+          detail: `restored from the marker's malformed-block backup: ${result.restoredPaths.join(', ')}`,
+        })
+      }
+
       // Remove the client assets this attach installed, after the settings
       // undo: a failure here leaves files behind but the client is already
       // unwired, and re-running the whole reverse is safe (both halves are

@@ -310,7 +310,14 @@ any risk to a user's own hook.
   divergence is now documented rather than accidental.
 - `DetachFromDiskResult` grows `restoredPaths?: string[]`, and `hyp detach`
   gains a `Restored <path> from the marker's malformed-block backup` line plus a
-  `restored_paths` key in `--json`. Nothing parses it; both consumers render it.
+  `restored_paths` key in `--json`. Nothing parses it; both output modes render
+  it.
+- The reconciler's `reverse()` (`action_attach.js`) reports it too, as a
+  `client_action.attach_reverse_restored` log record. It is the same field and
+  the same paths-never-values rule, but it is the *more* important half: an
+  org-driven fleet drop rewrites a block of the user's settings file with nobody
+  at a terminal to read a printed line, and the failure half of the replay was
+  already logged there while the success half was not.
 - The legacy `json` branch is no longer a silent hole for a damaged marker. It
   replays `prev_malformed` and `prev_base_url`, strips `classify-cwd` hooks, and
   reports itself as a partial reversal. A genuine pre-record marker carries none
