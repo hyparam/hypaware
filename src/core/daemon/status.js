@@ -19,7 +19,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
-import { isPlainObject, sanitizeLabel } from '../util/json_util.js'
+import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
 import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1082,6 +1082,26 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
 
     if (probe.format === 'toml' && probe.marker_header) {
       return { attached: raw.includes(probe.marker_header), settingsPath }
+    }
+
+    // @ref LLP 0172#lane-a-detach [implements]: the json_path read branch removed by
+    // LLP 0143 / PR #510, restored parallel to the json/toml branches above; pure
+    // read, attached when any configured provider key's marker header matches.
+    if (probe.format === 'json_path' && probe.container_path && probe.provider_keys && probe.marker_header) {
+      /** @type {unknown} */
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') {
+        return { attached: false, settingsPath }
+      }
+      const container = getAtDottedPath(parsed, probe.container_path)
+      if (!isPlainObject(container)) return { attached: false, settingsPath }
+      const markerHeader = probe.marker_header
+      const attached = probe.provider_keys.some((key) => {
+        const entry = container[key]
+        if (!isPlainObject(entry) || !isPlainObject(entry.headers)) return false
+        return entry.headers[markerHeader] === key
+      })
+      return { attached, settingsPath }
     }
 
     return { attached: false, settingsPath }
