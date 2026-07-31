@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, ScanColumnOptions, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /**
@@ -38,6 +38,14 @@ export function unionSources(sources) {
     for (const col of s.columns) allColumns.add(col)
     totalRows += s.numRows ?? 0
   }
+  // Only expose scanColumn when every partition can stream the column
+  // itself: a union that silently skipped a partition lacking scanColumn
+  // would undercount aggregates rather than refuse, the wrong failure mode
+  // per LLP 0056. Resolved once (not per-call) so the closure below never
+  // has to deal with an optional method.
+  const columnScanners = sources.every((s) => s.scanColumn)
+    ? sources.map((s) => /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (s.scanColumn))
+    : undefined
   return {
     columns: Array.from(allColumns),
     numRows: totalRows,
@@ -66,6 +74,50 @@ export function unionSources(sources) {
         },
       }
     },
+    ...(columnScanners && {
+      /**
+       * Forward `scanColumn` by concatenating per-partition column
+       * streams in source order. `limit`/`offset` are not pushed into the
+       * per-partition `scanColumn` calls, for the same reason `scan`
+       * strips them above (`union-source.js:47`): they are not
+       * distributive across a concatenation, so pushing them per partition
+       * would apply each independently instead of once over the merged
+       * result. Unlike `scan`'s `ScanResults`, `scanColumn` has no
+       * `appliedLimitOffset` escape hatch, so the union itself re-applies
+       * `limit`/`offset` here, over the merged column stream, before
+       * yielding chunks to the caller.
+       *
+       * @param {ScanColumnOptions} options
+       * @returns {AsyncIterable<ArrayLike<SqlPrimitive>>}
+       * @ref LLP 0055 [implements]: stream a single column across union partitions without buffering rows
+       */
+      async *scanColumn({ column, limit, offset, signal }) {
+        const remainingOffset = offset ?? 0
+        const cap = limit ?? Infinity
+        let skipped = 0
+        let yielded = 0
+        for (const scanColumn of columnScanners) {
+          if (yielded >= cap) return
+          for await (const chunk of scanColumn({ column, signal })) {
+            let start = 0
+            if (skipped < remainingOffset) {
+              const toSkip = Math.min(remainingOffset - skipped, chunk.length)
+              skipped += toSkip
+              start = toSkip
+            }
+            if (start >= chunk.length) continue
+            const afterOffset = start > 0 ? Array.prototype.slice.call(chunk, start) : chunk
+            const values = yielded + afterOffset.length > cap
+              ? Array.prototype.slice.call(afterOffset, 0, cap - yielded)
+              : afterOffset
+            if (values.length === 0) continue
+            yielded += values.length
+            yield values
+            if (yielded >= cap) return
+          }
+        }
+      },
+    }),
   }
 }
 
@@ -176,5 +228,7 @@ export function emptySource(columns) {
         async *rows() {},
       }
     },
+    // @ref LLP 0055 [implements]: an empty source's column stream is just empty, no chunks
+    async *scanColumn() {},
   }
 }
