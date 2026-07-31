@@ -961,7 +961,7 @@ function hasCodexTransportSignal(input, provider, path) {
  * `/v1/chat/completions`. Honouring the pair on its own would therefore let an
  * unrelated client be stamped `client_name: 'codex'` and dictate this row's
  * `conversation_id` and `session_id`, which is the same defect class as the
- * fictional `thread-id` header this document removed, only through the body. So
+ * bare `thread-id` header read this document removed, only through the body. So
  * the pair is trusted only once `corroborated` says a Codex-namespaced transport
  * signal already identified the exchange, where it adds lineage detail to a
  * client that is already known rather than naming the client. A Codex-shaped
