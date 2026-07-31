@@ -846,7 +846,9 @@ test('the near-miss note does not say "no longer on disk" of an alias that is on
 // @ref LLP 0104#spellings [tests]: an unprovable alias is retained whatever the errno, so the fix to the wording cannot move a deletion
 test('no stat errno makes an unprovable alias deletable', () => {
   for (const code of ['ENOENT', 'EACCES', 'EPERM', 'ELOOP', 'ENOTDIR', 'EIO']) {
+    let calls = 0
     const statSync = () => {
+      calls++
       const err = new Error(code)
       Object.assign(err, { code })
       throw err
@@ -856,5 +858,10 @@ test('no stat errno makes an unprovable alias deletable', () => {
       'aliased',
       `${code} must retain and report, never widen the deletion`
     )
+    // Without this the test could not fail: neither spelling exists on any
+    // host, so a build that stopped threading `statSync` down to
+    // `sameDirectoryOnDisk` would reach the same `aliased` through a real
+    // `ENOENT`, and the errno under test would never have been raised at all.
+    assert.ok(calls > 0, `the injected ${code} has to be the errno the predicate actually saw`)
   }
 })
