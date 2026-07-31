@@ -143,6 +143,47 @@ core format dispatch (probe + `detachClientFromDisk`):
 This keeps LLP 0045's invariants: one core undo, driven entirely from the
 settings file on disk, and the marker is a self-describing undo record.
 
+#### restoredValue is single-primary only
+
+The undo restores **every** still-ours `set` entry that carries a `prev`,
+but `DetachFromDiskResult.restoredValue` is a single scalar. A record whose
+replay restores more than one prior therefore restores them all correctly
+**on disk** and reports only one of them to the caller. That field is
+defined here as **meaningful only for a single-primary record**: one with at
+most one restoring `set` entry. For a multi-entry record the reported value
+is unspecified, and no caller may depend on which one it is.
+
+Unlike `warning`, folding is not available. `restoredValue` has exactly two
+consumers, both in [`src/core/commands/clients.js`](../src/core/commands/clients.js):
+`restored_value` in the `hyp detach --json` payload, and `  Restored <v>` on
+stdout. Both render it as a bare scalar, so joining two values would be
+actively wrong rather than merely ugly. (The attach handler's span `detail`
+consumer reads `warning`, not this field.)
+
+The multi-entry semantics are **deliberately left unstated rather than
+settled by a guard**. A first-wins guard, matching the one `removed` already
+carries three lines later in the same loop, would not fix the defect: it
+would pick a different arbitrary survivor and still drop the rest. Worse, it
+would promote "the first `set` entry is primary" into behaviour of the
+published `marker_record` contract. That convention exists today only inside
+the OpenClaw plugin (`openclaw/src/settings.js` reads `setEntries[0]` as
+primary); this section's own rule - core knows `json_path` semantics, never
+"OpenClaw" - says core must not learn it.
+
+Nothing shipped can reach the case: `claude` is `json` and `codex` is
+`toml`, so neither enters this loop, and OpenClaw, the only real
+`json_path` + `marker_record` producer, always emits exactly one `set`
+entry. It is unreached, not unreachable by construction: `marker_record`
+is part of the published kernel contract, so a third-party plugin can
+declare two `set` entries on day one. When such a producer exists, decide
+then between first-wins, last-wins, and a new plural
+`restoredValues: string[]`, with a concrete consumer in front of you.
+
+The sibling `removed` field's first-wins guard is itself undocumented, so a
+multi-entry record can describe one entry by one rule and another by the
+opposite rule. That incoherence is **recorded here, not resolved**:
+resolving it is the same deferred decision.
+
 ### Gateway capture
 
 - The plugin requires `hypaware.ai-gateway ^2.0.0`, registers the client
@@ -194,6 +235,11 @@ settings file on disk, and the marker is a self-describing undo record.
 - Whether OpenClaw session JSONL (`~/.openclaw/agents/<id>/sessions/`)
   should feed a settlement enricher for native session identity, like
   the Claude transcript enricher (LLP 0027).
+- What `restoredValue` should report when a `json_path` undo restores
+  more than one `set` entry (first-wins and a primacy convention,
+  last-wins, or a plural `restoredValues: string[]`). Deferred until a
+  real multi-entry producer exists; documented above as single-primary
+  only in the meantime (issue #443).
 
 ## References
 

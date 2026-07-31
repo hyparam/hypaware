@@ -645,7 +645,24 @@ export interface DetachFromDiskResult {
   settingsPath?: string
   /** The managed value deleted (e.g. the gateway base URL) when there was no prior to restore. */
   removed?: string
-  /** The prior value restored from the undo record. */
+  /**
+   * The prior value restored from the undo record.
+   *
+   * **Single-primary only.** An undo whose replay restores more than one
+   * prior (a `json_path` record with two still-ours `set` entries that each
+   * carry a `prev`) restores them all on disk but reports only one of them
+   * here, and *which* one is unspecified. Unlike `warning` there is no fold
+   * available: both consumers render this as a bare scalar
+   * (`src/core/commands/clients.js` puts it in the `hyp detach --json`
+   * payload as `restored_value` and prints `  Restored <v>` on stdout), so
+   * joining two values would be wrong rather than merely ugly.
+   *
+   * No shipped producer emits a multi-restore record, and the multi-entry
+   * semantics are deliberately unstated rather than pinned by a guard (LLP
+   * 0109 §restoredValue is single-primary only). A caller that needs every
+   * restored value should get a new `restoredValues: string[]` field, not
+   * read meaning into this one.
+   */
   restoredValue?: string
   /**
    * Set when a managed value was overridden externally and left in place. The
