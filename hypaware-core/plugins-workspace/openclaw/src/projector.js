@@ -24,6 +24,19 @@ const CLIENT_NAME = 'openclaw'
 const CLIENT_HEADER = 'x-hypaware-client'
 
 /**
+ * Written by the `openclaw-steering-plugin` (the OpenClaw-side npm
+ * package, not this adapter) on any request it has decided to steer
+ * through a shadow provider. Names the real upstream provider
+ * (`'anthropic'` or `'openai'`), never a `hypaware-*` shadow id, so the
+ * gateway's upstream presets know which static `base_url` to forward to
+ * regardless of which path the shadow provider's own client happened to
+ * hit.
+ *
+ * @ref LLP 0161#upstream-header [implements]: the one wire contract the steering plugin and this adapter agree on byte-for-byte
+ */
+const UPSTREAM_HEADER = 'x-hypaware-upstream'
+
+/**
  * How much of the system prompt feeds the session hash. The head is
  * stable across the turns of one OpenClaw agent conversation while the
  * tail can grow with injected context, so a bounded prefix keys the
@@ -129,6 +142,7 @@ export function createOpenclawExchangeProjector() {
  * depend on plugin activation order.
  *
  * @ref LLP 0109#gateway-capture [constrained-by]: the preset is identical and the name must stay `anthropic` (LLP 0016)
+ * @ref LLP 0161#upstream-presets [implements]: the x-hypaware-upstream precedence rung sits above the existing path/header checks
  * @returns {AiGatewayUpstreamPreset}
  */
 export function anthropicUpstreamPreset() {
@@ -139,15 +153,62 @@ export function anthropicUpstreamPreset() {
     path_prefix: '/v1/messages',
     priority: 100,
     match(input) {
+      if (steersTo(input.headers, 'anthropic')) return true
       if (isAnthropicPath(input.path)) return true
       return hasAnthropicHeaderSignature(input.headers)
     },
   }
 }
 
+/**
+ * The OpenAI upstream preset, registered by this plugin so an
+ * OpenClaw-only install (no Codex plugin active) still routes OpenAI
+ * Chat Completions-shaped traffic upstream once the steering plugin
+ * starts sending it. Config values (`name`, `base_url`, `path_prefix`,
+ * `provider`) are byte-identical in shape to `@hypaware/codex`'s
+ * existing `openai` preset registration: same real endpoint, so
+ * whichever plugin registers last wins the preset-map slot without
+ * changing where traffic goes.
+ *
+ * @ref LLP 0161#upstream-presets [implements]: openai preset registration, byte-identical in shape to @hypaware/codex's, plus the x-hypaware-upstream precedence rung
+ * @returns {AiGatewayUpstreamPreset}
+ */
+export function openaiUpstreamPreset() {
+  return {
+    name: 'openai',
+    base_url: 'https://api.openai.com',
+    provider: 'openai',
+    path_prefix: '/v1',
+    priority: 100,
+    match(input) {
+      if (steersTo(input.headers, 'openai')) return true
+      return isOpenaiPath(input.path)
+    },
+  }
+}
+
+/**
+ * Unconditional match when the steering plugin's `x-hypaware-upstream`
+ * header names this preset's provider: lets steered OpenClaw traffic
+ * route correctly even on a path or header signature shared with
+ * another adapter (e.g. Claude's `/v1/messages`), without changing how
+ * Claude/Codex traffic (which never sends this header) is routed today.
+ *
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
+ * @param {string} provider
+ */
+function steersTo(headers, provider) {
+  return headerValue(headers, UPSTREAM_HEADER) === provider
+}
+
 /** @param {string} path */
 export function isAnthropicPath(path) {
   return path === '/v1/messages' || path.startsWith('/v1/messages/')
+}
+
+/** @param {string} path */
+export function isOpenaiPath(path) {
+  return path === '/v1' || path.startsWith('/v1/')
 }
 
 /**

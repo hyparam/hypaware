@@ -1,17 +1,20 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import test from 'node:test'
 
 import {
   anthropicUpstreamPreset,
   createOpenclawExchangeProjector,
+  openaiUpstreamPreset,
   openclawSessionId,
 } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import {
   anthropicUpstreamPreset as claudeAnthropicUpstreamPreset,
   createClaudeExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { compileUpstreams, matchUpstream } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
 
 /**
  * @param {Record<string, unknown>} [overrides]
@@ -315,4 +318,94 @@ test('the anthropic upstream preset is equivalent to the claude plugin preset', 
       `match divergence on ${input.path} ${JSON.stringify(input.headers)}`
     )
   }
+})
+
+// @ref LLP 0161#upstream-presets [tests]: config values (name, base_url,
+// path_prefix, provider) are byte-identical in shape to @hypaware/codex's
+// existing openai preset registration; priority is the value LLP 0161
+// names explicitly.
+test('the openai upstream preset matches the shape of the codex plugin registration', () => {
+  const preset = openaiUpstreamPreset()
+  assert.equal(preset.name, 'openai')
+  assert.equal(preset.base_url, 'https://api.openai.com')
+  assert.equal(preset.provider, 'openai')
+  assert.equal(preset.path_prefix, '/v1')
+  assert.equal(preset.priority, 100)
+})
+
+// @ref LLP 0161#upstream-header [tests]: the steering plugin's
+// x-hypaware-upstream header wins routing outright, one rung above each
+// preset's existing path/header checks, for both providers.
+test('x-hypaware-upstream names a preset provider: match() is unconditional', () => {
+  const anthropic = anthropicUpstreamPreset()
+  const openai = openaiUpstreamPreset()
+  // A path/header shape that would not otherwise match either preset.
+  const unmatched = { method: 'POST', path: '/custom/route', headers: {} }
+  assert.equal(anthropic.match?.(unmatched), false)
+  assert.equal(openai.match?.(unmatched), false)
+
+  const steeredToAnthropic = {
+    method: 'POST',
+    path: '/custom/route',
+    headers: { 'x-hypaware-upstream': ['anthropic'] },
+  }
+  assert.equal(anthropic.match?.(steeredToAnthropic), true)
+  assert.equal(openai.match?.(steeredToAnthropic), false)
+
+  const steeredToOpenai = {
+    method: 'POST',
+    path: '/custom/route',
+    headers: { 'x-hypaware-upstream': ['openai'] },
+  }
+  assert.equal(openai.match?.(steeredToOpenai), true)
+  assert.equal(anthropic.match?.(steeredToOpenai), false)
+
+  // A header naming neither this preset's provider nor anything it
+  // otherwise matches on stays unmatched.
+  const steeredElsewhere = {
+    method: 'POST',
+    path: '/custom/route',
+    headers: { 'x-hypaware-upstream': ['chatgpt'] },
+  }
+  assert.equal(anthropic.match?.(steeredElsewhere), false)
+  assert.equal(openai.match?.(steeredElsewhere), false)
+})
+
+// @ref LLP 0161#upstream-header [tests]: regression - Claude and Codex
+// traffic never sends x-hypaware-upstream, so registering openclaw's new
+// openai preset alongside the existing anthropic preset must not change
+// where that unsteered traffic routes.
+test('regression: unsteered Claude/Codex traffic routes unchanged with both openclaw presets registered', () => {
+  // Both presets registered together, as an OpenClaw-only install (no
+  // Claude/Codex plugin active) would do: registerUpstreamPreset() is a
+  // last-write-wins Map.set keyed on name, so Claude's/Codex's own
+  // byte-identical registrations of the same names would not change this.
+  const upstreams = compileUpstreams([anthropicUpstreamPreset(), openaiUpstreamPreset()])
+
+  // Claude Code traffic: /v1/messages, no x-hypaware-upstream header. Must
+  // keep routing to the anthropic upstream despite the new openai preset's
+  // broader '/v1' path_prefix now also being registered.
+  const claude = matchUpstream(upstreams, 'POST', '/v1/messages', {})
+  assert.equal(claude?.name, 'anthropic', 'Claude /v1/messages still routes to the anthropic upstream')
+
+  // Codex-shaped traffic: /v1/chat/completions, no x-hypaware-upstream
+  // header. Falls through to the openai upstream this task adds.
+  const codex = matchUpstream(upstreams, 'POST', '/v1/chat/completions', {})
+  assert.equal(codex?.name, 'openai', 'Codex-shaped chat/completions traffic routes to the openai upstream')
+
+  // Generic Anthropic SDK traffic identified by header signature alone.
+  const anthropicSignature = matchUpstream(upstreams, 'POST', '/custom', {
+    'anthropic-version': ['2023-06-01'],
+  })
+  assert.equal(anthropicSignature?.name, 'anthropic')
+})
+
+// @ref LLP 0161#upstream-presets [tests]: required_upstreams grows to
+// declare both, now that the plugin actually registers both presets.
+test('the manifest declares both required upstreams', () => {
+  const manifest = JSON.parse(fs.readFileSync(
+    new URL('../../hypaware-core/plugins-workspace/openclaw/hypaware.plugin.json', import.meta.url),
+    'utf8'
+  ))
+  assert.deepEqual(manifest.contributes.client.required_upstreams, ['anthropic', 'openai'])
 })
