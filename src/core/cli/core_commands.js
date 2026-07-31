@@ -272,11 +272,13 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'attach',
-      summary: 'Attach an AI client to the local gateway',
-      usage: 'hyp attach [client] [--client <name>] [--dry-run] [--json]',
+      summary: 'Attach AI clients to the local gateway',
+      usage: 'hyp attach [client|all] [--client <name>] [--dry-run] [--json]',
       help: [
         'Points an AI client at the local gateway so its traffic is captured, by',
         'writing HypAware-managed settings into that client\'s own config file.',
+        'With no client name, attaches every active client adapter. Pass a client',
+        'name to limit the command to that client.',
         'Idempotent: re-running is a no-op. Reversible with hyp detach, which',
         'removes only the managed settings.',
         '',
@@ -297,11 +299,13 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'detach',
-      summary: 'Detach an AI client from the local gateway',
-      usage: 'hyp detach [client] [--client <name>] [--dry-run] [--json]',
+      summary: 'Detach AI clients from the local gateway',
+      usage: 'hyp detach [client|all] [--client <name>] [--dry-run] [--json]',
       help: [
         'Removes the HypAware-managed settings hyp attach wrote, leaving the',
         'client\'s own configuration otherwise intact. hyp unattach is an alias.',
+        'With no client name, detaches every known client integration. Pass a',
+        'client name to limit the command to that client.',
         '',
         'Detaching stops future capture for that client; it does not delete',
         'anything already recorded (see hyp purge for that).',

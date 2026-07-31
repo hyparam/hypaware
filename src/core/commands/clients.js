@@ -45,7 +45,7 @@ import { pluginStateDir } from './plugin.js'
  */
 
 /**
- * `hyp attach [client] [--client <name>] [--yes]`
+ * `hyp attach [client|all] [--client <name>] [--yes]`
  *
  * Resolves the `hypaware.ai-gateway` capability, looks up the named
  * client adapter, and dispatches to the adapter's `attach()`. Each
@@ -61,7 +61,7 @@ export async function runAttach(argv, ctx) {
 }
 
 /**
- * `hyp detach [client] [--client <name>]`
+ * `hyp detach [client|all] [--client <name>]`
  *
  * Reverses a client's attach. Unlike `attach`, detach does **not**
  * dispatch to a per-adapter hook: it routes through the single core,
@@ -613,12 +613,12 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
 
 /**
  * Parse an optional positional client name plus `--client <name>`,
- * `--dry-run`, and `--json` from argv.
+ * `--dry-run`, and `--json` from argv. With no name, target all clients.
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
   /** @type {{ client: string, dryRun: boolean, json: boolean, error?: string }} */
-  const r = { client: 'claude', dryRun: false, json: false }
+  const r = { client: 'all', dryRun: false, json: false }
   /** @type {string | undefined} */
   let requestedClient
   /**
