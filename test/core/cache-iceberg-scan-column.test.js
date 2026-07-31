@@ -64,7 +64,13 @@ async function collectColumn(source, options) {
   /** @type {SqlPrimitive[]} */
   const values = []
   const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-  for await (const chunk of scanColumn(options)) {
+  // squirreling@0.16.0's scanColumn return type is a union (bare
+  // AsyncIterable, what icebird@0.8.12 yields today, or the newer
+  // ScanColumnResults `.chunks()` wrapper); normalize before iterating.
+  // `@ref LLP 0055`.
+  const result = scanColumn(options)
+  const chunks = 'chunks' in result ? result.chunks() : result
+  for await (const chunk of chunks) {
     for (let i = 0; i < chunk.length; i++) values.push(chunk[i])
   }
   return values

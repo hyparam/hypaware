@@ -20,7 +20,7 @@ import {
 /**
  * @import { ColumnSpec, QueryScope } from '../../collectivus-plugin-kernel-types.js'
  * @import { AsyncDataSource } from 'squirreling'
- * @import { ScanColumnOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ScanColumnOptions, ScanColumnResults, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /** @param {string} prefix */
@@ -289,12 +289,19 @@ function fakeColumnSource(columns, columnValues) {
 }
 
 /**
- * @param {AsyncIterable<ArrayLike<SqlPrimitive>>} chunks
+ * Normalizes squirreling's `scanColumn` return, which is a union: a bare
+ * `AsyncIterable` (what every source in this stack yields today) or the
+ * newer `ScanColumnResults` wrapper (`.chunks()`); this test stack never
+ * produces the latter, but the pinned squirreling@0.16.0 type still declares
+ * the union, so consumption has to narrow it. `@ref LLP 0055`.
+ *
+ * @param {AsyncIterable<ArrayLike<SqlPrimitive>> | ScanColumnResults} result
  * @returns {Promise<SqlPrimitive[]>}
  */
-async function collectColumn(chunks) {
+async function collectColumn(result) {
   /** @type {SqlPrimitive[]} */
   const values = []
+  const chunks = 'chunks' in result ? result.chunks() : result
   for await (const chunk of chunks) {
     for (const v of Array.from(chunk)) values.push(v)
   }
