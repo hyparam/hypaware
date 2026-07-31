@@ -353,6 +353,24 @@ that reached this projector without having gone through the steering plugin
 at all, which should not happen once the steering plugin is installed, but a
 projector must not throw on traffic it can still parse).
 
+**"The same message list shape" is the Anthropic block vocabulary, not
+each wire's own.** `openaiMessages()` emits `text` / `tool_use` /
+`tool_result` blocks, so an OpenAI `tool_calls` array becomes `tool_use`
+blocks appended to the calling message and a `role: "tool"` envelope
+becomes a one-block `tool_result` message. This is not cosmetic tidying:
+`wireMatchKey` (Section 5) reduces a block to `{kind, identity}` and only
+recognizes tool calls and tool results under *those* kind names, so an
+OpenAI turn left in its native shape would hash through the generic
+fallback and could never match the same turn read back out of the session
+file by `sessionMatchKey`. One block vocabulary in, one comparable match
+key out, for both wires. For the same reason the leading
+`system`/`developer` messages of an OpenAI chat array are lifted into
+`system_text` (where Anthropic already carries its own `system` field)
+rather than projected as rows: the session file records no system-role
+message, so a system row would be a row settlement could never match, and
+keying the session hash off the system-prompt head stays one rule instead
+of two.
+
 @ref LLP 0157#adapter-rework [implements]: the projector "records the true
 upstream; it gains a shape-aware branch... for `openai-completions`, keeping
 the `priority: 110` ordering" and R6, the projection must record the true
