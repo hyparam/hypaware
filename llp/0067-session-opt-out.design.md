@@ -470,8 +470,15 @@ states: every `session_meta` Codex writes carries `payload.id`, so a header
 without one is a file nothing accounts for, there is no second field left to
 check its `session_id` against, and the control route reports `ignored: true`
 for whatever token it is handed. Counting an unvouchable header is not trusting
-it, exactly as [§cli-legacy-rollout](#cli-legacy-rollout) reads the raw line
-without trusting it.
+it, exactly as the missing-`session_id` refusal below reads the raw line without
+trusting it.
+
+That refusal is the one asked **second**. A header stating neither field is not
+a pre-field Codex - the back-fill that rule exists to defeat needs an `id` to
+back-fill *from* - so answering it with "upgrade Codex" would name a fix for a
+problem the file does not have. Both are fail-closed, so only the diagnosis is
+at stake, and the diagnosis is the whole value of a refusal a user has to act
+on.
 
 **The rule holds for this verb only, and the Codex `hypaware-privacy` skill body
 is now the exception.** Its Step 1 disk scan still drops an id-less header

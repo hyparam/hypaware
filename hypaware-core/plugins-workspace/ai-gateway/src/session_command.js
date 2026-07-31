@@ -609,9 +609,6 @@ export function resolveSessionIdForCli(args) {
         error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
       }
     }
-    if (only.sessionId === undefined) {
-      return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
-    }
     // Every `session_meta` Codex writes states `payload.id`, so a header
     // without one is a file nothing accounts for - truncated, hand-edited, or
     // written by something that is not Codex. Its `session_id` reads like an
@@ -619,11 +616,22 @@ export function resolveSessionIdForCli(args) {
     // one goes to a privacy control that reports success for whatever token it
     // is handed. Unconfirmable is unresolvable, the same rule that refuses a
     // blank container.
+    //
+    // This is asked BEFORE the missing-container question, because
+    // `legacyRolloutError` diagnoses one specific file - a Codex old enough to
+    // predate `session_id` - and names the thread id it does carry as the thing
+    // not to key on. A header stating neither field is not an old Codex, so
+    // answering it with "Upgrade Codex" would send the user after a fix for a
+    // problem this file does not have. Both refuse either way; only the
+    // diagnosis differs.
     if (only.threadId === undefined) {
       return {
         ok: false,
-        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) states no thread id (payload.id), which every session_meta Codex writes carries, so the header cannot be vouched for and the session_id on it is not evidence of the session you are in. Pass the session id explicitly: hyp session status <session-id>.`,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) states no thread id (payload.id), which every session_meta Codex writes carries, so the header cannot be vouched for and nothing it states about the session is evidence of the session you are in. Pass the session id explicitly: hyp session status <session-id>.`,
       }
+    }
+    if (only.sessionId === undefined) {
+      return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
     }
     return {
       ok: true,
@@ -740,6 +748,12 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
  * resolution exists to remove, and it would be invisible: on a root thread the
  * two coincide, so the wrong key only shows up on the subagent threads nobody
  * tests by hand.
+ *
+ * Both callers establish a thread id before reaching this, which the message
+ * relies on twice: "upgrade Codex" is only the right advice for a rollout old
+ * enough to predate the field, and "its thread id is NOT that container" names
+ * a value the header has to be carrying. A header stating neither field is a
+ * different failure and gets its own refusal.
  *
  * @param {string} which  how the rollout was selected, for the message
  * @param {string} names  rollout basename(s) the refusal is about

@@ -425,6 +425,43 @@ test('a LONE cwd match with no thread id refuses rather than resolving the conta
   assert.match(out.ok ? '' : out.error, /explicitly/, 'point at the escape hatch')
 })
 
+test('a header stating NEITHER field is not diagnosed as an old Codex', () => {
+  // Newly reachable once an id-less header survives to the single-candidate
+  // checks: before that it was dropped inside the reader and never got a
+  // diagnosis at all. Both refusals here are fail-closed, so this is about
+  // which one the user is sent to act on. `legacyRolloutError` describes one
+  // specific file - a Codex predating `session_meta.session_id` - and tells the
+  // user to upgrade; it also asserts "its thread id is NOT that container",
+  // naming a value this header does not carry. Answering a file nothing
+  // accounts for with "Upgrade Codex" sends the user after a fix for a problem
+  // it does not have.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', noThread: true, legacy: true, cwd: '/repo/here' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'still unresolvable: neither field is readable')
+  assert.match(out.ok ? '' : out.error, /payload\.id/, 'diagnose the field that is actually missing')
+  assert.equal(
+    (out.ok ? '' : out.error).includes('Upgrade Codex'),
+    false,
+    'a header with no payload.id is not an old Codex, so upgrading is not the fix'
+  )
+  assert.match(out.ok ? '' : out.error, /rollout-2026-01-01-aaa\.jsonl/)
+})
+
+test('a rollout that DOES state a thread id but no session_id is still the legacy diagnosis', () => {
+  // The other side of the ordering above: reordering the two refusals must not
+  // cost the old-Codex case its own message, which is the one that can actually
+  // be acted on.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-06-old.jsonl', id: 'thread-legacy', legacy: true, cwd: '/repo/here' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false)
+  assert.match(out.ok ? '' : out.error, /Upgrade Codex/)
+  assert.match(out.ok ? '' : out.error, /carries no session_id/)
+})
+
 test('a stated thread ignores an id-less rollout entirely: that path is identity, not counting', () => {
   // The counting change above must not leak into `resolveFromStatedThread`.
   // There a header stating no thread names nothing to compare against, so it is
