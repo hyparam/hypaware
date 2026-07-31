@@ -258,10 +258,13 @@ has the symmetric fallback.
   warn on every turn of an ordinary session whose `session_meta.cwd` is a
   subdirectory of its workspace, which is the frequency objection already open
   against the existing signal, so the two want settling together rather than
-  separately. The other two are filed so they do not live only here. Because the key keeps
-  enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
-  declared workspace) carries that workspace's identity even though the
-  directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
+  separately. The other two are filed so they do not live only here. Because the
+  key keeps enriching, a row recorded where it used to drop (an ignored declared
+  workspace outranked by a clean `cwd`, in-band since #476 and, now that the key
+  ranks below it, from the **rollout** too: demoting the key widens this case to
+  the whole subscription route rather than leaving it to the in-band one) carries
+  that workspace's identity even though the directory it names is
+  `.hypignore`-ignored: the gate is scoped by `cwd`
   ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
   source (#481). And the gate does not canonicalize paths, so *which spelling*
   reaches it decides the verdict: a symlinked spelling of an ignored directory

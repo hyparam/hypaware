@@ -263,6 +263,47 @@ test('the workspace key still gates when there is no rollout to outrank it (#480
   assert.equal(projection, USAGE_POLICY_DROP, 'the key is the last resort, not a discarded value')
 })
 
+// @ref LLP 0083#workspace-key-ranks-last [tests]: demoting the key moved it onto
+// its own `usableInBandCwd` call, so pin that the shape checks travelled with it.
+// Nothing else covers that call: every #471 case states the bad value in-band and
+// so exercises the FIRST call. Drop the wrapper from the third term and the whole
+// suite would still pass while a relative key reached the matcher, whose first act
+// is `path.resolve`, handing the verdict to wherever the daemon was started.
+test('a relative workspace key is refused rather than resolved against the daemon (#480, #471)', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    // The only governing `.hypignore` sits at exactly the mistaken base, so a
+    // key that reached the matcher would drop this exchange and say so.
+    resolver: ignoringResolver(path.resolve('sub')),
+    rolloutCwd: fakeRolloutCwd({}),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: { sub: {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), {
+    log: {
+      debug() {},
+      info() {},
+      error() {},
+      /** @param {string} message @param {Record<string, unknown>=} fields */
+      warn: (message, fields) => { warns.push({ message, fields }) },
+    },
+  }))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'no verdict is computed against the daemon cwd')
+  assert.equal(projection.cwd, undefined, 'and the relative key is not stamped on the row either')
+  const refused = warns.find((e) => e.message === 'plugin.codex.usage_policy_cwd_unusable')
+  assert.equal(refused?.fields?.error_kind, 'cwd_not_absolute', 'the refusal is observable, as it is for an in-band value')
+})
+
 // ---------------------------------------------------------------------
 // createRolloutCwdResolver: reads session_meta.cwd from the thread's rollout
 // file (the same source backfill reads), keyed by the thread id embedded in
