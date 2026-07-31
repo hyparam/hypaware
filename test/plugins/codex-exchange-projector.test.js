@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -1308,6 +1310,174 @@ test('no workspace-cwd refusal is logged when the key matches or the request sta
     [],
     'an uncontradicted workspace key is not a refusal',
   )
+})
+
+// ---------------------------------------------------------------------
+// The refusal signal reports a discarded guess, not a spelling difference
+// (#481)
+//
+// @ref LLP 0160#decision [tests]: a session running in a subdirectory of its
+// declared workspace is the commonest Codex shape there is, and an ancestor key
+// is a less specific name for the same tree rather than a guess about where the
+// session ran, so the location inference is not in doubt and nothing is
+// reported. NOT because taking the `cwd` can only tighten - it cannot only
+// tighten, and the third test below pins the case where it loosens. A key off
+// the ancestor chain is still a guess about a directory the session never ran
+// in, and still warns.
+// ---------------------------------------------------------------------
+
+test('an ordinary subdirectory-of-workspace session logs no workspace-cwd refusal (#481)', () => {
+  // Real directories and the real shared matcher, with no `.hypignore` anywhere:
+  // nothing privacy-relevant is happening, the row records exactly as it did
+  // before the gate learned to prefer the in-band cwd, and the only question is
+  // whether the warn fires. It must not - once per turn for the life of every
+  // such session devalues the privacy warns beside it.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481-'))
+  const workspace = path.join(root, 'proj')
+  const subdir = path.join(workspace, 'sub')
+  fs.mkdirSync(subdir, { recursive: true })
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const projector = createCodexExchangeProjector()
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: 'thread-481a',
+          workspaces: { [workspace]: { latest_git_commit_hash: 'feedface' } },
+        }),
+      }),
+      request_body: JSON.stringify({ cwd: subdir, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log }))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'nothing governs this tree')
+    assert.equal(projection.cwd, subdir, 'the row still records where the session actually ran')
+    assert.equal(projection.attributes.codex.workspace, workspace, 'and is still enriched from the key')
+    assert.deepEqual(
+      warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+      [],
+      'a subdirectory of the declared workspace is not a refused substitution',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a workspace key off the session cwd ancestry is still a refusal (#481)', () => {
+  // The other side of the narrowing, in both directions the ancestor test can
+  // fail: an unrelated sibling tree, and a key BELOW the cwd. The second one
+  // matters most - the key's own ancestor walk covers strictly more than the
+  // cwd's, so preferring the cwd there can genuinely loosen the verdict, which
+  // is precisely what this signal exists to report.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481b-'))
+  const proj = path.join(root, 'proj')
+  const other = path.join(root, 'other')
+  const deeper = path.join(proj, 'deeper')
+  fs.mkdirSync(deeper, { recursive: true })
+  fs.mkdirSync(other, { recursive: true })
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const projector = createCodexExchangeProjector()
+    for (const [key, cwd] of [[other, proj], [deeper, proj]]) {
+      projector.project(exchange({
+        path: '/backend-api/codex/responses',
+        provider: 'chatgpt',
+        request_headers: JSON.stringify({
+          'x-codex-turn-metadata': JSON.stringify({
+            thread_id: 'thread-481b',
+            workspaces: { [key]: {} },
+          }),
+        }),
+        request_body: JSON.stringify({ cwd, input: 'go' }),
+        response_body: JSON.stringify({ output_text: 'done' }),
+      }), { log })
+    }
+    const refusals = warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused')
+    assert.equal(refusals.length, 2, 'a sibling key and a key below the cwd are both refusals')
+    for (const refusal of refusals) {
+      assert.equal(refusal.fields?.error_kind, 'workspace_cwd_mismatch')
+      assert.ok(!JSON.stringify(refusal.fields).includes(root), 'paths stay hashed')
+      // @ref LLP 0160#decision [tests]: this signal reports a location
+      // inference, never a verdict. It carries no usage class, which is why
+      // narrowing it away on the ancestor chain removes a constant rather than
+      // privacy information - a reader could not have told a nested loosening
+      // from an ordinary subdirectory turn by it either way.
+      assert.equal(refusal.fields?.class, undefined, 'the refusal warn carries no usage class')
+      assert.equal(refusal.fields?.declared, undefined, 'nor a declared token')
+      assert.equal(refusal.fields?.governed_by, undefined, 'nor a governing declaration')
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an ancestor key that resolves MORE restrictively than the cwd is silent (documents the residue, #481)', () => {
+  // The disclosed cost of the ancestor test, pinned so it stays a decision
+  // rather than becoming a surprise. Nearest-governs is NOT monotone down the
+  // chain: `ignore` at the key with `local-only` beneath it resolves the cwd
+  // LESS restrictively than the key would have. The substitution is refused,
+  // the verdict genuinely loosens, and no refusal is reported - because the
+  // warn carries no class field and fired identically on subdirectory turns
+  // that loosen nothing, so it could never have reported this anyway. If this
+  // ever needs reporting it is a different signal, comparing resolve(key)
+  // against resolve(cwd) (LLP 0160#decision).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481c-'))
+  const workspace = path.join(root, 'private')
+  const subdir = path.join(workspace, 'scratch')
+  fs.mkdirSync(subdir, { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.hypignore'), 'ignore\n')
+  fs.writeFileSync(path.join(subdir, '.hypignore'), 'local-only\n')
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const resolver = createUsagePolicyResolver({})
+    assert.equal(resolver.resolve(workspace).class, 'ignore', 'the key alone would have dropped')
+    assert.equal(resolver.resolve(subdir).class, 'local-only', 'the cwd records, withheld from forwarding')
+    const projection = /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: 'thread-481c',
+          workspaces: { [workspace]: {} },
+        }),
+      }),
+      request_body: JSON.stringify({ cwd: subdir, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log }))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the carve-out records')
+    assert.deepEqual(
+      warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+      [],
+      'the ancestor test reports the location inference, not a verdict change',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {

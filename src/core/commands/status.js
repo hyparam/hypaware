@@ -194,6 +194,17 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_sync: report.clientSync
       ? { syncing: report.clientSync.syncing, local_only: report.clientSync.localOnly }
       : null,
+    // Client surfaces the daemon's gateway actually produced rows for (LLP
+    // 0164). Always an array so a consumer can pin the key; empty means "no
+    // daemon has recorded any", which is not the same as "no traffic ever" -
+    // the cache is the durable record, this is only the activity signal.
+    // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: --json carries the machine-readable last-seen list
+    recent_entrypoints: report.recentEntrypoints.map((e) => ({
+      entrypoint: e.entrypoint,
+      client_name: e.clientName,
+      last_seen: e.lastSeen,
+      rows: e.rows,
+    })),
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -367,6 +378,24 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     )
   }
 
+  // Which client surfaces have actually produced rows, and when (LLP 0164).
+  // This is the line that answers "did Codex Desktop traffic arrive?" and
+  // "did Claude Desktop's 3p route land?" without a query. Rendered only when
+  // the daemon recorded something, so an install that has never captured
+  // keeps the V1 text surface unchanged; the entrypoint strings are printed
+  // verbatim because they are the client's to choose, and they are the exact
+  // values a follow-up `ai_gateway_messages` query filters on.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status names recent client surfaces and their age
+  if (report.recentEntrypoints.length > 0) {
+    stdout.write('  recent clients:\n')
+    for (const e of report.recentEntrypoints) {
+      const client = e.clientName ? `  (${e.clientName})` : ''
+      stdout.write(
+        `    - ${e.entrypoint}${client}  last seen ${formatEntrypointAge(e.lastSeen)}, ${e.rows} row${e.rows === 1 ? '' : 's'}\n`
+      )
+    }
+  }
+
   stdout.write(`  cache:           ${cacheRoot}\n`)
   stdout.write(
     `  cache retention: ${report.retention.days} days${
@@ -460,6 +489,31 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       }
     }
   }
+}
+
+/**
+ * Human-readable age of a `recent clients` entry. Coarse on purpose: the
+ * question the line answers is "was that just now, or last week?", and a
+ * precise timestamp would invite reading the value as a query bound it is
+ * not (the durable record is the cache). A future timestamp - a status file
+ * written under a clock that has since gone backwards - reads as `just now`
+ * rather than a negative age.
+ *
+ * @param {string} lastSeen ISO timestamp
+ * @param {number} [nowMs]
+ * @returns {string}
+ */
+export function formatEntrypointAge(lastSeen, nowMs = Date.now()) {
+  const thenMs = Date.parse(lastSeen)
+  if (Number.isNaN(thenMs)) return 'at an unreadable time'
+  const deltaSec = Math.floor((nowMs - thenMs) / 1000)
+  if (deltaSec < 60) return 'just now'
+  const minutes = Math.floor(deltaSec / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 }
 
 /**
