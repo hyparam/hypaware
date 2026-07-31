@@ -248,11 +248,19 @@ export async function readOpenclawSessionMessages(filePath) {
  * `undefined` when the line is not a `type: "message"` record. Guards the
  * same way the header parse does (rules 1-3 above), applied to the fields
  * LLP 0158's Context names as present on a message envelope: `id` and a
- * timestamp on every message, `model`/`provider`/`api`/`stopReason`/`usage`
- * on an assistant one. Every field this function does not normalize (role,
- * content blocks, and anything else OpenClaw writes) is still reachable
- * through `record`, the untouched envelope, so a caller that needs one is
+ * timestamp on every message, `role` and `content` on every message,
+ * `model`/`provider`/`api`/`stopReason`/`usage` on an assistant one. Every
+ * field this function does not normalize (`parentId`, `idempotencyKey`,
+ * `toolCallId`, and anything else OpenClaw writes) is still reachable
+ * through `record`, the untouched record line, so a caller that needs one is
  * not blocked on this reader growing a field for it.
+ *
+ * `role` and `content` are normalized here rather than left to `record`
+ * precisely because their location is the non-obvious part
+ * ({@link openclawMessageEnvelope}): both consumers used to reach into
+ * `record.role`/`record.content` themselves, so both read one level too high
+ * and both dropped every real session (#543). A field whose *address* is the
+ * thing that is easy to get wrong belongs to the one reader.
  *
  * @param {string} line
  * @returns {OpenclawSessionMessage | undefined}
@@ -261,22 +269,72 @@ function parseOpenclawSessionMessage(line) {
   const row = parseMaybeJson(line)
   if (!isPlainObject(row)) return undefined
   if (row.type !== 'message') return undefined
+  const envelope = openclawMessageEnvelope(row)
   /** @type {OpenclawSessionMessage} */
   const message = { record: row }
-  const id = nonBlankString(row.id)
+  const id = nonBlankString(messageField(envelope, row, 'id'))
   if (id !== undefined) message.id = id
-  const timestampMs = parseTimestampMs(row.timestamp)
+  const timestampMs = parseTimestampMs(messageField(envelope, row, 'timestamp'))
   if (timestampMs !== undefined) message.timestampMs = timestampMs
-  const model = nonBlankString(row.model)
+  const role = nonBlankString(messageField(envelope, row, 'role'))
+  if (role !== undefined) message.role = role
+  const content = messageField(envelope, row, 'content')
+  if (content !== undefined) message.content = content
+  const model = nonBlankString(messageField(envelope, row, 'model'))
   if (model !== undefined) message.model = model
-  const provider = nonBlankString(row.provider)
+  const provider = nonBlankString(messageField(envelope, row, 'provider'))
   if (provider !== undefined) message.provider = provider
-  const api = nonBlankString(row.api)
+  const api = nonBlankString(messageField(envelope, row, 'api'))
   if (api !== undefined) message.api = api
-  const stopReason = nonBlankString(row.stopReason)
+  const stopReason = nonBlankString(messageField(envelope, row, 'stopReason'))
   if (stopReason !== undefined) message.stopReason = stopReason
-  if (isPlainObject(row.usage)) message.usage = row.usage
+  const usage = messageField(envelope, row, 'usage')
+  if (isPlainObject(usage)) message.usage = usage
   return message
+}
+
+/**
+ * The message envelope of a `type: "message"` record: the nested `message`
+ * object, not the record line.
+ *
+ * A record line states only what identifies and positions the message
+ * (`id`, `parentId`, `timestamp`, `type`); the message itself - `role`,
+ * `content`, and for an assistant turn `model`, `provider`, `api`,
+ * `stopReason`, `usage` - is one level down under `message`. Read at the top
+ * level every one of those fields is absent, which is not a loud failure:
+ * `provider` reads `undefined`, the backfill allowlist resolves the record to
+ * `unknown`, and the run reports a clean "0 rows" for a session it simply
+ * failed to read (#543). Fail-closed exclusion and a parse miss are
+ * indistinguishable at that seam, so the address has to be right here.
+ *
+ * The record line is the fallback, not a second address to prefer: a record
+ * that nests no `message` object states its fields on the line itself, and
+ * reading them there is better than reading a message with no role and no
+ * content. A field the envelope does state is never overridden by a
+ * same-named field on the line.
+ *
+ * @ref LLP 0158#decision [implements]: where a message's fields live is part
+ * of the one reader's knowledge, not something each consumer re-derives
+ * @param {Record<string, unknown>} row
+ * @returns {Record<string, unknown>}
+ */
+function openclawMessageEnvelope(row) {
+  return isPlainObject(row.message) ? row.message : row
+}
+
+/**
+ * One message field, read from the envelope first and the record line
+ * second. Not a substitution across fields (rule 1): it is the same field
+ * name, looked for at the two levels one record can state it at.
+ *
+ * @param {Record<string, unknown>} envelope
+ * @param {Record<string, unknown>} row
+ * @param {string} key
+ * @returns {unknown}
+ */
+function messageField(envelope, row, key) {
+  const value = envelope[key]
+  return value === undefined ? row[key] : value
 }
 
 /**

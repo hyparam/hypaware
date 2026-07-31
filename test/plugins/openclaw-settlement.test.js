@@ -131,6 +131,30 @@ function iso(ms) {
 }
 
 /**
+ * Put a `type: "message"` record's message fields where OpenClaw puts them:
+ * `id`, `parentId`, and `timestamp` stay on the record line, `role`,
+ * `content`, `model`, `provider`, `api`, `stopReason`, and `usage` nest under
+ * `message` (verified against a live install, #543). Tests above author the
+ * records flat and this is the one place that nests them, so the enricher is
+ * always measured against the shape it will meet on disk rather than against
+ * the flat envelope the suite used to invent.
+ *
+ * @param {Record<string, unknown>} record
+ * @returns {Record<string, unknown>}
+ */
+function sessionFileLine(record) {
+  if (record.type !== 'message') return record
+  const { type, id, timestamp, parentId, ...message } = record
+  return {
+    type,
+    ...(id !== undefined ? { id } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    parentId: parentId ?? null,
+    message: { ...message, ...(timestamp !== undefined ? { timestamp } : {}) },
+  }
+}
+
+/**
  * Write a session file under a throwaway `agents/<agentId>/sessions/` root
  * and return the root.
  *
@@ -144,7 +168,7 @@ function writeSessionFile(records, opts = {}) {
   fs.mkdirSync(sessionsDir, { recursive: true })
   fs.writeFileSync(
     path.join(sessionsDir, opts.fileName ?? `${NATIVE_SESSION_ID}.jsonl`),
-    records.map((record) => JSON.stringify(record)).join('\n') + '\n'
+    records.map((record) => JSON.stringify(sessionFileLine(record))).join('\n') + '\n'
   )
   return agentsDir
 }

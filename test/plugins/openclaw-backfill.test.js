@@ -36,6 +36,35 @@ async function stageEnv() {
 }
 
 /**
+ * One `type: "message"` line in the shape OpenClaw actually appends: `id`,
+ * `parentId`, and `timestamp` on the record line, and every message field
+ * (`role`, `content`, `model`, `provider`, `api`, `stopReason`, `usage`)
+ * nested under `message`. Tests author records flat and this is the one
+ * place that puts them where OpenClaw puts them, so no fixture can drift
+ * back to the invented flat envelope the suite used to assert against
+ * (#543: a flat fixture made a reader that reads flat look correct while
+ * every real session projected zero rows).
+ *
+ * Verified against a live `~/.openclaw/agents/main/sessions/<id>.jsonl`:
+ * record keys `['id', 'message', 'parentId', 'timestamp', 'type']`, assistant
+ * message keys `['api', 'content', 'idempotencyKey', 'model', 'provider',
+ * 'role', 'stopReason', 'timestamp', 'usage']`.
+ *
+ * @param {Record<string, unknown>} fields
+ * @returns {Record<string, unknown>}
+ */
+function messageLine(fields) {
+  const { id, timestamp, parentId, ...message } = fields
+  return {
+    type: 'message',
+    ...(id !== undefined ? { id } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    parentId: parentId ?? null,
+    message: { ...message, ...(timestamp !== undefined ? { timestamp } : {}) },
+  }
+}
+
+/**
  * Write one `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`.
  *
  * @param {{ homeDir: string }} env
@@ -64,7 +93,7 @@ async function writeSession(env, doc) {
       ...doc.header,
     }))
   }
-  for (const record of doc.records ?? []) lines.push(JSON.stringify({ type: 'message', ...record }))
+  for (const record of doc.records ?? []) lines.push(JSON.stringify(messageLine(record)))
   await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
   return filePath
 }
@@ -191,6 +220,27 @@ function provider(env, opts = {}) {
 // ---------------------------------------------------------------------------
 // Shape and native identity
 // ---------------------------------------------------------------------------
+
+// @ref LLP 0158#decision [tests]: the message envelope is nested under
+// `message`, so a fixture that states those fields flat is not a session file
+// OpenClaw ever wrote and cannot prove the reader reads one (#543).
+test('the fixture writes the record shape OpenClaw actually appends', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, { header: { cwd: '/work/repo' }, records: [ASSISTANT_RECORD] })
+    const lines = (await fs.readFile(filePath, 'utf8')).trim().split('\n')
+    const record = JSON.parse(lines[1])
+    assert.deepEqual(Object.keys(record).sort(), ['id', 'message', 'parentId', 'timestamp', 'type'])
+    assert.deepEqual(
+      Object.keys(record.message).sort(),
+      ['api', 'content', 'model', 'provider', 'role', 'stopReason', 'timestamp', 'usage']
+    )
+    assert.equal(record.provider, undefined, 'a real record states no provider at the top level')
+    assert.equal(record.message.provider, 'anthropic')
+  } finally {
+    await env.cleanup()
+  }
+})
 
 test('projects one item per session file, with the header cwd and native session id', async () => {
   const env = await stageEnv()
@@ -480,6 +530,70 @@ test('a claude-cli turn is excluded whole, prompt included, and reported as cove
     // already holds that whole turn.
     assert.equal(excluded[0].attributes?.record_count, 2)
     assert.equal(excluded[0].attributes?.covered_by, 'claude_transcript')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The #543 regression case, both sides of the allowlist in one real-shape
+// file: a session that mixes an `anthropic` turn with a `claude-cli` turn must
+// PARTIALLY project. Before the envelope fix every record of every real
+// session read `provider: undefined`, so the whole file resolved to `unknown`
+// and the run reported `sessions_projected: 0` with an `excluded_backend`
+// event naming a provider no session file ever stated.
+test('a mixed real-shape session partially projects: anthropic turns land, claude-cli turns stay excluded', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        {
+          id: 'msg-user-2',
+          timestamp: '2026-07-30T10:01:00.000Z',
+          role: 'user',
+          content: [{ type: 'text', text: 'delegate this' }],
+        },
+        {
+          id: 'msg-asst-2',
+          timestamp: '2026-07-30T10:01:05.000Z',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          model: 'claude-sonnet-4-6',
+          provider: 'claude-cli',
+          api: 'anthropic-messages',
+          stopReason: 'end_turn',
+          usage: { input: 4, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 6, cost: 0 },
+        },
+      ],
+    })
+    const { ctx, entries } = runContext()
+    const { items, events } = await collect(provider(env).run(ctx))
+
+    assert.equal(items.length, 1, 'the anthropic half of the session must project')
+    assert.deepEqual(
+      value(items[0]).messages.map((/** @type {any} */ m) => m.message_id),
+      ['msg-user-1', 'msg-asst-1']
+    )
+    const excluded = events.filter((e) => e.event === 'excluded_backend')
+    assert.deepEqual(excluded.map((e) => e.attributes?.provider), ['claude-cli'])
+    assert.equal(excluded[0].attributes?.record_count, 2)
+    assert.equal(excluded[0].attributes?.covered_by, 'claude_transcript')
+
+    const complete = entries.find((e) => e.message === 'openclaw.backfill.scan_complete')
+    assert.equal(complete.fields.sessions_projected, 1)
+    assert.equal(complete.fields.messages_projected, 2)
+    assert.equal(complete.fields.records_excluded, 2)
+
+    // The usage spelling a real file uses lands under the gateway names too.
+    const rows = await materialize(items[0])
+    assert.deepEqual(attributesOf(rows[1]).usage, {
+      input_tokens: 11,
+      output_tokens: 7,
+      cache_read_tokens: 3,
+      cache_write_tokens: 2,
+    })
   } finally {
     await env.cleanup()
   }

@@ -181,6 +181,15 @@ test('a session file with no trailing newline is still one whole first line', ()
 /* The full-transcript iteration: message records only                 */
 /* ------------------------------------------------------------------ */
 
+// The record shape is the real one, verified against a live
+// `~/.openclaw/agents/main/sessions/<id>.jsonl` (#543): the record line
+// carries `id`, `parentId`, `timestamp`, `type`, and every message field
+// (`role`, `content`, `model`, `provider`, `api`, `stopReason`, `usage`)
+// lives one level down under `message`. The suite used to assert against a
+// flat envelope OpenClaw never writes, which is why a reader that read flat
+// looked correct while every real session projected zero rows.
+//
+// @ref LLP 0158#decision [tests]: the message-envelope read rule
 test('readOpenclawSessionMessages returns only type:"message" records, in file order', async () => {
   const file = tempSessionFile([
     headerLine({ id: 'session-abc', cwd: '/repo/here' }),
@@ -188,22 +197,31 @@ test('readOpenclawSessionMessages returns only type:"message" records, in file o
     JSON.stringify({
       type: 'message',
       id: 'msg-1',
+      parentId: null,
       timestamp: '2026-07-30T00:00:00.000Z',
-      role: 'user',
-      content: [{ type: 'text', text: 'hi' }],
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'hi' }],
+        timestamp: '2026-07-30T00:00:00.000Z',
+      },
     }),
     JSON.stringify({ type: 'thinking_level_change', level: 'high' }),
     JSON.stringify({
       type: 'message',
       id: 'msg-2',
+      parentId: 'msg-1',
       timestamp: '2026-07-30T00:00:05.000Z',
-      role: 'assistant',
-      model: 'claude-x',
-      provider: 'anthropic',
-      api: 'anthropic-messages',
-      stopReason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 20 },
-      content: [{ type: 'text', text: 'hello' }],
+      message: {
+        role: 'assistant',
+        model: 'claude-x',
+        provider: 'anthropic',
+        api: 'anthropic-messages',
+        stopReason: 'end_turn',
+        idempotencyKey: 'idem-1',
+        usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: 0.01 },
+        content: [{ type: 'text', text: 'hello' }],
+        timestamp: '2026-07-30T00:00:05.000Z',
+      },
     }),
     JSON.stringify({ type: 'custom', note: 'irrelevant' }),
   ].join('\n') + '\n')
@@ -213,17 +231,67 @@ test('readOpenclawSessionMessages returns only type:"message" records, in file o
 
   assert.equal(messages[0].id, 'msg-1')
   assert.equal(messages[0].timestampMs, Date.parse('2026-07-30T00:00:00.000Z'))
+  assert.equal(messages[0].role, 'user')
   assert.equal(messages[0].model, undefined)
   assert.equal(messages[0].usage, undefined)
-  assert.deepEqual(messages[0].record.content, [{ type: 'text', text: 'hi' }])
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: 'hi' }])
 
   assert.equal(messages[1].id, 'msg-2')
+  assert.equal(messages[1].role, 'assistant')
   assert.equal(messages[1].model, 'claude-x')
   assert.equal(messages[1].provider, 'anthropic')
   assert.equal(messages[1].api, 'anthropic-messages')
   assert.equal(messages[1].stopReason, 'end_turn')
-  assert.deepEqual(messages[1].usage, { input_tokens: 10, output_tokens: 20 })
-  assert.deepEqual(messages[1].record.content, [{ type: 'text', text: 'hello' }])
+  assert.deepEqual(messages[1].usage, {
+    input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: 0.01,
+  })
+  assert.deepEqual(messages[1].content, [{ type: 'text', text: 'hello' }])
+  // The untouched record line stays reachable for anything not normalized.
+  assert.equal(messages[1].record.parentId, 'msg-1')
+})
+
+test('a message field the nested envelope states is never read off the record line', async () => {
+  // Both levels state `provider`; the envelope owns the message's fields, so
+  // its value is the one that decides the backfill allowlist. A record line
+  // that happens to carry a same-named field cannot override it.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    provider: 'record-line-value',
+    message: { role: 'assistant', provider: 'anthropic', content: [{ type: 'text', text: 'x' }] },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].provider, 'anthropic')
+})
+
+test('a record with no nested envelope reads its fields off the record line', async () => {
+  // The envelope is where OpenClaw v3 writes them, but the record line is the
+  // envelope's own fallback: a record that nests nothing states whatever it
+  // states, rather than reading as a message with no role and no content.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    timestamp: '2026-07-30T00:00:00.000Z',
+    role: 'assistant',
+    provider: 'anthropic',
+    content: [{ type: 'text', text: 'hello' }],
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].role, 'assistant')
+  assert.equal(messages[0].provider, 'anthropic')
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: 'hello' }])
+})
+
+test('the record line supplies the timestamp when the nested envelope states none', async () => {
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    timestamp: '2026-07-30T00:00:00.000Z',
+    message: { role: 'user', content: 'hi' },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].timestampMs, Date.parse('2026-07-30T00:00:00.000Z'))
+  assert.equal(messages[0].content, 'hi')
 })
 
 test('readOpenclawSessionMessages skips blank and unparseable lines without aborting the rest', async () => {

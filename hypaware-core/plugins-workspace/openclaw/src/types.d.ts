@@ -15,20 +15,26 @@ export interface OpenclawSessionHeader {
 /**
  * One `type: "message"` record recovered from an OpenClaw session
  * transcript. The normalized fields are the ones LLP 0158's Context names as
- * present on every message envelope (`id`, a timestamp) or on an assistant
- * envelope specifically (`model`, `provider`, `api`, `stopReason`, `usage`);
- * each is a present-value read off the envelope, absent when the field is
- * missing, non-string (for the string fields), or blank, following the same
- * "unconfirmable is unresolvable" rule the header applies. `record` is the
- * full raw envelope, for a caller that needs a field this reader does not
- * normalize (e.g. message content/blocks); it is an untyped bag rather than
- * `JsonObject` on purpose, the same choice `CodexRolloutItem.payload` makes
- * for the same reason (an arbitrary parsed line, not a value this reader
- * constructs and can vouch for the shape of).
+ * present on every message envelope (`id`, a timestamp, `role`, `content`)
+ * or on an assistant envelope specifically (`model`, `provider`, `api`,
+ * `stopReason`, `usage`); each is read off the nested `message` envelope,
+ * falling back to the record line, and is absent when the field is missing,
+ * non-string (for the string fields), or blank, following the same
+ * "unconfirmable is unresolvable" rule the header applies. `content` is
+ * whatever the envelope wrote (a string or a block array), passed through
+ * unnormalized. `record` is the full raw record line, for a caller that
+ * needs a field this reader does not normalize (`parentId`, `toolCallId`);
+ * it is an untyped bag rather than `JsonObject` on purpose, the same choice
+ * `CodexRolloutItem.payload` makes for the same reason (an arbitrary parsed
+ * line, not a value this reader constructs and can vouch for the shape of).
+ * Reaching into `record` for `role`/`content` is the #543 defect: those live
+ * under `message`, and the reader is the one place that knows it.
  */
 export interface OpenclawSessionMessage {
   id?: string
   timestampMs?: number
+  role?: string
+  content?: unknown
   model?: string
   provider?: string
   api?: string
