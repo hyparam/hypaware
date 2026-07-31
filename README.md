@@ -223,6 +223,7 @@ hyp smoke hypignore_capture_drop
 hyp smoke otel_loopback_capture
 hyp smoke local_parquet_export
 hyp smoke status_diagnostics
+hyp smoke bounded_query_refusal
 ```
 
 Finally, exercise the manual gate end-to-end on at least one macOS host
