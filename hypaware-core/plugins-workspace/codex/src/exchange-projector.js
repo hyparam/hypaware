@@ -253,9 +253,12 @@ export function createCodexExchangeProjector(opts = {}) {
  * When the client states no thread id the container is still the right key for a
  * ROOT thread (there the two are one uuid). That was once the common
  * subscription-route shape, a bare `session-id` header; it is not any more, and
- * that header name is not one Codex emits or this file reads
- * (@ref LLP 0151#real-header-names). Since the adapter began reading the body's
- * flat `client_metadata` map, which Codex fills with BOTH ids on every request
+ * that header name is not one this file reads on any path
+ * (@ref LLP 0151#real-header-names). The name is real on Codex's compaction and
+ * websocket paths, so leaving it unread is a decision rather than an oversight:
+ * those requests state the same ids in the turn-metadata blob
+ * (@ref LLP 0165#header-audit-correction). Since the adapter began reading the
+ * body's flat `client_metadata` map, which Codex fills with BOTH ids on every request
  * (@ref LLP 0151#body-is-authority), an ordinary Codex turn states its thread and
  * is answered by the branch above. What is left for the two lines below is a turn
  * that names a container on a Codex-owned surface while naming no `thread_id` on
