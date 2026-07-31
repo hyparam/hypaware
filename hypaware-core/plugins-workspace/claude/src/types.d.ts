@@ -87,4 +87,23 @@ export interface ClaudeAttachOptions {
   binPath?: string
 }
 
-export type ClaudeAttachResult = { changed: true; prevValue?: string } | { changed: false }
+export interface ClaudeAttachChanged {
+  changed: true
+  /** The pre-existing `env.ANTHROPIC_BASE_URL` attach backed up, if any. */
+  prevValue?: string
+  /**
+   * One notice per `env` / `hooks` block this run found present on disk with
+   * the wrong JSON type and had to rebuild. Attach backs the displaced value
+   * up into the marker's `prev_malformed` and keeps succeeding (LLP 0163), so
+   * this is the only thing that tells the user a hand-edit was moved aside.
+   *
+   * A list, not a joined string: attach's callers render it (`hyp attach`
+   * prints a line each, `--json` echoes the array) and there is no reason to
+   * hand them a field they would have to split. Omitted when nothing was
+   * displaced, including on a re-attach whose backup was carried over from an
+   * earlier run.
+   */
+  warnings?: string[]
+}
+
+export type ClaudeAttachResult = ClaudeAttachChanged | { changed: false }

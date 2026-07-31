@@ -664,6 +664,7 @@ rules.
 | `ai-gateway/src/session_command.js` `readRolloutMeta` | `@ref LLP 0067#cli-session-id [implements]` (raw line, so an absent `session_id` is not the back-filled thread id) |
 | `codex/src/backfill.js` `buildSession` / `projectedExchangeFromSession` | `@ref LLP 0030#decision [implements]` (container in `session_id`, thread in `conversation_id`) |
 | `ai-gateway/src/session_command.js` `provenanceNotes` | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli-provenance [implements]` |
+| `ai-gateway/src/session_command.js` `EPHEMERAL_NOTE` (one caveat string, printed by the writer and the reader) | `@ref LLP 0066#readable [implements]` (R9: name both ways an opt-out stops applying, not only the restart) |
 | `ai-gateway/src/index.js` `session` verb group | `@ref LLP 0067#cli [implements]` |
 | `ai-gateway/src/api.js` `ignoredSessions` on `GatewayState` | `@ref LLP 0066#ephemeral` |
 | claude/codex projector session drop | `@ref LLP 0066#enforcement [implements]` (alongside the existing `@ref LLP 0050` at the same seam) |

@@ -10,6 +10,7 @@ export {
   governingListEntry,
   isEqualOrDescendant,
   sameDirectory,
+  scopeGovernance,
   scopeGoverns,
 } from './matcher.js'
 // The two mechanisms by which one directory has several spellings, and the gate
@@ -22,7 +23,13 @@ export { canonicalizeDirSync, canonicalSpellings, PATH_CANONICALIZE_ERROR_KIND }
 // Unicode-NFC always, case only on a volume probed case-insensitive. Exported so
 // a caller that has to agree with the gate's verdict folds by the same rule
 // instead of growing a second one.
-export { createVolumeCaseProbe, foldPath, PATH_CASE_PROBE_ERROR_KIND } from './fold.js'
+export {
+  createVolumeCaseProbe,
+  foldPath,
+  sameDirectoryOnDisk,
+  PATH_ALIAS_PROBE_ERROR_KIND,
+  PATH_CASE_PROBE_ERROR_KIND,
+} from './fold.js'
 // The terminal capture-seam drop sentinel (LLP 0050): an adapter projector
 // returns it for an `.hypignore`-ignored exchange, and the gateway dispatcher
 // stops on it (never falls through to a later projector) and logs it as a drop.

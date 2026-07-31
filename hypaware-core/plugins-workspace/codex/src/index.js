@@ -101,7 +101,14 @@ export async function activate(ctx) {
   // `.hypignore` fails open for that whole traffic class and its rows record
   // cwd = NULL.
   gateway.registerExchangeProjector(createCodexExchangeProjector({
-    rolloutCwd: createRolloutCwdResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+    rolloutCwd: createRolloutCwdResolver({
+      sessionsDir: path.join(codexHome, 'sessions'),
+      // So the identity guard's refusal (a rollout whose `session_meta.payload.id`
+      // is not the thread it was located for) is visible instead of silent: the
+      // consequence is a row recorded with cwd = NULL, which otherwise looks
+      // identical to a not-yet-written rollout.
+      log: ctx.log,
+    }),
     localOnlyListPath: localOnlyList,
   }))
 
