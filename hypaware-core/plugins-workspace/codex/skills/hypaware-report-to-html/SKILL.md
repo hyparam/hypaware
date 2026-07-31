@@ -9,7 +9,7 @@ The `~/hypaware-reports/` git repo holds the outputs of the HypAware report skil
 `hypaware-ai-usage-report` (the merged team review, since 2026-07-15 it also carries
 the former adoption / spend / improvement content; since 2026-07-16 its ranked changes
 live on a `proposed-changes.md` section page and the one-pager's Proposed changes block
-is a short pointer to it) and `hypaware-ai-security-report`; archives may hold adoption / spend /
+is a short pointer to it); archives may hold adoption / spend /
 improvement one-pagers from the superseded skills. Each report is a dated one-pager
 `<slug>.md` at the top level,
 optionally with a sibling `<slug>/` folder of section `.md` files. This skill turns that
@@ -376,7 +376,7 @@ even when the content skills produced plain Markdown.
   component markup still looks dramatically better after step 2 (type, tables, code, and
   the auto hero thesis). Charts and metric cards are added report-by-report in the source
   `.md`; they are enrichments, not required.
-- **Interplay with archiving.** `hypaware-archive-reports` moves the reports **and** the
+- **Interplay with archiving.** An archive pass moves the reports **and** the
   built `html/` and `index.html` into `archive/<timestamp>/`, then clears the top level.
   Normal cycle: archive old batch → generate new reports → **run this skill** to rebuild
   `html/` + `index.html` → commit. Don't run this skill *while* an archive is in progress.
