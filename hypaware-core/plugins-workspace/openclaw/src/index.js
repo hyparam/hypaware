@@ -104,10 +104,10 @@ export async function activate(ctx) {
   if (openaiPreset.name !== OPENAI_UPSTREAM_NAME) {
     throw new Error(`@hypaware/openclaw: unexpected upstream preset name ${openaiPreset.name}`)
   }
-  // Same "register iff not already present" reasoning as the anthropic
-  // preset above: the Codex plugin may or may not be active, and both
-  // plugins contribute the identical `openai` preset, so whichever
-  // registers last changes nothing.
+  // NOT the same reasoning as the anthropic preset above: Codex's `openai`
+  // registration declares no `priority` and no `match()`, so the two copies
+  // are not interchangeable and whichever registers last DOES change
+  // routing. See `openaiUpstreamPreset`'s "KNOWN DIVERGENCE" note.
   // @ref LLP 0161#upstream-presets [implements]: registers the openai upstream preset itself iff not already present, so an OpenClaw-only install still routes steered OpenAI-shaped traffic
   gateway.registerUpstreamPreset(openaiPreset)
 
@@ -151,6 +151,7 @@ export async function activate(ctx) {
   ctx.backfills.register(
     createOpenclawBackfillProvider({
       homeDir: ctx.env.HOME ?? os.homedir(),
+      env: ctx.env,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),

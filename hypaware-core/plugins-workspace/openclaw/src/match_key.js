@@ -77,7 +77,7 @@ function normalizeBlockKind(rawKind) {
 }
 
 /**
- * The canonical role+tuple hash both match-key builders below fund into.
+ * The canonical role+tuple hash both match-key builders below funnel into.
  *
  * @param {string} role
  * @param {Array<{ kind: string, identity: string }>} tuples

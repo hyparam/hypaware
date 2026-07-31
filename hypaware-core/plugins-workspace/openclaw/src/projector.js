@@ -187,11 +187,18 @@ export function createOpenclawExchangeProjector() {
 /**
  * The Anthropic upstream preset, registered by this plugin so an
  * OpenClaw-only install (no Claude plugin active) still routes
- * `/v1/messages` upstream. MUST stay byte-equivalent in meaning to the
- * Claude plugin's `anthropicUpstreamPreset()`: same `anthropic` name,
- * base URL, path prefix, priority, and match surface, because whichever
- * plugin registers last wins the preset-map slot and routing must not
- * depend on plugin activation order.
+ * `/v1/messages` upstream. Same `anthropic` name, base URL, path prefix
+ * and priority as the Claude plugin's `anthropicUpstreamPreset()`.
+ *
+ * KNOWN DIVERGENCE: the `x-hypaware-upstream` rung below exists only on
+ * this copy. `registerUpstreamPreset` is a name-keyed last-write-wins
+ * `Map.set`, so on an install where `@hypaware/claude` activates after
+ * this plugin, the Claude copy wins the slot and the rung is silently
+ * dropped. Harmless for Anthropic specifically (a steered
+ * `anthropic-messages` turn still matches on the `/v1/messages` path,
+ * which is what routed OpenClaw before the header existed), but see
+ * {@link openaiUpstreamPreset}, where the same divergence is not
+ * harmless.
  *
  * @ref LLP 0109#gateway-capture [constrained-by]: the preset is identical and the name must stay `anthropic` (LLP 0016)
  * @ref LLP 0161#upstream-presets [implements]: the x-hypaware-upstream precedence rung sits above the existing path/header checks
@@ -216,11 +223,20 @@ export function anthropicUpstreamPreset() {
  * The OpenAI upstream preset, registered by this plugin so an
  * OpenClaw-only install (no Codex plugin active) still routes OpenAI
  * Chat Completions-shaped traffic upstream once the steering plugin
- * starts sending it. Config values (`name`, `base_url`, `path_prefix`,
- * `provider`) are byte-identical in shape to `@hypaware/codex`'s
- * existing `openai` preset registration: same real endpoint, so
- * whichever plugin registers last wins the preset-map slot without
- * changing where traffic goes.
+ * starts sending it. `name`, `base_url`, `provider` and `path_prefix`
+ * match `@hypaware/codex`'s existing `openai` registration, so it points
+ * at the same real endpoint.
+ *
+ * KNOWN DIVERGENCE, and the load-bearing one: Codex's registration
+ * declares no `priority` and no `match()`, so this copy is NOT
+ * interchangeable with it, and `registerUpstreamPreset`'s name-keyed
+ * last-write-wins `Map.set` makes which one survives an activation-order
+ * accident. When Codex's wins, both the `x-hypaware-upstream` rung and
+ * `priority: 100` are gone, and a steered `openai-completions` turn
+ * (whose shadow `baseUrl` is the bare gateway origin, so its path is
+ * `/chat/completions`, not `/v1/chat/completions`) matches no upstream at
+ * all. Closing this needs the rung on Codex's registration too, which is
+ * a change to Codex's routing and so is not made here.
  *
  * @ref LLP 0161#upstream-presets [implements]: openai preset registration, byte-identical in shape to @hypaware/codex's, plus the x-hypaware-upstream precedence rung
  * @returns {AiGatewayUpstreamPreset}

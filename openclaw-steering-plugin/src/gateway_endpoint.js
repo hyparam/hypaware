@@ -6,11 +6,13 @@
 const DEFAULT_GATEWAY_ENDPOINT = 'http://127.0.0.1:18521'
 
 /**
- * The environment variable the HypAware install sets when it configures
- * OpenClaw, carrying the local AI gateway's `localEndpoint()` value
- * (LLP 0161#steering-plugin). Resolved once at plugin load, matching
- * `gateway.localEndpoint()`'s own "ask the live gateway" contract as closely
- * as a process with no access to the HypAware kernel can.
+ * The environment variable carrying the local AI gateway's `localEndpoint()`
+ * value (LLP 0161#steering-plugin). Nothing on the HypAware side sets it:
+ * this package runs inside OpenClaw's process, so the operator puts it in
+ * `~/.openclaw/openclaw.json`'s `env` block (docs/ACCEPTANCE.md
+ * `## openclaw_capture` states the step). Resolved once at plugin load,
+ * matching `gateway.localEndpoint()`'s own "ask the live gateway" contract
+ * as closely as a process with no access to the HypAware kernel can.
  */
 export const GATEWAY_ENDPOINT_ENV_VAR = 'HYP_GATEWAY_ENDPOINT'
 

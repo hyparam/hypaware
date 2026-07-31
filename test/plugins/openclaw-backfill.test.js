@@ -182,7 +182,7 @@ const ASSISTANT_RECORD = {
 
 /**
  * @param {{ homeDir: string }} env
- * @param {{ resolver?: any }} [opts]
+ * @param {{ resolver?: any, env?: NodeJS.ProcessEnv }} [opts]
  */
 function provider(env, opts = {}) {
   return createOpenclawBackfillProvider({ homeDir: env.homeDir, ...opts })
@@ -541,6 +541,40 @@ test('every agent under the agents root is scanned, in a deterministic order', a
     const { items } = await collect(provider(env).run(runContext().ctx))
     assert.deepEqual(items.map((item) => value(item).session_id), ['sess-a', 'sess-b'])
     assert.deepEqual(items.map((item) => value(item).attributes.openclaw.agent_id), ['alpha', 'beta'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The agents root comes from the LLP 0158 reader's own `defaultOpenclawAgentsDir`,
+// not a private `path.join(homeDir, '.openclaw')`. A private copy silently
+// ignored `OPENCLAW_HOME`, so a relocated install backfilled zero sessions while
+// the settlement enricher (which does use the helper) read the real ones - the
+// two-consumers-two-copies drift LLP 0158 exists to prevent, applied to the
+// file's location rather than its parse.
+//
+// @ref LLP 0158#decision [tests]: the session-file location is the one reader's
+// knowledge, not something each consumer re-derives.
+test('a relocated install is found through OPENCLAW_HOME, the same way settlement finds it', async () => {
+  const env = await stageEnv()
+  try {
+    const openclawHome = path.join(env.homeDir, 'elsewhere')
+    const dir = path.join(openclawHome, 'agents', 'main', 'sessions')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, 'sess-relocated.jsonl'),
+      [
+        JSON.stringify({ type: 'session', id: 'sess-relocated', cwd: '/work/repo', timestamp: '2026-07-30T10:00:00.000Z' }),
+        JSON.stringify({ type: 'message', ...ASSISTANT_RECORD }),
+      ].join('\n') + '\n',
+      'utf8'
+    )
+    // Nothing at $HOME/.openclaw: only the override names a real install.
+    const { items } = await collect(
+      provider(env, { env: { OPENCLAW_HOME: openclawHome } }).run(runContext().ctx)
+    )
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).session_id, 'sess-relocated')
   } finally {
     await env.cleanup()
   }

@@ -649,8 +649,8 @@ export interface DetachFromDiskResult {
    * The prior value restored from the undo record.
    *
    * **Single-primary only.** An undo whose replay restores more than one
-   * prior (a `json_path` record with two still-ours `set` entries that each
-   * carry a `prev`) restores them all on disk but reports only one of them
+   * prior (a record with two still-ours `set` entries that each carry a
+   * `prev`) restores them all on disk but reports only one of them
    * here, and *which* one is unspecified. Unlike `warning` there is no fold
    * available: both consumers render this as a bare scalar
    * (`src/core/commands/clients.js` puts it in the `hyp detach --json`
@@ -666,8 +666,8 @@ export interface DetachFromDiskResult {
   restoredValue?: string
   /**
    * Set when a managed value was overridden externally and left in place. The
-   * `json` and `json_path` undos emit one notice per overridden key and join
-   * them with ` | ` when the undo left more than one behind (LLP 0045
+   * `json` undo emits one notice per overridden key and joins them with
+   * ` | ` when the undo left more than one behind (LLP 0045
    * §never-clobber-a-user-edit).
    *
    * **Display only: do not parse or split this field.** No separator is safe.

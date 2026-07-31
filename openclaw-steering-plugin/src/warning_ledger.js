@@ -9,17 +9,11 @@
 // @ref LLP 0149#decision [implements]: one rate-limited warning per
 // provider+cause naming provider, cause, session.
 
-const DEFAULT_WINDOW_MS = 5 * 60 * 1000
-
 /**
- * `operation`, `status`, and `detail` default to the pass-through ledger LLP
- * 0149 describes. They are per-record rather than per-ledger so the credential
- * and wire-parity hooks (LLP 0161#credentials-and-wire), which are degraded
- * capture rather than an uncaptured turn, can share this one rate limiter
- * instead of growing a second copy of it.
- *
- * @typedef {{ provider: string, cause: string, session?: string, operation?: string, status?: string, detail?: string }} UncapturedTurn
+ * @import { UncapturedTurn } from './types.js'
  */
+
+const DEFAULT_WINDOW_MS = 5 * 60 * 1000
 
 /**
  * @param {{

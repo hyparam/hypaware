@@ -36,9 +36,9 @@ were silent: no backup, no `prev_*` record on the marker, no warning, and a
 success exit. Whatever the user had written was gone and nothing said so.
 
 The sibling adapter answers the identical question the other way.
-`ensureObjectAt` in
-[`hypaware-core/plugins-workspace/openclaw/src/settings.js`](../hypaware-core/plugins-workspace/openclaw/src/settings.js)
-throws `MALFORMED_CONFIG` naming the offending path, on the ground that a
+`ensureObjectAt` in the OpenClaw adapter's `src/settings.js` (retired since,
+with the settings-file attach surface itself: [LLP 0143](./0143-openclaw-registers-no-attach-probe.decision.md))
+threw `MALFORMED_CONFIG` naming the offending path, on the ground that a
 non-object there is a config OpenClaw itself would reject, so hypaware refuses
 too rather than clobbering it. Two client plugins in one tree, opposite
 answers, and the destructive one carried no comment explaining itself

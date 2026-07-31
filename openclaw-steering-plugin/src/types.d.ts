@@ -118,6 +118,22 @@ export interface BeforeModelResolveResult {
   requestMeta?: Record<string, string>
 }
 
+/**
+ * One pass-through warning record the ledger rate-limits and emits.
+ * `operation`, `status`, and `detail` default to the LLP 0149 pass-through
+ * ledger's own values; they are per-record so the credential and wire-parity
+ * hooks (LLP 0161#credentials-and-wire), which are degraded capture rather
+ * than an uncaptured turn, can share the one rate limiter.
+ */
+export interface UncapturedTurn {
+  provider: string
+  cause: string
+  session?: string
+  operation?: string
+  status?: string
+  detail?: string
+}
+
 export interface OpenclawPluginApi {
   registerProvider(opts: RegisterProviderOptions): void
   on(

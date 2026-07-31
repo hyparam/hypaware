@@ -11,7 +11,11 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
-import { readOpenclawSessionHeader, readOpenclawSessionMessages } from './session_file.js'
+import {
+  defaultOpenclawAgentsDir,
+  readOpenclawSessionHeader,
+  readOpenclawSessionMessages,
+} from './session_file.js'
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
@@ -120,7 +124,7 @@ const SIBLING_ADAPTER_COVERAGE = [
  *
  * @param {{
  *   homeDir: string,
- *   openclawHome?: string,
+ *   env?: NodeJS.ProcessEnv,
  *   agentsDir?: string,
  *   clientName?: string,
  *   pluginName?: string,
@@ -132,7 +136,11 @@ const SIBLING_ADAPTER_COVERAGE = [
 export function createOpenclawBackfillProvider(opts) {
   const clientName = opts.clientName ?? DEFAULT_CLIENT_NAME
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
-  const agentsDir = opts.agentsDir ?? path.join(opts.openclawHome ?? defaultOpenclawHome(opts.homeDir), 'agents')
+  // Through the LLP 0158 reader's own location helper, never a private
+  // `path.join(homeDir, '.openclaw')`: that second opinion silently ignored
+  // `OPENCLAW_HOME`, so a relocated install backfilled zero sessions while the
+  // settlement enricher (which does use the helper) read the real ones.
+  const agentsDir = opts.agentsDir ?? defaultOpenclawAgentsDir(opts.env, opts.homeDir)
   // One `.hypignore` resolver per provider instance, holding its per-cwd cache
   // for the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
@@ -160,11 +168,6 @@ export function createOpenclawBackfillProvider(opts) {
       yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver })
     },
   }
-}
-
-/** @param {string} homeDir */
-export function defaultOpenclawHome(homeDir) {
-  return path.join(homeDir, '.openclaw')
 }
 
 /**
