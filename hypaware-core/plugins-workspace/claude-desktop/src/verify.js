@@ -86,9 +86,14 @@ export async function runVerify(argv, cmdCtx, opts) {
   cmdCtx.stdout.write('  2. Send it a message.\n')
   // 'local-agent' is what Desktop's 3p mode writes on the current build;
   // 'claude-desktop-3p' was observed on an earlier one (LLP 0133#attribution).
+  // Pointing at `hyp status` was aspirational until the gateway started
+  // tracking last-seen entrypoints: the command activates no plugins and
+  // reads no cache, so it had no way to see a row. It does now.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: "confirm capture via hyp status" is a check a human can actually run
   cmdCtx.stdout.write(
-    "  3. Confirm capture: rows land under entrypoint 'local-agent' (older builds: 'claude-desktop-3p') "
-    + "in ai_gateway_messages (check via 'hyp status' or 'hyp mcp').\n",
+    "  3. Confirm capture: run 'hyp status' and look for entrypoint 'local-agent' "
+    + "(older builds: 'claude-desktop-3p') under 'recent clients'. The rows themselves "
+    + "are in ai_gateway_messages (query via 'hyp query' or 'hyp mcp').\n",
   )
 
   if (!result.ok) {
