@@ -178,8 +178,11 @@ key `selectCodexWorkspace` selected for it ... so an absolute-but-unrelated
 directory can still reach the gate (#476)"*. Since that document's own amendment
 landed (PR #477), `usableInBandCwd` sees the request's `cwd` whenever the request
 states one. The residual case is narrower than the sentence: **only** a request
-that states no `cwd` at all lets a substituted key reach the gate, which is the
-open #480 ranking question, not #476.
+that states no `cwd` at all lets a substituted key reach the gate, which was the #480
+ranking question, not #476. #480 has since been answered the other way, in LLP
+0083's own [§workspace-key-ranks-last](./0083-codex-live-cwd-from-rollout.decision.md#workspace-key-ranks-last):
+the key now ranks **below** the rollout, so it reaches the gate only when the
+request states no `cwd` *and* no rollout is found.
 
 ## Consequences
 

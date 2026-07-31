@@ -131,8 +131,23 @@ export function createCodexExchangeProjector(opts = {}) {
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
       // a Codex thread id (only a real Codex thread has a rollout), so
       // non-codex traffic never scans.
+      //
+      // @ref LLP 0083#workspace-key-ranks-last [implements]: three sources, in
+      // this order: in-band, rollout, workspace key (#480).
+      // The key ranks LAST because it is the only one of the three that can be a
+      // guess: `selectCodexWorkspace` substitutes the first `workspaces` entry
+      // when none matches, while `session_meta.cwd` is what Codex itself wrote
+      // at session start. Ranking the key above the rollout meant a declared
+      // `workspaces` map satisfied the first `??` and the rollout was never
+      // consulted, so on the subscription route (the route this fallback exists
+      // for) a first-key guess turned a correct `.hypignore` drop into a record.
+      // It is still a real source, not a discarded one: with no rollout it is
+      // the only cwd there is, and refusing it outright would remove `.hypignore`
+      // coverage from that route. Held to the same usability checks as the
+      // in-band value, which is where it used to be checked.
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? resolveRolloutCwd(rolloutCwd, codexContext)
+        ?? usableInBandCwd(codexContext?.workspace_cwd, ctx)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
       // observable, not silent - it means the key named a tree the session did
       // not run in, so the location inference behind it is in doubt.
@@ -876,9 +891,18 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // substitutes the first `workspaces` key when none matches, which is a guess
     // about a directory the session may never have run in, so it must not decide
     // a `.hypignore` verdict. The key still enriches (`attributes.codex.workspace`,
-    // git_*) and still supplies the cwd on the subscription route, where the
-    // request states none and the key is the only in-band source there is.
-    cwd: firstString(inBandCwd, workspace?.path),
+    // git_*) and still supplies the cwd on the subscription route as a last
+    // resort, below: see `workspace_cwd`.
+    cwd: inBandCwd,
+    // The key as a LAST-RESORT cwd, carried apart from the in-band one so the
+    // call site can rank it BELOW the rollout (#480). Set only when the request
+    // stated no cwd at all: when it stated one, the key is a substitution over a
+    // value the client actually sent, and a substitution never decides the
+    // verdict (#476 case c, where the stated cwd is unusable and the key must
+    // still not stand in for it).
+    // @ref LLP 0083#workspace-key-ranks-last [implements]: in-band, then
+    // rollout, then the key
+    workspace_cwd: inBandCwd ? undefined : workspace?.path,
     // Set only when the substitution was refused, so the caller can log it
     // rather than let a discarded guess vanish. Refused is narrower than
     // "different bytes": see `workspaceCoversCwd`.
@@ -1229,14 +1253,18 @@ function readRecordedCwd(reqBody) {
  * `firstString` refuse the rest upstream), and over that whole domain the two
  * former copies agreed.
  *
- * One thing this does NOT reach, so nobody reads it as the whole gate: when the
- * request states no `cwd` at all, the value passed in is the workspace key
- * `selectCodexWorkspace` picked for it, and that falls back to the first
- * workspace when none matches, which is absolute and so accepted here even when
- * the session ran elsewhere. A request that DOES state one no longer reaches
- * here through the key (#476, closed), so the residue is the narrower ranking
- * question: the key still outranks the rollout fallback (#480). The rollout
- * fallback at the call site sits outside this call, but it is not unguarded:
+ * One thing this does NOT reach, so nobody reads it as the whole gate: it bounds
+ * the SHAPE of a value, never its provenance. The call site also passes the
+ * workspace key `selectCodexWorkspace` picked through here - a separate call
+ * since #480, where it used to arrive folded into the in-band value - and that
+ * key falls back to the first workspace when none matches, which is absolute and
+ * so accepted here even when the session ran elsewhere. A request that DOES
+ * state a `cwd` no longer reaches here through the key at all (#476, closed);
+ * the key is offered only when the request stated none. What keeps such a guess
+ * from deciding a verdict is then the RANKING at the call site (in-band,
+ * rollout, key), not this predicate: the key lost its precedence over the
+ * rollout in #480, which is where the residual ranking question used to sit. The
+ * rollout fallback sits between the two and is not unguarded either:
  * `rollout-cwd.js` reads it through `readRolloutSessionMeta`, which applies
  * `sessionMetaCwd`.
  * @ref LLP 0160#corrections-0083 [constrained-by]: LLP 0083's own statement of
