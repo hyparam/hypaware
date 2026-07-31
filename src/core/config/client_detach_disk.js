@@ -36,12 +36,30 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
  * @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker is the backup; reverse restores it (or removes the managed value) on leave
  */
 
-// Dotted-path segments {@link restoreAtDottedPath} refuses to walk or create.
-// Every other dotted path in this file is an in-tree literal or a path an
-// adapter's own attach recorded; the `prev_malformed` keys are the one set that
-// a hand-edited settings file can name freely, and the restore helper creates
-// the parents it walks.
+// Dotted-path segments the three path writers in this file refuse to walk.
+// Every dotted path here comes off disk: `prev_malformed` keys and the
+// `managed.set` / `managed.added` / `managed.created_parents` entries of a
+// nested-marker record are all named by a settings file a hand-edit can reach.
+// The writers walk with plain `parent[segment]`, so a `__proto__` segment
+// leaves the document and lands on `Object.prototype` - either assigning there
+// (the restore helper creates the parents it walks) or *deleting* from it
+// (`deleteAtDottedPath` on a `managed.added` path removes `Object.prototype`
+// members outright, breaking every object in the process). No attach records
+// such a path, so refusing costs nothing real.
 const UNWRITABLE_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
+ * Whether a dotted path names a segment {@link UNWRITABLE_PATH_SEGMENTS}
+ * refuses. Split from the writers so a caller can tell a *policy* refusal apart
+ * from a path it merely could not reach, and report the right reason.
+ *
+ * @ref LLP 0163#detach-restores-the-backup [implements]: one predicate for all three path writers, so a policy refusal is a reason the caller can name
+ * @param {string} dottedPath
+ * @returns {boolean}
+ */
+function hasUnwritableSegment(dottedPath) {
+  return dottedPath.split('.').some((segment) => UNWRITABLE_PATH_SEGMENTS.has(segment))
+}
 
 const TOML_MANAGED_BEGIN = '# BEGIN hypaware'
 const TOML_MANAGED_END = '# END hypaware'
@@ -239,18 +257,40 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   // `hooks.<event>` backup nested inside it. Not because the parent has to exist
   // first - `restoreAtDottedPath` recreates a missing parent either way - but
   // because when both are recorded they cannot both go back, and the order is
-  // what picks the winner. See LLP 0163.
+  // what picks the winner.
+  //
+  // Which one it *should* pick is a question depth cannot answer: the shallower
+  // entry is the older one in one recording sequence and the newer one in the
+  // other, so neither direction implements "the earliest backup holds the user's
+  // content". The record carries no age, so the sort is an arbitrary but stable
+  // tiebreak and the loser is reported. See LLP 0163.
   for (const dotted of Object.keys(prevMalformed).sort((a, b) => pathDepth(a) - pathDepth(b))) {
+    // Reported before the in-use test, so a path this undo refuses on principle
+    // is never explained as somebody else's key sitting in the way.
+    if (hasUnwritableSegment(dotted)) {
+      warnings.push(
+        `${dotted} could not be restored; ` +
+        'its path is not one this undo may write, so the backed-up value is discarded with the marker'
+      )
+      continue
+    }
     if (getAtDottedPath(value, dotted) !== undefined) {
       warnings.push(
         `${dotted} is in use again; leaving it in place, and the backed-up value is discarded with the marker`
       )
       continue
     }
+    // The remaining failure is a parent that is present as a non-object, which
+    // is the one this branch actually hits in practice: a `hooks` backup that
+    // went back first is a string, and the `hooks.<event>` backup nested inside
+    // it now has nowhere to go. Naming that cause matters - the earlier wording
+    // reported it as a path the undo may not write, which is both false and
+    // unactionable for the one person who can still act on it.
     if (!restoreAtDottedPath(value, dotted, prevMalformed[dotted])) {
       warnings.push(
         `${dotted} could not be restored; ` +
-        'its path is not one this undo may write, so the backed-up value is discarded with the marker'
+        'a parent on its path is no longer a JSON object, ' +
+        'so the backed-up value is discarded with the marker'
       )
     }
   }
@@ -630,13 +670,21 @@ function pathDepth(dottedPath) {
 /**
  * Set the leaf of a dotted path (plain literal segments, no escaping) when
  * its parent chain exists as plain objects; silently a no-op otherwise (a
- * broken chain means there is nothing meaningful to restore into).
+ * broken chain means there is nothing meaningful to restore into), and for any
+ * path {@link UNWRITABLE_PATH_SEGMENTS} refuses.
+ *
+ * The refusal is defence in depth rather than a live hole closed: the caller
+ * only writes here when the live value still equals the one attach recorded,
+ * and a prototype path reads back as `undefined` while a recorded `value` comes
+ * from JSON and never is, so the equality gate already blocks it. The guard is
+ * on the helper so a future caller without that gate cannot reopen it.
  *
  * @param {Record<string, unknown>} root
  * @param {string} dottedPath
  * @param {unknown} newValue
  */
 function setAtDottedPath(root, dottedPath, newValue) {
+  if (hasUnwritableSegment(dottedPath)) return
   const segments = dottedPath.split('.')
   const leaf = segments.pop()
   if (leaf === undefined) return
@@ -656,14 +704,14 @@ function setAtDottedPath(root, dottedPath, newValue) {
  * and overwriting it would repeat the destruction the backup exists to undo.
  * The caller reports it rather than forcing the write.
  *
- * It also returns false for a path with an `__proto__` / `constructor` /
- * `prototype` segment. Unlike every other dotted path in this file those come
- * from a marker sitting in a settings file a hand-edit (or anything else with
- * write access to the user's home) can reach, and this helper *creates* the
- * parents it walks, so `__proto__.x` would leave the settings object entirely
- * and assign onto `Object.prototype` for the rest of the process. Attach never
- * records such a path, so refusing costs nothing real and the caller reports it
- * like any other path it could not write.
+ * It also returns false for a path {@link UNWRITABLE_PATH_SEGMENTS} refuses.
+ * `prev_malformed` keys come from a marker sitting in a settings file a
+ * hand-edit (or anything else with write access to the user's home) can reach,
+ * and this helper *creates* the parents it walks, so `__proto__.x` would leave
+ * the settings object entirely and assign onto `Object.prototype` for the rest
+ * of the process. Attach never records such a path, so refusing costs nothing
+ * real. The caller tests the same predicate first so it can report *that* as
+ * the reason, rather than folding it into the non-object-parent case below.
  *
  * @ref LLP 0163#detach-restores-the-backup [implements]: recreate emptied parents, refuse to overwrite a parent someone else owns
  * @param {Record<string, unknown>} root
@@ -672,8 +720,8 @@ function setAtDottedPath(root, dottedPath, newValue) {
  * @returns {boolean}
  */
 function restoreAtDottedPath(root, dottedPath, newValue) {
+  if (hasUnwritableSegment(dottedPath)) return false
   const segments = dottedPath.split('.')
-  if (segments.some((segment) => UNWRITABLE_PATH_SEGMENTS.has(segment))) return false
   const leaf = segments.pop()
   if (leaf === undefined) return false
   /** @type {Record<string, unknown>} */
@@ -696,12 +744,21 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
 
 /**
  * Delete the leaf of a dotted path (plain literal segments, no escaping)
- * when its parent chain exists as plain objects; no-op otherwise.
+ * when its parent chain exists as plain objects; no-op otherwise, and for any
+ * path {@link UNWRITABLE_PATH_SEGMENTS} refuses.
+ *
+ * Unlike its two siblings this one had a *reachable* hole: the nested-marker
+ * record's `managed.added` and `managed.created_parents` lists are replayed
+ * with no equality gate at all, so an `added` entry of `__proto__.toString`
+ * deleted `Object.prototype.toString` for the rest of the process. A settings
+ * file the user (or anything with write access to their home) can edit is not
+ * a place to take dotted paths on trust.
  *
  * @param {Record<string, unknown>} root
  * @param {string} dottedPath
  */
 function deleteAtDottedPath(root, dottedPath) {
+  if (hasUnwritableSegment(dottedPath)) return
   const segments = dottedPath.split('.')
   const leaf = segments.pop()
   if (leaf === undefined) return

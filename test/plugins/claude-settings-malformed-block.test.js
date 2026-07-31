@@ -186,6 +186,34 @@ test('a second displacement at an already-backed-up path is reported as discarde
   }
 })
 
+test('a backed-up null still outranks a later displacement: the collision test is presence, not truthiness', async () => {
+  // The same presence-not-type rule `prev_base_url` and `manageEnvAdditions`
+  // follow, at the one site that decides whether a *recorded* backup is
+  // displaced. JSON cannot encode `undefined`, so a recorded `null` is a value
+  // the user is owed. A truthiness test here would let the second hand-edit
+  // overwrite it on the marker and hand back the wrong value at detach - the
+  // failure mode this rule has already caused twice elsewhere in this file.
+  const { home, settingsPath } = await stageHome({ env: 'ORIGINAL' })
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const tampered = await readSettings(settingsPath)
+    tampered._hypaware.prev_malformed = { env: null }
+    tampered.env = 'SECOND-HANDEDIT'
+    await fs.writeFile(settingsPath, JSON.stringify(tampered, null, 2) + '\n')
+
+    const second = await attach({ ...ATTACH, settingsPath })
+    const warnings = second.changed ? second.warnings ?? [] : []
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /already holds an earlier backup/)
+    assert.deepEqual((await readSettings(settingsPath))._hypaware.prev_malformed, { env: null })
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.deepEqual(await readSettings(settingsPath), { env: null })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a hooks root and a hooks.<event> backup cannot both go back; the shallower one wins and the other is reported', async () => {
   // The only way to record nested paths: one attach repairs the event, a hand
   // edit then breaks the whole root, and a second attach records that too. They
@@ -194,6 +222,10 @@ test('a hooks root and a hooks.<event> backup cannot both go back; the shallower
   // choice, not a consequence: `restoreAtDottedPath` recreates a missing parent
   // either way, so a deepest-first replay would keep `echo mine` and report the
   // root instead. Change the order and this test tells you what you traded.
+  //
+  // Depth is not age, though - see the sibling test below, where the same sort
+  // keeps the *older* value. Do not read this test as evidence that the order
+  // favours one or the other.
   const { home, settingsPath } = await stageHome({ hooks: { SessionStart: 'echo mine' } })
   try {
     await attach({ ...ATTACH, settingsPath })
@@ -214,6 +246,41 @@ test('a hooks root and a hooks.<event> backup cannot both go back; the shallower
     // only copy and it has just been deleted.
     assert.match(String(detached.warning), /^hooks\.SessionStart could not be restored;/)
     assert.match(String(detached.warning), /discarded with the marker/)
+    // And it says *why*, correctly. This is the only cause this branch reaches
+    // without a hand-edited path: the restored root is a string. Reporting it as
+    // a path the undo may not write (the `__proto__` refusal's reason) is both
+    // false and useless to the person reading the line.
+    assert.match(String(detached.warning), /a parent on its path is no longer a JSON object/)
+    assert.doesNotMatch(String(detached.warning), /not one this undo may write/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('the same shallowest-first order keeps the older value when the older break was the shallow one', async () => {
+  // The mirror of the test above, and the reason neither order can be called
+  // the right one: swap which block the user broke first and the same sort now
+  // preserves the pre-hypaware content it discarded a moment ago. Depth is
+  // orthogonal to age, so "shallowest first" is a stable tiebreak and nothing
+  // more - it is not, and must not be documented as, an implementation of
+  // "the earliest backup is the one holding the user's content".
+  const { home, settingsPath } = await stageHome({ hooks: 'broken-before-hypaware' })
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const between = await readSettings(settingsPath)
+    between.hooks.SessionStart = 'later-hand-edit'
+    await fs.writeFile(settingsPath, JSON.stringify(between, null, 2) + '\n')
+    await attach({ ...ATTACH, settingsPath })
+
+    assert.deepEqual((await readSettings(settingsPath))._hypaware.prev_malformed, {
+      'hooks.SessionStart': 'later-hand-edit',
+      hooks: 'broken-before-hypaware',
+    })
+
+    const detached = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    // The older, shallower value is the survivor here.
+    assert.deepEqual(await readSettings(settingsPath), { hooks: 'broken-before-hypaware' })
+    assert.match(String(detached.warning), /^hooks\.SessionStart could not be restored;/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -234,6 +301,10 @@ test('a hand-edited prev_malformed path cannot escape the settings object', asyn
     const detached = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
     assert.equal(/** @type {any} */ ({}).hyp_polluted, undefined)
     assert.match(String(detached.warning), /^__proto__\.hyp_polluted could not be restored;/)
+    // Refused on principle, and reported as such - not as a parent that was in
+    // the way, which is the other reason this notice can carry.
+    assert.match(String(detached.warning), /not one this undo may write/)
+    assert.doesNotMatch(String(detached.warning), /no longer a JSON object/)
   } finally {
     delete (/** @type {any} */ (Object.prototype).hyp_polluted)
     await fs.rm(home, { recursive: true, force: true })

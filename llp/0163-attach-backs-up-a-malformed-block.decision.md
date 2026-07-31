@@ -170,10 +170,20 @@ Restoring may have to **recreate** an object parent the strip just deleted (the
 restore helper creates missing parents. It refuses when a parent is present as a
 non-object (something else owns that path, and forcing the write would repeat
 the destruction the backup exists to undo), and when a segment is `__proto__`,
-`constructor` or `prototype`. Those last three matter because `prev_malformed`
-keys are the only dotted paths in the undo that a *settings file* names freely,
-and a helper that creates the parents it walks would otherwise leave the
-document and assign onto `Object.prototype`. Attach never records such a path.
+`constructor` or `prototype`. Those last three matter because every dotted path
+this undo replays is named by a *settings file* the user can hand-edit, and the
+path writers walk with plain `parent[segment]`: the restore helper creates the
+parents it walks, so `__proto__.x` would assign onto `Object.prototype`, and the
+nested-marker branch's `managed.added` replay *deletes* what its paths name, so
+`__proto__.toString` removed an `Object.prototype` member outright. No attach
+records such a path, so all three writers refuse them.
+
+**The two refusals are reported apart.** "Could not be restored" carries a
+reason, and the reason has to be the true one: a segment this undo may not write
+is a policy refusal the user can do nothing about, while a parent that is no
+longer a JSON object is the ordinary nested-backup collision below and tells
+them exactly which value is sitting in the way. Folding both into one sentence
+made the common case unactionable.
 
 **A backup that cannot go back is destroyed, and the notice says so.** The
 marker is deleted in the same write, and it held the only copy, so "left in
@@ -187,17 +197,30 @@ taken here: it is new on-disk surface with its own lifecycle, and the decision
 on #454 scoped this change to the marker. Recorded as an open question rather
 than smuggled in.
 
-**Order between nested paths is a choice, not a mechanism.** `hooks` and
-`hooks.<event>` can both be recorded (an earlier run repaired the event, a later
-hand-edit broke the whole root). They are mutually exclusive on the way back - a
-string root has no room for an event key - so whichever the replay reaches first
-wins and the other is reported as discarded. The replay sorts **shallowest
-first**, which restores the later whole-root breakage and drops the earlier
-event value. Note that this is *not* forced by the restore helper, which
-recreates missing parents in either direction; a deepest-first replay would keep
-the earlier value, which is arguably what "the earliest backup is the one
-holding the user's content" argues for one level up. The current order is pinned
-by a test so that flipping it is a visible decision.
+**Order between nested paths is an arbitrary tiebreak, and cannot be more.**
+`hooks` and `hooks.<event>` can both be recorded (one run repaired the event, a
+hand-edit then broke the whole root, or the other way round). They are mutually
+exclusive on the way back - a string root has no room for an event key - so
+whichever the replay reaches first wins and the other is reported as discarded.
+The replay sorts **shallowest first**. That is not forced by the restore helper,
+which recreates missing parents in either direction.
+
+It is tempting to read the sort as choosing between an old value and a new one,
+the way `prev_malformed`'s prior-wins rule does one level up. It does not, and
+it cannot: **depth is orthogonal to age.** Break the event first and the shallow
+entry is the newer one; break the root first and the shallow entry is the older
+one. Both sequences are pinned by tests, and the same sort keeps the later value
+in the first and the earlier value in the second. Neither direction implements
+"the earliest backup is the one holding the user's content", so flipping the
+sort would move the loss, not remove it.
+
+Implementing prior-wins here would need the record to carry age. It very nearly
+does by accident - `{ ...displaced, ...priorMalformed }` leaves the newest key
+first, and both tests observe that order - but JSON key order is not a thing to
+hang a user's data on: a reformat or a hand-edit reorders it silently. An
+explicit per-entry order (or timestamp) would be a schema change, and it is left
+as an open question rather than smuggled in. The current order is pinned by
+tests so that changing it is a visible decision.
 
 Legacy pre-record markers never wrote `prev_malformed`, so the legacy branch is
 untouched. A marker that reaches that branch *with* the field (only possible by
@@ -218,7 +241,12 @@ that is accepted as corrupt-input behaviour, not designed for.
   detach, and that detach discards it if the path has been re-occupied, if a
   nested backup outranks it, or if a second displacement collided with it at
   attach time. Every one of those is reported in the words "discarded", never
-  as a deferral.
+  as a deferral, and each names its own cause.
+- The three dotted-path writers in the core undo now refuse `__proto__`,
+  `constructor` and `prototype` segments. That closes a reachable hole in the
+  nested-marker branch as well (`managed.added` deleted `Object.prototype`
+  members), which predates this change but shares the helper family and the
+  guard.
 - OpenClaw is unchanged and still refuses (LLP 0143, LLP 0109). The
   divergence is now documented rather than accidental.
 
@@ -229,9 +257,12 @@ that is accepted as corrupt-input behaviour, not designed for.
   (`settings.json.hypaware-backup-<timestamp>`) would make the promise
   unconditional at the cost of new on-disk surface nobody cleans up. Out of
   scope for #454; worth deciding before anyone leans harder on the promise.
-- **Shallowest-first or deepest-first between nested paths?** See above. The
-  current order keeps the later, shallower breakage. Deepest-first would keep
-  the earlier, deeper original.
+- **Should `prev_malformed` record the order its entries were taken in?** Not
+  shallowest-versus-deepest: see above, depth is orthogonal to age and flipping
+  the sort only moves which sequence loses. The real question is whether the
+  record should carry enough (an explicit order, or a per-entry timestamp) to
+  apply the same prior-wins rule between nested paths that it already applies at
+  a single path. That is a marker schema change and out of scope for #454.
 - **Does OpenClaw converge?** Argued above that it does not, on the ground that
   its own loader rejects the malformed config. That asymmetry deserves its own
   look; OpenClaw is untouched here per the decision on #454.
