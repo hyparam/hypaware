@@ -257,11 +257,16 @@ export async function bindProxyWithFallback({ config, bind, log, onFallback }) {
  * out (they can never route a request and would only inflate the
  * compiled table).
  *
+ * Exported so routing tests can assert against the table an install
+ * really compiles (config plus registered presets, in merge order)
+ * rather than against a preset's literal field values, which is what
+ * let an over-broad preset priority through review.
+ *
  * @param {UpstreamConfig[]} configUpstreams
  * @param {GatewayState} state
  * @returns {UpstreamConfig[]}
  */
-function mergeUpstreams(configUpstreams, state) {
+export function mergeUpstreams(configUpstreams, state) {
   /** @type {Map<string, UpstreamConfig>} */
   const merged = new Map()
   for (const upstream of configUpstreams) {

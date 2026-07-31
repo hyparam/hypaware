@@ -10,6 +10,7 @@ import {
   createCodexExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { sessionMetaCwd } from '../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -44,6 +45,17 @@ function clampingResolver(ignoredDir) {
     existsSync: (p) => p === hypignore,
     readFileSync: () => 'some-future-class\n',
   })
+}
+
+/**
+ * A real usage-policy resolver over an fs that holds no `.hypignore` anywhere.
+ * For a test about the cwd *predicate* rather than the gate: without it the
+ * matcher walks the real ancestors of the fixture path, so a `.hypignore`
+ * sitting above the checkout on whatever machine runs the suite would turn the
+ * assertion into a drop.
+ */
+function governsNothingResolver() {
+  return createUsagePolicyResolver({ existsSync: () => false })
 }
 
 // @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
@@ -223,6 +235,41 @@ test('project() logs an unusable in-band cwd rather than skipping the gate silen
     !JSON.stringify(refused.fields).includes('elsewhere'),
     'the refused value is hashed, never logged raw',
   )
+})
+
+// @ref LLP 0150#usable-cwd [tests]: the in-band seam and the rollout-stated
+// seam are asked the same question and must answer it identically. Two copies
+// of this exact rule have already drifted and shipped the wrong answer twice
+// (#453, #459), so pin agreement at the seam rather than trusting two
+// independent readings of the same two conjuncts (#478).
+test('the in-band cwd seam answers exactly as the shared sessionMetaCwd predicate does', () => {
+  // The whole of what the in-band predicate can be asked: only a non-empty
+  // string reaches it (`readStringKey` and `firstString` both refuse anything
+  // else upstream), so blank-ish, relative and absolute forms are the cases.
+  const cases = [
+    '/work/repo', // absolute: accepted, byte-identical
+    '/work/repo/', // trailing slash is not ours to normalize
+    '/work/repo/./sub', // an unnormalized absolute path is still absolute
+    'repo', // bare relative
+    './repo',
+    '../elsewhere',
+    ' ', // blank after trim
+    '\t\n',
+    ' /work/repo', // non-blank but not absolute: the trim alone would accept it
+  ]
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  for (const cwd of cases) {
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/v1/chat/completions',
+      request_body: JSON.stringify({ cwd, messages: [{ role: 'user', content: 'hi' }] }),
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    }), context()))
+    assert.equal(
+      projection.cwd,
+      sessionMetaCwd(cwd),
+      `${JSON.stringify(cwd)}: the in-band seam must not be looser or stricter than sessionMetaCwd`,
+    )
+  }
 })
 
 // ---------------------------------------------------------------------

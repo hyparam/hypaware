@@ -17,13 +17,16 @@ import { runCodexClassifyHook } from './classify_hook.js'
 import { errCode } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayRouteInput, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'
 const CLIENT_NAME = 'codex'
 const UPSTREAM_NAME = 'openai'
 const CHATGPT_UPSTREAM_NAME = 'chatgpt'
+// Gateway-local request metadata naming the real upstream a steering client
+// wants, stripped before the request leaves for the provider (LLP 0109).
+const UPSTREAM_HEADER = 'x-hypaware-upstream'
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -70,11 +73,18 @@ export async function activate(ctx) {
   /** @type {AiGatewayCapability} */
   const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
+  // `path_prefix` stays for the sort rank the compiled table derives from it;
+  // `match()` reproduces that prefix exactly and adds the steering rung, so
+  // this registration is self-sufficient rather than relying on a sibling
+  // adapter having won the name-keyed preset slot (LLP 0016's presets are a
+  // last-write-wins `Map.set` by name).
+  // @ref LLP 0157#adapter-rework [implements]: the `x-hypaware-upstream` rung, so a steered turn selects this upstream per request
   gateway.registerUpstreamPreset({
     name: UPSTREAM_NAME,
     base_url: 'https://api.openai.com',
     path_prefix: '/v1',
     provider: 'openai',
+    match: matchOpenaiUpstream,
   })
   gateway.registerUpstreamPreset({
     name: CHATGPT_UPSTREAM_NAME,
@@ -235,6 +245,57 @@ export async function activate(ctx) {
       sourceDir: path.join(skillsRoot, skillName),
     })
   }
+}
+
+/**
+ * Route an inbound request to the `openai` upstream.
+ *
+ * Two rungs, in precedence order:
+ *
+ *  1. The `x-hypaware-upstream` request metadata, when it names this
+ *     preset's provider. A steering client can then reach this upstream on
+ *     a path that carries no `/v1` at all (the bare gateway origin plus
+ *     `/chat/completions`), which is otherwise unroutable: the gateway
+ *     answers 404 and the caller's turn fails, which capture may never
+ *     cause. No Codex or Claude traffic sends this header, so the rung is
+ *     inert for every route that exists today.
+ *  2. The `/v1` path anchor: byte-for-byte the same set of paths
+ *     `pathMatchesPrefix(path, '/v1')` accepts, because a preset that
+ *     declares `match()` never falls back to its `path_prefix`. Widening or
+ *     narrowing this re-routes live Codex traffic.
+ *
+ * @ref LLP 0157#adapter-rework [implements]: upstream routing is per request, selected by the `x-hypaware-upstream` metadata via the gateway's existing header match functions
+ * @ref LLP 0157#requirements [constrained-by]: R5 - the user's turn MUST NOT fail because of capture, so an unroutable steered turn is a defect
+ * @param {AiGatewayRouteInput} input
+ * @returns {boolean}
+ */
+function matchOpenaiUpstream(input) {
+  if (headerValue(input.headers, UPSTREAM_HEADER) === 'openai') return true
+  return input.path === '/v1' || input.path.startsWith('/v1/')
+}
+
+/**
+ * First non-empty value for a header name, case-insensitively. The route
+ * input's headers are already lowercased and array-valued, but the lookup
+ * accepts the raw `IncomingHttpHeaders` shape too so it stays usable from a
+ * caller that did not go through `buildRouteInput`.
+ *
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function headerValue(headers, name) {
+  if (!headers) return undefined
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue
+    if (typeof value === 'string' && value.length > 0) return value
+    if (Array.isArray(value)) {
+      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
+      if (typeof found === 'string') return found
+    }
+  }
+  return undefined
 }
 
 /**

@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { runDetach } from '../../src/core/commands/clients.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 // Adapter helpers are used only to *build* realistic fixtures. The core undo
@@ -863,6 +864,248 @@ test('claude re-attach carries a non-string base URL backup forward, and undo re
     const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)
     assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------- issue #500: the undo's silences ------------------
+ *
+ * Three deferred findings from the review of #495 (`claude attach` backs a
+ * malformed `env`/`hooks` block up onto the marker and repairs it, LLP 0163).
+ * All three are about the undo *not saying* something, and two of them about it
+ * dropping a backup while reporting success.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Hand-edit `_hypaware.managed` out of an otherwise current marker, which is
+ * the only way to reach {@link detachLegacyJsonMarker} with a marker that
+ * carries backups. No attach writes this shape: `managed` goes onto the marker
+ * in the same write that ever sets `prev_malformed`/`prev_base_url`, so the
+ * state has to be constructed directly (issue #500, "reachability, verified by
+ * execution"). It is still worth reversing honestly - the file it corrupts is
+ * the user's `settings.json`, and the marker holds the only copy of what attach
+ * displaced.
+ *
+ * @param {string} settingsPath
+ */
+async function breakManagedRecord(settingsPath) {
+  const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  delete parsed._hypaware.managed
+  await fs.writeFile(settingsPath, JSON.stringify(parsed, null, 2) + '\n')
+}
+
+test('#500 finding 3: a restored malformed-block backup is reported by path, not silently', async () => {
+  // The whole point of LLP 0163 is that attach's repair is reversible. A detach
+  // that quietly rewrites the user's `env` block back tells them nothing: the
+  // result carried no `removed`, no `restoredValue` and no `warning`, so
+  // `hyp detach` printed only `✓ Detached claude` while it put a block back.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'ANTHROPIC_API_KEY=sk-x' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), { env: 'ANTHROPIC_API_KEY=sk-x' })
+    assert.deepEqual(result.restoredPaths, ['env'])
+    // Nothing went wrong, so nothing is warned about.
+    assert.equal('warning' in result, false)
+    // The path, never the value: a malformed `env` is exactly where an API key
+    // ends up, and this is printed to the terminal and echoed into `--json`.
+    // `settingsPath` is stripped first: it is `stageHome()`'s own mkdtemp path,
+    // always present and never sensitive, and its random suffix can coincidentally
+    // start with 'x' right after the fixed "...disk-" prefix, spelling "sk-x" with
+    // no secret involved.
+    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 2: the delete-then-detach resurrection is announced, not silent', async () => {
+  // Deleting the repaired block by hand and then detaching puts the original
+  // malformed value back, where the sibling `prev_base_url` mechanism would
+  // leave it deleted. That divergence is deliberately NOT changed here - two
+  // reviewers and triage judged the restore defensible (nothing is lost, which
+  // is the direction #454 was about) and flipping it would discard a value
+  // instead. What is fixed is that it happened without a word.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'SUPER-SECRET-ORIGINAL' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    delete attached.env
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(JSON.parse(await fs.readFile(settingsPath, 'utf8')).env, 'SUPER-SECRET-ORIGINAL')
+    assert.deepEqual(result.restoredPaths, ['env'])
+    assert.equal(JSON.stringify(result).includes('SUPER-SECRET-ORIGINAL'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 1: the legacy branch replays a prev_malformed backup instead of dropping it', async () => {
+  // A `hooks` backup can go back down this branch, because the strip empties the
+  // block: every managed handler is matched by its `hyp claude-hook …` command,
+  // which is proof of ownership rather than a guess, so the widened pattern also
+  // clears the `classify-cwd` entries the record would have named.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ hooks: 'broken-by-hand' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+    await breakManagedRecord(settingsPath)
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.hooks, 'broken-by-hand') // the user's value, back
+    assert.deepEqual(result.restoredPaths, ['hooks'])
+    assert.equal('_hypaware' in parsed, false)
+    // No orphaned hyp hooks survive, including the ones the retired convention
+    // predates.
+    assert.equal((await fs.readFile(settingsPath, 'utf8')).includes('claude-hook'), false)
+    // And the reversal says it was partial. The record that named the managed
+    // env keys is what got damaged, so they are left in place (never clobber a
+    // value we cannot prove is ours) and the user is told rather than left to
+    // find them.
+    assert.match(String(result.warning), /carried no readable undo record/)
+    assert.equal(parsed.env.ENABLE_TOOL_SEARCH, 'true')
+    assert.equal(parsed.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 1: the legacy branch reports a prev_malformed backup it cannot put back', async () => {
+  // The `env` case is the one the leftovers block: the managed additions this
+  // branch may not delete are still sitting at `env`, so the backup has nowhere
+  // to go. It is then destroyed - the marker is deleted in the same write and
+  // held the only copy - and the notice has to say so. Silently is what it did.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'ANTHROPIC_API_KEY=sk-x' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+    await breakManagedRecord(settingsPath)
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.match(String(result.warning), /env is in use again/)
+    assert.match(String(result.warning), /discarded with the marker/)
+    assert.equal('restoredPaths' in result, false)
+    // See the sibling assertion above: `settingsPath` is stripped before the
+    // leak check because its random mkdtemp suffix can coincidentally spell
+    // "sk-x" against the fixed "...disk-" prefix.
+    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 1: the legacy branch restores prev_base_url rather than deleting the key', async () => {
+  // The same silent drop, one field over: a marker reaching this branch with a
+  // recorded prior had it thrown away and the key removed outright, so a detach
+  // reporting success left the user without the base URL they had set.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(
+      home,
+      JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://mine.example' } }) + '\n'
+    )
+    await claudeAttach({ ...ATTACH, settingsPath })
+    await breakManagedRecord(settingsPath)
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://mine.example')
+    assert.equal(result.restoredValue, 'https://mine.example')
+    assert.equal('removed' in result, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 1: a GENUINE pre-record marker is reversed exactly as before, and says nothing new', async () => {
+  // The guard on the change above. A marker of the literal pre-upgrade shape
+  // carries none of `managed`/`prev_base_url`/`prev_malformed`, so there is no
+  // damaged record to report and no backup to replay - the branch must stay
+  // silent, or every upgraded install gets a warning about nothing.
+  const home = await stageHome()
+  try {
+    const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
+    const fixture = {
+      env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' },
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command }] }] },
+      _hypaware: { attached_at: '2026-06-26T00:00:00.000Z', version: '0.2.0', port: 4123, state_file: '/abs/x' },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.removed, 'http://127.0.0.1:4123')
+    assert.equal('warning' in result, false)
+    assert.equal('restoredPaths' in result, false)
+    assert.equal('restoredValue' in result, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 3: `hyp detach` prints the restored block, and never its contents', async () => {
+  // The user-visible half. The core result is only worth setting if the command
+  // renders it; before this, a detach that put a block back printed one line
+  // saying it had detached and nothing else.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'ANTHROPIC_API_KEY=sk-x' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    let out = ''
+    let err = ''
+    const ctx = /** @type {any} */ ({
+      stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+      stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+      env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+      config: { version: 2 },
+    })
+    const code = await runDetach(['claude'], ctx)
+    assert.equal(code, 0, err)
+    assert.match(out, /Restored env from the marker's malformed-block backup/)
+    // `out` legitimately echoes `settingsPath` (the "✓ Detached claude (<path>)"
+    // line), so strip it before the leak check for the same reason as the
+    // `result`-based assertions above: its random mkdtemp suffix can
+    // coincidentally spell "sk-x" against the fixed "...disk-" prefix.
+    assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#500 finding 3: `hyp detach --json` echoes restored_paths, and never the contents', async () => {
+  // The machine-readable half of the same report. `restored_paths` is a declared
+  // field of the `hyp detach --json` payload (`ClientResult`), so a scripted
+  // caller can see that a block went back - and the same paths-never-values rule
+  // holds here, where the payload is the thing most likely to be logged.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'ANTHROPIC_API_KEY=sk-x' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    let out = ''
+    let err = ''
+    const ctx = /** @type {any} */ ({
+      stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+      stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+      env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+      config: { version: 2 },
+    })
+    const code = await runDetach(['claude', '--json'], ctx)
+    assert.equal(code, 0, err)
+    const payload = JSON.parse(out.trim().split('\n').at(-1) ?? '{}')
+    assert.equal(payload.changed, true)
+    assert.deepEqual(payload.restored_paths, ['env'])
+    // Same leak check as the prose assertion above, and the same reason for
+    // stripping `settings_path` first.
+    assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

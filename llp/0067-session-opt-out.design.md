@@ -293,6 +293,13 @@ dependency for one check makes it a separate design decision rather than a
 hardening tweak. Recorded, not adopted; the residual stays mitigated by the
 `endpoint_source` disclosure ([§cli-provenance](#cli-provenance)).
 
+> **Extended-by: [LLP 0166 §stated-not-proved](./0166-session-control-plane-states-its-guarantees.decision.md#stated-not-proved).**
+> Issue #451 settled the deferred question as **accept and document**: the
+> residual is not closed, and every confirmed answer now states that the
+> responder was never authenticated (`trust:` in the human output,
+> `endpoint_authenticated: false` in `--json`) beside the `endpoint_source`
+> disclosure this section points at.
+
 ### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
 
 The daemon's live bound port from `status.json` wins
@@ -450,6 +457,46 @@ nonzero exit naming the candidates, rather than taking newest-by-mtime the way
 the `hypaware-privacy` skill body does. Guessing here would opt out the wrong
 session while telling the user they are covered: the same fail-open shape this
 change exists to remove.
+
+**Recording the cwd is the whole of what makes a rollout a candidate.** The
+count *is* the uniqueness claim, so nothing else may filter the list before it
+is taken: a `session_meta` header dropped for a field this path does not resolve
+on takes the ambiguity with it and leaves a confident answer behind. Whether a
+candidate is *usable* (a live enough mtime, a readable container, a header the
+resolver can vouch for) is decided after the count, on the one candidate. This
+was wrong in the first implementation, which discarded a header stating no
+`payload.id` inside the reader wrapper: two rollouts recording one cwd resolved
+at `ok: true` to whichever of them carried a thread id, with no disclosure that
+a rival had been thrown away
+([issue #499](https://github.com/hyparam/hypaware/issues/499) §1). That is the
+artefact failure of the paragraph below, reached by a discard rather than by the
+bound.
+
+A lone such header still **refuses** rather than resolving the container it
+states: every `session_meta` Codex writes carries `payload.id`, so a header
+without one is a file nothing accounts for, there is no second field left to
+check its `session_id` against, and the control route reports `ignored: true`
+for whatever token it is handed. Counting an unvouchable header is not trusting
+it, exactly as the missing-`session_id` refusal below reads the raw line without
+trusting it.
+
+That refusal is the one asked **second**. A header stating neither field is not
+a pre-field Codex - the back-fill that rule exists to defeat needs an `id` to
+back-fill *from* - so answering it with "upgrade Codex" would name a fix for a
+problem the file does not have. Both are fail-closed, so only the diagnosis is
+at stake, and the diagnosis is the whole value of a refusal a user has to act
+on.
+
+**The rule holds for this verb only, and the Codex `hypaware-privacy` skill body
+is now the exception.** Its Step 1 disk scan still drops an id-less header
+before its own count (`not payload.get('id')`), so on the two-rollouts fixture
+above the verb refuses while the script resolves and POSTs the survivor. That is
+the divergence round 4 of [#456](https://github.com/hyparam/hypaware/pull/456)
+predicted, live now rather than hypothetical, and it is a fail-open on the
+script path alone. It is left standing because
+[#435](https://github.com/hyparam/hypaware/issues/435) retires that script onto
+this verb rather than repairing it, so until then the skill body must not be
+read as a second implementation of the rule above.
 
 The rollout walk is bounded so a very large history cannot turn a privacy check
 into a long directory scan. **A truncated walk also refuses**: "exactly one cwd

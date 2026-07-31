@@ -211,8 +211,22 @@ export type SessionEndpointResolution =
  * gateway" - and only some of the ways of establishing them are authoritative.
  * Hiding which one was used is how a confident answer about the wrong session
  * reads as a confident answer about yours.
+ *
+ * **The `--json` envelope is this record plus two fields the writer adds and
+ * this interface deliberately does not carry**, because they are constants
+ * rather than results: `folder_policy` (the other governor's verb) and
+ * `endpoint_authenticated`, which is always `false`. The second is `false` **by
+ * contract, not by outcome** - no answer this verb can obtain is authenticated,
+ * on `unknown` reports included - so a peer-identity check, if one is ever
+ * adopted, needs a NEW field rather than flipping this one: a consumer that
+ * learned "false means nobody checked" must not have to relearn "false now
+ * means the check ran and failed". Anything that adds a report shape here owes
+ * it the same constant.
+ *
  * @ref LLP 0066#readable [implements]: R10 and R12 shape this record - `ignored`
  * is nullable so an unconfirmable read cannot render as `false`.
+ * @ref LLP 0166#stated-not-proved [constrained-by]: the `--json` envelope states
+ * the responder was never authenticated, on every shape.
  */
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'

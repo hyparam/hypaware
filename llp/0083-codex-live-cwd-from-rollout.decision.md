@@ -70,22 +70,32 @@ has the symmetric fallback.
   against the **daemon's** own process cwd and return a confident verdict for an
   unrelated directory (#471). The rollout fallback then still gets its turn, and
   when nothing usable is found the row records `cwd = NULL` exactly as before, so
-  refusing does not make this path fail closed. The rollout-stated `cwd` is held
-  to the same two checks, by a different owner: core's `sessionMetaCwd` refuses a
-  blank or relative `session_meta.cwd`
+  refusing does not make this path fail closed. All three cwd sources for this
+  gate answer that from **one** predicate: core's `sessionMetaCwd` refuses a
+  blank or relative value
   ([LLP 0150 §usable-cwd](./0150-one-reader-for-codex-session-meta.decision.md#usable-cwd)),
-  and `rollout-cwd.js` reads through it, so a refused in-band value falls through
-  to an already-predicated source. That predicate is **not** borrowed for the
-  in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
-  in-band path out of its own mandate, because in-band is a separate source with
-  its own trust story whose value is also stamped on the row for workspace/git
-  enrichment. So the two checks are restated locally, in `usableInBandCwd`. The
-  same predicate also guards the workspace key, which is a third source with the
-  same trust problem, and it is applied to it separately (the key no longer
-  arrives folded into the in-band value, #480). It only bounds the *shape* of
-  either value, never its provenance: an absolute-but-unrelated directory passes
-  both checks, which is why the ranking below, not this predicate, is what keeps
-  a substituted key from deciding a verdict (#476).
+  `rollout-cwd.js` reads the rollout through it, and `usableInBandCwd` calls it
+  for the in-band value, so a refused in-band value falls through to a source
+  predicated the same way. The in-band wrapper survives only to name *which* way
+  the value was unusable (`error_kind`: `cwd_blank` vs `cwd_not_absolute`), which
+  a single `undefined` cannot carry. Sharing the predicate is a de-duplication
+  (#478), not an invariant LLP 0150 imposed: 0150 scopes the in-band path out of
+  its own mandate, because in-band is a separate source with its own trust story
+  whose value is also stamped on the row for workspace/git enrichment. The first
+  cut (#471) restated the two checks locally on exactly that scoping argument,
+  not for want of an owner: `sessionMetaCwd` was already on `master` when that
+  copy landed, and its docstring cited LLP 0150 `#usable-cwd` by anchor while
+  declining to borrow it. What changed here is the weight given to drift, not
+  the scoping: the two readings were behaviourally identical over every input
+  that can reach the seam, so folding them together changed nothing except the
+  number of places the rule can drift from. The workspace key is the third source
+  with the same trust problem, and `usableInBandCwd` is applied to it too, as a
+  **separate** call, because the key no longer arrives folded into the in-band
+  value (#480). One limit of the rule, stated rather than implied: it bounds the
+  *shape* of a value, never its provenance, so an absolute-but-unrelated
+  directory (the first workspace `selectCodexWorkspace` substitutes when none
+  matches) passes it. What keeps such a guess from deciding a verdict is the
+  **ranking** below, not this predicate (#476).
 - **Keyed on the codex thread id, and the rollout must confirm it.** A rollout is
   one **thread's** file: its name embeds `session_meta.payload.id` (the thread),
   matched via the `sessionIdFromPath` helper shared with the backfill (a helper
