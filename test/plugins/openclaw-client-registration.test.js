@@ -42,6 +42,7 @@ test('activate() registers the openclaw client with an honest no-op attach()', a
   const gateway = /** @type {any} */ ({
     registerUpstreamPreset() {},
     registerExchangeProjector() {},
+    registerSettlementEnricher() {},
     registerClient(client) {
       registeredClient = client
     },
@@ -75,6 +76,7 @@ test('activate() attach() emits the same report under --json, still writing noth
   const gateway = /** @type {any} */ ({
     registerUpstreamPreset() {},
     registerExchangeProjector() {},
+    registerSettlementEnricher() {},
     registerClient(client) {
       registeredClient = client
     },
@@ -97,6 +99,39 @@ test('activate() attach() emits the same report under --json, still writing noth
   assert.equal(payload.client, 'openclaw')
   assert.equal(payload.changed, false)
   assert.match(payload.routing_owned_by, /openclaw-steering-plugin/)
+})
+
+// @ref LLP 0161#settlement-enricher [tests]: the settlement enricher is
+// registered in activate(), right after registerExchangeProjector (the
+// Claude adapter's placement). Order matters to a reader, not to the
+// kernel: the projector stamps the match key the enricher spends, so the
+// two registrations belong together and are read together.
+test('activate() registers the settlement enricher right after the exchange projector', async () => {
+  /** @type {string[]} */
+  const calls = []
+  /** @type {any} */
+  let enricher
+  const gateway = /** @type {any} */ ({
+    registerUpstreamPreset() { calls.push('preset') },
+    registerExchangeProjector() { calls.push('projector') },
+    registerSettlementEnricher(value) {
+      calls.push('enricher')
+      enricher = value
+    },
+    registerClient() { calls.push('client') },
+  })
+  const ctx = /** @type {any} */ ({
+    env: { HOME: '/tmp/no-home', HYP_HOME: '/tmp/no-home/.hyp' },
+    plugin: { version: '0.0.0-test' },
+    configRegistry: { registerSection() {} },
+    requireCapability: () => gateway,
+  })
+
+  await activate(ctx)
+
+  assert.deepEqual(calls, ['preset', 'projector', 'enricher', 'client'])
+  assert.equal(enricher.name, 'openclaw-settlement')
+  assert.equal(enricher.clientName, 'openclaw')
 })
 
 test('hyp attach openclaw resolves the client and does not error unknown client', async () => {

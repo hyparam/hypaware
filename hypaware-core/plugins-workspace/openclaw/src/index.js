@@ -1,8 +1,12 @@
 // @ts-check
 
-import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import os from 'node:os'
+
+import { Attr, getLogger, readObservabilityEnv, withSpan } from '../../../../src/core/observability/index.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { OPENCLAW_CONFIG_SECTION, validateOpenclawConfig } from './config.js'
 import { anthropicUpstreamPreset, createOpenclawExchangeProjector } from './projector.js'
+import { createOpenclawSettlementEnricher } from './settle.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -40,9 +44,11 @@ export const configSection = { section: OPENCLAW_CONFIG_SECTION, validate: valid
  * Activate the `@hypaware/openclaw` adapter plugin.
  *
  * Resolves the `hypaware.ai-gateway@^2.0.0` capability, registers the
- * Anthropic upstream preset and the header-gated OpenClaw exchange
- * projector, and registers the `openclaw` client so `hyp attach openclaw`
- * / `hyp detach openclaw` / `hyp clients openclaw` keep resolving it.
+ * Anthropic upstream preset, the header-gated OpenClaw exchange projector
+ * and the flush-time settlement enricher that upgrades the projector's
+ * fallback-identity rows to the session file's native identity, and
+ * registers the `openclaw` client so `hyp attach openclaw` /
+ * `hyp detach openclaw` / `hyp clients openclaw` keep resolving it.
  *
  * Routing is no longer a HypAware-side settings write (LLP 0152): OpenClaw
  * traffic is steered by the `@hypaware/openclaw-steering-plugin` npm
@@ -92,6 +98,28 @@ export async function activate(ctx) {
   gateway.registerUpstreamPreset(upstreamPreset)
 
   gateway.registerExchangeProjector(createOpenclawExchangeProjector())
+
+  // Flush-time settlement: upgrade the fallback-identity rows the projector
+  // emitted (OpenClaw's wire carries no session or message id, LLP 0144) to
+  // the session JSONL's native identity, so a later `hyp backfill openclaw`
+  // dedupes against them instead of double-importing every turn. It also
+  // carries this client's ONLY `.hypignore` seam: live proxy rows capture no
+  // cwd, so the session header's cwd is resolved here or nowhere.
+  // @ref LLP 0159#decision [implements]: route agreement rides native-identity
+  //   settlement, and the header-cwd usage-policy drop rides the same seam.
+  //
+  // The local-only list lives at the SHARED state root
+  // (`readObservabilityEnv(ctx.env).stateDir`), the same path the export and
+  // query seams read, NOT the per-plugin `ctx.paths.stateDir` where the file
+  // never exists (the same trap the Claude adapter documents).
+  gateway.registerSettlementEnricher(
+    createOpenclawSettlementEnricher({
+      homeDir: ctx.env.HOME ?? os.homedir(),
+      env: ctx.env,
+      clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
+    })
+  )
 
   const logger = getLogger('plugin.openclaw')
 
