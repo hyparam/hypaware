@@ -376,6 +376,21 @@ export function seqValue(raw) {
  * yet or has no committed snapshot: the query layer treats that as
  * an empty table.
  *
+ * `icebergDataSource` is the pinned `icebird@0.8.12` source factory: its
+ * returned `AsyncDataSource` now carries `scanColumn({ column, limit, offset,
+ * signal })`, streaming a single column's values (row-group chunk by
+ * row-group chunk) instead of only whole rows, and it matches the kernel's
+ * pinned `squirreling@0.12.24` `AsyncDataSource.scanColumn?` contract exactly
+ * (a plain `AsyncIterable<ArrayLike<SqlPrimitive>>`, no unwrap needed), so no
+ * kernel-side adaptation is required here. This function is the consumption
+ * point: the version bump alone is what makes `scanColumn` reach every
+ * `dataSourceForTable` caller.
+ *
+ * @ref LLP 0055 [implements]: icebird source factory, pinned bump lights
+ * `scanColumn` for the dormant `tryColumnScanAggregate` fast path
+ * (LLP 0054#streaming-first); forwarding it on through the union
+ * (`union-source.js`, task T3) and the ai-gateway schema wrapper
+ * (`dataset.js`, task T4) is what lights the fast path up end-to-end.
  * @param {string} tablePath
  * @returns {Promise<AsyncDataSource | null>}
  */
