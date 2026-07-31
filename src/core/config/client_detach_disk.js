@@ -2,12 +2,15 @@
 
 import fsp from 'node:fs/promises'
 import os from 'node:os'
+import path from 'node:path'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
 
 /**
+ * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
@@ -96,15 +99,30 @@ export class ClientDetachError extends Error {
  * `attachProbe` and the settings-file marker. No-op (`{ changed: false }`) when
  * the descriptor has no probe, the file is absent, or it carries no marker.
  *
+ * `expectedBaseUrl` is the one fact the dispatcher cannot read off disk: the
+ * gateway's own currently-resolved base origin. Only the `json_path` format
+ * needs it, and it needs it for a reason no marker can supply - that format's
+ * undo record IS the entry it wrote, so "is this entry ours?" can only be
+ * answered by comparing the URL it points at against the URL we would have
+ * written. The `json`/`toml` formats carry a HypAware-owned marker key or
+ * managed block, which answers ownership on its own, so they ignore it.
+ *
  * @param {{
  *   descriptor: ClientDescriptor,
  *   homeDir?: string,
  *   env?: NodeJS.ProcessEnv,
+ *   expectedBaseUrl?: string,
  *   fs?: typeof fsp,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-export async function detachClientFromDisk({ descriptor, homeDir = os.homedir(), env, fs = fsp }) {
+export async function detachClientFromDisk({
+  descriptor,
+  homeDir = os.homedir(),
+  env,
+  expectedBaseUrl,
+  fs = fsp,
+}) {
   const probe = descriptor.attachProbe
   if (!probe) return { changed: false }
 
@@ -115,6 +133,19 @@ export async function detachClientFromDisk({ descriptor, homeDir = os.homedir(),
   }
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
+  }
+  // @ref LLP 0172#lane-a-detach [implements]: the json_path branch LLP 0143 removed returns, reshaped for two provider entries plus a cache purge
+  if (probe.format === 'json_path') {
+    return await detachJsonPathProviders({
+      settingsPath,
+      containerPath: probe.container_path,
+      providerKeys: probe.provider_keys,
+      markerHeader: probe.marker_header,
+      cacheGlob: probe.cache_glob,
+      homeDir,
+      expectedBaseUrl,
+      fs,
+    })
   }
   // Unknown/incomplete probe: nothing this core routine knows how to reverse.
   return { changed: false, settingsPath }
@@ -662,6 +693,424 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
   }
   parent[leaf] = newValue
   return true
+}
+
+/* ----------------------------- json_path format ---------------------------- */
+
+/**
+ * The container-relative key the backup of a present-but-not-ours provider
+ * entry lands under, so `models.providers.anthropic` moves to
+ * `models.providers._hypaware_detach_backup.anthropic`.
+ *
+ * A **sibling** of the provider key, not a top-level marker: LLP 0163 ruled a
+ * top-level HypAware key out for this client because its own config schema
+ * rejects one, which is exactly why that LLP left OpenClaw refusing where the
+ * `json`/`toml` formats backed up. Keeping the backup inside the container the
+ * undo already navigates converges the *outcome* (never discard a value
+ * HypAware did not write) without reintroducing the mechanism that was ruled
+ * out.
+ *
+ * @ref LLP 0163#open-questions [implements]: json_path converges on backup-not-discard without adopting the top-level marker key LLP 0163 ruled out for this client
+ */
+const JSON_PATH_BACKUP_KEY = '_hypaware_detach_backup'
+
+/**
+ * Reverse a `json_path` attach: the format whose undo record is the entries it
+ * wrote. There is no marker to replay, so each provider key is judged on what
+ * it points at.
+ *
+ * 1. Absent settings file: `{ changed: false }`, like every other format.
+ * 2. For each `providerKeys` entry under `containerPath` that is present:
+ *    **ours** (its `baseUrl` is the gateway's, its `markerHeader` names the
+ *    key) is deleted; anything else is **backed up, never discarded**.
+ * 3. The same provider keys are then best-effort purged from the client's
+ *    derived caches (`cacheGlob`). Those caches do not self-heal, so a partial
+ *    purge is strictly better than none, and one unreadable cache file must
+ *    not fail a detach whose settings half already landed.
+ *
+ * @param {{
+ *   settingsPath: string,
+ *   containerPath: string | undefined,
+ *   providerKeys: string[] | undefined,
+ *   markerHeader: string | undefined,
+ *   cacheGlob: string | undefined,
+ *   homeDir: string,
+ *   expectedBaseUrl: string | undefined,
+ *   fs: typeof fsp,
+ * }} args
+ * @returns {Promise<DetachFromDiskResult>}
+ * @ref LLP 0169#decision [implements]: delete an entry only when its baseUrl is the gateway's, back up a present-but-not-ours one instead of discarding it, and purge the written provider keys from the derived caches
+ */
+async function detachJsonPathProviders({
+  settingsPath,
+  containerPath,
+  providerKeys,
+  markerHeader,
+  cacheGlob,
+  homeDir,
+  expectedBaseUrl,
+  fs,
+}) {
+  // `contributes.client` is unvalidated manifest input (the same reason
+  // `resolveClientSettingsPath` guards its own field), so a probe missing any
+  // of the three fields this undo navigates by, or naming a path segment the
+  // restore helper already refuses, reverses nothing rather than guessing.
+  const keys = Array.isArray(providerKeys)
+    ? providerKeys.filter((key) => typeof key === 'string' && key.length > 0 && !UNWRITABLE_PATH_SEGMENTS.has(key))
+    : []
+  const container = typeof containerPath === 'string' && containerPath.length > 0 && !hasUnwritableSegment(containerPath)
+    ? containerPath
+    : undefined
+  if (container === undefined || keys.length === 0 || typeof markerHeader !== 'string' || markerHeader.length === 0) {
+    return { changed: false, settingsPath }
+  }
+
+  const read = await readJson(settingsPath, fs)
+  if (!read.existed) return { changed: false, settingsPath }
+
+  const value = read.value
+  const providers = getAtDottedPath(value, container)
+  const present = isPlainObject(providers)
+    ? keys.filter((key) => Object.hasOwn(providers, key))
+    : []
+
+  // The two spellings attach writes: the bare origin for the vendor whose
+  // client appends its own path, `+ '/v1'` for the one that does not. Both are
+  // ours; anything else at the key is not.
+  const ours = ownedBaseUrls(expectedBaseUrl)
+  if (present.length > 0 && ours === undefined) {
+    // Without the gateway's own base URL there is no way to tell our entry from
+    // the user's, and both wrong answers are destructive (delete a value we
+    // never wrote, or leave the client routed at a dead port and report the
+    // undo done). Fail loudly: the reconciler's reverse() keeps the marker and
+    // retries, `hyp detach` prints the reason.
+    throw new ClientDetachError(
+      `cannot reverse ${settingsPath}: the gateway's base URL is unknown, ` +
+      'so a provider entry HypAware wrote cannot be told from one it did not',
+      { code: 'EXPECTED_BASE_URL_UNKNOWN' }
+    )
+  }
+
+  /** @type {Record<string, unknown>} */
+  const containerObj = /** @type {Record<string, unknown>} */ (providers)
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {string | undefined} */
+  let removed
+  let changed = false
+
+  for (const key of present) {
+    const entry = containerObj[key]
+    if (isOwnedProviderEntry(entry, key, markerHeader, /** @type {Set<string>} */ (ours))) {
+      if (removed === undefined) removed = providerBaseUrl(entry)
+      delete containerObj[key]
+      changed = true
+      continue
+    }
+
+    const backups = isPlainObject(containerObj[JSON_PATH_BACKUP_KEY])
+      ? /** @type {Record<string, unknown>} */ (containerObj[JSON_PATH_BACKUP_KEY])
+      : {}
+    if (Object.hasOwn(backups, key)) {
+      // An earlier detach already parked a value here. Overwriting it would
+      // destroy the older backup to save the newer one, which is the exact
+      // destruction this branch exists to prevent, so the live key stays put
+      // and the user is told which two values are now in play.
+      warnings.push(
+        `${container}.${key} was not written by this gateway and ` +
+        `${container}.${JSON_PATH_BACKUP_KEY}.${key} already holds an earlier backup; ` +
+        'leaving it in place rather than overwriting that backup'
+      )
+      continue
+    }
+    backups[key] = entry
+    containerObj[JSON_PATH_BACKUP_KEY] = backups
+    delete containerObj[key]
+    changed = true
+    // Paths, never values: a provider entry carries headers, and this string is
+    // printed to the terminal and echoed into `hyp detach --json` (LLP 0163).
+    warnings.push(
+      `${container}.${key} was not written by this gateway; ` +
+      `backed up to ${container}.${JSON_PATH_BACKUP_KEY}.${key} rather than discarded`
+    )
+  }
+
+  if (changed) await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+
+  warnings.push(...await purgeProviderCaches({
+    cacheGlob,
+    configHome: clientConfigHome(settingsPath, homeDir),
+    containerPath: container,
+    providerKeys: keys,
+    fs,
+  }))
+
+  const warning = joinWarnings(warnings)
+
+  /** @type {DetachFromDiskResult} */
+  const result = { changed, settingsPath }
+  if (removed !== undefined) result.removed = removed
+  if (warning !== undefined) result.warning = warning
+  return result
+}
+
+/**
+ * The two `baseUrl` spellings a `json_path` attach writes for one gateway
+ * origin, or `undefined` when the origin is unknown. Trailing slashes are
+ * trimmed on the way in for the same reason attach trims them: `+ '/v1'` on a
+ * slash-terminated origin is a different string that names the same URL, and
+ * the comparison here is textual.
+ *
+ * @param {string | undefined} expectedBaseUrl
+ * @returns {Set<string> | undefined}
+ */
+function ownedBaseUrls(expectedBaseUrl) {
+  if (typeof expectedBaseUrl !== 'string') return undefined
+  const origin = expectedBaseUrl.trim().replace(/\/+$/, '')
+  if (origin.length === 0) return undefined
+  return new Set([origin, `${origin}/v1`])
+}
+
+/**
+ * Whether a provider entry is one this gateway wrote: it points at the
+ * gateway's own origin, its marker header names its own key, and its shape is
+ * the one attach produces (an empty `models` array). Every other outcome -
+ * a foreign `baseUrl`, a missing or renamed marker header, a hand-edited
+ * `models` list - is somebody else's entry that merely sits at our key, and
+ * the caller backs it up instead of deleting it.
+ *
+ * @param {unknown} entry
+ * @param {string} key
+ * @param {string} markerHeader
+ * @param {Set<string>} ours
+ * @returns {boolean}
+ */
+function isOwnedProviderEntry(entry, key, markerHeader, ours) {
+  if (!isPlainObject(entry)) return false
+  if (typeof entry.baseUrl !== 'string' || !ours.has(entry.baseUrl)) return false
+  const headers = entry.headers
+  if (!isPlainObject(headers) || headers[markerHeader] !== key) return false
+  return Array.isArray(entry.models) && entry.models.length === 0
+}
+
+/** @param {unknown} entry @returns {string | undefined} */
+function providerBaseUrl(entry) {
+  if (!isPlainObject(entry)) return undefined
+  return typeof entry.baseUrl === 'string' ? entry.baseUrl : undefined
+}
+
+/**
+ * The client's config home: the first segment of its home-relative
+ * `settings_file`, which is what `cache_glob` is declared relative to. Derived
+ * back out of the already-resolved settings path rather than re-resolved, so
+ * the purge and the settings write can never disagree about which home they
+ * are working in, including under a `$<CLIENT>_HOME` relocation (which takes
+ * the path out of `homeDir` entirely, and is detected here by exactly that).
+ *
+ * @param {string} settingsPath
+ * @param {string} homeDir
+ * @returns {string}
+ */
+function clientConfigHome(settingsPath, homeDir) {
+  const rel = path.relative(path.resolve(homeDir), settingsPath)
+  if (rel.length === 0 || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return path.dirname(settingsPath)
+  }
+  const [first] = rel.split(path.sep)
+  return path.join(path.resolve(homeDir), first)
+}
+
+/**
+ * Best-effort removal of the same provider keys from the client's derived
+ * caches. These are files the client regenerates from its config and does not
+ * re-derive on its own after the config changes, so leaving them keeps a
+ * detached client pointed at a dead gateway.
+ *
+ * Every failure here is a warning, never a throw: the settings undo has
+ * already landed by the time this runs, and failing the whole detach over one
+ * unreadable cache file would leave the caller unable to finish an operation
+ * that is already most of the way done. A file that will not parse is one the
+ * client itself will have to rebuild.
+ *
+ * @param {{
+ *   cacheGlob: string | undefined,
+ *   configHome: string,
+ *   containerPath: string,
+ *   providerKeys: string[],
+ *   fs: typeof fsp,
+ * }} args
+ * @returns {Promise<string[]>} the per-file notices, for the caller's `warning`
+ */
+async function purgeProviderCaches({ cacheGlob, configHome, containerPath, providerKeys, fs }) {
+  if (typeof cacheGlob !== 'string' || cacheGlob.length === 0) return []
+  const log = getLogger('client-detach')
+
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {string[]} */
+  let files
+  try {
+    files = await expandCacheGlob(configHome, cacheGlob, fs)
+  } catch (err) {
+    // A glob the manifest declares that this expander refuses (an absolute
+    // pattern, or one that climbs out of the config home) purges nothing.
+    log.warn('client.detach.cache_glob_refused', {
+      [Attr.COMPONENT]: 'client-detach',
+      [Attr.OPERATION]: 'client.detach.cache_purge',
+      [Attr.ERROR_KIND]: 'glob_refused',
+      cache_glob: cacheGlob,
+      detail: errMsg(err),
+    })
+    return [`cache purge skipped: ${errMsg(err)}`]
+  }
+
+  for (const file of files) {
+    /** @type {string} */
+    let raw
+    try {
+      raw = await fs.readFile(file, 'utf8')
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') continue
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'read_failed',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} could not be read; its cached provider entries were left in place`)
+      continue
+    }
+
+    /** @type {unknown} */
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (err) {
+      // Logged and skipped, not fatal (LLP 0172 §2.2 step 6).
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'malformed_json',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} is not valid JSON; its cached provider entries were left in place`)
+      continue
+    }
+    if (!isPlainObject(parsed)) continue
+
+    // The cache may mirror the settings file's container or hold the provider
+    // keys at its root; both spellings are the same keys, so purge whichever
+    // one this file uses rather than pinning a shape core cannot validate.
+    const targets = [parsed, getAtDottedPath(parsed, containerPath)]
+    let purged = false
+    for (const target of targets) {
+      if (!isPlainObject(target)) continue
+      for (const key of providerKeys) {
+        if (!Object.hasOwn(target, key)) continue
+        delete target[key]
+        purged = true
+      }
+    }
+    if (!purged) continue
+
+    try {
+      await atomicWriteFile(file, JSON.stringify(parsed, null, 2) + '\n', { fsync: true, fs })
+      log.info('client.detach.cache_purged', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.STATUS]: 'ok',
+        cache_path: file,
+      })
+    } catch (err) {
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'write_failed',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} could not be rewritten; its cached provider entries were left in place`)
+    }
+  }
+  return warnings
+}
+
+/**
+ * Expand a `cache_glob` under the client's config home. `*` matches within one
+ * path segment only, and `..`/absolute patterns are refused outright, so an
+ * expansion can never leave the config home: containment is a property of the
+ * expander rather than a check bolted on after it. A directory that cannot be
+ * listed contributes no matches (the cache simply is not there).
+ *
+ * @param {string} configHome
+ * @param {string} pattern
+ * @param {typeof fsp} fs
+ * @returns {Promise<string[]>}
+ */
+async function expandCacheGlob(configHome, pattern, fs) {
+  if (path.isAbsolute(pattern)) {
+    throw new Error(`cache_glob '${pattern}' must be relative to the client's config home`)
+  }
+  const segments = pattern.split('/').filter((segment) => segment.length > 0 && segment !== '.')
+  if (segments.length === 0) throw new Error('cache_glob names no file')
+  if (segments.some((segment) => segment === '..')) {
+    throw new Error(`cache_glob '${pattern}' must stay under the client's config home`)
+  }
+
+  /** @type {string[]} */
+  let dirs = [configHome]
+  /** @type {string[]} */
+  const matches = []
+  for (const [index, segment] of segments.entries()) {
+    const last = index === segments.length - 1
+    /** @type {string[]} */
+    const next = []
+    for (const dir of dirs) {
+      if (!segment.includes('*')) {
+        const candidate = path.join(dir, segment)
+        if (last) matches.push(candidate)
+        else next.push(candidate)
+        continue
+      }
+      const matcher = segmentMatcher(segment)
+      /** @type {Dirent[]} */
+      let entries
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (!matcher.test(entry.name)) continue
+        const candidate = path.join(dir, entry.name)
+        if (last) {
+          if (entry.isFile()) matches.push(candidate)
+        } else if (entry.isDirectory()) {
+          next.push(candidate)
+        }
+      }
+    }
+    dirs = next
+  }
+  return matches
+}
+
+/**
+ * One glob segment as a whole-segment regex. `*` is the only metacharacter;
+ * everything else is literal, so a cache path with a `.` or `+` in it matches
+ * itself rather than acting as a pattern.
+ *
+ * @param {string} segment
+ * @returns {RegExp}
+ */
+function segmentMatcher(segment) {
+  const source = segment
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/]*')
+  return new RegExp(`^${source}$`)
 }
 
 /* ------------------------------- TOML format ------------------------------ */
