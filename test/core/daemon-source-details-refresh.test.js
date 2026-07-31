@@ -164,3 +164,112 @@ test('a daemon that never reached a tick still refreshes source details before i
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
+
+// The refresh put plugin code on the tick loop's critical path, and the
+// kernel contract puts no bound on `status()`. A probe that never settles
+// used to be able to hang only boot, which is at least loud. On the tick path
+// it froze `persist()` - so *every* field in `status.json` went stale, not
+// just that source's - and hung the shutdown refresh with it, all while the
+// daemon went on reporting itself healthy.
+// @ref LLP 0164#status-reads-it-from-the-status-file [tests]:
+
+/**
+ * Stage a plugin whose source answers `status()` once, at boot, and then
+ * never again.
+ *
+ * @param {string} hypHome
+ * @returns {Promise<string>}
+ */
+async function stageHangingPlugin(hypHome) {
+  const installDir = path.join(hypHome, 'hypaware', 'plugins', PLUGIN)
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name: PLUGIN,
+    version: '0.1.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  }))
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    `
+export async function activate(ctx) {
+  ctx.sources.register({
+    name: 'accruing-fixture',
+    plugin: '${PLUGIN}',
+    async start() {
+      let probes = 0
+      return {
+        async status() {
+          probes += 1
+          if (probes > 1) await new Promise(() => {})
+          return { state: 'ready', details: { probes } }
+        },
+        async stop() {},
+      }
+    },
+  })
+}
+`
+  )
+  return installDir
+}
+
+test('a source whose status() never settles cannot freeze the status file or the shutdown', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-source-details-hang-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  let handle
+  try {
+    const configPath = await writeInstall(hypHome, await stageHangingPlugin(hypHome))
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'source-details-hang',
+      tickIntervalMs: 1,
+      installSignalHandlers: false,
+    })
+
+    const statusPath = path.join(stateRoot, 'run', 'status.json')
+    const firstWrite = (await fs.stat(statusPath)).mtimeMs
+
+    // The probe is hung from the very first tick. The tick loop must still be
+    // rewriting the file: a frozen mtime here is the whole bug.
+    const deadline = Date.now() + 20_000
+    let advanced = false
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      if ((await fs.stat(statusPath)).mtimeMs > firstWrite) {
+        advanced = true
+        break
+      }
+    }
+    assert.ok(advanced, 'status.json stopped being written while a probe hung')
+
+    // Details keep their last good value rather than being lost.
+    const snapshot = readStatusFile(stateRoot)
+    assert.deepEqual(snapshot?.sources?.[0]?.details, { probes: 1 })
+
+    // ... and the daemon can still be stopped.
+    const stopped = await Promise.race([
+      handle.stop().then(() => handle.done).then(() => 'stopped'),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 15_000)),
+    ])
+    handle = undefined
+    assert.equal(stopped, 'stopped', 'shutdown hung on the source status probe')
+
+    // Silence was the other half of the bug: say it, but say it once, not
+    // once per tick for the daemon's life.
+    const log = await fs.readFile(path.join(stateRoot, 'logs', 'daemon.log'), 'utf8')
+    const failures = log.split(String.fromCharCode(10)).filter((l) => l.includes('daemon.source_status_failed'))
+    assert.ok(failures.length > 0, 'a stuck status probe was never reported')
+    assert.ok(failures.length <= 4, `status probe failure logged ${failures.length} times`)
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})

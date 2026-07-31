@@ -472,6 +472,96 @@ export async function runDaemon(opts = {}) {
 
   // ----- Tick loop -----
   /**
+   * How long a source's `status()` may take before the tick gives up on it.
+   * `status()` is plugin code and the kernel contract puts no bound on it. It
+   * used to be awaited only at boot, where a probe that never settles is at
+   * least loud: the daemon does not start. On the tick path a hang is silent
+   * and total - `persist()` is downstream of the refresh, so *every* field in
+   * `status.json` freezes, not just that source's, while the daemon goes on
+   * reporting itself healthy; and the shutdown refresh would hang
+   * `hyp daemon stop` with it. Well under the tick interval floor so a slow
+   * probe cannot overlap itself into the next tick.
+   */
+  const SOURCE_STATUS_TIMEOUT_MS = 5000
+
+  /**
+   * Last failure message logged per source, so a persistently broken probe
+   * says so once instead of once per tick forever.
+   *
+   * @type {Map<string, string>}
+   */
+  const sourceProbeFailures = new Map()
+
+  /** @type {Set<string>} */
+  const sourceProbesInFlight = new Set()
+
+  /**
+   * Probe one source's `status()` details under a timeout, and never let the
+   * plugin's promise outlive our interest in it. A timed-out probe cannot be
+   * cancelled, so the source is skipped until its previous call settles.
+   * Otherwise a permanently hung probe would start (and hold open) a fresh
+   * `source.status` span on every tick for the daemon's life.
+   *
+   * @param {string} name
+   * @returns {Promise<{ details: object | undefined, failure: string | undefined }>}
+   */
+  async function probeSourceDetails(name) {
+    if (sourceProbesInFlight.has(name)) {
+      return { details: undefined, failure: 'previous status probe has not settled' }
+    }
+    sourceProbesInFlight.add(name)
+    const settle = () => sourceProbesInFlight.delete(name)
+    const probe = boot.runtime.sources.status(name).then((s) => s?.details ?? undefined)
+    probe.then(settle, settle)
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer
+    try {
+      const details = await Promise.race([
+        probe,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`status probe exceeded ${SOURCE_STATUS_TIMEOUT_MS}ms`)),
+            SOURCE_STATUS_TIMEOUT_MS
+          )
+          if (typeof timer.unref === 'function') timer.unref()
+        }),
+      ])
+      return { details: /** @type {object | undefined} */ (details), failure: undefined }
+    } catch (err) {
+      return { details: undefined, failure: err instanceof Error ? err.message : String(err) }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Report a probe outcome at most once per transition. The refresh runs every
+   * tick, so logging each failure unconditionally would turn one broken plugin
+   * into a log line every tick for the daemon's life; logging none at all - the
+   * old `safeStatus` behaviour - leaves an operator with a source whose details
+   * silently never change and nothing anywhere saying why.
+   *
+   * @param {string} name
+   * @param {string | undefined} failure
+   */
+  function noteProbeOutcome(name, failure) {
+    const previous = sourceProbeFailures.get(name)
+    if (failure === undefined) {
+      if (previous === undefined) return
+      sourceProbeFailures.delete(name)
+      fileLog.info('daemon.source_status_recovered', { hyp_source: name })
+      return
+    }
+    if (previous === failure) return
+    sourceProbeFailures.set(name, failure)
+    fileLog.warn('daemon.source_status_failed', {
+      hyp_source: name,
+      message: failure,
+      error_kind: 'source_status_probe',
+    })
+  }
+
+  /**
    * Re-read every started source's `status()` details into the snapshot
    * list. Boot writes the details once (`startConfiguredSources`), which
    * was enough while every detail was fixed at bind time (host, port,
@@ -481,17 +571,19 @@ export async function runDaemon(opts = {}) {
    * this file. Name, plugin, and state are left alone - liveness is the
    * lifecycle's business, not a status probe's.
    *
-   * Best-effort per source, like `safeStatus` itself: a source whose
-   * probe throws or returns nothing keeps the details it already had
-   * rather than losing them.
+   * Best-effort per source: a source whose probe throws, times out, or
+   * returns nothing keeps the details it already had rather than losing
+   * them, and one bad source never blocks the next one or the persist
+   * below.
    *
    * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source details so accruing details reach status.json
    */
   async function refreshSourceDetails() {
     for (const snap of status.sources) {
       if (snap.state !== 'started') continue
-      const details = await safeStatus(boot.runtime, snap.name)
+      const { details, failure } = await probeSourceDetails(snap.name)
       if (details !== undefined) snap.details = details
+      noteProbeOutcome(snap.name, failure)
     }
   }
 

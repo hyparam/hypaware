@@ -337,3 +337,29 @@ test('a rendered recent-clients block cannot be forged by a hostile entrypoint',
   assert.match(block[1], /^ {4}- \S.* {2}\(claude\) {2}last seen just now, 1 row$/)
   assert.match(block[2], /^ {2}cache:/, 'the next line is the real one, not a forged one')
 })
+
+// `sanitizeLabel` bounds a label's bytes; nothing bounded how many of them
+// core would read back. The gateway caps its own map, but core reads a *file*,
+// and the same sentence that justifies sanitizing on read - this build did not
+// necessarily write it - applies to the count.
+test('a status file with an absurd number of entrypoints is capped on read', () => {
+  const many = Array.from({ length: 5000 }, (_, i) => ({
+    entrypoint: `surface-${i}`,
+    client_name: null,
+    last_seen: new Date(Date.now() - i * 1000).toISOString(),
+    rows: 1,
+  }))
+
+  const recent = recentEntrypointsFromSources([
+    {
+      name: 'ai-gateway',
+      plugin: '@hypaware/ai-gateway',
+      state: 'started',
+      details: { recent_entrypoints: many },
+    },
+  ])
+
+  assert.equal(recent.length, 32)
+  // Capped after the sort, so what survives is the most recently seen.
+  assert.equal(recent[0].entrypoint, 'surface-0')
+})

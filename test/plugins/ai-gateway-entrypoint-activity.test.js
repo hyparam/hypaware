@@ -149,3 +149,45 @@ test('the default cap is 32 distinct entrypoints', () => {
   for (let i = 0; i < 200; i++) activity.record([{ entrypoint: `surface-${i}` }])
   assert.equal(activity.size(), 32)
 })
+
+// A control byte is not the only way a label can render as something other
+// than what it stores. Bidi overrides print nothing and reverse what follows,
+// and an unterminated one runs past the end of the label into the rest of the
+// status line.
+test('a bidi override cannot reorder the rendered status line', () => {
+  const RLO = String.fromCharCode(0x202e)
+  const LRI = String.fromCharCode(0x2066)
+  const activity = createEntrypointActivity()
+  activity.record([{ entrypoint: `local-agent${RLO}tnega-lacol`, client_name: `c${LRI}laude` }])
+
+  const [entry] = activity.snapshot()
+  assert.equal(entry.entrypoint.includes(RLO), false)
+  assert.equal(entry.client_name?.includes(LRI), false)
+  assert.match(entry.entrypoint, /^local-agent/)
+})
+
+// The whole reason the tracker sanitizes at `record` rather than at render is
+// to keep the map *key* clean. Characters with no rendered width would
+// otherwise mint unlimited distinct keys that an operator cannot tell apart,
+// so 32 slots of one surface would evict every real one.
+test('invisible characters cannot dilute the eviction cap', () => {
+  const ZWSP = String.fromCharCode(0x200b)
+  const activity = createEntrypointActivity()
+  for (let i = 0; i < 500; i++) activity.record([{ entrypoint: 'codex-tui' + ZWSP.repeat(i) }])
+
+  assert.equal(activity.size(), 1)
+  assert.deepEqual(activity.snapshot().map((e) => e.entrypoint), ['codex-tui'])
+})
+
+// The clamp counts UTF-16 code units, so a cut can land between the halves of
+// an astral character. A lone surrogate is not a well-formed string and would
+// ride into `status.json` as one.
+test('clamping an astral entrypoint leaves a well-formed string', () => {
+  const activity = createEntrypointActivity()
+  activity.record([{ entrypoint: 'A'.repeat(119) + String.fromCodePoint(0x1f600).repeat(50) }])
+
+  const [entry] = activity.snapshot()
+  assert.equal(entry.entrypoint.isWellFormed(), true)
+  // The marker is inside the ceiling, not bolted on past it.
+  assert.ok(entry.entrypoint.length <= 120, `length ${entry.entrypoint.length}`)
+})

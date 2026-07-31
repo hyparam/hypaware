@@ -125,6 +125,15 @@ export function gatewaySourceDetails(sources) {
 }
 
 /**
+ * How many recent client surfaces `hyp status` will report. The gateway keeps
+ * its own, deliberately equal, cap on the writing side; this one exists
+ * because core reads a *file* and a file can have been written by an older
+ * build, a different build, or something that is not this daemon at all. It
+ * bounds the terminal output, not the tracker.
+ */
+const MAX_RECENT_ENTRYPOINTS = 32
+
+/**
  * Lift the gateway source's `recent_entrypoints` detail out of a status-file
  * source-snapshot list, most recently seen first.
  *
@@ -136,12 +145,15 @@ export function gatewaySourceDetails(sources) {
  * a name in `hyp status` that no query could reproduce would be worse than a
  * short list.
  *
- * Labels are sanitized here as well as at the gateway that wrote them. This is
- * not belt-and-braces: `status.json` is a file, and core must not assume the
- * daemon that wrote it was this version, was this build, or was well behaved.
- * Everything read here is about to be printed to a terminal, so control bytes
- * (which can repaint the operator's screen or forge a plausible extra status
- * line) and unbounded lengths are removed at the last point before render.
+ * Labels are sanitized here as well as at the gateway that wrote them, and the
+ * list is capped here as well as there. This is not belt-and-braces:
+ * `status.json` is a file, and core must not assume the daemon that wrote it
+ * was this version, was this build, or was well behaved. Everything read here
+ * is about to be printed to a terminal, so all three ways a label can be
+ * hostile are answered at the last point before render - control and invisible
+ * bytes (`sanitizeLabel`), unbounded length (`sanitizeLabel`), and unbounded
+ * *count*, which the writer's cap does not cover for a file this build did not
+ * write.
  *
  * @param {SourceSnapshot[] | undefined} sources
  * @returns {RecentEntrypoint[]}
@@ -172,7 +184,9 @@ export function recentEntrypointsFromSources(sources) {
     })
   }
   out.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0))
-  return out
+  // Sorted before the cap so the entries kept are the most recently seen ones,
+  // which is the same entry a "recent clients" readout would keep anyway.
+  return out.slice(0, MAX_RECENT_ENTRYPOINTS)
 }
 
 /**

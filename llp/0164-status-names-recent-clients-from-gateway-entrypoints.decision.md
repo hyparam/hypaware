@@ -63,9 +63,10 @@ version of option 2:
   pins none of them), and the value printed is byte-identical to the one a
   follow-up `ai_gateway_messages` query filters on - for every value a real
   client surface produces. The one exception is deliberate: a value carrying
-  control bytes or running past 120 characters is cleaned before it is
-  displayed (see **Bounded** below), so it is the row, not the readout, that
-  stays authoritative for a pathological name.
+  control, invisible, or display-reordering characters, or running past
+  120 characters, is cleaned before it is displayed (see **Bounded**
+  below), so it is the row, not the readout, that stays authoritative for
+  a pathological name.
 - **No placeholder.** A row with no `entrypoint` is skipped, not bucketed
   under "unknown". A name in `hyp status` that no query can reproduce would
   be worse than a short list.
@@ -83,11 +84,22 @@ version of option 2:
   (`assignTranscriptIdentity`), and that is an ordinary JSON string of any
   length containing any byte. Since this map is the source for a file on
   disk and for text printed to a terminal, values are passed through
-  `sanitizeLabel` (control bytes stripped, clamped to 120 chars) at the
-  point of record, and again in core when read back. Without it, a
-  transcript value could repaint the operator's screen or forge a
-  plausible extra `hyp status` line, and 32 unbounded values would be
-  rewritten into `status.json` on every tick.
+  `sanitizeLabel` at the point of record, and again in core when read
+  back. Without it, a transcript value could repaint the operator's
+  screen or forge a plausible extra `hyp status` line, and 32 unbounded
+  values would be rewritten into `status.json` on every tick.
+
+  `sanitizeLabel` clamps to 120 characters (marker included) and strips
+  every character that either drives the terminal or occupies no width
+  on it: C0/DEL/C1 and the line separators, bidi formatting, and the
+  zero-width and default-ignorable formatting characters. The last group
+  is not cosmetic. Stripping at the point of record is what keeps the
+  map *key* clean, and a key differing only in characters that render as
+  nothing would mint unlimited entries an operator cannot tell apart -
+  filling all 32 slots with one surface and evicting every real one. What
+  is deliberately *not* attempted is confusables: this bounds what a
+  label does, not what it looks like, so two labels built from different
+  but similar-looking real letters stay distinct, as they must.
 
 This is an **activity signal, not a store**. It is in-memory and
 daemon-scoped: it dies with the process and is never written anywhere but the
@@ -102,12 +114,40 @@ that accrues. So the daemon re-reads started sources' details on every sink
 tick, and once more at shutdown before the sources are torn down (a daemon
 that stopped between ticks must not leave a file claiming it saw nothing).
 Name, plugin, and state are left alone: liveness is the lifecycle's business,
-not a status probe's, and the refresh is best-effort per source like
-`safeStatus` itself.
+not a status probe's, and the refresh is best-effort per source.
+
+Putting a plugin call on the tick path is the widest thing this decision
+does, so the refresh bounds it rather than trusting it. `status()` is plugin
+code and the kernel contract puts no limit on what it may do. Awaited only at
+boot, a probe that never settles is at least loud: the daemon does not start.
+Awaited every tick it would be silent and total, because `persist()` is
+downstream of the refresh: *every* field in `status.json` would freeze, not
+just that source's, while the daemon went on reporting itself healthy, and
+the shutdown refresh would hang `hyp daemon stop` with it. So each probe runs
+under a timeout, a source with a probe still outstanding is skipped rather
+than piling up a fresh call (and a fresh unclosed span) every tick, and a
+probe that throws or times out leaves the details it already had.
+
+A failure is reported **once per transition, not once per tick**. The old
+boot-only path swallowed a throwing `status()` in silence, which was
+survivable when it happened once; at tick cadence, silence would hide a
+permanently broken plugin behind details that simply never change, and
+logging unconditionally would trade that for a line every tick for the
+daemon's life. Neither is observable in the sense LLP 0033 means. So the
+daemon logs `daemon.source_status_failed` when a source's failure changes,
+and `daemon.source_status_recovered` when it stops.
 
 Core's whole share of the feature is `recentEntrypointsFromSources`: find the
 gateway source's snapshot, validate the shape, order by time, drop what is
-malformed. `hyp status` then renders a `recent clients:` block, and
+malformed, sanitize each label, and cap the list. The sanitizing and the cap
+are deliberately duplicated from the gateway rather than delegated to it:
+`status.json` is a *file*, and core cannot assume the daemon that wrote it
+was this version, this build, or well behaved, while everything read here is
+about to be printed to a terminal. All three ways a label can be hostile are
+answered at that last point before render - control and invisible bytes,
+unbounded length, and unbounded count.
+
+`hyp status` then renders a `recent clients:` block, and
 `--json` a `recent_entrypoints` array. The block appears only when the daemon
 recorded something, so an install that has never captured keeps the V1 text
 surface unchanged.
