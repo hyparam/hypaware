@@ -576,7 +576,13 @@ export function resolveSessionIdForCli(args) {
     }
   }
 
-  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
+  // Recording the cwd is the whole of what makes a rollout a candidate here.
+  // Nothing further about it may filter the list, because the list is counted
+  // below and the count is the uniqueness claim: a header dropped for a field
+  // this path does not resolve on would take the ambiguity with it and leave a
+  // confident answer behind. Whether a candidate is usable is decided after the
+  // count, one candidate at a time.
+  /** @type {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
   const candidates = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -603,6 +609,27 @@ export function resolveSessionIdForCli(args) {
         error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
       }
     }
+    // Every `session_meta` Codex writes states `payload.id`, so a header
+    // without one is a file nothing accounts for - truncated, hand-edited, or
+    // written by something that is not Codex. Its `session_id` reads like an
+    // answer and there is no second field left to check it against, and this
+    // one goes to a privacy control that reports success for whatever token it
+    // is handed. Unconfirmable is unresolvable, the same rule that refuses a
+    // blank container.
+    //
+    // This is asked BEFORE the missing-container question, because
+    // `legacyRolloutError` diagnoses one specific file - a Codex old enough to
+    // predate `session_id` - and names the thread id it does carry as the thing
+    // not to key on. A header stating neither field is not an old Codex, so
+    // answering it with "Upgrade Codex" would send the user after a fix for a
+    // problem this file does not have. Both refuse either way; only the
+    // diagnosis differs.
+    if (only.threadId === undefined) {
+      return {
+        ok: false,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) states no thread id (payload.id), which every session_meta Codex writes carries, so the header cannot be vouched for and nothing it states about the session is evidence of the session you are in. Pass the session id explicitly: hyp session status <session-id>.`,
+      }
+    }
     if (only.sessionId === undefined) {
       return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
     }
@@ -620,7 +647,12 @@ export function resolveSessionIdForCli(args) {
       error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
-  const named = candidates.map((c) => `${c.threadId} (${path.basename(c.file)})`).join(', ')
+  // A candidate with no thread id still has to appear: it is one of the reasons
+  // the answer is ambiguous, and a user reading the list needs to see the file
+  // rather than wonder why the count exceeds the names.
+  const named = candidates
+    .map((c) => `${c.threadId ?? 'no thread id'} (${path.basename(c.file)})`)
+    .join(', ')
   return {
     ok: false,
     error: `could not resolve a session id: ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
@@ -666,8 +698,13 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
     if (!meta) continue
-    if (meta.threadId !== threadId) continue
-    matches.push({ ...meta, file })
+    // Unlike the cwd scan, this path is an identity test rather than a count,
+    // so a header stating no thread cannot be a match and cannot be missing
+    // one either: it names nothing to compare.
+    const found = meta.threadId
+    if (found === undefined) continue
+    if (found !== threadId) continue
+    matches.push({ ...meta, threadId: found, file })
   }
 
   if (matches.length === 0) {
@@ -711,6 +748,12 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
  * resolution exists to remove, and it would be invisible: on a root thread the
  * two coincide, so the wrong key only shows up on the subagent threads nobody
  * tests by hand.
+ *
+ * Both callers establish a thread id before reaching this, which the message
+ * relies on twice: "upgrade Codex" is only the right advice for a rollout old
+ * enough to predate the field, and "its thread id is NOT that container" names
+ * a value the header has to be carrying. A header stating neither field is a
+ * different failure and gets its own refusal.
  *
  * @param {string} which  how the rollout was selected, for the message
  * @param {string} names  rollout basename(s) the refusal is about
@@ -801,7 +844,19 @@ function describeAge(ms) {
 
 /**
  * The thread id, session container and cwd a rollout's `session_meta` header
- * states, or `undefined` when the file states no thread at all.
+ * states, or `undefined` when the file's first line is not that header at all.
+ *
+ * **`undefined` means "this file establishes nothing about any session", and
+ * nothing else.** It used to also swallow a header that states a `cwd` and a
+ * container but no `payload.id`, which made such a rollout invisible to the
+ * caller rather than unresolvable to it. The cwd scan counts its candidates to
+ * decide whether the match is unique, so a discarded match did not merely fail
+ * to resolve, it removed the evidence that the survivor was not alone: two
+ * rollouts recording one cwd resolved confidently to whichever of them happened
+ * to carry a thread id. That is the artefact-of-the-bound failure LLP 0067
+ * §cli-session-id refuses on, reached by discard instead of by truncation.
+ * Judging a header is the caller's job, so a header is now returned whenever it
+ * is one and the callers refuse on what they need.
  *
  * The read itself is `readRolloutSessionMeta`, shared with `@hypaware/codex`'s
  * live cwd resolver, which asks this exact line the same question for the
@@ -832,13 +887,13 @@ function describeAge(ms) {
  * rollout whose header records no usable `cwd` still answers it.
  *
  * @param {string} file
- * @returns {{ threadId: string, sessionId: string | undefined, cwd: string | undefined } | undefined}
+ * @returns {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined } | undefined}
  * @ref LLP 0067#cli-session-id [implements]: an absent or unusable session_id is
  * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
   const meta = readRolloutSessionMeta(file)
-  if (meta?.threadId === undefined) return undefined
+  if (!meta) return undefined
   return { threadId: meta.threadId, sessionId: meta.sessionId, cwd: meta.cwd }
 }
 
