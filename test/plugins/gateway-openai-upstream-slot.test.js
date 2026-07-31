@@ -110,6 +110,30 @@ const ROUTES = [
   { label: 'unsteered bare chat completions', path: '/chat/completions', headers: {}, expect: undefined },
 ]
 
+/**
+ * The no-change tests below are a `for` loop over `ROUTES`, so an emptied or
+ * thinned table asserts nothing and they go green having routed nothing. Pin
+ * the coverage the table is supposed to carry separately from walking it, or
+ * the guard can be disarmed by deletion alone.
+ */
+test('the route table still carries the coverage the no-change tests walk', () => {
+  assert.ok(ROUTES.length >= 11, `the route table shrank to ${ROUTES.length} routes`)
+  for (const expected of ['openai', 'chatgpt', 'anthropic', undefined]) {
+    assert.ok(
+      ROUTES.some((route) => route.expect === expected),
+      `no route expects ${expected ?? '404'}`
+    )
+  }
+  // The `/v1` segment boundary, the Anthropic path the priority hazard aims
+  // at, and the bare-origin path only the header rung can route.
+  for (const path of ['/v1', '/v1/', '/v1x', '/v1/messages', '/chat/completions']) {
+    assert.ok(
+      ROUTES.some((route) => route.path === path),
+      `no route covers ${path}`
+    )
+  }
+})
+
 for (const order of [[CODEX, OPENCLAW], [OPENCLAW, CODEX]]) {
   test(`existing routes are unchanged when the openai slot is won by activation order ${order.join(' then ')}`, async () => {
     const table = await compiledPresetTable(order)
