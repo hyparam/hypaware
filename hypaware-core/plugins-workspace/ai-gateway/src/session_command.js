@@ -48,7 +48,7 @@ const EPHEMERAL_NOTE =
  * is dropping (issue #451). Authenticating it would need peer-process identity,
  * which has no portable form, and a gateway-written secret defends nothing
  * because whoever can bind that port runs as the same uid and can read the same
- * file ([LLP 0067 §cli-response-check](../../../../llp/0067-session-opt-out.design.md)).
+ * file ([LLP 0067 §cli-response-check](../../../../llp/0067-session-opt-out.design.md#cli-response-check)).
  *
  * So the guarantee is stated rather than proved, and the statement is
  * **unconditional**: the verb cannot tell the gateway from the impostor, so a
