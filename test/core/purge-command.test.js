@@ -716,7 +716,10 @@ test('scopeGovernance stays unwidened for callers that do not opt in', () => {
 // directory they already deleted), and a `stat` that could not be taken at all,
 // because `sameDirectoryOnDisk` answers `false` for every errno rather than for
 // `ENOENT` alone. The tests below use spellings that exist on no host, or exist
-// but cannot be read, so none of them depends on whether the test volume folds.
+// but cannot be read, so none of them asks the volume for a folding verdict. The
+// last one is the single fixture in this file that has to *build* both
+// spellings, so it alone needs them to be two entries, and skips where they are
+// not.
 // @ref LLP 0104#spellings [tests]: the retention note claims only what the run established
 test('the near-miss note does not claim a verdict an ENOENT never gave', async () => {
   const cacheRoot = await makeTmpDir('cli-alias-gone')
@@ -780,13 +783,25 @@ test('the near-miss note agrees in number with the rows it is counting', async (
 // chmod-ed ancestor for `EACCES`: it needs no injection, needs the real
 // predicate rather than a stubbed one, and unlike a permission bit it still
 // fails the `stat` when the suite runs as root.
-test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', async () => {
+//
+// Unlike every other fixture here it creates *both* spellings, which is the one
+// thing a normalization-insensitive volume will not allow: on APFS or HFS+ the
+// NFD spelling already names the NFC directory just made, so the `symlink` below
+// would land `EEXIST` instead of building the loop. That host cannot host this
+// cause at all (a folded volume proves the alias and deletes), so it skips
+// rather than erroring, and the `ENOENT` case above still covers the retention.
+test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', async (t) => {
   const cacheRoot = await makeTmpDir('cli-alias-eloop')
   const hypHome = await makeTmpDir('cli-alias-eloop-home')
   const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-eloop-'))
   try {
     const root = await fs.realpath(projects)
     await fs.mkdir(path.join(root, NFC))
+    const folds = await fs.lstat(path.join(root, NFD)).then(() => true, () => false)
+    if (folds) {
+      t.skip('this volume folds the two spellings into one entry, so the alias cannot be made unreadable here')
+      return
+    }
     // Present (`lstat` finds it), unreadable (`stat` gives `ELOOP`), and so
     // neither "genuinely different" nor "no longer on disk".
     await fs.symlink(path.join(root, NFD), path.join(root, NFD))
