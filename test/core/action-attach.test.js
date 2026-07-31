@@ -632,6 +632,65 @@ test('reverse() invokes the disk-driven undo once and never consults ctx.clients
   assert.equal(calls[0].descriptor, CLAUDE_DESCRIPTOR)
 })
 
+test('reverse() reports a replayed malformed-block backup by path, and never its contents', async () => {
+  // The reconciler half of #500 finding 3. `hyp detach` prints a line per
+  // restored path; this reverse is an org config drop with nobody at a
+  // terminal, so the log is the only place a rewrite of the user's settings
+  // file can be recorded - and the failure half of the same replay was already
+  // logged here while the success half was not.
+  /** @type {{ event: string, attrs: any }[]} */
+  const records = []
+  /** @type {any} */
+  const log = {
+    debug() {},
+    info(/** @type {string} */ event, /** @type {any} */ attrs) { records.push({ event, attrs }) },
+    warn(/** @type {string} */ event, /** @type {any} */ attrs) { records.push({ event, attrs }) },
+    error() {},
+  }
+  const handler = createAttachHandler({
+    detach: async () => ({
+      changed: true,
+      settingsPath: '/home/u/.claude/settings.json',
+      restoredPaths: ['env', 'hooks.SessionStart'],
+    }),
+  })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    log,
+  }))
+
+  assert.deepEqual(outcome, { status: 'done' })
+  const restored = records.find((r) => r.event === 'client_action.attach_reverse_restored')
+  assert.ok(restored, 'a replayed backup is named before the marker drops')
+  assert.equal(restored.attrs.client, 'claude')
+  for (const dotted of ['env', 'hooks.SessionStart']) {
+    assert.ok(String(restored.attrs.detail).includes(dotted), `${dotted} is named`)
+  }
+})
+
+test('reverse() says nothing about a restore that did not happen', async () => {
+  // The guard on the line above: `restoredPaths` is absent on every undo that
+  // replayed no backup, which is nearly all of them, and an org-driven detach
+  // must not emit a restore record for one.
+  /** @type {string[]} */
+  const events = []
+  /** @type {any} */
+  const log = {
+    debug() {},
+    info(/** @type {string} */ event) { events.push(event) },
+    warn(/** @type {string} */ event) { events.push(event) },
+    error() {},
+  }
+  const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    log,
+  }))
+
+  assert.deepEqual(outcome, { status: 'done' })
+  assert.equal(events.includes('client_action.attach_reverse_restored'), false)
+})
+
 test('reverse() replays the real core undo from disk with no adapter loaded (fs round-trip)', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-action-attach-'))
   try {

@@ -9,7 +9,7 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
 
 /**
  * @import { ClientDescriptor } from '../../../src/core/types.js'
- * @import { DetachFromDiskResult } from './types.d.ts'
+ * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -222,26 +222,63 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
     if (Object.keys(envObj).length === 0) delete value.env
   }
 
-  // Put back the blocks attach had to rebuild because what was on disk was
-  // present with the wrong JSON type. `prev_malformed` is path-keyed
-  // (`env`, `hooks`, `hooks.<event>`), so the replay is the same format-generic
-  // shape as the rest of the record: core never learns that `hooks.SessionStart`
-  // means anything to Claude.
-  //
-  // Same never-clobber rule the managed env keys follow, expressed as a
-  // presence test: the backup only goes back into a slot that is now *empty*,
-  // which is exactly the case where everything attach put there has just been
-  // stripped. Anything still sitting at the path arrived after we attached, so
-  // it is left alone and reported instead.
-  //
-  // Both failure notices say the backup is *discarded*, not merely skipped. The
-  // marker is deleted a few lines up and it held the only copy, so a detach that
-  // cannot restore is the moment the value stops existing. "Leaving it in place"
-  // on its own reads as though the record survives to be retried, and it does
-  // not; the user who reads this line is the last person who can act on it.
-  // @ref LLP 0163#detach-restores-the-backup [implements]: replay prev_malformed shallowest-first, restoring only into a slot the strip emptied
+  const restoredPaths = replayPrevMalformed(value, marker.prev_malformed, warnings)
+
+  await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+
+  const warning = joinWarnings(warnings)
+
+  /** @type {DetachFromDiskResult} */
+  const result = { changed: true, settingsPath }
+  if (removed !== undefined) result.removed = removed
+  if (restoredValue !== undefined) result.restoredValue = restoredValue
+  if (restoredPaths.length > 0) result.restoredPaths = restoredPaths
+  if (warning !== undefined) result.warning = warning
+  return result
+}
+
+/**
+ * Put back the blocks attach had to rebuild because what was on disk was
+ * present with the wrong JSON type. `prev_malformed` is path-keyed
+ * (`env`, `hooks`, `hooks.<event>`), so the replay is the same format-generic
+ * shape as the rest of the record: core never learns that `hooks.SessionStart`
+ * means anything to Claude.
+ *
+ * Same never-clobber rule the managed env keys follow, expressed as a presence
+ * test: the backup only goes back into a slot that is now *empty*, which is
+ * exactly the case where everything attach put there has just been stripped.
+ * Anything still sitting at the path arrived after we attached, so it is left
+ * alone and reported instead.
+ *
+ * Every failure notice says the backup is *discarded*, not merely skipped. The
+ * marker is deleted by the caller in the same write and it held the only copy,
+ * so a detach that cannot restore is the moment the value stops existing.
+ * "Leaving it in place" on its own reads as though the record survives to be
+ * retried, and it does not; the user who reads this line is the last person who
+ * can act on it.
+ *
+ * Shared by both `json` branches. The record-driven undo is not the only way to
+ * reach a marker carrying this field: a marker whose `managed` record has been
+ * damaged routes to {@link detachLegacyJsonMarker}, which used to drop the
+ * whole backup without a word (#500 finding 1). One replay means one set of
+ * words for both.
+ *
+ * Returns the paths whose backup actually went back, so the caller can *report*
+ * a restore that succeeded. Paths only, never values: a malformed `env` is
+ * exactly where an API key ends up, and this list is printed to the terminal
+ * and echoed into `--json` (LLP 0163).
+ *
+ * @ref LLP 0163#detach-restores-the-backup [implements]: replay prev_malformed shallowest-first, restoring only into a slot the strip emptied, and report both halves by path
+ * @param {Record<string, unknown>} value
+ * @param {unknown} recorded the marker's `prev_malformed` field, whatever type it is on disk
+ * @param {string[]} warnings accumulator for the per-path failure notices
+ * @returns {string[]}
+ */
+function replayPrevMalformed(value, recorded, warnings) {
   /** @type {Record<string, unknown>} */
-  const prevMalformed = isPlainObject(marker.prev_malformed) ? marker.prev_malformed : {}
+  const prevMalformed = isPlainObject(recorded) ? recorded : {}
+  /** @type {string[]} */
+  const restoredPaths = []
   // Shallowest first, so a `hooks` backup is considered before any
   // `hooks.<event>` backup nested inside it. Not because the parent has to exist
   // first - `restoreAtDottedPath` recreates a missing parent either way - but
@@ -275,7 +312,9 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
     // it now has nowhere to go. Naming that cause matters - the earlier wording
     // reported it as a path the undo may not write, which is both false and
     // unactionable for the one person who can still act on it.
-    if (!restoreAtDottedPath(value, dotted, prevMalformed[dotted])) {
+    if (restoreAtDottedPath(value, dotted, prevMalformed[dotted])) {
+      restoredPaths.push(dotted)
+    } else {
       warnings.push(
         `${dotted} could not be restored; ` +
         'a parent on its path is no longer a JSON object, ' +
@@ -283,17 +322,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
       )
     }
   }
-
-  await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
-
-  const warning = joinWarnings(warnings)
-
-  /** @type {DetachFromDiskResult} */
-  const result = { changed: true, settingsPath }
-  if (removed !== undefined) result.removed = removed
-  if (restoredValue !== undefined) result.restoredValue = restoredValue
-  if (warning !== undefined) result.warning = warning
-  return result
+  return restoredPaths
 }
 
 /**
@@ -392,7 +421,24 @@ function isManagedHandler(handler, command) {
 
 /* ----------------------------- legacy JSON marker ---------------------------- */
 
-const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
+// Both `hyp claude-hook` sub-commands attach has ever installed. `classify-cwd`
+// (LLP 0106) postdates the `managed` undo record, so a *genuine* pre-record
+// marker never had one to orphan - but this branch is also where a marker whose
+// record has been damaged lands, and there the entries are on disk and the
+// record naming them is unreadable. Matching the command is proof of ownership
+// (nothing but hypaware writes `hyp claude-hook …`), so widening the pattern
+// cannot clobber a user's own hook. Kept in step with the adapter's
+// `MANAGED_HOOK_PATTERN`.
+// @ref LLP 0163#the-legacy-branch-replays-every-backup-the-marker-carries [implements]: match on the command, which is proof of ownership, so a damaged-record detach leaves no classify-cwd hook orphaned
+const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+(?:session-context|classify-cwd)\b/
+
+// Marker fields no pre-record marker ever carried. Any of them present means
+// this is a *current*-shape marker whose `managed` record has been damaged (a
+// hand edit, or anything else with write access to the settings file), not the
+// pre-upgrade shape this branch was written for. The reversal below is then
+// knowingly partial - the record that named the managed keys is unreadable - so
+// it says so instead of reporting a clean detach.
+const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_malformed']
 
 /**
  * Reverse a pre-upgrade legacy `json` marker — the old Claude marker shape
@@ -401,10 +447,21 @@ const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
  * fall back to the convention `attach()` used before the record existed:
  * remove `env.ANTHROPIC_BASE_URL` only when it still equals the recorded
  * `http://127.0.0.1:${port}` gateway URL (never clobbering a later user edit),
- * and strip the session-context hooks by the `claude-hook session-context`
+ * and strip the managed hooks by their {@link LEGACY_CLAUDE_HOOK_PATTERN}
  * command pattern. Legacy JSON markers were only ever written by Claude, so the
  * key/pattern are safe to assume here. Moved from the retired claude-adapter
  * `detach()` so the one core undo owns this reversal too.
+ *
+ * It is also where a **current**-shape marker lands once its `managed` record
+ * has been damaged - only reachable by hand-editing (or otherwise corrupting)
+ * the record out of a marker, never through attach/re-attach/detach. That case
+ * is not the one this branch was written for, and the difference is visible:
+ * such a marker still carries its `prev_base_url` / `prev_malformed` backups.
+ * Those are replayed here exactly as the record-driven branch replays them -
+ * the marker is deleted in the same write and holds the only copy, so dropping
+ * them is destruction, not a deferral (#500 finding 1). What cannot be replayed
+ * (the managed keys the unreadable record named) is reported instead of quietly
+ * left behind.
  *
  * @param {{
  *   settingsPath: string,
@@ -419,19 +476,54 @@ const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
 async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs }) {
   const markerPort = typeof marker.port === 'number' ? marker.port : undefined
 
+  // Read every backup the marker carries BEFORE it is deleted. A genuine
+  // pre-record marker has none of these and nothing changes for it. A marker
+  // that got here with them is a damaged current-shape one, and dropping a
+  // backup it is holding is the single worst thing this undo can do: the marker
+  // is the only copy, so "no record to replay" was silently destroying the
+  // user's value while reporting a successful detach (#500 finding 1).
+  // Presence, not type, for the same reason the record-driven branch uses it:
+  // attach only writes these when there was something to record.
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, on every branch that deletes it
+  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
+  const recordDamaged = POST_LEGACY_MARKER_FIELDS.some((field) => Object.hasOwn(marker, field))
+
   delete value[markerKey]
   stripLegacyClaudeHooks(value)
 
   /** @type {string | undefined} */
   let removed
   /** @type {string | undefined} */
-  let warning
+  let restoredValue
+  /** @type {string[]} */
+  const warnings = []
+  if (recordDamaged) {
+    // The one thing this branch cannot do is name the keys a post-record attach
+    // added beside the base URL (`ENABLE_TOOL_SEARCH`,
+    // `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, …): the record that listed
+    // them is exactly what is unreadable, and nothing on disk distinguishes a
+    // value we wrote from one the user did. Deleting on a guess would clobber a
+    // user edit, which this undo never does - so they stay, and the user is told
+    // the reversal was partial rather than left to discover the leftovers.
+    warnings.push(
+      `${markerKey} carried no readable undo record; ` +
+      'reversed by the pre-record convention, so any managed value a newer attach ' +
+      'added beside the gateway base URL is left in place'
+    )
+  }
   if (isPlainObject(value.env)) {
     const envObj = /** @type {Record<string, unknown>} */ (value.env)
     const current = envObj.ANTHROPIC_BASE_URL
     if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
-      removed = typeof current === 'string' ? current : String(current)
-      delete envObj.ANTHROPIC_BASE_URL
+      // Still our gateway URL. A recorded prior goes back; with none recorded
+      // the key is removed, which is all a genuine legacy marker ever supports.
+      if (prevBaseUrl !== undefined) {
+        envObj.ANTHROPIC_BASE_URL = prevBaseUrl
+        restoredValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
+      } else {
+        removed = typeof current === 'string' ? current : String(current)
+        delete envObj.ANTHROPIC_BASE_URL
+      }
     } else if (Object.hasOwn(envObj, 'ANTHROPIC_BASE_URL')) {
       // Presence, not type - the same rule the record-driven undo above
       // follows. A legacy marker meets settings this tree never wrote, so the
@@ -441,24 +533,35 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
       // current === 'string'` gate swallowed the notice for exactly the values
       // most likely to be deliberate. The key absent is still silent - nothing
       // was left in place to report.
-      warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
+      warnings.push('ANTHROPIC_BASE_URL was overridden externally; leaving in place')
     }
     if (Object.keys(envObj).length === 0) delete value.env
   }
 
+  // Same replay, same words, as the record-driven branch. It runs after the
+  // strip above for the same reason it does there: the strip is what empties
+  // the slot a backup can go back into.
+  const restoredPaths = replayPrevMalformed(value, marker.prev_malformed, warnings)
+
   await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
+
+  const warning = joinWarnings(warnings)
 
   /** @type {DetachFromDiskResult} */
   const result = { changed: true, settingsPath }
   if (removed !== undefined) result.removed = removed
+  if (restoredValue !== undefined) result.restoredValue = restoredValue
+  if (restoredPaths.length > 0) result.restoredPaths = restoredPaths
   if (warning !== undefined) result.warning = warning
   return result
 }
 
 /**
- * Strip the legacy Claude session-context hooks — matched by the
- * `claude-hook session-context` command pattern rather than the marker's undo
- * record (a legacy marker recorded no hook entries). Empty groups, emptied
+ * Strip the managed Claude hooks matched by {@link LEGACY_CLAUDE_HOOK_PATTERN}
+ * rather than by the marker's undo record (a legacy marker recorded no hook
+ * entries). The pattern covers every `hyp claude-hook` sub-command attach has
+ * installed, not only `session-context`, because a damaged-record marker also
+ * lands here with `classify-cwd` entries on disk. Empty groups, emptied
  * event arrays, and an emptied `hooks` root are pruned, so no orphaned `hyp …`
  * hooks survive. Preserves a user's own non-managed handlers for the same event.
  *

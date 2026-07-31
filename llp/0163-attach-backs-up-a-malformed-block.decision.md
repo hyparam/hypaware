@@ -222,10 +222,69 @@ explicit per-entry order (or timestamp) would be a schema change, and it is left
 as an open question rather than smuggled in. The current order is pinned by
 tests so that changing it is a visible decision.
 
-Legacy pre-record markers never wrote `prev_malformed`, so the legacy branch is
-untouched. A marker that reaches that branch *with* the field (only possible by
-hand-editing `managed` out of an otherwise current marker) drops it silently;
-that is accepted as corrupt-input behaviour, not designed for.
+### A restore that happened is reported, by path and never by value
+
+The failure half of the replay has always been reported (`warning`). The
+*success* half was silent: a detach that rewrote the user's `env` block back set
+none of `removed` / `restoredValue` / `warning`, so `hyp detach` printed
+`✓ Detached claude` and stopped. A restore that says nothing is the same defect
+as a destruction that says nothing, one direction over - the user cannot tell
+that the file they are looking at was rewritten (issue #500, finding 3).
+
+The undo reports it as `DetachFromDiskResult.restoredPaths`, a **list of dotted
+paths**, and the command prints one line each.
+
+**Paths, never values.** The attach-side notices already refuse to echo the
+displaced value, because a malformed `env` block is exactly where an API key
+ends up and these strings are printed and logged. The same rule governs the way
+back, so this cannot ride on `restoredValue`, which both consumers render as a
+bare value.
+
+**A list, not a joined string**, for the reason LLP 0045 Part 3 already gives
+for `warnings: string[]`: `warning` is unsplittable prose because each notice
+carries its own punctuation, whereas a successful restore has nothing to say
+*but* the path. Handing callers a string they would have to split would be
+inventing a parsing problem.
+
+This also makes the one behaviour this document deliberately leaves alone
+audible. Delete the repaired block by hand and `hyp detach` puts the original
+malformed value back, where the sibling `prev_base_url` leaves a hand-deleted
+leaf deleted. The divergence is defensible - at the moment of deletion the block
+held only hypaware's own repaired keys, so restoring the pre-attach value
+completes a partial manual detach and nothing is lost, which is the opposite of
+the destruction direction #454 was about - and reversing it would *discard* a
+value rather than keep one. It stays. What it no longer does is happen without a
+word.
+
+### The legacy branch replays every backup the marker carries
+
+Legacy pre-record markers never wrote `prev_malformed` or `prev_base_url`, so
+for a genuine pre-upgrade marker the legacy branch has nothing to replay and is
+unchanged.
+
+A marker can nevertheless *reach* that branch carrying both, because the branch
+is selected by `managed` not being a plain object, and hand-editing (or
+otherwise corrupting) the record out of a current marker leaves the backups
+behind. No attach writes that shape - `managed` goes on in the same write that
+ever sets `prev_malformed` - so it is only reachable through a damaged file.
+This was previously accepted as corrupt-input behaviour and the backups were
+dropped without a word. That is wrong on this document's own terms: the marker
+is deleted in the same write and holds the only copy, so "no record to replay"
+was destroying the user's value while reporting a successful detach, which is
+the exact failure this document exists to end (issue #500, finding 1). The
+branch now replays `prev_malformed` through the same helper and with the same
+words as the record-driven one, and restores a recorded `prev_base_url` instead
+of deleting the key.
+
+What it still cannot do is name the managed keys the unreadable record listed
+(`ENABLE_TOOL_SEARCH`, `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, and any
+later addition). Nothing on disk distinguishes a value hypaware wrote from one
+the user did, and never-clobber-a-user-edit outranks tidiness, so they are left
+in place and the reversal reports itself as partial. Hooks are different and are
+now stripped: every managed handler is matched by its `hyp claude-hook …`
+command, which is proof of ownership rather than a guess, so widening the legacy
+pattern to `classify-cwd` clears entries the retired convention predates without
+any risk to a user's own hook.
 
 ## Consequences
 
@@ -249,6 +308,21 @@ that is accepted as corrupt-input behaviour, not designed for.
   guard.
 - OpenClaw is unchanged and still refuses (LLP 0143, LLP 0109). The
   divergence is now documented rather than accidental.
+- `DetachFromDiskResult` grows `restoredPaths?: string[]`, and `hyp detach`
+  gains a `Restored <path> from the marker's malformed-block backup` line plus a
+  `restored_paths` key in `--json`. Nothing parses it; both output modes render
+  it.
+- The reconciler's `reverse()` (`action_attach.js`) reports it too, as a
+  `client_action.attach_reverse_restored` log record. It is the same field and
+  the same paths-never-values rule, but it is the *more* important half: an
+  org-driven fleet drop rewrites a block of the user's settings file with nobody
+  at a terminal to read a printed line, and the failure half of the replay was
+  already logged there while the success half was not.
+- The legacy `json` branch is no longer a silent hole for a damaged marker. It
+  replays `prev_malformed` and `prev_base_url`, strips `classify-cwd` hooks, and
+  reports itself as a partial reversal. A genuine pre-record marker carries none
+  of the triggering fields, so its reversal and its (silent) output are
+  bit-identical to before.
 
 ## Open questions
 

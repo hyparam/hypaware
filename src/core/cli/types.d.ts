@@ -357,6 +357,16 @@ export interface ClientResult {
    * §restoredValue is single-primary only).
    */
   restored_value?: string
+  /**
+   * Dotted paths whose `prev_malformed` backup the `json` undo put back on
+   * detach - the blocks attach had to rebuild because they were present with
+   * the wrong JSON type (LLP 0163). Absent when the replay restored nothing.
+   *
+   * Paths, never values: a malformed `env` block is exactly where an API key
+   * ends up, and this is printed and logged. That is also why it is not folded
+   * into `restored_value`, which is rendered as a bare value.
+   */
+  restored_paths?: string[]
   /** Non-fatal warning emitted by the adapter. */
   warning?: string
   /** Machine-readable failure category on the error path. */
