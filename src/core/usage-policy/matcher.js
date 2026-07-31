@@ -7,7 +7,7 @@ import { Attr } from '../observability/attrs.js'
 import { getLogger } from '../observability/logger.js'
 
 import { canonicalSpellings } from './canonical.js'
-import { createVolumeCaseProbe, foldPath, hashPath } from './fold.js'
+import { createVolumeCaseProbe, foldPath, hashPath, sameDirectoryOnDisk } from './fold.js'
 import { parseHypignore } from './format.js'
 import { LocalOnlyListUnreadableError } from './local_only.js'
 
@@ -426,15 +426,20 @@ function listScope(entry, probeVolume, deps) {
  * is `max(declared, widened)` on the restrictiveness lattice, so a fold that
  * merges two genuinely distinct directories (which it does on Linux, where NFC
  * and NFD names are two inodes) can only ever over-suppress. That argument does
- * not survive the trip to a CLI verb: `hyp purge --subtree` **deletes** through
- * {@link scopeGoverns}, `policy unset` **removes an opt-out** through it, and
- * `sameDirectory` decides which stored declaration to **replace**. In each of
- * those, widening the match destroys something the user did not name. Closing
- * that gap needs a per-volume normalization-insensitivity probe (the existing
- * probe answers only the case question) or a darwin-only guard, which is tracked
- * in the LLP rather than smuggled in here.
+ * not survive the trip to a CLI verb: `policy unset` **removes an opt-out**
+ * through {@link scopeGoverns}, and `sameDirectory` decides which stored
+ * declaration to **replace**. In each of those, widening the match destroys
+ * something the user did not name, so the fold's word alone does not buy it.
  *
- * @ref LLP 0050#normalization [constrained-by]: "do not reuse foldPath in a predicate where widening is not free"
+ * `hyp purge` is the one call site that has bought it, and it did so without
+ * relaxing this rule: {@link scopeGovernance}'s `proveAliases` mode uses the
+ * fold only to *propose* a spelling and then requires `dev`/`ino` identity
+ * before deleting through it. That proof is available because a purge compares
+ * one pair of paths; it is not available to the verbs above, which ask about a
+ * directory rather than about a pair, so they stay here.
+ *
+ * @ref LLP 0050#normalization [constrained-by]: "do not reuse foldPath as a verdict in a predicate where widening is not free"
+ * @ref LLP 0104#spellings [constrained-by]: what it takes to widen a destructive predicate, and why only that one did
  * @param {LocalOnlyEntry} entry
  * @param {{ realpathSync?: (p: string) => string, component?: string }} deps
  * @returns {ListScope}
@@ -635,24 +640,122 @@ export function governingListEntry(dir, entries, deps = {}) {
  * callers that are comparing two already-canonical strings and must not touch
  * the filesystem.
  *
- * Symlink-widened but **not folded**: see {@link canonicalScope}. This one is
- * the sharpest case, because `hyp purge --subtree` routes its *deletion*
- * predicate through here.
+ * Symlink-widened always; folded only for a caller that passes
+ * `proveAliases` and can therefore afford the `stat` pair that makes a folded
+ * match safe (see {@link scopeGovernance}). Without it this is bit-for-bit the
+ * unfolded predicate `canonicalScope` describes.
  *
  * Does up to two `realpath` calls, so callers on a per-row loop should memoize
  * per distinct path (`src/core/cache/purge.js` does).
  *
  * @ref LLP 0069#requirements [implements]: R8, one shared equal-or-descendant test, now spelling-agnostic
  * @ref LLP 0050#canonicalization [implements]: CLI membership answers agree with the gate's verdict
- * @ref LLP 0050#normalization [constrained-by]: the fold stops at the gate; a deletion predicate must not widen for free
+ * @ref LLP 0050#normalization [constrained-by]: a deletion predicate never widens for free; `proveAliases` buys the widening with a `dev`/`ino` proof
  * @param {string} cwd
  * @param {string} dir
- * @param {{ realpathSync?: (p: string) => string, component?: string }} [deps]
+ * @param {{ realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number }, component?: string, proveAliases?: boolean }} [deps]
  * @returns {boolean}
  */
 export function scopeGoverns(cwd, dir, deps = {}) {
+  return scopeGovernance(cwd, dir, deps) === 'governs'
+}
+
+/**
+ * The full verdict {@link scopeGoverns} collapses into a boolean: does `dir`
+ * govern `cwd` (`governs`), is `cwd` unrelated to it (`outside`), or is `cwd`
+ * spelled as if it were inside `dir` on a volume that folds spellings, without
+ * *this* filesystem confirming the two spellings are one directory (`aliased`)?
+ * `aliased` is the absence of a proof, not a proof of difference: it covers
+ * both a live pair with two inodes and a spelling that could not be `stat`ed at
+ * all, so a caller rendering it must not report a verdict the second never gave.
+ *
+ * The third answer is the point, and it exists because `hyp purge` deletes. At
+ * the gate, folding two spellings together is free: the resolved class is
+ * `max(declared, folded)`, so a fold that merges two genuinely distinct
+ * directories can only over-suppress. In a deletion predicate the same fold
+ * destroys rows for a directory the user never named, and on every ext4 volume
+ * `caf` + U+00E9 and `cafe` + U+0301 (or `Proj` and `proj`) genuinely *are* two
+ * directories. So the fold here is only a **candidate generator**: it proposes
+ * the prefix of `cwd` that a spelling-insensitive volume would fold onto `dir`,
+ * and {@link sameDirectoryOnDisk} decides, by `dev`/`ino`, whether that prefix
+ * and `dir` are one directory. `governs` is therefore returned only for a
+ * subtree relation the filesystem itself asserts, which makes over-deletion
+ * structurally unreachable rather than merely unlikely: the widening never
+ * rests on a rule about strings.
+ *
+ * When the proof fails the answer is `aliased` rather than `outside`, so the
+ * caller can say so. A purge that retains rows under a lookalike spelling is
+ * indistinguishable from one that found nothing (LLP 0104 §spellings), and that
+ * silence is the actual complaint: reporting the near-miss is what turns a
+ * quiet non-deletion into a stated one.
+ *
+ * The candidate generator folds case **unconditionally**, with no volume probe.
+ * That is not the probe's job here: the probe exists to keep an *unproven* case
+ * fold from widening, and nothing widens on a proposal alone at this seam. On a
+ * case-sensitive volume the proposal is simply refused by `dev`/`ino`, which is
+ * the same verdict the probe would have produced, reached from the actual pair
+ * rather than from a synthesized flip of a different path.
+ *
+ * Cost is bounded by the lexical answer: the fold runs only when plain
+ * canonical matching already said no, and the `stat` pair runs only when the
+ * fold proposes something, so a cache whose rows are all inside or all far
+ * outside the target issues no extra syscall at all.
+ *
+ * @ref LLP 0050#normalization [implements]: the one shared predicate folds for purge too, with the fold proposing and the filesystem disposing
+ * @ref LLP 0104#spellings [implements]: purge deletes an aliased spelling it can prove, and names one it cannot
+ * @param {string} cwd
+ * @param {string} dir
+ * @param {{ realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number }, component?: string, proveAliases?: boolean }} [deps]
+ * @returns {'governs' | 'aliased' | 'outside'}
+ */
+export function scopeGovernance(cwd, dir, deps = {}) {
   const dirSpellings = canonicalSpellings(dir, deps)
-  return canonicalSpellings(cwd, deps).some((spelling) => matchDepth(spelling, dirSpellings) !== null)
+  const cwdSpellings = canonicalSpellings(cwd, deps)
+  if (cwdSpellings.some((spelling) => matchDepth(spelling, dirSpellings) !== null)) return 'governs'
+  if (!deps.proveAliases) return 'outside'
+
+  let aliased = false
+  for (const spelling of cwdSpellings) {
+    for (const base of dirSpellings) {
+      const alias = foldedAliasOf(spelling, base)
+      if (alias === null) continue
+      if (sameDirectoryOnDisk(alias, base, deps)) return 'governs'
+      aliased = true
+    }
+  }
+  return aliased ? 'aliased' : 'outside'
+}
+
+/**
+ * The prefix of `cwd` that a volume folding Unicode normalization and case
+ * would treat as `dir`, or `null` when no such fold makes `cwd` a descendant of
+ * `dir`.
+ *
+ * Two properties of {@link foldPath} carry this. It **distributes over the path
+ * separator**, so a folded segment-aware prefix match implies the unfolded
+ * prefix is a fold-equal spelling of `dir` (a sibling like `caf` + U+00E9 +
+ * `-other` still fails the match, because the segment boundary survives the
+ * fold). And it **preserves segment count**, since neither NFC nor
+ * `toLowerCase` creates or removes a `/`, so the matching prefix can be cut
+ * from the unfolded `cwd` by counting segments; character offsets could not be
+ * used, because NFC is length-reducing.
+ *
+ * Returns `null` rather than `dir` itself when the prefix already equals `dir`:
+ * that is the plain lexical relation the caller tested first, so proposing it
+ * again would only buy a redundant `stat` pair.
+ *
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {string} dir absolute, already `path.resolve`d
+ * @returns {string | null}
+ */
+function foldedAliasOf(cwd, dir) {
+  const opts = { caseInsensitive: true }
+  if (!isEqualOrDescendant(foldPath(cwd, opts), foldPath(dir, opts))) return null
+  const segments = dir.split(path.sep).length
+  const parts = cwd.split(path.sep)
+  if (parts.length < segments) return null
+  const alias = parts.slice(0, segments).join(path.sep)
+  return alias === dir ? null : alias
 }
 
 /**
