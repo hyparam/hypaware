@@ -8,9 +8,25 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 /**
  * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../collectivus-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from '../../../src/core/query/types.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult, ExecutionBudget, RefreshMode } from '../../../src/core/query/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
+
+/**
+ * Conservative safe-low default execution budget so an un-configured caller
+ * (`hyp query`, the `query_sql` MCP tool, or a direct `hypaware/core/query`
+ * import) is bounded out of the box rather than free to OOM the daemon
+ * (HypAware Server issue #9). The concrete tuned buffered-row/buffered-byte
+ * ceilings are deferred to the LLP 0057 Phase 0 measurement pass; these are
+ * deliberately conservative placeholders until that measurement lands, not a
+ * tuned value. Callers may pass an explicit `budget` to raise it.
+ *
+ * @type {ExecutionBudget}
+ */
+const DEFAULT_EXECUTION_BUDGET = {
+  maxBufferedRows: 100_000,
+  maxBufferedBytes: 32 * 1024 * 1024,
+}
 
 /**
  * Run a read-only SELECT against the kernel's dataset registry. The
@@ -120,7 +136,9 @@ export async function executeQuerySql(args) {
         // undefined when neither is set leaves the unbounded path unchanged.
         const signal = buildExecutionSignal({ signal: args.signal, timeoutMs: args.timeoutMs })
         // @ref LLP 0054#signal-threading [implements] — kernel constructs and forwards the AbortSignal the operators read via context.signal but never received; enabler only, bounds nothing on its own
-        const results = squirrelExecuteSql({ tables, query: trimmed, signal })
+        const budget = args.budget ?? DEFAULT_EXECUTION_BUDGET
+        // @ref LLP 0054#execution-budget [implements]: kernel forwards a buffered-row/buffered-byte ceiling (whichever trips first) into the engine's blocking operators, defaulting to a conservative safe-low ceiling when the caller supplies none
+        const results = squirrelExecuteSql({ tables, query: trimmed, signal, budget })
         const rows = await collect(results)
         const columns = results.columns ?? []
         span.setAttribute('row_count', rows.length)
