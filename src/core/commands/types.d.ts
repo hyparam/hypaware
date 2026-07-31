@@ -1,4 +1,10 @@
 import type { UsageClass } from '../usage-policy/types.d.ts'
+import type {
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
+  HypAwareV2Config,
+  QueryStorageService,
+} from '../../../hypaware-plugin-kernel-types.js'
 
 // How the shared machine-local marking writers (`runMarkMachineLocal`,
 // `runUnmarkMachineLocal`, `runIgnoreCheck`) render internal values for a
@@ -24,6 +30,23 @@ export interface PolicyHumanVocabulary {
   // aliases' internal wording) gets the empty string, so it stays correct
   // by omission rather than by remembering to opt in.
   implicitSuffix?(): string
+}
+
+// A structural subset of `CommandRunContext`: exactly the fields
+// `runBackfillProvider`, `runProvider`, and `resolveOwnersForRun`
+// (`src/core/commands/backfill.js`) read off `ctx`. Every existing
+// `CommandRunContext` already satisfies it, so `hyp backfill`'s CLI path
+// and the onboarding finale's call keep typechecking unchanged; the
+// daemon sweep driver (LLP 0173 T9) can build one directly out of
+// `boot.runtime` fields without assembling a full, mostly-unused
+// `CommandRunContext`.
+// @ref LLP 0172#lane-b-sweep [implements]: the narrowed context type `runBackfillProvider`, `runProvider`, and `resolveOwnersForRun` declare, so the daemon sweep driver can build one without a full `CommandRunContext`
+export interface BackfillRunnerContext {
+  env: NodeJS.ProcessEnv
+  config: HypAwareV2Config
+  storage: QueryStorageService
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
 }
 
 export interface BackfillProviderResult {
