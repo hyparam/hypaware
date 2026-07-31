@@ -204,6 +204,16 @@ export interface PluginAttachProbeManifest {
    * `json_path` only: dotted path RELATIVE to the marker object to a
    * string property holding the JSON-encoded self-describing undo
    * record (e.g. `headers.x-hypaware-marker`).
+   *
+   * The record's `set` list is **unordered**: core replays every entry and
+   * nothing in this contract makes the first one primary. A record whose
+   * replay restores more than one prior value restores them all on disk,
+   * but the single `DetachFromDiskResult.restoredValue` reported back (and
+   * the `restored_value` field of `hyp detach --json`) is only meaningful
+   * for a record with at most one restoring entry; for several, which one
+   * is reported is unspecified. Declare at most one restoring `set` entry
+   * per record if the restored value must be reported (LLP 0109
+   * §restoredValue is single-primary only).
    */
   marker_record?: string
 }

@@ -348,7 +348,14 @@ export interface ClientResult {
   prev_value?: unknown
   /** Value removed on detach, when one was present. */
   removed?: string
-  /** Prior value restored on detach (codex). */
+  /**
+   * Prior value restored on detach. Emitted by every core undo format that
+   * records a prior (`json`, `toml`, `json_path`), not just codex.
+   *
+   * Single-primary only: an undo that restores several priors restores them
+   * all on disk but reports one unspecified value here (LLP 0109
+   * §restoredValue is single-primary only).
+   */
   restored_value?: string
   /** Non-fatal warning emitted by the adapter. */
   warning?: string
