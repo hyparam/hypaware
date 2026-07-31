@@ -1,4 +1,4 @@
-# LLP 0042: Incremental sink reads — plan
+# LLP 0042: Incremental sink reads (plan)
 
 **Type:** plan
 **Status:** Active
@@ -10,10 +10,10 @@
 
 > Implementation plan refining [LLP 0040](./0040-incremental-sink-reads.design.md)
 > (which answers the spec in [LLP 0039](./0039-incremental-sink-reads.spec.md))
-> into small, independently-mergeable tasks. The design's chosen shape — a
+> into small, independently-mergeable tasks. The design's chosen shape, a
 > row-resident monotonic `_hyp_ingest_seq` int64 watermark, a `since`/continuation
 > extension to `QueryStorageService.readRows`, and a per-`(sink instance, partition)`
-> watermark keyed by the **logical** partition path — decomposes cleanly along the
+> watermark keyed by the **logical** partition path, decomposes cleanly along the
 > producer → read-API → persistence → consumer seam.
 
 @ref LLP 0040: incremental sink reads design
@@ -44,14 +44,14 @@ else parallelizes. The seam is:
    (forward sink, local-fs/s3, format-iceberg, ai-gateway projector & dataset,
    vector-search, backfill, query) is untouched until it opts in. This task also
    owns the **null-seq migration contract** (design risk #1): a row whose seq is
-   null (pre-upgrade) is treated as **new** — emitted, never skipped — so the
+   null (pre-upgrade) is treated as **new** (emitted, never skipped), so the
    upgrade is at worst a one-time full re-export, never silent data loss.
 
 3. **Persistence (T3).** A small per-`(sink instance, partition)` watermark store
    under the sink plugin's `PluginPaths.stateDir`
    (`<stateDir>/watermarks/<dataset>/<partition-key>.json`), keyed by the **stable
    logical partition path** (relative to `cacheRoot`, sanitized as in
-   `state.js`'s `sanitizeSegment`) — never the physical `tableDir`. This keying is
+   `state.js`'s `sanitizeSegment`), never the physical `tableDir`. This keying is
    the hinge of design constraint (B): it reads straight through a compaction
    generation swap. Atomic write-rename, like `writeCursor`/`writeProgress`.
 
@@ -60,7 +60,7 @@ else parallelizes. The seam is:
    - **Forward sink** (`hypaware-core/plugins-workspace/central/src/sink.js`,
      `forwardPartition`): swap the full `readRows(tablePath)` loop for
      `readRowsSince({ since })`; advance the watermark **once, at end-of-partition**
-     (after every chunk acks), to the partition's high-water `after` token — never
+     (after every chunk acks), to the partition's high-water `after` token, never
      per-chunk, because the scan is not seq-ordered so a per-chunk advance to the
      running-max `after` could skip lower-seq rows in a later un-acked chunk
      (design §3/§4). The existing `MAX_CHUNK_ROWS`/`MAX_CHUNK_BYTES` chunking, the
@@ -73,11 +73,11 @@ else parallelizes. The seam is:
      `readRowsSince({ since })` into the unchanged `encodePartition` contract; an
      empty new-row set writes **no blob**; embed the `[sinceSeq, lastSeq]` range in
      the output filename so a crash-retry re-PUTs the **same object key**
-     (idempotent overwrite — the blob sink's stand-in for the server ledger);
+     (idempotent overwrite, the blob sink's stand-in for the server ledger);
      advance the watermark after the durable PUT.
 
 5. **Proof (T6).** Exactly-once acceptance across the two cache rewrites that
-   make this hard — retention front-prune and compaction generation swap — for
+   make this hard, retention front-prune and compaction generation swap, for
    **both** sinks, plus the watermark/outbox-respool composition (design risk #6).
 
 The `format-iceberg` sink is out of scope (it already has destination-side

@@ -11,7 +11,7 @@ Invoke as `/llp-create <title>` with an optional title, or `/llp-create` and the
 
 ## Ground rules
 
-- LLP documents live in `llp/` (flat or grouped into subdirectories — see LLP 0000 for filesystem organization rules).
+- LLP documents live in `llp/` (flat or grouped into subdirectories: see LLP 0000 for filesystem organization rules).
 - Filenames follow `NNNN-slug.type.md` where `NNNN` is zero-padded four digits, `slug` is a lowercase kebab-case identifier, and `type` is the lowercased document type.
 - Numbers are globally unique across the entire `llp/` tree, including subdirectories and `llp/tombstones/`. Never reuse a number that has ever been assigned.
 - Standard types (LLP 0000 §Types): `rfc`, `spec`, `decision`, `plan`, `explainer`, `principle`, `guide`, `issue`, `research`. Projects may define additional types; check the project's root LLP for any local conventions.
@@ -29,8 +29,8 @@ If another LLP tree exists in a non-standard location (some projects use `docs/s
 
 Required to produce a useful scaffold:
 
-- **Title** — short, sentence case. If not provided by the slash command argument, ask.
-- **Type** — which of the standard types fits best. If the user didn't specify, propose one based on the title and current conversation context, then confirm. Common cues:
+- **Title**: short, sentence case. If not provided by the slash command argument, ask.
+- **Type**, which of the standard types fits best. If the user didn't specify, propose one based on the title and current conversation context, then confirm. Common cues:
   - "How should we..." / "Proposal to..." → `rfc`
   - "What are the requirements..." / "Specification of..." → `spec`
   - "We decided..." / "Chose X over Y" → `decision`
@@ -40,8 +40,8 @@ Required to produce a useful scaffold:
   - "How to use..." / "Workflow for..." → `guide`
   - "Bug in..." / "Problem with..." → `issue`
   - "Analysis of..." / "Findings from..." → `research`
-- **Systems** — one or more system tags relevant to this LLP. Ask if unclear.
-- **Related** — existing LLPs worth reading alongside this one. Ask the user or propose based on topic overlap.
+- **Systems**: one or more system tags relevant to this LLP. Ask if unclear.
+- **Related**: existing LLPs worth reading alongside this one. Ask the user or propose based on topic overlap.
 
 ### 3. Generate the slug from the title
 
@@ -49,7 +49,7 @@ Required to produce a useful scaffold:
 - Replace any character that is not `a-z0-9` with `-`
 - Collapse repeated `-` into a single `-`
 - Trim leading and trailing `-`
-- Keep it short — aim for fewer than 6 words. If the title is long, truncate the slug after the meaningful words.
+- Keep it short: aim for fewer than 6 words. If the title is long, truncate the slug after the meaningful words.
 
 Example: `"Token rotation and session management"` → `token-rotation-and-session-management`. If that feels long, shorten to `token-rotation`.
 
@@ -79,7 +79,7 @@ Why does this exist? What problem does it solve?
 
 ## Design
 
-The body of the document. Structure this however the type and topic demand — RFCs usually have a Design section with sub-headings; Decisions have Context / Options / Decision / Consequences; Plans have phase breakdowns; etc.
+The body of the document. Structure this however the type and topic demand - RFCs usually have a Design section with sub-headings; Decisions have Context / Options / Decision / Consequences; Plans have phase breakdowns; etc.
 
 ## Open questions
 

@@ -71,7 +71,7 @@ export async function runAttach(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
  */
 export async function runDetach(argv, ctx) {
   return runClientLifecycle('detach', argv, ctx)
@@ -93,7 +93,7 @@ async function runClientLifecycle(action, argv, ctx) {
   // Detach is the single core, disk-driven undo (LLP 0045 §Part 3): it reverses
   // an on-disk attach from the static client descriptor map (owning plugin +
   // attach_probe), never the live gateway registry. So it must keep working
-  // with the @hypaware/ai-gateway capability absent/unloaded — resolve and
+  // with the @hypaware/ai-gateway capability absent/unloaded: resolve and
   // reverse here, AHEAD of the gateway gate. Attach genuinely needs the live
   // adapter, so it stays gated below.
   if (action === 'detach') {
@@ -193,7 +193,7 @@ async function runClientLifecycle(action, argv, ctx) {
       }
       // In dry-run mode the gateway source may not be started yet,
       // so `localEndpoint()` could throw. Fall back to a placeholder
-      // endpoint — adapters are expected to short-circuit before
+      // endpoint: adapters are expected to short-circuit before
       // touching it.
       let endpoint
       if (parsed.dryRun) {
@@ -216,7 +216,7 @@ async function runClientLifecycle(action, argv, ctx) {
             // The daemon persists that bound port to status.json, so discover
             // it - guarded by a daemon-liveness check - instead of guessing or
             // reporting the internal endpoint error.
-            // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context: manual attach without a configured listen defers to the daemon; probe disk, don't guess a port
+            // @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context: manual attach without a configured listen defers to the daemon; probe disk, don't guess a port
             // @ref LLP 0086#manual-attach-reads-the-live-port [implements]: hyp attach falls back to status.json sources[].details.port before giving up
             const stateRoot = readObservabilityEnv(ctx.env).stateDir
             const liveEndpoint = resolveLiveGatewayEndpointFromStatus({ stateRoot })
@@ -377,7 +377,7 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
 }
 
 /**
- * Reverse a client's attach from disk — the single core undo
+ * Reverse a client's attach from disk: the single core undo
  * (`detachClientFromDisk`). The manual `hyp detach` command and the
  * daemon reconciler's `reverse()` both route through this one
  * implementation, resolved per client via its `descriptor` (owning
@@ -400,7 +400,7 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<void>}
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
 export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
   if (!descriptor) {
@@ -472,7 +472,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         // `hyp join`'s forward gap short-circuits on it and never re-attaches the
         // client (#217). Best-effort: a marker we cannot retract is a status
         // blemish, not a detach failure (the settings undo already landed).
-        // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
+        // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
         //
         // The skills and subagents an org-driven attach installed come off its
         // marker, and the retraction below clears that marker, so they have to
@@ -692,7 +692,7 @@ function expandClientName(requested, gateway) {
  * Resolve `--client all` to every known client name from the descriptor map
  * (bundled+installed) for the disk-driven detach; otherwise return the
  * requested name verbatim (validated against the map at the call site). Detach
- * must not consult the live gateway registry — a client whose adapter was
+ * must not consult the live gateway registry: a client whose adapter was
  * dropped/unloaded still has an on-disk attach to reverse (LLP 0045 §Part 3).
  *
  * @param {string} requested
@@ -758,7 +758,7 @@ function parseIgnoreArgs(argv) {
  * `.hypignore` is left as-is. With `--check`, reports status without writing.
  * With one of the three machine-local flags, marks the target in the
  * machine-local class-per-entry store instead of touching a dotfile
- * (LLP 0103 #cli) — see {@link runMarkMachineLocal}. The bare-path dotfile
+ * (LLP 0103 #cli): see {@link runMarkMachineLocal}. The bare-path dotfile
  * meaning is unchanged from LLP 0049.
  *
  * @ref LLP 0049#cli [implements]: the `hyp ignore` verb: write the dotfile at the repo root, idempotent, with a prospective-only `--check`
@@ -887,13 +887,13 @@ const INTERNAL_VOCABULARY = {
  * - `local-only`: rows stay recorded to the local cache (queryable) but are
  *   dropped at the export seam (LLP 0070), unchanged since LLP 0072.
  * - `full`: an explicit "asked; syncs" marker. It resolves identically to
- *   the implicit default, but — unlike an unlisted directory — is a
+ *   the implicit default, but, unlike an unlisted directory, is a
  *   recorded answer the classification hook (LLP 0106) can see, so it never
  *   asks about this directory again.
  *
  * Idempotent and non-destructive (LLP 0104 boundary: marking never touches
  * cached rows). A target already governed by a class at least as
- * restrictive (`ignore`/`local-only`) — from either source — is a no-op
+ * restrictive (`ignore`/`local-only`), from either source, is a no-op
  * success naming the governor; a `full` mark is idempotent only against an
  * existing *explicit* machine-local `full` entry (the implicit default for
  * an unlisted directory is not "already answered", LLP 0103).
@@ -947,7 +947,7 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
  * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
  * governs succeeds as a no-op. With one of the three machine-local flags,
  * removes every machine-local entry of that class that governs the target
- * instead (LLP 0103 #cli, symmetric with the `hyp ignore` marking verbs) —
+ * instead (LLP 0103 #cli, symmetric with the `hyp ignore` marking verbs):
  * see {@link runUnmarkMachineLocal}.
  *
  * @ref LLP 0049#cli [implements]: the `hyp unignore` verb: remove the governing dotfile, idempotent
@@ -1071,11 +1071,11 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
  * `hyp ignore --check [path]`
  *
  * Reports whether `path` (default cwd) is currently ignored, the resolved
- * usage class, and which source governs it — a `.hypignore` dotfile, or a
+ * usage class, and which source governs it, a `.hypignore` dotfile, or a
  * machine-local class-per-entry (LLP 0103 #cli: `--check` names the
  * governing source explicitly, not just the file path, so a `--private`/
  * `--local-only`/`--sync` mark and a committed dotfile read distinctly even
- * though both resolve through the same `resolve()` call) — and the residual
+ * though both resolve through the same `resolve()` call), and the residual
  * count of already-cached rows from the scope. This is prospective-only:
  * `--check` never purges; it just surfaces the residue so the rule stays
  * debuggable (LLP 0049 #prospective-only), pointing at `hyp purge` for
@@ -1145,7 +1145,7 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
  * Resolve the directory whose residual cached rows `hyp ignore --check`
  * should count: the directory containing the governing `.hypignore` when
  * governed by a dotfile (unchanged from before the machine-local list
- * existed), or — when governed by the machine-local store
+ * existed), or, when governed by the machine-local store
  * (`result.governedBy === listPath`), the entry the gate itself used, from
  * the shared {@link governingListEntry} selector rather than a second copy of
  * the selection rule (R8). The `resolve()` call already decided *whether*
@@ -1290,7 +1290,7 @@ export async function runSkillsInstall(argv, ctx) {
  *
  * Built from the same **bundled + installed** catalog that `boot.js` and
  * `status.js` use, so an installed (non-bundled) client adapter that can
- * attach-on-join is also resolvable here — its `hyp detach` / skill / agent
+ * attach-on-join is also resolvable here: its `hyp detach` / skill / agent
  * install must not silently miss the descriptor.
  *
  * @param {CommandRunContext} ctx

@@ -22,10 +22,10 @@ and downstream-integration story.
 
 "Destination" is two different kinds of thing:
 
-1. **Blob destinations** — local filesystems and object stores
+1. **Blob destinations**: local filesystems and object stores
    (`@hypaware/local-fs`, `@hypaware/s3`, future `@hypaware/gcs`). Accept "put
    these bytes at this path." Format is separable.
-2. **Request destinations** — endpoints with their own wire protocol
+2. **Request destinations**: endpoints with their own wire protocol
    (`@hypaware/webhook`, `@hypaware/central`). Accept "send this structured
    payload via my protocol." Format is bound to the destination.
 
@@ -52,13 +52,13 @@ plugin and every existing writer works.
 A table-format writer lays data out for the **archive's** job, which is not the
 cache's job. The `@hypaware/format-iceberg` writer partitions exported tables by
 a writer-owned **day grain** and sorts each partition by the dataset's lookup
-key — deliberately *not* inheriting the cache's `cachePartitioning`, which is
+key: deliberately *not* inheriting the cache's `cachePartitioning`, which is
 tuned for recent-query lookups and would impose an unbounded per-conversation
 file count on an archive. See [LLP 0022](./0022-iceberg-export-partitioning.spec.md).
 
 ## Export contract
 
-A sink implements an export contract — not a per-row writer:
+A sink implements an export contract, not a per-row writer:
 
 ```ts
 interface Sink {
@@ -78,8 +78,8 @@ to the server in bounded chunks. The server rate-limits per gateway, so a chunk
 can come back `429`/`503` carrying a `Retry-After`. The sink treats this as
 **backpressure, not failure**:
 
-- It **retries the same chunk in place** — byte-identical body and
-  `X-Hyp-Batch-Id` — so the re-send is idempotent (the server dedupes the
+- It **retries the same chunk in place**: byte-identical body and
+  `X-Hyp-Batch-Id`, so the re-send is idempotent (the server dedupes the
   already-delivered prefix; server LLP 0001).
 - It honors a **positive** `Retry-After`. An absent, garbage, or **non-positive**
   value (a legal `Retry-After: 0` and a past HTTP-date both parse to `0`) carries
@@ -89,7 +89,7 @@ can come back `429`/`503` carrying a `Retry-After`. The sink treats this as
   governs the config pull loop ([LLP 0025](./0025-remote-config-join-flow.spec.md#config-pull-loop)).
 - The inline wait per chunk is **bounded** (~5 min). Past the budget the chunk
   throws and the export driver respools the partition (`ExportResult.retryPartitions`)
-  on the next scheduled tick — cheap, because the server has already deduped what
+  on the next scheduled tick: cheap, because the server has already deduped what
   landed.
 - The wait is **abortable**: `close()` aborts an in-flight pause so daemon
   shutdown is never wedged by a parked chunk.
@@ -110,19 +110,19 @@ Blob sinks compose a `writer` + `destination`; request sinks are one-piece
                   "config": { "endpoint": "https://hypaware.acme.internal", "schedule": "*/5 * * * *" } } } }
 ```
 
-`schedule` is a standard **5-field cron expression** — chosen over a friendly
+`schedule` is a standard **5-field cron expression**, chosen over a friendly
 DSL because cron expresses "02:00 UTC nightly" naturally and the kernel parses
 one grammar. The kernel validates writer/destination compatibility at
 config-load time: `format-parquet` + `@hypaware/webhook` is rejected with an
 explicit message (writer requires `hypaware.blob-store`; webhook provides
-`hypaware.http-endpoint`) — so the failure is configuration, not runtime.
+`hypaware.http-endpoint`), so the failure is configuration, not runtime.
 
 ## Queryable sinks
 
 Sinks declare what they support via the `supports` list in their manifest
 (renamed from `capabilities` to avoid clashing with the global registry).
 Recognized tag at V1: **`queryable`**. Queryability of a blob sink is a property
-of the resolved writer/destination pair — Parquet-on-local-fs is queryable,
+of the resolved writer/destination pair: Parquet-on-local-fs is queryable,
 JSONL-on-local-fs is not. A queryable sink adds a read API; `hypaware query`
 scans its data in place and queries transparently span cache + sink. If no
 queryable sink is configured, queries run against the cache and retention bounds

@@ -1,4 +1,4 @@
-# LLP 0080: local-only directory selection — technical design
+# LLP 0080: local-only directory selection (technical design)
 
 **Type:** design
 **Status:** Superseded
@@ -53,7 +53,7 @@ Four pieces, all reusing existing machinery:
    `hyp status` line.
 
 Nothing touches the capture path, the cache schema, the gateway, or the
-adapters — `local-only` differs from `ignore` precisely in that the row is
+adapters: `local-only` differs from `ignore` precisely in that the row is
 recorded normally and withheld only at export ([LLP 0070](./0070-local-only-export-seam.decision.md)).
 
 ## The machine-local list store {#store}
@@ -69,10 +69,10 @@ New module `src/core/usage-policy/local_only.js`:
   "/abs/path", ... ] }`. Entries are normalized absolute paths
   (`path.resolve`), deduplicated, sorted; paths need not exist on disk or be
   git repos (R4).
-- **API.** `readLocalOnlyDirs({ stateDir, fs? })` → `string[]` — a missing
+- **API.** `readLocalOnlyDirs({ stateDir, fs? })` → `string[]`: a missing
   file is the common case and returns `[]`; a present-but-unparseable file
   **throws** (see [fail-safe](#fail-safe)). `writeLocalOnlyDirs({ stateDir,
-  dirs, fs? })` — `mkdir -p` the parent, write tmp + rename (the same
+  dirs, fs? })`: `mkdir -p` the parent, write tmp + rename (the same
   atomic-write discipline other `HYP_HOME` state uses, e.g.
   `src/core/sinks/watermarks.js`).
 
@@ -80,14 +80,14 @@ New module `src/core/usage-policy/local_only.js`:
 
 An unreadable/unparseable `local-only.json` is an uninterpretable privacy
 signal. Resolving it as "empty list" would silently forward directories the
-user marked private (expose more — forbidden by
+user marked private (expose more: forbidden by
 [LLP 0049 §fail-safe](./0049-hypignore-usage-policy.spec.md#fail-safe));
 silently dropping **and advancing the cursor past** every row would durably
 skip rows the user never excluded. So the store throws, the resolver
 propagates, and `readRowsSince` lets the error fail the partition read: the
 sink's existing per-partition failure path retries next tick with the
 watermark untouched. Suppress more, lose nothing, self-heal on fix, and the
-failure is a structured error naming the file — never a silent state.
+failure is a structured error naming the file, never a silent state.
 
 ## The resolver gains a second source {#resolver}
 
@@ -102,19 +102,19 @@ createUsagePolicyResolver({ readFileSync, existsSync, now, ttlMs, localOnlyListP
 ```
 
 - When `localOnlyListPath` is set, `resolve(cwd)` computes both the existing
-  `.hypignore` ancestor walk **and** list membership — `cwd` equals or is a
+  `.hypignore` ancestor walk **and** list membership, `cwd` equals or is a
   path-segment descendant of a listed dir (the [LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope)
-  ancestor rule; segment-aware, so `/a/bc` is not under `/a/b`) — and returns
+  ancestor rule; segment-aware, so `/a/bc` is not under `/a/b`), and returns
   the most restrictive class: `ignore` > `local-only` > `full`.
 - A list-governed result is `{ class: 'local-only', governedBy:
   <localOnlyListPath>, declared: 'local-only' }`, so `--check` and logs can
   name the governing source uniformly.
 - The parsed list is memoized with the same short TTL as the per-`cwd` memo
   (`CACHE_TTL_MS`, 5s), so the export hot path does one file read per TTL
-  window and a list edit is honored by a running daemon within the window —
+  window and a list edit is honored by a running daemon within the window:
   the same staleness bound `.hypignore` already has
   ([LLP 0052 §matcher](./0052-hypignore-usage-policy.design.md#matcher)).
-- `format.js`: `IMPLEMENTED` gains `'local-only'` — the growth LLP 0052
+- `format.js`: `IMPLEMENTED` gains `'local-only'`, the growth LLP 0052
   anticipated ("grows additively when local-only ships"). A committable
   `.hypignore` declaring `local-only` now resolves to `local-only` instead of
   clamping to `ignore`. This is the loosening-the-user-asked-for that
@@ -140,20 +140,20 @@ so every kernel boot enforces the policy without per-caller opt-in. Inside
 // @ref LLP 0069#enforce [implements]
 const cwd = row.cwd
 if (typeof cwd === 'string' && cwd !== '' && resolver.resolve(cwd).class !== 'full') {
-  yield { after, dropped: true }   // no row payload — cursor still advances
+  yield { after, dropped: true }   // no row payload - cursor still advances
   continue
 }
 yield { row, after }
 ```
 
 - The check runs before internal-field stripping, keyed on the row's existing
-  `cwd` column — no schema change, retroactive over already-cached and
+  `cwd` column: no schema change, retroactive over already-cached and
   backfilled rows by construction (R5, [LLP 0070 §derive](./0070-local-only-export-seam.decision.md#derive)).
 - Rows without a `cwd` (logs/traces/metrics/proxy datasets) pass through
-  untouched — directory exclusion is structurally a no-op for them
+  untouched: directory exclusion is structurally a no-op for them
   ([LLP 0069 non-goal 3](./0069-local-only-dir-selection.spec.md#non-goals)).
 - Dropping on `class !== 'full'` (not `=== 'local-only'`) also withholds the
-  *residual* cached rows of a directory `.hypignore`d after capture — the
+  *residual* cached rows of a directory `.hypignore`d after capture, the
   most-restrictive ordering of [LLP 0070 §resolver](./0070-local-only-export-seam.decision.md#resolver)
   applied at the seam: `ignore` is a strictly stronger privacy signal than
   `local-only`, so forwarding its residue would be perverse.
@@ -163,7 +163,7 @@ yield { row, after }
 - `readRows` (the full-scan sibling) is **not** filtered: its callers are
   capture-side settlement/dedupe reads (`ai-gateway/src/dataset.js`,
   `message_projector.js`) and local indexing (`vector-search`) that must see
-  every cached row — filtering there would corrupt dedupe and break the
+  every cached row, filtering there would corrupt dedupe and break the
   "locally queryable" half of `local-only`. The one `readRows` caller that
   *is* an export path is rerouted below ([iceberg](#iceberg)).
 
@@ -181,7 +181,7 @@ AsyncIterable<
 
 A drop-only entry carries the running high-water `after` and nothing else: the
 payload never exists off the cache read, so no sink can forward it by
-accident, yet every consumer can advance its cursor across it — the invariant
+accident, yet every consumer can advance its cursor across it, the invariant
 [LLP 0070 §incremental](./0070-local-only-export-seam.decision.md#incremental)
 fixes. Both in-repo consumers are updated in the same change (the type is
 load-bearing).
@@ -204,7 +204,7 @@ and the end-of-partition watermark gate widens from `shippedRowCount > 0` to
 preserved: a dropped row is never shipped, so advancing past it needs no ack;
 a failed chunk POST still throws before the watermark write, so a partial
 partition still never checkpoints. A partition tail of `local-only` rows
-therefore checkpoints once and is durably passed — not re-scanned each tick,
+therefore checkpoints once and is durably passed, not re-scanned each tick,
 not re-sent on un-exclusion ([LLP 0069 R5](./0069-local-only-dir-selection.spec.md#requirements)).
 The partition-level log gains `dropped_row_count`.
 
@@ -218,7 +218,7 @@ first **payload** row. New reader field: `droppedRowCount`.
 
 The s3 and local-fs sinks (`s3/src/index.js:281`, `local-fs/src/index.js:119`)
 change their skip-empty branch: when `reader.empty && reader.droppedRowCount >
-0`, write the watermark to `reader.lastAfter` before `continue` — a drop-only
+0`, write the watermark to `reader.lastAfter` before `continue`, a drop-only
 tick must checkpoint, or the tail re-scans forever. A non-empty export already
 persists `reader.lastAfter` after the durable PUT, which now includes drops in
 its high-water. `withSeqRangeFilename` is unchanged: the range keys on
@@ -228,18 +228,18 @@ consumed seqs, so a crash-retry reproduces the same object key.
 
 The format-iceberg table format's `openRows`
 (`hypaware-core/plugins-workspace/format-iceberg/src/table-format.js:446`)
-reads whole partitions via the unfiltered `storage.readRows` — the one export
+reads whole partitions via the unfiltered `storage.readRows`, the one export
 path not on the shared seam, and it would leak `local-only` rows. It is
 rerouted onto `readRowsSince` with no `since` (a full scan: `continuationToSeq`
 treats absent as `0n`, `includeLegacy: true`), skipping drop-only entries and
-discarding `after` tokens — the table format is snapshot/marker-based, not
+discarding `after` tokens, the table format is snapshot/marker-based, not
 watermark-based, so there is no cursor to advance. This makes "every sink
 funnels through the one filtered seam"
 ([LLP 0070 §why-export](./0070-local-only-export-seam.decision.md#why-export))
 true by construction rather than by convention.
 
 Local query is untouched: `executeQuerySql` → squirreling → parquet source
-never calls `readRowsSince`, so `local-only` rows stay fully queryable — the
+never calls `readRowsSince`, so `local-only` rows stay fully queryable, the
 structural property LLP 0070 relies on.
 
 ## Enumerating candidate directories {#enumerate}
@@ -256,18 +256,18 @@ export async function listCapturedDirectories({ query, storage, config })
 - One `executeQuerySql` call (`src/core/query/index.js`, `refresh: 'never'`):
   `SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS last_seen FROM
   ai_gateway_messages WHERE cwd IS NOT NULL GROUP BY cwd, repo_root ORDER BY
-  last_seen DESC` — read from this machine's cache, never the remote (R2).
+  last_seen DESC`, read from this machine's cache, never the remote (R2).
 - Results are collapsed to one candidate per distinct `cwd` (a Codex `cwd`
   has a null `repo_root` by design and groups by `cwd` alone; a `cwd` seen
   under several `repo_root`s keeps the most recent), carrying `repo_root`,
   row count, and last-seen for display (R3).
 - **Bounded presentation** (resolves the spec's open questions): the picker
   shows at most the **50** most-recently-active candidates; more prints a
-  one-line `…and N more — manage with 'hyp ignore --local-only <path>'`. The
+  one-line `…and N more, manage with 'hyp ignore --local-only <path>'`. The
   aggregate itself is tiny (distinct-`cwd` cardinality), so LLP 0054 bounded
   execution is not implicated at this size; if the engine refuses or errors,
   enumeration is **best-effort**: return `null`, and the picker is skipped
-  with the durable-command hint — a failed enumeration must never block
+  with the durable-command hint, a failed enumeration must never block
   enrollment (same catch-to-null discipline as `countResidualCachedRows`).
 
 ## The picker {#picker}
@@ -279,18 +279,18 @@ export async function listCapturedDirectories({ query, storage, config })
   one-line durable-command hint and returns zero exclusions without prompting.
 - **Component**: the existing `multiselect` from `src/core/cli/tui/index.js`
   (already keyboard-driven, checkbox-toggling, injectable stdin/stdout for
-  tests) — LLP 0072 assumed this was net-new; it is not, which removes its
+  tests), LLP 0072 assumed this was net-new; it is not, which removes its
   main cost. The prompt renders on `ctx.stderr` so stdout stays clean for
   scripts. Each option's label is the path; its `summary` carries
   `repo_root`, exchange count, and last-seen.
 - **Defaults and dismissal** ([LLP 0072 §default](./0072-enrollment-dir-picker.decision.md#default)):
   fresh candidates are unchecked; Enter with nothing selected, Ctrl-C, and EOF
   (`PromptCancelledError` from the tui runtime, via `isPromptCancelledError`)
-  all resolve to **zero exclusions and proceed** — the picker can narrow an
+  all resolve to **zero exclusions and proceed**, the picker can narrow an
   enrollment, never abort one. An empty/`null` candidate list skips with the
   hint.
 - **Editor semantics on re-login**: candidates already on the list are shown
-  pre-checked — they are the user's own prior affirmative choices, so
+  pre-checked, they are the user's own prior affirmative choices, so
   pre-checking them does not violate "the tool does not infer"
   ([LLP 0072 §default](./0072-enrollment-dir-picker.decision.md#default), which
   forbids the *tool* pre-excluding). The confirmed checked set replaces list
@@ -298,13 +298,13 @@ export async function listCapturedDirectories({ query, storage, config })
   or not-yet-captured directories) are preserved untouched.
 - **Persist, then never-silent**: selections are written via
   `writeLocalOnlyDirs` and the flow prints
-  `withholding N director(ies) from forwarding — recorded locally, never sent`
+  `withholding N director(ies) from forwarding, recorded locally, never sent`
   ([LLP 0072 §never-silent](./0072-enrollment-dir-picker.decision.md#never-silent)).
 
 ### Wiring into `hyp remote login` {#login}
 
 In `runBrowserLogin` (`src/core/cli/remote_commands.js`), the picker runs
-after `seed(...)` succeeds and **before** the `seeded.length === 0` fork —
+after `seed(...)` succeeds and **before** the `seeded.length === 0` fork,
 i.e. after the gateway credential is confirmed and past the `--no-forward`
 early-return (both skips fall out of the placement for free), and strictly
 before `enrollCentralSink` (`remote_commands.js:428`), so the list is on disk
@@ -341,7 +341,7 @@ enrollment it refines.
 > **Revisited-by [issue #281] follow-up (fresh-enroll registry staleness).** The
 > reordered wiring above still enumerated through the login process's boot-time
 > query-registry snapshot, which on a genuinely fresh box predates the org
-> config pull that enables `@hypaware/ai-gateway` — so `ai_gateway_messages` was
+> config pull that enables `@hypaware/ai-gateway`, so `ai_gateway_messages` was
 > unregistered, the enumeration failed to null, and the picker still silently
 > skipped. The fix adds `freshenCaptureEnumeration`
 > (`src/core/cli/remote_commands.js`): after a client attaches (which
@@ -363,18 +363,18 @@ enrollment it refines.
 
 `hyp ignore` / `hyp unignore` / `hyp ignore --check`
 (`src/core/commands/clients.js`) gain a `--local-only` flag
-(`parseIgnoreArgs`), per [LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli)
-— same verbs, second store:
+(`parseIgnoreArgs`), per [LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli):
+same verbs, second store:
 
-- `hyp ignore --local-only [path]` — resolve the target like `runIgnore`
+- `hyp ignore --local-only [path]`: resolve the target like `runIgnore`
   (repo root when in a repo, else the path/cwd; explicit path wins), then
   read/modify/write the machine-local list. Never writes into a repo; the
   path need not exist or be a repo (R4). Idempotent: already governed (exact
   entry or ancestor entry) ⇒ no-op success naming the governor.
-- `hyp unignore --local-only [path]` — remove every list entry that governs
-  the target (equal or ancestor), printing what was removed — the same
+- `hyp unignore --local-only [path]`: remove every list entry that governs
+  the target (equal or ancestor), printing what was removed, the same
   "remove the governing thing" semantics as dotfile `unignore`. Idempotent.
-- `hyp ignore --check [path]` — the extended resolver now reports
+- `hyp ignore --check [path]`, the extended resolver now reports
   `local-only` membership via the same `resolve()` call: resolved class, the
   governing source (dotfile path or the list file), and the existing residual
   cached-row count, which for a `local-only` scope reads as "recorded locally,
@@ -383,7 +383,7 @@ enrollment it refines.
   are updated to name the flag.
 
 Both the picker and the verbs are thin front-ends over the one store + one
-resolver — one place privacy-critical logic lives, one place to test
+resolver: one place privacy-critical logic lives, one place to test
 ([LLP 0072 consequences](./0072-enrollment-dir-picker.decision.md#consequences)).
 
 ## `hyp status`: never-silent withholding {#status}
@@ -393,7 +393,7 @@ resolver — one place privacy-critical logic lives, one place to test
 file surfaces as a diagnostic, consistent with [fail-safe](#fail-safe));
 `runStatus` (`src/core/commands/status.js`) renders
 `local-only: withholding N directories from forwarding (recorded locally)` in
-text and the count in `--json` when N > 0 — "enrolled but withholding" is a
+text and the count in `--json` when N > 0, "enrolled but withholding" is a
 visible state (R9).
 
 ## Composition with the neighbouring mechanisms {#composition}
@@ -401,9 +401,9 @@ visible state (R9).
 Per the spec's [neighbours table](./0069-local-only-dir-selection.spec.md#neighbours),
 the three mechanisms stay independent and compose by construction:
 
-- `.hypignore` `ignore` and the session opt-out drop at the **capture seam**
-  — those rows never reach the cache, so the export filter never sees them;
-- the `local-only` list acts only at the **export seam** — rows are cached and
+- `.hypignore` `ignore` and the session opt-out drop at the **capture seam**:
+  those rows never reach the cache, so the export filter never sees them;
+- the `local-only` list acts only at the **export seam**: rows are cached and
   locally queryable; the resolver returns the most restrictive class when both
   sources govern one directory, and the export filter's `class !== 'full'`
   test makes any non-`full` verdict withhold;
@@ -412,7 +412,7 @@ the three mechanisms stay independent and compose by construction:
 
 ## Telemetry {#telemetry}
 
-Log-driven (CLAUDE.md): per-partition aggregate on the export read —
+Log-driven (CLAUDE.md): per-partition aggregate on the export read,
 `usage_policy.export_drop` with `component: 'cache'`, `hyp_dataset`,
 `dropped_row_count`, `distinct_cwd_count` (cwds hashed/redacted, never raw
 paths in dev telemetry). Picker events: `local_only.picker_result` with

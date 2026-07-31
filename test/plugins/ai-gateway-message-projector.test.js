@@ -522,7 +522,7 @@ test('dispatcher threads a working isSessionIgnored predicate into the projector
 
 test('projector ctx defaults isSessionIgnored to a false predicate when none is supplied', async () => {
   // Absent an isSessionIgnored (backfill materialization, unit-test stubs) the
-  // ctx still carries a predicate, and it always answers false — so existing
+  // ctx still carries a predicate, and it always answers false, so existing
   // behavior is unchanged.
   /** @type {((sessionId: string) => boolean) | undefined} */
   let received

@@ -11,9 +11,9 @@ import { attach } from '../../hypaware-core/plugins-workspace/claude/src/setting
 /**
  * T1 (LLP 0045/0046): the Claude `_hypaware` marker is a self-describing
  * undo record. `attach()` records everything the format-aware core undo
- * (task 4) needs to reverse the attach from disk alone — `prev_base_url`
+ * (task 4) needs to reverse the attach from disk alone, `prev_base_url`
  * (the restore target) plus the managed `env.ANTHROPIC_BASE_URL` and the
- * managed session-context hook entries — so reverse never depends on the
+ * managed session-context hook entries, so reverse never depends on the
  * plugin being loaded. These tests assert the marker contents directly.
  */
 
@@ -52,7 +52,7 @@ test('attach records the managed env + hook entries into the marker undo record'
     assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
 
     const marker = await readMarker(settingsPath)
-    // Managed env values are what we wrote — the core undo matches the live
+    // Managed env values are what we wrote: the core undo matches the live
     // value against them before removing.
     assert.deepEqual(marker.managed.env, {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
@@ -138,7 +138,7 @@ test('attach leaves a user-owned ENABLE_TOOL_SEARCH untouched and unmanaged', as
     await attach({ ...ATTACH, settingsPath })
 
     // The user's own value is respected, not overwritten, and it is not
-    // recorded as ours — so detach will never remove it.
+    // recorded as ours, so detach will never remove it.
     const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
     assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'false')
 
@@ -280,7 +280,7 @@ test('idempotent re-attach keeps the original prev_base_url, not the gateway URL
     const second = await attach({ ...ATTACH, settingsPath })
 
     // The second attach observes our gateway URL live, but must report
-    // and record the *original* foreign URL — not the gateway URL.
+    // and record the *original* foreign URL, not the gateway URL.
     assert.equal(second.changed && second.prevValue, 'https://foreign.example/api')
     const marker = await readMarker(settingsPath)
     assert.equal(marker.prev_base_url, 'https://foreign.example/api')

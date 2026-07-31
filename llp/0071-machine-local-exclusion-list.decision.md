@@ -28,8 +28,8 @@
 [LLP 0069](./0069-local-only-dir-selection.spec.md) lets a user select captured
 working directories to withhold from forwarding. That selection has to live
 somewhere. Three homes are plausible, and the existing usage-policy mechanism
-([LLP 0049](./0049-hypignore-usage-policy.spec.md)) already picked one of them —
-the committable `.hypignore` dotfile — for the `ignore` class. This decision
+([LLP 0049](./0049-hypignore-usage-policy.spec.md)) already picked one of them,
+the committable `.hypignore` dotfile, for the `ignore` class. This decision
 explains why `local-only`-by-login deliberately picks a *different* home.
 
 ## Decision
@@ -57,7 +57,7 @@ absolute directory paths:
   login picker and the durable authoring command
   ([LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli)), under the same
   atomic-write discipline other `HYP_HOME` state uses.
-- It is **never forwarded, never pushed, never pulled** — it is not a sink, not a
+- It is **never forwarded, never pushed, never pulled**: it is not a sink, not a
   dataset, and not part of layered config.
 
 ## Why not committable `.hypignore` dotfiles {#not-dotfiles}
@@ -75,15 +75,15 @@ wrong home:
    the repo and drags it through code review. The list must be invisible to the
    repo.
 2. **It must not mutate the user's repos.** The picker offers directories the
-   user *already worked in*; writing a dotfile into each selected one modifies —
-   and, if the user commits broadly, checks in — files across many repositories
+   user *already worked in*; writing a dotfile into each selected one modifies,
+   and, if the user commits broadly, checks in, files across many repositories
    as a side effect of logging in. A login command silently touching working
    trees is a surprising, unwanted blast radius.
 3. **Not every candidate is a repo.** The candidate set is distinct captured
    `cwd`s ([LLP 0069 §enumerate](./0069-local-only-dir-selection.spec.md#enumerate)).
    Some are not git repos, some are scratch dirs, and some **no longer exist** on
    disk. There is nowhere to drop a dotfile for those, but the user can still
-   name them — an absolute-path list handles all three; a dotfile scheme cannot.
+   name them: an absolute-path list handles all three; a dotfile scheme cannot.
 
 `.hypignore` is not deprecated or altered: a user who *wants* the committable,
 team-visible, repo-scoped form still authors one, and the resolver honors both
@@ -100,7 +100,7 @@ that point the same way:
   local-only.** LLP 0031's §"Query is local-only" establishes the precedent: some
   config is inherently per-machine ("the fleet operator cannot sensibly set it")
   and lives only in the local layer, never central. Which directories *this
-  user's laptop* holds that *this user* considers private is the textbook case —
+  user's laptop* holds that *this user* considers private is the textbook case:
   the org operator has no basis to author it, and it would be meaningless pushed
   to another machine. The `local-only` list takes the same carve-out, by the same
   argument.
@@ -108,20 +108,20 @@ that point the same way:
   which cuts exactly against the point. [LLP 0037](./0037-backfill-on-join.decision.md)/
   [LLP 0044](./0044-client-attach-on-join.decision.md) hold that central-owned
   policy is locked with no local override. If the exclusion list were central, an
-  operator could clear it and force-forward the user's private directories — the
+  operator could clear it and force-forward the user's private directories: the
   opposite of a privacy control. Keeping it machine-local is what makes it a
   *user* control at all.
 
 This does not contradict [LLP 0049 non-goal 3](./0049-hypignore-usage-policy.spec.md#non-goals)
 ("no central/config interaction"); it *extends* the same stance to the new
-source. Usage policy — `ignore` or `local-only`, dotfile or list — is honored
+source. Usage policy (`ignore` or `local-only`, dotfile or list) is honored
 locally and is never merged with or pushed by central config.
 
 ### The org-forces-forwarding question is deferred, not decided here {#org-policy}
 
 Keeping the list machine-local means an org **cannot** currently forbid a user
-from withholding directories. Whether it *should* be able to — a central
-`local_only: forbidden` / force-forward policy — is a real tenant-governance
+from withholding directories. Whether it *should* be able to, a central
+`local_only: forbidden` / force-forward policy, is a real tenant-governance
 question, but it is a **central-server policy concern**, deliberately out of V1
 scope and owned by [LLP 0072 §org-policy](./0072-enrollment-dir-picker.decision.md#org-policy).
 It is named, not silently emergent; V1 ships the user control, exactly as
@@ -131,7 +131,7 @@ login-enrollment and named the server-side opt-out knob as a follow-up.
 ## Reconciliation with the "no local opt-out" doctrine {#doctrine}
 
 LLP 0037 §"No local opt-out" and [LLP 0044](./0044-client-attach-on-join.decision.md)
-§"Opt-out — operator-only" hold that an enrolled machine cannot locally override
+§"Opt-out, operator-only" hold that an enrolled machine cannot locally override
 locked central policy: it "cannot drop the central sink," and not importing
 history "is an operator scoping decision, not a local override." A per-machine
 `local-only` list *is* a user withholding slices of what the sink would forward,
@@ -140,23 +140,23 @@ so the tension is real and must be met head-on, not waved away.
 It is met by a precedent **already in the corpus**: `.hypignore`'s `ignore` class
 already lets an enrolled user withhold directories from forwarding, and
 [LLP 0049 non-goal 3](./0049-hypignore-usage-policy.spec.md#non-goals) makes it
-"honored whenever found" — explicitly *outside* the layered-config/central model
+"honored whenever found", explicitly *outside* the layered-config/central model
 and regardless of enrollment. An `ignore`d tree on an enrolled machine is never
-recorded, hence never forwarded — a strictly **stronger** withholding than
+recorded, hence never forwarded: a strictly **stronger** withholding than
 `local-only`, which still records locally. If the doctrine forbade a user from
 keeping their own directories off the central sink, it would already forbid
-`.hypignore` on an enrolled box — which it does not. `local-only` adds a gentler
+`.hypignore` on an enrolled box, which it does not. `local-only` adds a gentler
 point on a spectrum the corpus already allows; it opens no new hole.
 
-The reconciliation, precisely: the doctrine governs **fleet topology** — the sink
+The reconciliation, precisely: the doctrine governs **fleet topology**, the sink
 set, central config entries, whole-machine backfill/attach the operator owns and
-locks. Usage policy governs **content privacy** — which of *this user's own*
-captured exchanges are their private business — and the corpus has always kept
+locks. Usage policy governs **content privacy**, which of *this user's own*
+captured exchanges are their private business, and the corpus has always kept
 the two as different systems (LLP 0049 is tagged `Sources, Gateway, CLI`, not
 `Config`). The central sink still exists and still forwards everything the user
 did not mark private; no fleet machinery is dropped. Whether an org may
 nonetheless *forbid* this is the one coherent central angle, and it is deferred to
-[§org-policy](#org-policy) — named, not silently emergent.
+[§org-policy](#org-policy): named, not silently emergent.
 
 ## Consequences
 
@@ -172,7 +172,7 @@ nonetheless *forbid* this is the one coherent central angle, and it is deferred 
   implementer does not "helpfully" wipe it.)
 - Because the list is a plain local file, the durable authoring path
   ([LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli)) is a thin
-  read/modify/write over it — no schema migration, no config-layer merge.
+  read/modify/write over it: no schema migration, no config-layer merge.
 
 ## Alternatives considered
 

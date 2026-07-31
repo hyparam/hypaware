@@ -35,7 +35,7 @@ function ignoringResolver(ignoredDir) {
  * the running version does not implement, so the matcher fail-safe clamps it
  * to `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
  * warn level with the declared token. `local-only` is no longer a fixture for
- * this — it is implemented (LLP 0070/0080) and no longer clamps.
+ * this: it is implemented (LLP 0070/0080) and no longer clamps.
  *
  * @param {string} ignoredDir
  */
@@ -369,8 +369,8 @@ test('the session opt-out drop is also visible through the gateway message-proje
   // its ignored-session drop through createAiGatewayMessageProjector /
   // projectViaGateway returning `[]` (claude-usage-policy-drop.test.js). This
   // proves the same shape for Codex: the drop must be visible at the seam
-  // callers actually use in production — the gateway dispatcher's
-  // `projectExchange` — not just the adapter-level `USAGE_POLICY_DROP`
+  // callers actually use in production, the gateway dispatcher's
+  // `projectExchange`, not just the adapter-level `USAGE_POLICY_DROP`
   // sentinel a direct `projector.project()` call returns.
   const ignoredSessionId = 'session-optout-gateway'
   const projector = createCodexExchangeProjector()

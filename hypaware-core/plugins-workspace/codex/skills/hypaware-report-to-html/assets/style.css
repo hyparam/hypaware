@@ -1,10 +1,10 @@
-/* HypAware data-report stylesheet — "fact sheet" revision (2026-07-16).
+/* HypAware data-report stylesheet: "fact sheet" revision (2026-07-16).
    Professional-report look: dense sans type, ruled list rows instead of tiles or
    cards, numbers at text size. INK-FIRST COLOR: the page is ink and hairlines; links
    are ink (underline signals clickable); --good/--warn/--crit appear ONLY where a
    number carries judgment; chart identity uses the slate ramp --s1..--s4 (dark→light),
    never the judgment colors. No shadows, no gradients, no hover motion. The component
-   class contract (metric-grid, rec, callout, barchart, stackbar, gauge) is unchanged —
+   class contract (metric-grid, rec, callout, barchart, stackbar, gauge) is unchanged:
    only the rendering changed. */
 
 :root {
@@ -16,7 +16,7 @@
   --soft: #f3f3f0;
   --border: #dededa;
   --border-soft: rgba(25, 24, 23, 0.1);
-  --accent: #33465c;      /* slate ink — wayfinding + neutral chart fill, not a brand blue */
+  --accent: #33465c;      /* slate ink - wayfinding + neutral chart fill, not a brand blue */
   --accent-ink: #24344a;
   --accent-soft: #eef1f4;
   --s1: #33465c;           /* chart identity ramp, dark → light; in-bar labels only on s1/s2 */
@@ -122,7 +122,7 @@ hr {
 }
 
 /* ---- Lead paragraph: the bold thesis right under an h1 ----------------- */
-/* Set as a plain lead paragraph — slightly larger, no box, no rule. */
+/* Set as a plain lead paragraph, slightly larger, no box, no rule. */
 h1 + p {
   font-size: 0.98rem;
   line-height: 1.5;
@@ -514,7 +514,7 @@ a.rec:hover h3 { text-decoration: underline; text-underline-offset: 2px; }
 .rec > p:not(.rec-kind) strong { color: var(--fg); }
 .rec .rec-stats { display: inline; margin: 0; }
 .rec .rec-stat { display: inline; line-height: 1.5; }
-.rec .rec-stat::before { content: " — "; color: var(--faint); }
+.rec .rec-stat::before { content: " - "; color: var(--faint); }
 .rec .rec-stat + .rec-stat::before { content: " · "; }
 .rec .rec-stat b {
   display: inline;

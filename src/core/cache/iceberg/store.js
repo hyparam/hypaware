@@ -282,7 +282,7 @@ const PURGE_DELETE_BATCH_SIZE = 5000
 
 /**
  * Delete every live row in the Iceberg table for which `predicate(row)` is
- * true, by committing Iceberg position-delete files — the same mechanism the
+ * true, by committing Iceberg position-delete files: the same mechanism the
  * retention enforcer uses (LLP 0013), reused here for the `hyp purge`
  * destructive verb (LLP 0104).
  *
@@ -290,8 +290,8 @@ const PURGE_DELETE_BATCH_SIZE = 5000
  * the resolution of LLP 0104's deferred rewrite mechanics.
  *
  *  - **`part_id` identity is preserved.** Surviving rows are never rewritten,
- *    so their `part_id` — the deterministic `<message_id>#<part_index>`
- *    forward-dedupe key — is unchanged. A later re-record of a purged
+ *    so their `part_id`, the deterministic `<message_id>#<part_index>`
+ *    forward-dedupe key, is unchanged. A later re-record of a purged
  *    directory therefore mints identical `part_id`s that the forward sink's
  *    chunk-level dedupe absorbs, so purge-then-re-record never produces
  *    server-side duplicate identities (LLP 0104 consequences).
@@ -299,8 +299,8 @@ const PURGE_DELETE_BATCH_SIZE = 5000
  *    surviving rows, so no sink's high-water mark moves and no incremental
  *    read is wedged. Purged rows are dropped by every subsequent read
  *    (`icebergDataSource` applies position-deletes), so a purged row above a
- *    sink's watermark is simply never exported, and one below it — already
- *    exported — just vanishes locally. The deletes are durable in table
+ *    sink's watermark is simply never exported, and one below it, already
+ *    exported, just vanishes locally. The deletes are durable in table
  *    metadata, so a re-scan re-applies them: no resurrection via a stale
  *    watermark.
  *
@@ -458,15 +458,15 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * `null`/absent is a pre-column "legacy" row; its disposition is governed by
  * `opts.includeLegacy`:
  *
- * - `includeLegacy` true (default) — legacy rows are treated as NEW (yielded).
+ * - `includeLegacy` true (default): legacy rows are treated as NEW (yielded).
  *   This is the safe migration default: a fresh sink with no durable watermark
  *   exports the pre-upgrade backlog once rather than silently skipping it
  *   (LLP 0040 risk #1, the data-loss hazard).
- * - `includeLegacy` false — legacy rows are treated as ALREADY EXPORTED
+ * - `includeLegacy` false: legacy rows are treated as ALREADY EXPORTED
  *   (skipped). A sink passes this once it HAS a durable watermark, so the
  *   pre-upgrade backlog is re-exported exactly once, never on every subsequent
- *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade —
- *   the `decorateRow` chokepoint stamps a real seq on every flushed row — so
+ *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade,
+ *   the `decorateRow` chokepoint stamps a real seq on every flushed row, so
  *   excluding legacy rows after the first export is safe.
  *
  * A real seq is yielded iff strictly `> since`. The seq column is force-projected
@@ -524,7 +524,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
 
 /**
  * Decode a raw `_hyp_ingest_seq` cell to a bigint, or `null` when the row has
- * no usable seq — a pre-column legacy row (null/absent), or an unparseable
+ * no usable seq: a pre-column legacy row (null/absent), or an unparseable
  * value. Returning `null` for an unparseable value is the safe direction: the
  * caller treats `null` as a NEW row and never skips it (LLP 0040 risk #1).
  *

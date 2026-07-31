@@ -1,4 +1,4 @@
-# LLP 0079: graph Skill & Program nodes — implementation plan
+# LLP 0079: graph Skill & Program nodes (implementation plan)
 
 **Type:** plan
 **Status:** Active
@@ -18,7 +18,7 @@
 
 Task shape:
 
-- **T1 — kit edge props** (`@hypaware/context-graph`). `EdgeSpec.props?` in
+- **T1: kit edge props** (`@hypaware/context-graph`). `EdgeSpec.props?` in
   `context-graph/src/types.d.ts` + the structural twin in
   `ai-gateway-graph/src/types.d.ts`; `buildEdge` mirrors `buildNode`'s props
   handling (`contract-kit.js`); unit tests for passthrough, empty → null, and
@@ -27,11 +27,11 @@ Task shape:
   with zero behavior change: nothing passes props yet. Rated 2: mechanical,
   but it touches the central kit and the capability shape, so the id-stability
   assertions must be airtight.
-- **T2 — Program nodes + `invoked` edges, #230** (`@hypaware/ai-gateway-graph`).
+- **T2: Program nodes + `invoked` edges, #230** (`@hypaware/ai-gateway-graph`).
   New `tool_facets.js` with `commandStringFrom` (Bash `command` /
   exec_command `cmd`) and the fail-closed `programFrom` pipeline
   (first-connector cut, env-skip, wrapper + `shell -c` unwrap, basename,
-  lowercase, `PROGRAM_RE` gate —
+  lowercase, `PROGRAM_RE` gate:
   [LLP 0073 §program-derivation](./0073-graph-skill-tool-nodes.design.md#program-derivation),
   [LLP 0077](./0077-program-facet-extraction.decision.md)); the
   `Program` node + `invoked` edge rules in `graph_contract.js`; the
@@ -40,19 +40,19 @@ Task shape:
   passthrough. No dependency on T1 (`invoked` carries no props). Rated 4:
   the shell-parsing judgment calls (wrappers, `bash -lc` recursion, quoting)
   are the risk; the graph wiring is pattern-following.
-- **T3 — Claude Skill nodes + `ran` edges** (`@hypaware/ai-gateway-graph`).
+- **T3: Claude Skill nodes + `ran` edges** (`@hypaware/ai-gateway-graph`).
   The three Claude surfaces as node+edge rule pairs in `graph_contract.js`
   (Skill tool call / offset-0 marker / offset-0 `<command-name>` with the
-  static `CLAUDE_BUILTIN_COMMANDS` exclusion —
+  static `CLAUDE_BUILTIN_COMMANDS` exclusion:
   [LLP 0074](./0074-claude-skill-activation-signal.decision.md)); skill-name
   helpers + `SKILL_NAME_RE` gate in `tool_facets.js`; per-surface dispatch
   props via the T1 kit
   ([LLP 0078](./0078-dispatch-source-edge-props.decision.md)); strict-filter
   false-positive tests (assistant-role marker, mid-text marker, built-in
   slash, grep-of-SKILL.md mint nothing). Rated 5: this is the
-  judgment-heaviest derivation — three signal shapes, an exclusion list, and
+  judgment-heaviest derivation, three signal shapes, an exclusion list, and
   the false-positive matrix are all inference over prose conventions.
-- **T4 — Codex Skill derivation** (`@hypaware/ai-gateway-graph`). The
+- **T4: Codex Skill derivation** (`@hypaware/ai-gateway-graph`). The
   exec-read path-pattern rule pair
   ([LLP 0075](./0075-codex-skill-activation-signal.decision.md)):
   `.codex/skills/<name>/SKILL.md` regex over `tool_args.cmd`,
@@ -61,7 +61,7 @@ Task shape:
   Skill-rule structure. Rated 3: one surface and a regex, but the
   reject-variants matter and the fixture shape must stay pinned to the Codex
   projector's `{"cmd": ...}`.
-- **T5 — end-to-end + query proof** (tests only). Extend
+- **T5: end-to-end + query proof** (tests only). Extend
   `context-graph-project-e2e.test.js`: all skill surfaces + programs through
   `projectGraph`, the `mergeRow` dispatch-flag union (marker + slash → one
   `ran` edge, both flags), re-projection idempotence, and the issue #229/#230

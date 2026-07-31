@@ -21,7 +21,7 @@ export const BATCH_ROW_LIMIT = 100_000
  * value, so a generation-swap rewrite copies it into the new table), and
  * stripped from every query/`readRows` consumer via `INTERNAL_FIELDS`.
  *
- * Nullable so it rides existing tables as an additive schema change — rows
+ * Nullable so it rides existing tables as an additive schema change: rows
  * written before the column existed read back as `null`.
  *
  * @ref LLP 0040#ingest-seq-column [implements]: row-resident monotonic int64 watermark column
@@ -38,9 +38,9 @@ export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nulla
  * or is still being written).
  *
  * Each emitted row is decorated with:
- * - `_hyp_cache_row_id`  — SHA-256 of the serialized row (stable dedup key)
- * - `_hyp_cache_batch_id` — caller-supplied batch identifier
- * - `_hyp_ingest_seq`     — monotonic int64 from `nextSeq` (null when absent)
+ * - `_hyp_cache_row_id`: SHA-256 of the serialized row (stable dedup key)
+ * - `_hyp_cache_batch_id`: caller-supplied batch identifier
+ * - `_hyp_ingest_seq`: monotonic int64 from `nextSeq` (null when absent)
  *
  * The decorated chunk's `columns` carry an extra nullable `_hyp_ingest_seq`
  * `ColumnSpec` so the value lands in the Iceberg schema (additive, never
@@ -207,7 +207,7 @@ function decorateRow(row, batchId, seq) {
 
 /**
  * Append the nullable `_hyp_ingest_seq` column to a chunk's column list so the
- * stamped value lands in the Iceberg schema. Idempotent — never double-adds.
+ * stamped value lands in the Iceberg schema. Idempotent, never double-adds.
  *
  * @param {readonly ColumnSpec[]} columns
  * @returns {ColumnSpec[]}
@@ -289,7 +289,7 @@ function progressPath(spoolFilePath) {
  * Internal-field names that should be hidden from query output and from every
  * `readRows` consumer (forward/blob sinks, query, projectors). `_hyp_ingest_seq`
  * is included so the sink-read watermark column never leaks to the wire payload
- * or query results — `readRowsSince` (T2) re-exposes it as an opaque token only.
+ * or query results: `readRowsSince` (T2) re-exposes it as an opaque token only.
  *
  * @ref LLP 0040#storage-api-extension [constrained-by]: internal, stripped on read
  */

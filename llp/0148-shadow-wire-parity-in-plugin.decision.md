@@ -10,7 +10,7 @@
 > Steering a turn onto a shadow provider must not change what the model
 > receives or returns. OpenClaw applies its Anthropic-only request shaping
 > through a hook that only runs for the provider *named* `anthropic`, so the
-> shadow provider loses it — and some of what it loses breaks auth and
+> shadow provider loses it, and some of what it loses breaks auth and
 > correctness, not just speed. Parity is a requirement, and it lives in the
 > OpenClaw-side plugin, not the gateway.
 
@@ -26,7 +26,7 @@ shadow provider, none of it runs. What that costs per call:
   without them, subscription-authenticated calls fail outright.
 - **Default beta headers** (fine-grained tool streaming, interleaved
   thinking): without them, tool-call streaming and thinking behavior
-  degrade — a correctness change, possibly silent.
+  degrade, a correctness change, possibly silent.
 - **`/fast` service tier**: turns quietly get slower.
 
 A capture layer that changes the behavior being captured undermines its own
@@ -34,7 +34,7 @@ record. So the principle this decision fixes: **a parity gap between the
 steered and unsteered wire is a capture bug, not a documented loss.**
 
 The enforcement point was the real question. An earlier sketch split the
-work — auth-critical headers at the gateway, config-dependent shaping in
+work: auth-critical headers at the gateway, config-dependent shaping in
 the plugin. Reading the existing ai-gateway ruled that out as unnecessary:
 
 - The gateway's `matchUpstream` already supports header-driven per-request
@@ -47,7 +47,7 @@ the plugin. Reading the existing ai-gateway ruled that out as unnecessary:
   so the gateway *couldn't* restore it anyway.
 
 Everything therefore points to one place: the plugin owns the `hypaware-*`
-provider ids, so **its own `wrapStreamFn` runs for them** — the exact seam
+provider ids, so **its own `wrapStreamFn` runs for them**, the exact seam
 OpenClaw's Anthropic plugin uses, available to us for our providers.
 
 ## Decision
@@ -62,7 +62,7 @@ OpenClaw's Anthropic plugin uses, available to us for our providers.
   unchanged: same proxy, same presets mechanism, same recorder, same
   header stripping. No new gateway, no capability bump.
 - Parity gaps discovered later are treated as bugs in the plugin, fixed by
-  extending the mirror — never re-classified as acceptable losses.
+  extending the mirror, never re-classified as acceptable losses.
 - Scope note: parity mirroring is per API shape. `openai-completions`
   currently has no known OpenClaw-side shaping to mirror; if OpenClaw grows
   some, the same rule applies.

@@ -90,7 +90,7 @@ function fakeClientKernel({ clientNames = ['claude', 'codex'] } = {}) {
 }
 
 /**
- * A kernel with NO `hypaware.ai-gateway` capability — models the gateway
+ * A kernel with NO `hypaware.ai-gateway` capability: models the gateway
  * plugin being uninstalled/unloaded. Detach must still run (it is the
  * disk-driven core undo resolved from the static descriptor map, LLP 0045
  * §Part 3); attach stays gated and fails cap_missing.
@@ -139,13 +139,13 @@ test('detach returns the parsed structured result (core disk undo)', async () =>
   assert.equal(result.action, 'detach')
   assert.equal(result.client, 'codex')
   // Detach is the single core disk-driven undo (LLP 0045 §Part 3), not a
-  // per-adapter hook — the fake client's detach() is never dispatched.
+  // per-adapter hook: the fake client's detach() is never dispatched.
   assert.deepEqual(calls, [])
 })
 
 test('detach reverses a client whose adapter was dropped from the live gateway (LLP 0045 §Part 3)', async () => {
   // The ai-gateway capability is present, but the codex adapter has been
-  // dropped/unloaded — the live registry exposes no clients. Detach must still
+  // dropped/unloaded: the live registry exposes no clients. Detach must still
   // resolve the target from the bundled+installed descriptor map and run the
   // disk-driven undo; it is NOT gated on gateway.getClient.
   const { registry, kernel, calls } = fakeClientKernel({ clientNames: [] })
@@ -169,8 +169,8 @@ test('detach reverses a client whose adapter was dropped from the live gateway (
 test('detach resolves an INSTALLED (non-bundled) client adapter from the bundled+installed descriptor map (LLP 0045 §Part 3)', async () => {
   // buildClientDescriptorMap() was bundled-only while boot/status use
   // bundled+installed. Stage an installed client plugin with an attach_probe and
-  // prove `hyp detach <client>` resolves its descriptor and runs the disk undo
-  // — otherwise it would throw "no client descriptor".
+  // prove `hyp detach <client>` resolves its descriptor and runs the disk undo:
+  // otherwise it would throw "no client descriptor".
   const { registry, kernel } = fakeClientKernel()
   const hypHome = await freshHome()
   const stateDir = path.join(hypHome, 'hypaware')
@@ -229,7 +229,7 @@ test('detach resolves an INSTALLED (non-bundled) client adapter from the bundled
 test('detach works with the @hypaware/ai-gateway capability absent (disk-driven undo, LLP 0045 §Part 3)', async () => {
   // The gateway plugin is not installed/loaded, so the capability is absent.
   // Detach is a pure on-disk undo resolved from the static descriptor map, so
-  // it must still succeed — it is NOT gated on the live gateway. (Attach stays
+  // it must still succeed: it is NOT gated on the live gateway. (Attach stays
   // gated; the next test proves it still fails cap_missing.)
   const { registry, kernel } = fakeKernelWithoutGateway()
   const home = await freshHome()
@@ -241,7 +241,7 @@ test('detach works with the @hypaware/ai-gateway capability absent (disk-driven 
     kernel,
   })
   // Resolved 'codex' from the bundled descriptor map and ran the disk undo to a
-  // clean no-op (no marker on the temp tree) — not a cap_missing failure.
+  // clean no-op (no marker on the temp tree), not a cap_missing failure.
   assert.equal(result.status, 'ok')
   assert.equal(result.action, 'detach')
   assert.equal(result.client, 'codex')

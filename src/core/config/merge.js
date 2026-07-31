@@ -8,18 +8,18 @@
 /**
  * Merge the two config layers a joined gateway boots:
  *
- * - **central** — server-owned, authoritative/locked (the applied slot,
+ * - **central**: server-owned, authoritative/locked (the applied slot,
  *   or the join seed before the first pull).
- * - **local** — user-owned, additive-only (`hypaware-config.json`).
+ * - **local**: user-owned, additive-only (`hypaware-config.json`).
  *
  * The whole central document wins: it contributes every key it names and
  * **locks** it; the local layer may only contribute keys central omits.
  * A local entry that collides with a central-named key is **dropped**
- * (recorded in `drops`), never merged in — the central layer is
+ * (recorded in `drops`), never merged in: the central layer is
  * sacrosanct and always boots. With no central layer, `effective = local`
  * verbatim, so a host that never joined is completely unaffected.
  *
- * `query{}` is structurally **local-only** (machine-specific storage —
+ * `query{}` is structurally **local-only** (machine-specific storage,
  * cache dir, maintenance, retention): the local layer always owns it, and
  * a `query` block appearing in the central document is ignored
  * (`centralQueryIgnored`), surfaced in `hyp status`, never merged.
@@ -42,7 +42,7 @@ export function mergeConfigLayers(central, local) {
   /** @type {HypAwareV2Config} */
   const effective = { version: 2 }
 
-  // plugins[] — keyed by plugin name.
+  // plugins[]: keyed by plugin name.
   const centralPlugins = central.plugins ?? []
   const centralPluginNames = new Set(centralPlugins.map((p) => p.name))
   const plugins = [...centralPlugins]
@@ -55,7 +55,7 @@ export function mergeConfigLayers(central, local) {
   }
   if (plugins.length > 0) effective.plugins = plugins
 
-  // sinks{} — keyed by instance name.
+  // sinks{}: keyed by instance name.
   const centralSinks = central.sinks ?? {}
   /** @type {NonNullable<HypAwareV2Config['sinks']>} */
   const sinks = { ...centralSinks }
@@ -68,7 +68,7 @@ export function mergeConfigLayers(central, local) {
   }
   if (Object.keys(sinks).length > 0) effective.sinks = sinks
 
-  // disambiguate{} — keyed by capability name; central wins per capability.
+  // disambiguate{}: keyed by capability name; central wins per capability.
   const centralDisambiguate = central.disambiguate ?? {}
   /** @type {Record<string, string>} */
   const disambiguate = { ...centralDisambiguate }
@@ -81,7 +81,7 @@ export function mergeConfigLayers(central, local) {
   }
   if (Object.keys(disambiguate).length > 0) effective.disambiguate = disambiguate
 
-  // query{} — local-only. A central query block is ignored + flagged.
+  // query{}: local-only. A central query block is ignored + flagged.
   const centralQueryIgnored = central.query !== undefined
   if (local?.query !== undefined) effective.query = local.query
 
@@ -101,12 +101,12 @@ export function mergeConfigLayers(central, local) {
  * baseline, so an error the central document carries on its own never
  * causes a drop, and central entries are never candidates. Local
  * additions are added back one at a time, in config order, and kept only
- * when they introduce no error beyond that baseline — a maximal valid
+ * when they introduce no error beyond that baseline: a maximal valid
  * additive subset. The central layer always boots; a bad local addition
  * is surfaced (a drop + `hyp status`), never a boot failure.
  *
  * With no central layer, this is a pure passthrough of
- * {@link mergeConfigLayers} — a host that never joined is never validated
+ * {@link mergeConfigLayers}: a host that never joined is never validated
  * or pruned, so its behaviour is byte-for-byte unchanged.
  *
  * @param {{
@@ -166,7 +166,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
 
 /**
  * The local entries that survived the structural collision merge (their
- * key is not owned by the central layer) — the add-back candidates, in
+ * key is not owned by the central layer), the add-back candidates, in
  * config order: plugins, then sinks, then disambiguate.
  *
  * @param {HypAwareV2Config | null} local

@@ -1,4 +1,4 @@
-# LLP 0057: Bounded Query Execution — Implementation Plan
+# LLP 0057: Bounded Query Execution (Implementation Plan)
 
 **Type:** Plan
 **Status:** Accepted
@@ -31,7 +31,7 @@ The fix spans three first-party packages plus the server:
 
 ## Phases
 
-### Phase 0 — Measure (size the budget)
+### Phase 0: Measure (size the budget)
 
 Reproduce issue #9's crashers against representative `ai_gateway_messages`
 volume and record peak heap per query class (`ORDER BY`, high-card `GROUP BY`,
@@ -41,7 +41,7 @@ conservative default buffered-row / buffered-byte ceilings for
 before/after target for Phase 2. (Deferred during doc authoring; do this first
 when implementing.)
 
-### Phase 1 — Thread the abort signal (the enabler)
+### Phase 1: Thread the abort signal (the enabler)
 
 - `src/core/query/sql.js`: construct an `AbortSignal` (linked to any
   caller-supplied `signal` + an optional deadline) and pass it into
@@ -56,7 +56,7 @@ when implementing.)
 - `@ref` to add → [LLP 0054](./0054-bounded-query-execution.spec.md)
   `#signal-threading` at the `squirrelExecuteSql` call site.
 
-### Phase 2 — Implement `scanColumn` (light the streaming aggregates)
+### Phase 2: Implement `scanColumn` (light the streaming aggregates)
 
 Per [LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md), bottom-up so
 each layer can be tested before the one above:
@@ -66,7 +66,7 @@ each layer can be tested before the one above:
    chunks; honor `signal`.
 2. **kernel `union-source.js`**: forward `scanColumn` by concatenating
    per-partition column streams; do **not** push `limit`/`offset` per partition
-   (non-distributive — [LLP 0015](./0015-query-and-datasets.spec.md)
+   (non-distributive, [LLP 0015](./0015-query-and-datasets.spec.md)
    "Multi-partition union").
 3. **ai-gateway `withSchemaColumns`** (`hypaware-core/plugins-workspace/ai-gateway/src/dataset.js`):
    forward `scanColumn`; null-fill a column a partition physically lacks.
@@ -74,7 +74,7 @@ each layer can be tested before the one above:
 - `@ref` to add → [LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md)
   at the icebird source factory, `union-source.js`, and `withSchemaColumns`.
 
-### Phase 3 — Execution budget + refuse (the bound)
+### Phase 3: Execution budget + refuse (the bound)
 
 - **squirreling** (upstream PR): enforce a per-run buffered-row / buffered-byte
   budget in the three blocking operators (`sort.js`, `aggregates.js` group +
@@ -90,7 +90,7 @@ each layer can be tested before the one above:
   the operator budget-check sites; [LLP 0054](./0054-bounded-query-execution.spec.md)
   `#execution-budget` at the `ExecuteSqlOptions` addition.
 
-### Phase 4 — Wire the callers
+### Phase 4: Wire the callers
 
 - **CLI** (`hyp query`): pass the host-default budget; print the refusal to
   stderr with a non-zero exit.
@@ -99,17 +99,17 @@ each layer can be tested before the one above:
   as a tool error, not a silent empty result.
 - **HypAware Server**: pass its operator-configured budget through the existing
   `hypaware/core/query` path and map the refusal to a 4xx. Tracked in the server
-  corpus — **HypAware Server LLP 0020** — not here. The server response-edge cap
+  corpus, **HypAware Server LLP 0020**, not here. The server response-edge cap
   (HypAware Server LLP 0006 `#result-caps`) stays; the two caps compose.
 
-### Phase 5 — Tests and smokes
+### Phase 5: Tests and smokes
 
 - **Traditional tests** (`test/**`): budget enforcement (refuse at the ceiling),
   the typed-error shape, `scanColumn` correctness on icebird + the union +
   schema-drift null-fill, and signal-driven abort.
 - **Smoke**: run a known issue-#9 crasher (`ORDER BY` over the full dataset;
   `COUNT(DISTINCT content_text)`) and assert a **clean refusal** (typed error,
-  bounded heap) instead of an OOM / zero-byte socket — a candidate
+  bounded heap) instead of an OOM / zero-byte socket, a candidate
   `bounded_query_refusal` acceptance smoke alongside the
   `installed_daemon_idle_soak` family.
 - Per the repo's log-driven-development rule, emit structured budget/refusal

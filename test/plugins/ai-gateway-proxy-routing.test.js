@@ -309,7 +309,7 @@ test('R2 proxy edge cases: query string and trailing slash stay local; a look-al
     assert.equal(startExchangeCalls, 0, 'a control request with a query string starts no exchange')
 
     // A trailing slash no longer matches IGNORE_SESSION_PATH exactly, so the
-    // control router itself 404s it — but it is still handled LOCALLY, never
+    // control router itself 404s it, but it is still handled LOCALLY, never
     // forwarded to the catch-all upstream.
     upstreamHit = false
     startExchangeCalls = 0

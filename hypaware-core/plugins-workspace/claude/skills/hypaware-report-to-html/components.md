@@ -3,27 +3,27 @@
 Reference for `hypaware-report-to-html`. The look of every rendered report is carried by
 `assets/style.css` (a self-contained **data-report** system: system type, hairline rules,
 ink-first color, tabular figures, `prefers-color-scheme` dark mode, and a print
-stylesheet) plus the raw-HTML components below. No build-time tokens — just reference
+stylesheet) plus the raw-HTML components below. No build-time tokens: just reference
 the stylesheet.
 
-**Branding:** every page opens with the `masthead` letterhead — the Hyperparam mark
+**Branding:** every page opens with the `masthead` letterhead, the Hyperparam mark
 (`brand-mark`, the hyperparam.app favicon rendered ink-colored via CSS mask), the
 wordmark, and a `doc-label` saying what the document is and that it is generated
 ("Internal report · generated <report date> from HypAware data" on report pages,
-"Internal reports · generated from HypAware data" on the landing page — the "generated
+"Internal reports · generated from HypAware data" on the landing page; the "generated
 … from" wording is deliberate: it stops readers mistaking the pages for the HypAware
 product interface). `build.sh` injects it on report pages; the landing template below
 carries its own. It exists so a page is recognizably a Hyperparam internal report
-rather than a generic dashboard or app — keep it to that one quiet row, never a logo
+rather than a generic dashboard or app: keep it to that one quiet row, never a logo
 hero.
 
-**Color discipline (user requirement 2026-07-16 — color only for a reason, never
+**Color discipline (user requirement 2026-07-16, color only for a reason, never
 decoration):** the page is ink and hairlines; links are ink with an underline (color
-never signals "clickable"). `--good`/`--warn`/`--crit` are judgment colors — they appear
+never signals "clickable"). `--good`/`--warn`/`--crit` are judgment colors: they appear
 ONLY where a number or aside carries that judgment, never for identity, emphasis, or
 variety. Chart identity (who/what a segment or bar is) uses the slate ramp
 `--s1`..`--s4` (dark → light, assign in share order); in-bar text is legal only on
-`--s1`/`--s2` segments (the darker two — lighter steps fail text contrast), everything
+`--s1`/`--s2` segments (the darker two: lighter steps fail text contrast), everything
 else is named in the legend. A judgment color may recolor a single bar/segment only
 when the chart's point IS that judgment.
 
@@ -39,23 +39,23 @@ list entries, not tiles or cards. Keep that restraint when restyling.
 - Every page's **tables, code blocks, blockquotes, and headings** are restyled by the sheet.
 - The **first bold paragraph directly under the `# ` title becomes the lead thesis**
   (the CSS targets `h1 + p`). Write the report's one-sentence thesis as the first
-  paragraph, bold — it is set as a slightly larger lead paragraph (a plain paragraph,
+  paragraph, bold: it is set as a slightly larger lead paragraph (a plain paragraph,
   deliberately not a box) with no extra markup.
 
 ## Authoring components (raw HTML in the Markdown)
 
 Everything below is plain HTML dropped into the `.md`. In pandoc `gfm`, a raw HTML block
-must be **surrounded by blank lines**, and pandoc will not process Markdown *inside* it —
+must be **surrounded by blank lines**, and pandoc will not process Markdown *inside* it:
 write inner content as HTML. Reuse these classes verbatim; the stylesheet already styles
 them for light, dark, and print. **Do not invent new class names or add per-report CSS.**
 
-### Eyebrow — small-caps kicker above a heading
+### Eyebrow: small-caps kicker above a heading
 
 ```html
 <p class="eyebrow">HYP_CENTRAL fleet · 2026-06-02 → 2026-07-02</p>
 ```
 
-### Metric grid — the headline numbers
+### Metric grid: the headline numbers
 
 Renders as ruled key-figure rows: label | right-aligned value | note, one hairline row
 per metric. `is-crit` / `is-good` / `is-warn` recolor the value; omit for neutral.
@@ -66,7 +66,7 @@ per metric. `is-crit` / `is-good` / `is-warn` recolor the value; omit for neutra
   <div class="metric is-crit">
     <p class="label">Avoidable Edit failures</p>
     <div class="value">346</div>
-    <p class="note">Edited a file never read this session — the #1 preventable error.</p>
+    <p class="note">Edited a file never read this session - the #1 preventable error.</p>
   </div>
   <div class="metric is-warn">
     <p class="label">Opus output tokens / mo</p>
@@ -76,12 +76,12 @@ per metric. `is-crit` / `is-good` / `is-warn` recolor the value; omit for neutra
   <div class="metric is-good">
     <p class="label">Cache-read hygiene</p>
     <div class="value">99.8<small>%</small></div>
-    <p class="note">Already excellent — not a lever.</p>
+    <p class="note">Already excellent - not a lever.</p>
   </div>
 </div>
 ```
 
-### Callout — a tagged aside
+### Callout: a tagged aside
 
 Base = accent; add `crit` / `good` / `warn`.
 
@@ -92,7 +92,7 @@ Base = accent; add `crit` / `good` / `warn`.
 </div>
 ```
 
-### Horizontal bar chart — div-based, no dependencies
+### Horizontal bar chart: div-based, no dependencies
 
 Set each fill's width with `style="--w:<pct>%"` (percent of the largest bar). The default
 fill is slate ink (`--s1`); modifiers `crit` / `good` / `warn` recolor a bar ONLY when
@@ -116,10 +116,10 @@ that bar carries the judgment, `muted` de-emphasizes. `chart-title` names the ax
 </div>
 ```
 
-### Stacked share bar — one bar split by share, with legend
+### Stacked share bar: one bar split by share, with legend
 
 Set each segment's `width` and `background` inline. Identity = the `--s1`..`--s4` ramp in
-share order (never `--good`/`--warn`/`--crit` — those say judgment, not who); a tail
+share order (never `--good`/`--warn`/`--crit`: those say judgment, not who); a tail
 bucket can use `color-mix(in srgb,var(--s4) 45%,var(--track))`. In-bar text only on
 `--s1`/`--s2` segments wide enough to fit it; every segment goes in the legend.
 
@@ -127,7 +127,7 @@ bucket can use `color-mix(in srgb,var(--s4) 45%,var(--track))`. In-bar text only
 <div class="barchart">
   <p class="chart-title">Fleet output tokens by model tier · ≈43M / mo</p>
   <div class="stackbar">
-    <span style="width:82%;background:var(--s1)">Opus — 82%</span>
+    <span style="width:82%;background:var(--s1)">Opus - 82%</span>
     <span style="width:12%;background:var(--s2)">12%</span>
     <span style="width:3%;background:var(--s3)"></span>
     <span style="width:3%;background:var(--s4)"></span>
@@ -141,7 +141,7 @@ bucket can use `color-mix(in srgb,var(--s4) 45%,var(--track))`. In-bar text only
 </div>
 ```
 
-### Gauge — a single ring for a headline rate
+### Gauge: a single ring for a headline rate
 
 `--p` is the percent filled (0–100), `--gc` its color.
 
@@ -150,12 +150,12 @@ bucket can use `color-mix(in srgb,var(--s4) 45%,var(--track))`. In-bar text only
   <div class="ring" style="--p:27;--gc:var(--crit)"><b>27%</b></div>
   <div class="g-body">
     <p class="g-head">47 of 173 query_sql calls failed</p>
-    <p>The dangerous slice is the <strong>13 shared-daemon crashes</strong> — fleet-wide, not just the author.</p>
+    <p>The dangerous slice is the <strong>13 shared-daemon crashes</strong> - fleet-wide, not just the author.</p>
   </div>
 </div>
 ```
 
-### Recommendation entries — a linked numbered list of findings
+### Recommendation entries: a linked numbered list of findings
 
 Used on a report's own index page and on the landing page. Wrap in `<div class="rec-list">`;
 each `<a class="rec">` may carry a `.num` badge, a `.rec-kind` eyebrow, an `h3`, body copy,
@@ -179,7 +179,7 @@ small at the right margin.
 </div>
 ```
 
-## When to use what — keep it honest, no chart slop
+## When to use what: keep it honest, no chart slop
 
 - **One or two headline numbers** → a `metric-grid`. Reserve `is-crit`/`is-warn` for
   problems and `is-good` for a solved/healthy metric, so color carries meaning.
@@ -191,7 +191,7 @@ small at the right margin.
   charts readers come to a usage report for; don't leave them table-only.
 - **A single rate that *is* the story** (fail %, share %) → a `gauge`.
 - **A risk, caveat, or "already solved, don't chase it" aside** → a `callout`.
-- Keep the detailed source table **as well** when the numbers matter — the chart is the
+- Keep the detailed source table **as well** when the numbers matter: the chart is the
   at-a-glance, the table is the record. Don't add a chart that just restates a two-row
   table. One strong visual per section beats three weak ones.
 

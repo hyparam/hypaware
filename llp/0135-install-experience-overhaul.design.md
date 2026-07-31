@@ -504,7 +504,7 @@ independent reasons, any one sufficient:
    machines where install had succeeded. Neither answer is usable, and the
    quiet one is the more dangerous of the two.
 3. **No undo record.** The plist carries no `marker_record`, and per
-   [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
+   [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
    a record-less marker is refused, never half-reversed. Nor would adding
    one help: the file is root-owned, so an unprivileged detach cannot write
    it back.

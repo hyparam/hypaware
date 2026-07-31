@@ -14,25 +14,25 @@ import { resolveIcebergDir } from './storage.js'
 /**
  * Delete already-cached rows from the local query cache, cache-only: purge
  * never contacts a sink or the remote and never deletes exported copies
- * (LLP 0104 boundary — server-side deletion is out of scope, LLP 0069
+ * (LLP 0104 boundary, server-side deletion is out of scope, LLP 0069
  * §non-goals). The deletion mechanism is Iceberg position-deletes
  * ({@link deleteMatchingRows}), which preserve surviving rows' `part_id`
  * identity and every sink's `_hyp_ingest_seq` watermark (see that function).
  *
  * Four target shapes (LLP 0104 decision):
  *
- *  - `{ kind: 'subtree', path }` — rows whose `cwd` equals or descends from
+ *  - `{ kind: 'subtree', path }`, rows whose `cwd` equals or descends from
  *    `path` (the LLP 0049 §scope ancestor rule via {@link scopeGovernance}, so a
  *    row recorded under one spelling of a directory is still purged when the
  *    target names the other), regardless of the path's usage class: an explicit
  *    purge may remove any data, `local-only` and synced included.
- *  - `{ kind: 'session', id }` — one session's rows. `session_id` is the
+ *  - `{ kind: 'session', id }`, one session's rows. `session_id` is the
  *    partition key (LLP 0030); the predicate still scans every partition
  *    because the on-disk cache is partitioned by source, not session.
- *  - `{ kind: 'ignored', resolver }` — every row whose `cwd` currently
+ *  - `{ kind: 'ignored', resolver }`, every row whose `cwd` currently
  *    resolves to `ignore` from either source (dotfile or machine-local entry,
  *    LLP 0103), the review skill's bulk step.
- *  - `{ kind: 'all' }` — every recorded row, wholesale.
+ *  - `{ kind: 'all' }`, every recorded row, wholesale.
  *
  * Returns aggregate counts plus the distinct set of purged `cwd`s, so the
  * caller can resolve each and emit the resurrection warning for any that

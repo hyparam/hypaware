@@ -75,9 +75,9 @@ export type ConfigValidationError = ValidationError & { errorKind: ConfigValidat
 /**
  * Why a local-layer entry was dropped during the boot-time merge.
  *
- * - `collides_with_central` — the entry named a key the central layer
+ * - `collides_with_central`: the entry named a key the central layer
  *   already locks (caught by the structural key merge).
- * - `invalid_merge` — the entry is valid in isolation but makes the
+ * - `invalid_merge`: the entry is valid in isolation but makes the
  *   merged config invalid once layered onto the central document (e.g. a
  *   capability tie a local plugin introduces, an additive sink that
  *   references an unknown/incompatible plugin). `detail` carries the
@@ -111,7 +111,7 @@ export interface ConfigMergeResult {
 }
 
 /**
- * Phase 8 diagnostic kinds — internally inconsistent configurations
+ * Phase 8 diagnostic kinds: internally inconsistent configurations
  * that are not catastrophic enough to fail `hyp config validate` but
  * which `hyp status` surfaces with concrete repair suggestions.
  *
@@ -276,7 +276,7 @@ export interface CreateConfigControlOptions {
    * probation active→cleared transition (never on a no-probation poll).
    * `etag` is the revision whose probation just cleared. The daemon wires
    * this to schedule an action-reconciler pass; `apply.js` stays ignorant
-   * of the reconciler and only emits the edge event (LLP 0041). Optional —
+   * of the reconciler and only emits the edge event (LLP 0041). Optional:
    * a plain CLI boot leaves it unset and the edge is a no-op.
    */
   onConfirmed?: (etag: string) => void
@@ -291,11 +291,11 @@ export interface CreateConfigControlOptions {
  * Recorded state of a single reconciled action, persisted in
  * `config-control/client-actions.json`.
  *
- * - `done` — run-once terminal state; the action is never auto-run again
+ * - `done`: run-once terminal state; the action is never auto-run again
  *   (the marker is what makes every subsequent boot cheap). See LLP 0036
  *   §Idempotency.
- * - `failed` — not terminal; the next reconcile pass retries it.
- * - `applied` — current applied state of a reconciled/reversible handler
+ * - `failed`: not terminal; the next reconcile pass retries it.
+ * - `applied`: current applied state of a reconciled/reversible handler
  *   (attach, future); `reverse()` runs on leave when the config stops
  *   naming the effect.
  */
@@ -362,7 +362,7 @@ export type ActionMarkerStore = Record<string, Record<string, ActionMarker>>
 
 /**
  * A unit the reconciler should converge, emitted by `ActionHandler.desired()`.
- * `params` is handler-specific and not persisted — it is passed straight to
+ * `params` is handler-specific and not persisted: it is passed straight to
  * `perform()` (e.g. backfill carries `{ plugin, windowDays }`).
  */
 export interface DesiredAction {
@@ -395,22 +395,22 @@ export interface ActionOutcome {
 export interface ActionContext {
   /** Effective (merged) config the daemon booted (LLP 0031). */
   config: HypAwareV2Config
-  /** Kernel backfill registry — `list()` yields enabled-or-not providers. */
+  /** Kernel backfill registry: `list()` yields enabled-or-not providers. */
   backfills: BackfillRegistry
   /**
    * The daemon's resolved environment, threaded down to any spawned child
    * (notably `hyp backfill`). The daemon forces `HYP_HOME=hypHome` so the
-   * child imports into the *same* cache the daemon resolved — not whatever
+   * child imports into the *same* cache the daemon resolved, not whatever
    * `process.env.HYP_HOME` happened to be (LLP 0041 §Run-once flow step 2).
    */
   env: NodeJS.ProcessEnv
   /**
    * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
    * derived from manifests by `buildPluginCatalog`. The attach handler
-   * enumerates `desired()` off this map — the runtime `clients` registry
+   * enumerates `desired()` off this map: the runtime `clients` registry
    * carries no owning-plugin field, so descriptors are the source of truth
    * for "is this client's plugin enabled?" and hand the disk-driven undo the
-   * `attachProbe` it replays from (LLP 0045 §Part 1, §Part 3). Daemon-only —
+   * `attachProbe` it replays from (LLP 0045 §Part 1, §Part 3). Daemon-only:
    * a plain CLI boot leaves it unset and any client handler stays inert.
    */
   clientDescriptors?: Map<string, ClientDescriptor>
@@ -441,7 +441,7 @@ export interface ActionContext {
 }
 
 /**
- * A registered detect / perform / (optional) reverse triple — the unit the
+ * A registered detect / perform / (optional) reverse triple: the unit the
  * reconciler drives. The reconciler is generic: it knows nothing about
  * Claude vs Codex, only this interface (LLP 0036 §Options-3, LLP 0041).
  */
@@ -450,14 +450,14 @@ export interface ActionHandler {
   kind: string
   /**
    * Enumerate the units this handler wants reconciled, given the effective
-   * config + registries. Pure — no effects.
+   * config + registries. Pure: no effects.
    */
   desired(ctx: ActionContext): DesiredAction[]
   /** Run the effect for one desired action (subprocess or in-proc). */
   perform(action: DesiredAction, ctx: ActionContext): Promise<ActionOutcome>
   /**
    * Undo a previously-applied effect whose request key the config no longer
-   * names (leave/detach). Run-once handlers (backfill) omit this — imported
+   * names (leave/detach). Run-once handlers (backfill) omit this: imported
    * data stays and the marker is kept. Reversible handlers (attach, future)
    * implement it.
    *
@@ -475,7 +475,7 @@ export interface ActionHandler {
    * level-triggered short-circuit. Handlers with no moving input (backfill:
    * imported data never goes stale) omit it, so a `done` marker is permanently
    * done. The attach handler implements it to re-attach after the gateway
-   * rebinds to a new ephemeral port (issue #277 / LLP 0086). Pure — no effects.
+   * rebinds to a new ephemeral port (issue #277 / LLP 0086). Pure: no effects.
    */
   isCurrent?(marker: ActionMarker, action: DesiredAction, ctx: ActionContext): boolean
 }
@@ -522,10 +522,10 @@ export interface ReconcileActionResult {
   kind: string
   requestKey: string
   /**
-   * - `done` — `perform()` succeeded this pass; marker advanced to `done`.
-   * - `skipped` — a `done` marker already existed (run-once short-circuit).
-   * - `failed` — `perform()`/`reverse()` failed; marker recorded `failed`.
-   * - `reversed` — `reverse()` succeeded; marker removed.
+   * - `done`: `perform()` succeeded this pass; marker advanced to `done`.
+   * - `skipped`: a `done` marker already existed (run-once short-circuit).
+   * - `failed`: `perform()`/`reverse()` failed; marker recorded `failed`.
+   * - `reversed`: `reverse()` succeeded; marker removed.
    */
   outcome: 'done' | 'skipped' | 'failed' | 'reversed'
   rows?: number
@@ -567,7 +567,7 @@ export interface CreateActionReconcilerOptions {
   /**
    * Kernel state root (`<HYP_HOME>/hypaware`). The marker file lives at
    * `<stateRoot>/config-control/client-actions.json`, alongside the apply
-   * engine's `state.json` (LLP 0041 — the reconciler is kernel surface).
+   * engine's `state.json` (LLP 0041: the reconciler is kernel surface).
    */
   stateRoot: string
   /** Ordered handlers; v1 ships `[backfillHandler]`. */
@@ -597,7 +597,7 @@ export interface BackfillSpawnResult {
 /** Arguments handed to the injectable backfill spawn seam. */
 export interface BackfillSpawnArgs {
   /**
-   * The `hyp` argv after the bin path — e.g.
+   * The `hyp` argv after the bin path: e.g.
    * `['backfill', 'claude', '--since', '<iso>', '--json']`. The default
    * implementation prepends `process.execPath` and the resolved
    * `bin/hypaware.js` path (the `runSmoke` spawn pattern).
@@ -610,7 +610,7 @@ export interface BackfillSpawnArgs {
 /**
  * The subprocess seam the backfill handler launches `hyp backfill` through.
  * Injected in tests so the spawned argv + marker writes can be asserted
- * without a real child (LLP 0041 — "testable with the spawn injected").
+ * without a real child (LLP 0041: "testable with the spawn injected").
  */
 export type BackfillSpawn = (args: BackfillSpawnArgs) => Promise<BackfillSpawnResult>
 
@@ -625,7 +625,7 @@ export interface CreateBackfillHandlerOptions {
 // =============================================================================
 
 /**
- * The disk-driven undo seam the attach handler's `reverse()` invokes — the
+ * The disk-driven undo seam the attach handler's `reverse()` invokes: the
  * single core detach (`detachClientFromDisk`, LLP 0045 §Part 3). Injected in
  * tests so `reverse()` can be exercised against a fixture / fake without a live
  * gateway; the default is the real `detachClientFromDisk`. The seam only needs

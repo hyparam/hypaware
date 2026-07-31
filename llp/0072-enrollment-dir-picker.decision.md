@@ -8,7 +8,7 @@
 **Related:** LLP 0063, LLP 0069, LLP 0071, LLP 0037, LLP 0044, LLP 0011, LLP 0036
 
 > [LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md) settled
-> that `hyp remote login` **never prompts `y/n`** — enrollment consent is a
+> that `hyp remote login` **never prompts `y/n`**: enrollment consent is a
 > pre-auth warning, not a blocking question. [LLP 0069](./0069-local-only-dir-selection.spec.md)
 > adds an interactive multi-select *after* enrollment. This decision reconciles
 > the two: the picker is a **post-enrollment privacy refinement** that defaults
@@ -40,11 +40,11 @@ is distinguished from the confirm D3 rejected on every axis that mattered to D3:
 | D3's rejected confirm | This picker |
 |---|---|
 | Gates *whether enrollment happens* | Runs *after* enrollment is decided and provisioned; enrollment already happened |
-| Blocking `y/n` — must be answered | Defaults to **exclude nothing**; Enter / Ctrl-C / EOF proceeds unchanged |
+| Blocking `y/n`: must be answered | Defaults to **exclude nothing**; Enter / Ctrl-C / EOF proceeds unchanged |
 | Hangs piped / MDM flows | **TTY-gated**: no interactive stdin/stderr → skipped, zero exclusions, no hang |
 | Second-guesses operator's domain-claim consent | Adds *nothing* about enrollment; only lets the user withhold **their own** directories, which the org never had a claim to |
 
-So the picker does not violate D3 — it operates in the space D3 left open. D3
+So the picker does not violate D3: it operates in the space D3 left open. D3
 forbids a prompt that *asks permission to enroll*; this asks nothing about
 enrollment. It sits inside the [LLP 0036 §Consent](./0036-central-config-driven-client-actions.decision.md)
 doctrine (per-instance defaults sized to blast radius) as a *narrowing* control
@@ -60,30 +60,30 @@ directories from that. A default that pre-excluded anything would silently
 withhold data the org expects, inverting the consent the operator has. The user
 must affirmatively pick a directory for it to become `local-only`. This also
 makes the non-TTY skip safe: "no picker" and "picker with nothing selected" reach
-the identical state — full forwarding — so a piped login is never *more*
+the identical state, full forwarding, so a piped login is never *more*
 permissive than the operator intended, only never *less*.
 
 **Dismiss = finish enrolling with zero exclusions, never abort.** The picker runs
 *after* the browser login already succeeded (the gateway credential is minted) and
 *before* `enrollCentralSink` ([LLP 0069 §trigger](./0069-local-only-dir-selection.spec.md#trigger)).
 So Enter, Ctrl-C, and EOF at the picker all mean the same thing: **select nothing
-and proceed** — enrollment completes (sink provisioned, daemon installed, full
+and proceed**, enrollment completes (sink provisioned, daemon installed, full
 forwarding). Ctrl-C here **cannot** un-do the login; the picker can only *narrow*
 an enrollment already consented to, never reverse it. This is deliberately
 distinct from LLP 0063 D3's *pre*-auth `"Ctrl-C to cancel"`, which aborts before
-authenticating — once the credential is minted, there is nothing left to cancel,
+authenticating, once the credential is minted, there is nothing left to cancel,
 only directories to (optionally) withhold. Because the picker precedes
 provisioning, a dismissed or abandoned picker leaves no half-enrolled machine:
 the subsequent `enrollCentralSink` runs exactly as it would with no picker at all.
-An **empty candidate list** — a fresh login-first box with no captured history yet
-— is the same path: skip with a one-line hint pointing at the durable
+An **empty candidate list**, a fresh login-first box with no captured history yet,
+is the same path: skip with a one-line hint pointing at the durable
 `hyp ignore --local-only` command ([cli](#cli)), then proceed.
 
 ### TTY-gated, reusing the existing prompt seam {#tty}
 
 The picker runs only when both stdin and stderr are interactive TTYs, using the
 same `isTty` / `buildTtyPrompt` seam plugin-install confirmation already uses
-(`src/core/cli/core_commands.js`, `src/core/plugin_install/confirm.js`) — a
+(`src/core/cli/core_commands.js`, `src/core/plugin_install/confirm.js`): a
 multi-select (checkbox-list) variant of it, prompting on stderr so stdout stays
 clean for scripts. A non-interactive login prints a one-line hint naming the
 durable command ([cli](#cli)) instead of prompting, so the capability is
@@ -94,7 +94,7 @@ property intact.
 
 Consistent with [LLP 0063](./0063-login-auto-provision-forward-sink.decision.md)'s
 never-silent ethos: when the user *does* exclude directories, the flow prints
-what it did (`withholding N director(ies) from forwarding — recorded locally,
+what it did (`withholding N director(ies) from forwarding, recorded locally,
 never sent`), and `hyp status` reflects the list size
 ([LLP 0069 R9](./0069-local-only-dir-selection.spec.md#requirements)). "Enrolled
 but withholding" is a visible state, not a hidden one.
@@ -103,23 +103,23 @@ but withholding" is a visible state, not a hidden one.
 
 The picker is the *convenient* entry point, not the *only* one
 ([LLP 0069 R7](./0069-local-only-dir-selection.spec.md#requirements)). Two things
-the login-time picker structurally cannot cover — directories worked in *after*
-enrollment, and correcting a mistaken selection without re-running login — need a
+the login-time picker structurally cannot cover, directories worked in *after*
+enrollment, and correcting a mistaken selection without re-running login, need a
 durable command. It reuses the [LLP 0049 §cli](./0049-hypignore-usage-policy.spec.md#cli)
 verb surface rather than inventing a parallel one:
 
-- `hyp ignore --local-only [path]` — add a directory to the machine-local
+- `hyp ignore --local-only [path]`: add a directory to the machine-local
   `local-only` list ([LLP 0071](./0071-machine-local-exclusion-list.decision.md)),
   defaulting to the repo root / cwd like `hyp ignore`.
-- `hyp unignore --local-only [path]` — remove it.
-- `hyp ignore --check [path]` — already specified to report the governing class
+- `hyp unignore --local-only [path]`: remove it.
+- `hyp ignore --check [path]`: already specified to report the governing class
   ([LLP 0049 §cli](./0049-hypignore-usage-policy.spec.md#cli)); it now also
   reports `local-only` membership and, per its existing contract, how many
   already-cached rows from the scope have **not yet been forwarded**.
 
 These are idempotent ([LLP 0049 R5](./0049-hypignore-usage-policy.spec.md#requirements))
 and are the same read/modify/write over the machine-local file the picker
-performs — the picker is a TTY front-end over exactly this. Exact flag spelling
+performs: the picker is a TTY front-end over exactly this. Exact flag spelling
 (`--local-only` vs. a distinct verb) is a design detail for the follow-on design
 doc; the
 constraint here is only that a non-login authoring path exists and shares the
@@ -154,12 +154,12 @@ applied to governance rather than versioning).
 ## Alternatives considered
 
 - **Prompt `y/n` "exclude any directories?" first, then the list.** Rejected:
-  redundant — the list *is* the prompt, and it already defaults to
+  redundant, the list *is* the prompt, and it already defaults to
   exclude-nothing, so a guard question adds a keystroke and an extra TTY edge for
   no gain.
 - **Run the picker as a separate command after login (`hyp remote login` prints
   "run `hyp ignore --local-only`").** Rejected as the *primary* path: it defeats
-  [LLP 0069](./0069-local-only-dir-selection.spec.md)'s point — the moment
+  [LLP 0069](./0069-local-only-dir-selection.spec.md)'s point, the moment
   forwarding turns on is exactly when the user is thinking about what not to send,
   and a deferred command is one most users never run, leaking the backlog in the
   meantime ([LLP 0069 R6](./0069-local-only-dir-selection.spec.md#requirements)).

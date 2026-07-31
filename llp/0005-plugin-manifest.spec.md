@@ -18,14 +18,14 @@
 
 ## One shape, no privileged variant
 
-Every plugin — first-party and third-party — ships the **same manifest shape**.
+Every plugin, first-party and third-party, ships the **same manifest shape**.
 There is no privileged first-party variant; the kernel cannot tell at load time
 whether a plugin is first-party beyond the `@hypaware/` scope check.
 
 ## Declarative
 
 The manifest declares what the plugin *requires*, *provides*, and *contributes*.
-It enumerates the surfaces the plugin will populate at activation — which is
+It enumerates the surfaces the plugin will populate at activation, which is
 enough for core to resolve the dependency graph, route argv to the owning
 plugin, and list datasets/commands **before any plugin code is loaded**.
 
@@ -54,14 +54,14 @@ plugin, and list datasets/commands **before any plugin code is loaded**.
 
 ## Field notes
 
-- **`hypaware_api`** — the kernel API semver range the plugin builds against.
-- **`entrypoint`** — a single pre-bundled JS file
+- **`hypaware_api`**: the kernel API semver range the plugin builds against.
+- **`entrypoint`**: a single pre-bundled JS file
   ([LLP 0008](./0008-plugin-runtime-dependencies.decision.md)).
-- **`permissions`** — coarse grants (`network`, `read_state`, `write_state`)
+- **`permissions`**: coarse grants (`network`, `read_state`, `write_state`)
   surfaced to the user.
-- **`contributes.config_sections`** — declares which config section the plugin
+- **`contributes.config_sections`**: declares which config section the plugin
   validates ([LLP 0010](./0010-config-model.spec.md)).
-- **`supports`** on sink contributions — feature tags like `queryable`; see
+- **`supports`** on sink contributions: feature tags like `queryable`; see
   [LLP 0014](./0014-sinks.spec.md). Named `supports` (not `capabilities`) to
   avoid clashing with the global capability registry.
 

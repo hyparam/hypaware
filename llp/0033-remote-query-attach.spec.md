@@ -9,8 +9,8 @@
 
 > The **client consumer half** of remote attach: how a local `hyp` (and the AI
 > clients on a developer's machine) reach a HypAware server's data. The
-> *producer* half — a host exposing an MCP server assembled from its plugins'
-> verbs — is [LLP 0034](./0034-mcp-host-intrinsic.decision.md); this document
+> *producer* half, a host exposing an MCP server assembled from its plugins'
+> verbs, is [LLP 0034](./0034-mcp-host-intrinsic.decision.md); this document
 > owns the consumer side. Sibling to [LLP 0025](./0025-remote-config-join-flow.spec.md)
 > (the client half of remote *config*). The server (LLP 0006/0010) is the
 > design authority for the server's MCP surface and the scoped credential.
@@ -19,12 +19,12 @@
 > `@hypaware/remote` HTTP-pipe plugin, a `--remote` flag over HTTP). The rethink
 > recorded in [LLP 0034](./0034-mcp-host-intrinsic.decision.md) replaced the
 > transport with MCP and dissolved the plugin (its transport rationale evaporated
-> once MCP hosting + client became kernel-intrinsic). The surviving decisions —
+> once MCP hosting + client became kernel-intrinsic). The surviving decisions,
 > named targets, the `0600` credential store + `hyp remote login`,
 > secrets-never-in-config, explicit truncation, `--remote`/`--refresh` flag
-> compat — are carried here, reframed onto MCP and **core** (not a plugin).
+> compat, are carried here, reframed onto MCP and **core** (not a plugin).
 
-> **Status note:** the **consumer half is implemented in core** — `--remote` on
+> **Status note:** the **consumer half is implemented in core**, `--remote` on
 > every verb (routing to the MCP client), `query.remotes` targets + validation,
 > the `0600` credential store with env→file resolution, `hyp remote
 > add/login/list/remove`, and the two-line truncation surfacing + the
@@ -37,12 +37,12 @@
 There are **two ways** to consume a remote host's data, and `hyp` is **core** on
 both (no `@hypaware/remote` plugin):
 
-1. **AI clients install the server's MCP directly** — `claude mcp add
-   --transport http <url>`, a Desktop connector, etc. — authenticated by a
+1. **AI clients install the server's MCP directly**: `claude mcp add
+   --transport http <url>`, a Desktop connector, etc., authenticated by a
    **query-scoped** credential ([LLP 0034 §scoped-credential](./0034-mcp-host-intrinsic.decision.md#scoped-credential)).
    `hyp` is **not in the data path** for this; the server endpoint is
    self-describing.
-2. **A human at the terminal** runs `hyp <verb> --remote <target>` — `hyp` acts as
+2. **A human at the terminal** runs `hyp <verb> --remote <target>`: `hyp` acts as
    an **MCP client**, calls the remote tool, and renders locally. This needs
    `hyp`'s target registry + credential store (below).
 
@@ -60,7 +60,7 @@ draft's `--remote` flag **survives, re-pointed**:
 > **`graph_neighbors` MCP tool** (same `inputSchema`) instead of `operation`, then
 > renders with the **same `render`**.
 
-One verb declaration thus powers local CLI, local MCP tool, **and** remote CLI —
+One verb declaration thus powers local CLI, local MCP tool, **and** remote CLI:
 no separate remote code path or renderer. `--remote` is a **core** flag on a core
 verb routing to a core MCP client; it is not a plugin injecting an option (no
 conflict with [LLP 0009 §no-cross-plugin-option-injection](./0009-cli-registry.spec.md#no-cross-plugin-option-injection)).
@@ -80,7 +80,7 @@ Only read-class tools are reachable with a query-scoped credential
 This **supersedes** the earlier draft's plugin-config-block home: with the MCP
 client now core (LLP 0034), "which server a verb talks to" is a core concern, and
 `query.remotes` is the natural seat. Because `query{}` is structurally local-only,
-the **central layer can never inject a remote target** ([LLP 0031](./0031-layered-config.decision.md#query-is-local-only)) —
+the **central layer can never inject a remote target** ([LLP 0031](./0031-layered-config.decision.md#query-is-local-only)):
 a free invariant. The URL is non-secret and committable; the token is not config.
 
 > **Extended-by: [LLP 0062](./0062-builtin-default-remote.decision.md).** The
@@ -110,7 +110,7 @@ a free invariant. The URL is non-secret and committable; the token is not config
   legacy `token`-only record (no `kind`) reads as `static`, so existing files keep
   working without a rewrite.
 - **Resolution at query time:** per-target env `HYP_REMOTE_TOKEN_<NAME>`
-  (CI/ephemeral) → stored file → error (`no token for '<target>' — run 'hyp
+  (CI/ephemeral) → stored file → error (`no token for '<target>', run 'hyp
   remote login <target>'`). A *per-target* env var so a stored var can never
   silently authenticate the wrong server. For an `oidc` record the attach path is
   **session-aware** ([LLP 0058 D5](./0058-oidc-login-client.decision.md#d5)): it
@@ -121,15 +121,15 @@ a free invariant. The URL is non-secret and committable; the token is not config
   shares this session-aware path, resolving a fresh JWT per forwarded message so a
   long-lived proxy does not pin one short-lived access JWT.
 - AI clients that install the endpoint directly hold the token in **their own** MCP
-  config — `hyp`'s store is only for the human-CLI client path.
+  config: `hyp`'s store is only for the human-CLI client path.
 - **Browser login is additionally gated by the machine's server connection**
   ([LLP 0063 D4](./0063-login-auto-provision-forward-sink.decision.md#d4)): while a
   `@hypaware/central` sink targets server A, `hyp remote login` against a different
   origin is rejected (disconnect first). Static-token records and env resolution
-  for other targets are unaffected — the gate exists because a browser login can
+  for other targets are unaffected: the gate exists because a browser login can
   enroll the machine, which those paths cannot.
 
-<a id="credential-stakes"></a>**Stakes — much reduced by scoping.** The credential
+<a id="credential-stakes"></a>**Stakes: much reduced by scoping.** The credential
 `hyp` stores is the **query-scoped** token ([LLP 0034 §scoped-credential](./0034-mcp-host-intrinsic.decision.md#scoped-credential)):
 read/compute tools only, **cannot author configs or mint tokens**. So unlike the
 original design's single fleet-code-exec admin token, what lands in `hyp`'s `0600`
@@ -146,7 +146,7 @@ MCP are kernel-intrinsic, so these are core, not plugin):
 |---|---|---|
 | `hyp remote add <name> <url>` | register a target (creates/augments local config) | `query.remotes.<name>` |
 | `hyp remote login <name>` | store the query-scoped token (`--token-file`/stdin/prompt) | `remote-credentials.json` (0600) |
-| `hyp remote list` | targets + `token: stored / missing` (never the token) | — |
+| `hyp remote list` | targets + `token: stored / missing` (never the token) | - |
 | `hyp remote remove <name>` | drop target + its credential | local config + store |
 
 `hyp remote add` is a [local-layer writer](./0031-layered-config.decision.md#local-layer-writers)
@@ -161,7 +161,7 @@ commands: `hyp remote add prod <url>` → `hyp remote login prod` → `hyp query
 
 1. **Server cap (data volume).** The server's read tools enforce row/byte caps and
    mark `truncated` + the limit hit; *those rows never left the server*. Surfaced
-   as e.g. `remote: showing first N rows (server cap rows:10000) — narrow the
+   as e.g. `remote: showing first N rows (server cap rows:10000), narrow the
    query, or read the Iceberg archive directly for bulk` (server LLP 0006
    §result-caps). The client **cannot lift this cap**.
 2. **Client display budget (context volume).** The rendered result flows through
@@ -169,7 +169,7 @@ commands: `hyp remote add prod <url>` → `hyp remote login prod` → `hyp query
    32 KB) with its "rows withheld" notice. `--output` / `--max-bytes 0` lift
    **only this**, never the server cap.
 
-`2>/dev/null` hides **both** signals — never suppress stderr on a remote query.
+`2>/dev/null` hides **both** signals, never suppress stderr on a remote query.
 
 <a id="flag-compat"></a>**Flag compatibility.** `--format`/`--output`/`--max-cell`/
 `--max-bytes` are client-side render controls and stay valid under `--remote`.
@@ -179,11 +179,11 @@ silent ignore.
 
 ## References
 
-- [LLP 0034](./0034-mcp-host-intrinsic.decision.md) — producer half (MCP hosting
+- [LLP 0034](./0034-mcp-host-intrinsic.decision.md): producer half (MCP hosting
   intrinsic; verbs; transport; scoped credential)
-- [LLP 0025](./0025-remote-config-join-flow.spec.md) — sibling: client half of
+- [LLP 0025](./0025-remote-config-join-flow.spec.md), sibling: client half of
   remote *config*
-- hypaware-server LLP 0006 (admin query attach), LLP 0010 (server-side graph) —
+- hypaware-server LLP 0006 (admin query attach), LLP 0010 (server-side graph):
   design authority; a server LLP for the scoped credential + MCP route is pending
-- [LLP 0031](./0031-layered-config.decision.md) — query is local-only
+- [LLP 0031](./0031-layered-config.decision.md): query is local-only
 - [LLP 0009](./0009-cli-registry.spec.md), [LLP 0015](./0015-query-and-datasets.spec.md)

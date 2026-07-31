@@ -21,12 +21,12 @@ because the design's own text implies work it does not give its own section:
 - **A shared session-file reader is new work, not existing code.** Sections 6
   and 7 both say "reads the session file through the LLP 0158 reader," but
   [LLP 0158](./0158-one-reader-for-openclaw-session-jsonl.decision.md) is a
-  decision document, not a shipped module — `hypaware-core/plugins-workspace/openclaw/`
+  decision document, not a shipped module: `hypaware-core/plugins-workspace/openclaw/`
   currently has no file that reads `~/.openclaw/agents/<agentId>/sessions/*.jsonl`
   at all (verified: `settings.js`, `config.js`, `index.js`, `projector.js` are
   the only files in that tree today). Building that reader is its own task
   (**T3**) so the settlement enricher (T8) and the backfill provider (T9) both
-  consume one module instead of each growing its own copy — exactly the drift
+  consume one module instead of each growing its own copy: exactly the drift
   LLP 0158 exists to prevent, applied to a module that does not exist yet
   either.
 - **Section 3.1 (manifest) splits across two tasks**, not one, because half of
@@ -47,20 +47,20 @@ Everything else maps close to 1:1 onto the design's section numbers.
 
 **First wave (deps `[]`), four-wide:**
 
-- **T1** — the steering plugin's core (Sections 1, 2, 2.1): package scaffold,
+- **T1**, the steering plugin's core (Sections 1, 2, 2.1): package scaffold,
   the two shadow provider registrations, and the four-branch
   `resolveSteering` precedence algorithm with its `DEFERRED_SET`. This is the
   one place LLP 0157 left a real fork and the design resolved it with an
-  algorithm, not a restatement — see complexity note below.
-- **T3** — the LLP 0158 session-file reader, new module, consumed later by T8
+  algorithm, not a restatement; see complexity note below.
+- **T3**, the LLP 0158 session-file reader, new module, consumed later by T8
   and T9. Faithfully porting the Codex `rollout_session_meta.js` precedent's
   non-obvious guard rules (bounded first-line read, `type` guard, the
   absolute-path `cwd` predicate) matters more than it looks: LLP 0150
   documents two shipped privacy bugs from exactly this shape copied loosely.
-- **T4** — Section 5's `match_key.js`: `canonicalMatchKey` / `wireMatchKey` /
+- **T4**, Section 5's `match_key.js`: `canonicalMatchKey` / `wireMatchKey` /
   `sessionMatchKey` and the ordinal/time fallback matcher. The hardest single
-  piece of this change set — see complexity note below.
-- **T5** — Sections 3.1 (partial), 3.2, 3.3: manifest `attach_probe` removal
+  piece of this change set; see complexity note below.
+- **T5**, Sections 3.1 (partial), 3.2, 3.3: manifest `attach_probe` removal
   and `permissions` trim, the `validateBackfillSection` copy in `config.js`,
   deleting `settings.js`, and the honest no-op `attach()` that keeps
   `registerClient` registered (the fork Section 3.3 resolves: dropping
@@ -70,23 +70,23 @@ Everything else maps close to 1:1 onto the design's section numbers.
 
 **Second wave:**
 
-- **T2** (deps `[T1]`) — Section 2.2: credential borrowing
+- **T2** (deps `[T1]`), Section 2.2: credential borrowing
   (`prepareRuntimeAuth`) and the `wrapStreamFn` wire-parity mirror for
   `hypaware-anthropic`. Depends on T1 because both hooks attach to the same
   provider-registration object T1 creates.
-- **T6** (deps `[T5]`) — Section 3.4: `openaiUpstreamPreset()`, the
+- **T6** (deps `[T5]`), Section 3.4: `openaiUpstreamPreset()`, the
   `x-hypaware-upstream`-header precedence rung on both presets' `match()`, and
   the `required_upstreams` manifest growth. Depends on T5 as explained above.
-- **T7** (deps `[T4]`) — Section 3.5: the projector's shape-aware branch
+- **T7** (deps `[T4]`), Section 3.5: the projector's shape-aware branch
   (`anthropicMessages()` / new `openaiMessages()`), dropping the hardcoded
   `provider: 'anthropic'`, and stamping `wireMatchKey` (from T4) as
   `attributes.openclaw.match_key` on fallback-identity rows.
-- **T9** (deps `[T3]`) — Section 7: the backfill provider. Needs T3's reader;
-  does **not** need T4's match keys — Section 7 states explicitly that
+- **T9** (deps `[T3]`), Section 7: the backfill provider. Needs T3's reader;
+  does **not** need T4's match keys: Section 7 states explicitly that
   backfilled rows carry native identity directly and never need a match key,
   which is what makes R11 true by construction rather than by a second match
   pass.
-- **T10** (deps `[T5]`) — Section 8: the `json_path` core removal. Depends on
+- **T10** (deps `[T5]`), Section 8: the `json_path` core removal. Depends on
   T5, not the other way round: [LLP 0143](./0143-openclaw-registers-no-attach-probe.decision.md)'s
   R7 requires the manifest's last `json_path` consumer (T5's `attach_probe`
   removal) and core's removal of the format to land in the same logical
@@ -96,7 +96,7 @@ Everything else maps close to 1:1 onto the design's section numbers.
 
 **Third wave:**
 
-- **T8** (deps `[T3, T4]`) — Section 6: the settlement enricher. Needs T3 (the
+- **T8** (deps `[T3, T4]`), Section 6: the settlement enricher. Needs T3 (the
   reader) and T4 (`sessionMatchKey` + the ordinal/time fallback) to build its
   per-session lookup index. Does not depend on T7: T8's tests supply rows with
   `attributes.openclaw.match_key` directly rather than requiring the live
@@ -106,7 +106,7 @@ Everything else maps close to 1:1 onto the design's section numbers.
 
 **Last:**
 
-- **T11** (deps `[T1, T6, T7, T9]`) — Section 9: `docs/ACCEPTANCE.md`'s
+- **T11** (deps `[T1, T6, T7, T9]`), Section 9: `docs/ACCEPTANCE.md`'s
   `## openclaw_capture` procedure. Depends on everything it documents: T1 for
   the warning-ledger step, T6 and T7 for the live-capture route, T9 for the
   backfill route's pass condition.
@@ -117,11 +117,11 @@ T9, T10 touch five different files/packages with no imports between them, so
 none of them block each other even though several land in the same second
 wave.
 
-## Rating complexity — the hard parts, by name
+## Rating complexity: the hard parts, by name
 
 Two tasks earn a 5, both named directly in the brief for this plan:
 
-- **T1 (steering precedence) — 5.** The `resolveSteering` four-branch
+- **T1 (steering precedence): 5.** The `resolveSteering` four-branch
   algorithm is the one place LLP 0157 left a real fork and the design fills it
   with judgement, not restatement: which candidates land in `no_credential`
   vs. `no_preset` vs. `deferred` determines what the warning ledger says
@@ -132,14 +132,14 @@ Two tasks earn a 5, both named directly in the brief for this plan:
   A wrong branch order here is not a test failure to catch later, it is a
   wrong answer to "is this provider captured" that the whole coverage
   statement (LLP 0157 R13) rests on.
-- **T4 (match-key normalization) — 5.** `canonicalMatchKey` /
+- **T4 (match-key normalization): 5.** `canonicalMatchKey` /
   `wireMatchKey` / `sessionMatchKey` is a genuinely new two-sided
   normalization (Claude's single wire-shaped hash does not transfer, per the
   design's own Section 5 fork), the `toolCall` → `tool_use`-style synonym
   table it needs is verified against live OpenClaw session files at
   implementation time (an open item, see below), and R11's "backfill dedupes
   to zero writes against live" guarantee is exactly the property that breaks
-  silently if this normalization is wrong in either direction — a false
+  silently if this normalization is wrong in either direction: a false
   match key double-collapses distinct messages, a missed one lets the
   ordinal/time fallback carry more weight than the design intends. This is
   the hardest single piece of the whole change set.
@@ -147,26 +147,26 @@ Two tasks earn a 5, both named directly in the brief for this plan:
 Four tasks earn a 4, each because they apply a well-precedented shape but
 still require real reasoning, not because the shape is unknown:
 
-- **T2 — 4.** Owner-scoped OpenClaw hooks (`prepareRuntimeAuth`,
+- **T2: 4.** Owner-scoped OpenClaw hooks (`prepareRuntimeAuth`,
   `wrapStreamFn`) with concrete header values the design already gives, but
   the idempotent `Set`-based merge and the OAuth-vs-opt-in beta branching need
   correct reasoning about OpenClaw's own request shaping to not duplicate or
   drop a header.
-- **T7 — 4.** `openaiMessages()` is a new OpenAI Chat Completions
+- **T7: 4.** `openaiMessages()` is a new OpenAI Chat Completions
   request/response/SSE parser with no precedent inside this plugin (Codex's
   `response-items.js` is OpenAI-shaped but plugin-private and not
   importable across plugins per house rule); building the shape dispatch and
   the streaming reconstruction correctly is real, bounded engineering.
-- **T8 — 4.** Applies Claude's well-precedented `settle.js` shape with one
+- **T8: 4.** Applies Claude's well-precedented `settle.js` shape with one
   documented simplification (single cwd per session, no time-slicing), but
   still has to wire the two-pass match (content, then T4's ordinal/time
   fallback) and the flush-time usage-policy drop correctly against a session
   grouping that did not exist in this plugin before.
-- **T9 — 4.** Getting native-identity construction (`message_id`,
+- **T9: 4.** Getting native-identity construction (`message_id`,
   `previous_message_id`, `part_id`) exactly right is what makes R11's
   zero-write dedupe-to-live true "by construction, not coincidence" per the
   design; the CLI-backend allowlist open item (below) also lands here.
-- **T11 — 4.** Writing acceptance steps that actually work when a human runs
+- **T11: 4.** Writing acceptance steps that actually work when a human runs
   them requires resolving, in the doc itself, what the design explicitly
   leaves open: "exact mechanics depend on what OpenClaw's own plugin API
   exposes for introspection, verified at implementation time." A wrong
@@ -195,12 +195,12 @@ and each task begins by establishing the fact rather than assuming it:
   either outcome as a residue question, not a correctness one), but T8's
   implementer should measure the settlement match rate at flush against a
   real OpenClaw session before considering the enricher done, and note the
-  observed behavior in the PR description — LLP 0159's Consequences say this
+  observed behavior in the PR description; LLP 0159's Consequences say this
   number is what would trigger revisiting the whole route-agreement design.
 - **The `toolCall` / `tool_use`-style synonym table `sessionMatchKey` needs.**
   → **T4**. The design states the one divergence LLP 0159 already names
   (`toolCall` → `tool_use`) and the mechanism for handling more (a synonym
-  table, not a hardcoded pair), not an exhaustive table — because that table
+  table, not a hardcoded pair), not an exhaustive table, because that table
   does not exist in this repo to read yet. T4 begins by pulling a handful of
   real OpenClaw session JSONL files (or, failing local access, the openclaw
   repo's own fixtures/tests for its normalized message shape) and building
@@ -208,7 +208,7 @@ and each task begins by establishing the fact rather than assuming it:
   block-type name in advance.
 - **The exact `provider`/`api` values a CLI-backend-routed session record
   carries.** → **T9**. Section 7 already names the fail-closed default (an
-  explicit allowlist — project only `provider: 'anthropic'` or `'openai'` —
+  explicit allowlist, project only `provider: 'anthropic'` or `'openai'`,
   rather than a denylist) precisely so this is safe to ship before the
   question is answered: an unrecognized future value is excluded, not
   mis-attributed. T9 begins by verifying against a live OpenClaw session that
@@ -218,7 +218,7 @@ and each task begins by establishing the fact rather than assuming it:
 
 One further fact-finding item does not come from Section 10 but is real: T1's
 package needs OpenClaw's own plugin-manifest shape (id, entry, permission
-declaration fields — whatever `openclaw plugins install` expects), which is
+declaration fields; whatever `openclaw plugins install` expects), which is
 OpenClaw API surface this repo does not own. T1 begins by verifying that
 shape against the openclaw repo, the same way LLP 0157 verified
 `extensions/anthropic/stream-wrappers.ts` before relying on it, rather than
@@ -226,7 +226,7 @@ guessing a manifest shape and discovering it is wrong at `npm install
 --omit=dev` time inside OpenClaw's own installer.
 
 Section 11's two "living lists" (`DEFERRED_SET` membership, the CLI-backend
-allowlist) are not implementation tasks — they are a process note for
+allowlist) are not implementation tasks; they are a process note for
 *after* ship: the first time either list needs an addition, that addition
 should land as its own short decision LLP citing LLP 0161/0162, not a silent
 diff to T1's or T9's code. No task here needs to anticipate that; it is
@@ -261,18 +261,18 @@ recorded so a future implementer does not have to rediscover the norm.
   This is a plain git-merge-order concern, not a scheduling dependency: keep
   each task's diff to the hunks the brief above names so a later task's PR
   rebases cleanly.
-- Two "living lists" — T1's `DEFERRED_SET` and T9's CLI-backend allowlist —
+- Two "living lists", T1's `DEFERRED_SET` and T9's CLI-backend allowlist,
   are deliberately incomplete-by-design at ship (LLP 0161 Section 11). Their
   first post-ship addition should land as its own short decision LLP citing
   LLP 0161/0162, not a silent diff to either task's code.
 
 ## References
 
-- [LLP 0161](./0161-openclaw-full-capture.design.md) — the technical design
+- [LLP 0161](./0161-openclaw-full-capture.design.md): the technical design
   this plan schedules
-- [LLP 0157](./0157-openclaw-full-capture.spec.md) — the requirements this
+- [LLP 0157](./0157-openclaw-full-capture.spec.md): the requirements this
   design and plan implement
-- LLP 0109, 0143, 0144, 0145, 0146, 0147, 0148, 0149, 0150, 0152, 0158, 0159 —
+- LLP 0109, 0143, 0144, 0145, 0146, 0147, 0148, 0149, 0150, 0152, 0158, 0159:
   the Accepted decision set and precedent shapes LLP 0161's sections cite
   section-by-section
 - `hypaware-core/plugins-workspace/claude/src/settle.js`,
@@ -283,4 +283,4 @@ recorded so a future implementer does not have to rediscover the norm.
   `src/core/codex/rollout_session_meta.js`,
   `src/core/backfill/scan_util.js`,
   `src/core/config/client_detach_disk.js`, `src/core/daemon/status.js`,
-  `docs/ACCEPTANCE.md` — the precedent and target files each task above names
+  `docs/ACCEPTANCE.md`: the precedent and target files each task above names

@@ -9,7 +9,7 @@
 
 > A folder-scoped data-usage policy for HypAware capture. A `.hypignore` file
 > (gitignore-style, ancestor-walked) maps a directory subtree to a usage
-> **class**. V1 ships exactly one class — `ignore` (never recorded). Managed by
+> **class**. V1 ships exactly one class: `ignore` (never recorded). Managed by
 > a `hyp ignore` / `hyp unignore` CLI. The *where* of enforcement is
 > [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md); deferred classes
 > (`local-only`) and the ephemeral session opt-out are
@@ -18,8 +18,8 @@
 ## Motivation
 
 Today the `@hypaware/claude` `hypaware-ignore` / `hypaware-unignore` skills
-*describe* two opt-out mechanisms — a per-session in-memory drop
-(`POST /_hypaware/ignore/session`) and a committable `.hypignore` ancestor file —
+*describe* two opt-out mechanisms, a per-session in-memory drop
+(`POST /_hypaware/ignore/session`) and a committable `.hypignore` ancestor file,
 but **neither is implemented**: the endpoint route does not exist and no code
 reads a `.hypignore`. Users have no working way to tell HypAware "do not record
 work done in this directory."
@@ -35,7 +35,7 @@ The mechanism is a single function: resolve a **scope** to a **usage class**.
 
 - A **scope** is a directory subtree.
 - A **class** says how exchanges originating in that subtree are used.
-- Everything else — the file format, the CLI, the matcher — is authored once;
+- Everything else (the file format, the CLI, the matcher) is authored once;
   only *enforcement* differs per class.
 
 This unifies "a `.hypignore`" and "a local-only flag" into one feature with one
@@ -46,7 +46,7 @@ features that happen to ship together.
 
 A captured exchange is matched to a scope by its **`cwd`** (and, equivalently,
 its `repo_root`). HypAware already associates these with every Claude/Codex
-exchange — the client hook records `cwd`/`repo_root`/`git_remote` into
+exchange: the client hook records `cwd`/`repo_root`/`git_remote` into
 `session-context.jsonl` and the exchange projector stamps them onto each row
 (`claude/src/projector.js`).
 
@@ -102,7 +102,7 @@ A `.hypignore` is a small text file:
 - `#` comments and blank lines are ignored.
 - An optional **class token** on its own line names the class. V1 recognizes
   `ignore`.
-- An **empty or comment-only** file means `ignore` — preserving the existing
+- An **empty or comment-only** file means `ignore`: preserving the existing
   skill notes' promise that *"an empty `.hypignore` at the top of the repo"*
   opts the tree out.
 - **Reserved, parsed-but-not-invented in V1:** in-file *path patterns*
@@ -113,7 +113,7 @@ A `.hypignore` is a small text file:
 
 If a `.hypignore` names a class the running version does **not** implement (most
 importantly `local-only` before it ships, but any unknown token), the file
-resolves to **`ignore`** — the most restrictive class — and a warning is logged.
+resolves to **`ignore`**, the most restrictive class, and a warning is logged.
 
 This is a privacy invariant, not a convenience: the safe failure for a privacy
 control is "suppress more," never "record-and-export something the user flagged."
@@ -121,12 +121,12 @@ A corollary the design relies on:
 
 > **Upgrading HypAware can only ever expose *less* than before for a given
 > `.hypignore`.** When `local-only` ships, a file that said `local-only` moves
-> from fully-suppressed to locally-recorded — a loosening the user already asked
-> for in writing — never the reverse.
+> from fully-suppressed to locally-recorded, a loosening the user already asked
+> for in writing, never the reverse.
 
 ## Enforcement points {#enforcement}
 
-The class determines *where* it is enforced, riding HypAware's core seam —
+The class determines *where* it is enforced, riding HypAware's core seam:
 *"sources write only to the cache; the export pipeline reads the cache and pushes
 to sinks"* ([LLP 0000](./0000-hypaware.explainer.md#cross-cutting-invariants)):
 
@@ -145,11 +145,11 @@ capture-seam enforcement (which plugin, how the drop happens) are
 A kernel verb ([LLP 0009](./0009-cli-registry.spec.md)), since hand-authoring a
 dotfile should not be the only path:
 
-- `hyp ignore [path]` — write a self-documenting `.hypignore` (comment header +
+- `hyp ignore [path]`: write a self-documenting `.hypignore` (comment header +
   `ignore` token) at the git **repo root** if `path`/cwd is in a repo, else at
   cwd. An explicit `path` overrides.
-- `hyp unignore [path]` — remove the governing `.hypignore`.
-- `hyp ignore --check [path]` — report whether a path is currently ignored, which
+- `hyp unignore [path]`: remove the governing `.hypignore`.
+- `hyp ignore --check [path]`: report whether a path is currently ignored, which
   `.hypignore` governs, and how many already-cached rows from the scope remain
   (see [prospective-only](#prospective-only)). Keeps the rule debuggable, per the
   repo's log-driven ethos.
@@ -160,9 +160,9 @@ dotfile should not be the only path:
    which only the Claude/Codex pathways supply; the `raw-anthropic` / `raw-openai`
    proxy ([LLP 0012](./0012-sources.spec.md#source-kinds)) and OTEL receiver have
    none, so a folder rule is a no-op for them. This is structural, not a policy
-   choice — see [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md). A
+   choice: see [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md). A
    future caller-supplied scope (e.g. an `X-Hyp-Cwd` header) is not precluded.
-   **Extended-by: [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)** —
+   **Extended-by: [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)**,
    the ChatGPT-subscription Codex route (`provider='chatgpt'`) is *not* in this
    folder-blind set: it is a first-class adapter pathway whose `cwd` is recoverable
    from the local session rollout, so the Codex live projector now enriches it and
@@ -189,14 +189,14 @@ dotfile should not be the only path:
 - **R1.** An exchange whose resolved `cwd` has any ancestor `.hypignore`
   resolving to `ignore` MUST NOT be written to the cache, for both live capture
   and backfill. (**Extended-by:
-  [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — when `cwd`
+  [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)**, when `cwd`
   was *unknown at capture* (the Claude session-start race projected the row with
   `cwd = null`), the guarantee is honored at the capture seam **or** by a
   flush-time settlement-drop, before partition write and before export. The
   literal "never written to the cache" relaxes to "never persisted past flush or
   forwarded" for that race case; a fail-closed hold is rejected because it would
   drop legitimate SDK/headless traffic that never gets a hook record.)
-- **R2.** `ignore` MUST NOT alter the live LLM call — the gateway is pass-through;
+- **R2.** `ignore` MUST NOT alter the live LLM call: the gateway is pass-through;
   only persistence is suppressed.
 - **R3.** A `.hypignore` naming an unimplemented class MUST resolve to `ignore`
   (the [fail-safe](#fail-safe)) and SHOULD warn.
@@ -206,4 +206,4 @@ dotfile should not be the only path:
 - **R5.** `hyp ignore` / `hyp unignore` MUST be idempotent: ignoring an
   already-ignored path or unignoring an unignored path succeeds without error.
 - **R6.** Resolution MUST NOT add unbounded filesystem work to the capture hot
-  path — the resolver caches per-cwd results.
+  path: the resolver caches per-cwd results.

@@ -6,7 +6,7 @@
   "runtime": "node",
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
-  "description": "T1/T2 enrichment for the context graph. A recall-tuned proposer (T1, cheap model) over-proposes prospect knowledge from source text; a graph-and-source-aware curator (T2, frontier model) prunes/merges/deepens/commits. The prospect lifecycle lives in this plugin's own datasets; only committed knowledge is projected into the graph (via a contract) — rejected prospects never reach it.",
+  "description": "T1/T2 enrichment for the context graph. A recall-tuned proposer (T1, cheap model) over-proposes prospect knowledge from source text; a graph-and-source-aware curator (T2, frontier model) prunes/merges/deepens/commits. The prospect lifecycle lives in this plugin's own datasets; only committed knowledge is projected into the graph (via a contract) - rejected prospects never reach it.",
   "permissions": ["read_state", "write_state"],
   "requires": {
     "plugins": {

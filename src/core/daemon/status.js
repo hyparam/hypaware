@@ -88,7 +88,7 @@ export function readStatusFile(stateRoot) {
   return /** @type {DaemonStatus} */ (parsed)
 }
 
-/** The AI gateway plugin name — the source whose bound port drives attach. */
+/** The AI gateway plugin name: the source whose bound port drives attach. */
 const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
 
 /**
@@ -96,7 +96,7 @@ const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
  * source-snapshot list. The daemon captures the gateway source's `status()`
  * `details: { host, port, ... }` into each `SourceSnapshot.details`
  * (`startConfiguredSources`), so the port a rebinding daemon actually chose is
- * always readable here — no in-process gateway needed. Returns `undefined`
+ * always readable here, no in-process gateway needed. Returns `undefined`
  * when the gateway source is absent or recorded no usable host/port (e.g. it
  * failed to bind).
  *
@@ -673,7 +673,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const retention = readRetention(config)
   const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
   // Best-effort like every other probe here (see this function's docstring): a
-  // transient fs error mid-walk (EACCES/EMFILE/EIO — walkForStats re-throws
+  // transient fs error mid-walk (EACCES/EMFILE/EIO, walkForStats re-throws
   // anything but ENOENT) must degrade to zeroed cache stats, never throw out of
   // the whole report.
   /** @type {{ totalBytes: number, oldestDate: string | null }} */
@@ -712,7 +712,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // backfill/attach registries without activating plugins, so "this enabled
     // plugin is a client adapter" is read off the descriptors. backfill keys its
     // markers by owning-plugin name, attach by client name (the handlers'
-    // request keys) — buildClientActionsReport derives both from the one map.
+    // request keys), buildClientActionsReport derives both from the one map.
     clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, clientDescriptors })
   } catch { /* best-effort probe */ }
 
@@ -813,13 +813,13 @@ export async function collectHypAwareStatus(opts = {}) {
  *   key, even one whose plugin has since left the config).
  * - `pending` / `n/a` are derived for *declared* targets the reconciler would
  *   act on but has not yet. Two handlers declare such targets:
- *   - **backfill** (LLP 0037) — a plugin entry's `config.backfill` block,
+ *   - **backfill** (LLP 0037): a plugin entry's `config.backfill` block,
  *     keyed by owning-plugin name.
- *   - **attach** (LLP 0044 / 0045) — an enabled client adapter, keyed by
+ *   - **attach** (LLP 0044 / 0045), an enabled client adapter, keyed by
  *     *client* name (the attach handler's request key), opted out by
  *     `config.attach.on_join: false`.
  *   Neither capability is visible to the status collector without activating
- *   plugins (both are runtime registrations — LLP 0041 §per-plugin-capability),
+ *   plugins (both are runtime registrations, LLP 0041 §per-plugin-capability),
  *   so the catalog's client descriptors are the honest, provider-agnostic
  *   proxy: `on_join: false` or a non-joined host → `n/a` (the reconciler is a
  *   no-op); otherwise desired-but-unrun → `pending`.
@@ -833,7 +833,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   const actions = []
   const byKind = status?.byKind ?? {}
   // Client-adapter plugins (claude/codex), derived statically from the catalog
-  // descriptors — the set the backfill default-on derivation needs ("this
+  // descriptors: the set the backfill default-on derivation needs ("this
   // enabled plugin imports on join") and, via the descriptors themselves, the
   // universe of attach targets below.
   const clientAdapterPlugins = new Set(
@@ -841,7 +841,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   )
 
   // Declared backfill targets: enabled plugin entries that drive
-  // backfill-on-join (LLP 0037 — policy rides the owning plugin). Keyed by
+  // backfill-on-join (LLP 0037, policy rides the owning plugin). Keyed by
   // owning-plugin name (the backfill handler's request key, LLP 0041). Two cases:
   //   1. An explicit `config.backfill` block (any host).
   //   2. *Default-on*: a known backfill provider with no explicit block. On
@@ -869,8 +869,8 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   }
 
   // Declared attach targets (LLP 0044 / 0045): symmetric to backfill, but keyed
-  // by *client* name — the attach handler's request key is the client name
-  // (`descriptor.name`), not the owning plugin — so a `done` attach marker the
+  // by *client* name, the attach handler's request key is the client name
+  // (`descriptor.name`), not the owning plugin, so a `done` attach marker the
   // handler writes merges with the declared target instead of doubling it. Every
   // enabled client adapter on a joined host is a desired attach target by
   // default; an explicit `config.attach` block opts out via `on_join: false`,
@@ -929,7 +929,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
           ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
         })
       } else if (marker) {
-        // `done` (run-once / attached) or `applied` (reversible) — the effect
+        // `done` (run-once / attached) or `applied` (reversible): the effect
         // is in place. For attach a `done` marker is the "attached" rendering.
         actions.push({
           kind,
@@ -1097,7 +1097,7 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
 }
 
 /**
- * Build the plugin catalog the status surfaces read from — bundled ⊕ installed.
+ * Build the plugin catalog the status surfaces read from: bundled ⊕ installed.
  * Best-effort, exactly as the top-level collector was: each discovery failure
  * degrades to empty and any residual throw degrades the whole thing to
  * `undefined`, so a probe can always render a report rather than crash.
@@ -1127,7 +1127,7 @@ async function buildStatusCatalog({ stateDir }) {
 
 /**
  * Load just the client descriptors (claude/codex attach probes) from the plugin
- * catalog — the poll-invariant subset the login attach-wait needs. Best-effort
+ * catalog: the poll-invariant subset the login attach-wait needs. Best-effort
  * like the collector: discovery failure degrades to an empty map, never throws.
  *
  * @param {{ stateDir: string }} args
@@ -1141,8 +1141,8 @@ export async function loadClientDescriptors({ stateDir }) {
 /**
  * The marker-only slice of `collectHypAwareStatus`: which of the given client
  * descriptors show a HypAware attach marker on disk right now. Does only
- * per-client settings reads via `probeClientAttachFromDescriptor` — which maps
- * ENOENT *and* any other fs error to "not attached" — so it never walks the
+ * per-client settings reads via `probeClientAttachFromDescriptor`, which maps
+ * ENOENT *and* any other fs error to "not attached", so it never walks the
  * cache and never re-throws the way the full collector's `walkForStats` can.
  * That is exactly what makes it safe to poll on a tight loop (the login
  * attach-wait) without either the collector's cost or its throw path.

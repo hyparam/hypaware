@@ -13,26 +13,26 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
  */
 
 /**
- * The single core undo — the disk-driven, plugin-agnostic reverse of a
+ * The single core undo: the disk-driven, plugin-agnostic reverse of a
  * client's attach. It is the *one* detach implementation: both the reconciler's
  * `reverse()` (a fleet-config drop, fired only after the staged restart has
  * already unloaded the adapter) and the manual `hyp detach` command route
  * through it, so there is no second implementation to drift from.
  *
- * Reverse runs from **disk state alone** — the descriptor's `attachProbe`
+ * Reverse runs from **disk state alone**: the descriptor's `attachProbe`
  * locates the settings file, and the client's own settings-file marker is a
  * **self-describing undo record** that `attach()` wrote (LLP 0045 §Part 3). The
  * routine is **format-aware but plugin-agnostic**: it understands `json`
  * (marker-key) and `toml` (managed-block): the same dispatch
- * `probeClientAttached` uses on the *read* side — and how to replay an undo
+ * `probeClientAttached` uses on the *read* side, and how to replay an undo
  * record, never "Claude" vs "Codex". It imports no plugin code (which would not
  * survive the plugin being unloaded), subsuming what the adapters' old
- * `detach()` did — including the Codex `# BEGIN/END hypaware …` marked-block
+ * `detach()` did: including the Codex `# BEGIN/END hypaware …` marked-block
  * strip and prior-`model_provider` restore. The managed-block convention is
  * therefore a **core-understood format contract**, not a codex-private detail.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: one core/disk-driven undo, format-aware (json marker-key / toml managed-block), plugin-agnostic, reusing resolveClientSettingsPath + the probeClientAttached format dispatch
- * @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker is the backup; reverse restores it (or removes the managed value) on leave
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: one core/disk-driven undo, format-aware (json marker-key / toml managed-block), plugin-agnostic, reusing resolveClientSettingsPath + the probeClientAttached format dispatch
+ * @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker is the backup; reverse restores it (or removes the managed value) on leave
  */
 
 // Dotted-path segments the restore helper below refuses to walk. Every
@@ -142,10 +142,10 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   // Pre-upgrade markers have the legacy shape {attached_at,version,port,
   // state_file} with no self-describing `managed` undo record. There is no
   // record to replay, so reverse them by the original (now-retired) convention
-  // instead of just deleting the marker — otherwise env.ANTHROPIC_BASE_URL and
+  // instead of just deleting the marker, otherwise env.ANTHROPIC_BASE_URL and
   // the `hyp claude-hook session-context` entries it wrote would orphan, and the
   // detach is non-retryable once the marker is gone.
-  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: legacy markers predate the undo record; fall back to the convention attach used before it
+  // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: legacy markers predate the undo record; fall back to the convention attach used before it
   if (!isPlainObject(marker.managed)) {
     return await detachLegacyJsonMarker({
       settingsPath,
@@ -353,7 +353,7 @@ function joinWarnings(warnings) {
 }
 
 /**
- * Strip the managed hook entries the marker recorded — matching each by its
+ * Strip the managed hook entries the marker recorded: matching each by its
  * `event` / `matcher` / exact `command`, so only the handlers this attach
  * installed are removed and no orphaned `hyp …` hooks survive. Empty groups
  * and empty event arrays are pruned; an emptied `hooks` root is deleted.
@@ -385,11 +385,11 @@ function stripManagedHooks(value, hookEntries) {
       const handlers = group.hooks
       const keptHandlers = handlers.filter((h) => !isManagedHandler(h, command))
       if (keptHandlers.length === handlers.length) {
-        nextGroups.push(group) // nothing matched — leave the group untouched
+        nextGroups.push(group) // nothing matched - leave the group untouched
       } else if (keptHandlers.length > 0) {
         nextGroups.push({ ...group, hooks: keptHandlers })
       }
-      // else: the group held only the managed handler — drop it entirely.
+      // else: the group held only the managed handler, drop it entirely.
     }
 
     if (nextGroups.length > 0) {
@@ -441,7 +441,7 @@ const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+(?:session-context|classify-
 const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_malformed']
 
 /**
- * Reverse a pre-upgrade legacy `json` marker — the old Claude marker shape
+ * Reverse a pre-upgrade legacy `json` marker: the old Claude marker shape
  * `{attached_at,version,port,state_file}` that predates the self-describing
  * `managed` undo record. We can't replay a record the marker never wrote, so we
  * fall back to the convention `attach()` used before the record existed:
@@ -484,7 +484,7 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // user's value while reporting a successful detach (#500 finding 1).
   // Presence, not type, for the same reason the record-driven branch uses it:
   // attach only writes these when there was something to record.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, on every branch that deletes it
+  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, on every branch that deletes it
   const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
   const recordDamaged = POST_LEGACY_MARKER_FIELDS.some((field) => Object.hasOwn(marker, field))
 
@@ -584,11 +584,11 @@ function stripLegacyClaudeHooks(value) {
       }
       const keptHandlers = group.hooks.filter((h) => !isLegacyClaudeHandler(h))
       if (keptHandlers.length === group.hooks.length) {
-        nextGroups.push(group) // nothing matched — leave untouched
+        nextGroups.push(group) // nothing matched - leave untouched
       } else if (keptHandlers.length > 0) {
         nextGroups.push({ ...group, hooks: keptHandlers })
       }
-      // else: the group held only legacy managed handlers — drop it entirely.
+      // else: the group held only legacy managed handlers, drop it entirely.
     }
 
     if (nextGroups.length > 0) {
@@ -670,7 +670,7 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  * Reverse a `toml` managed-block attach (e.g. Codex's `# BEGIN/END hypaware …`
  * blocks). The blocks are self-delimiting and record the prior `model_provider`
  * as `# previous_model_provider`, so core strips the blocks and restores the
- * recorded root pointer — without importing the codex plugin.
+ * recorded root pointer, without importing the codex plugin.
  *
  * @param {{ settingsPath: string, fs: typeof fsp }} args
  * @returns {Promise<DetachFromDiskResult>}
@@ -989,7 +989,7 @@ async function readText(settingsPath, fs) {
   // Stat BEFORE reading the content so the captured mtime never post-dates the
   // bytes we return. If we stat'd after the read, a concurrent edit landing in
   // the read→stat window would leave us holding stale content paired with the
-  // *new* mtime — and the write-time guard would then pass and silently clobber
+  // *new* mtime, and the write-time guard would then pass and silently clobber
   // that edit. Stat-first instead makes the guard err toward CONCURRENT_EDIT.
   let stat
   try {
@@ -1022,7 +1022,7 @@ async function writeJsonAtomic(settingsPath, value, expectedMtimeMs, fs) {
 /**
  * Atomic temp-file + rename write, gated on the file's mtime so a concurrent
  * edit between read and write is detected (CONCURRENT_EDIT) rather than
- * silently clobbered — the same guarantee the adapters' writers gave.
+ * silently clobbered: the same guarantee the adapters' writers gave.
  *
  * @param {string} filePath
  * @param {string} body

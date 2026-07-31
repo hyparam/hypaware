@@ -17,7 +17,7 @@
 > the shared export read seam (`storage.readRowsSince`) drops each row whose
 > `cwd` resolves to `local-only`, via the shared usage-policy resolver, as the
 > rows are already being scanned for forwarding. No cache-schema column, no
-> capture-time marker — the verdict is derived from the row's existing `cwd` at
+> capture-time marker: the verdict is derived from the row's existing `cwd` at
 > export time. Local *query* uses a different read path, so `local-only` rows
 > stay locally queryable.
 >
@@ -35,19 +35,19 @@
 
 [LLP 0049](./0049-hypignore-usage-policy.spec.md) defined a scope→class usage
 model and shipped exactly one class, `ignore`, dropped at the **capture seam**
-(the projector returns no rows — [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
-It reserved a second class, `local-only` — *recorded locally, never
-exported/forwarded* — and [LLP 0051 §local-only](./0051-usage-policy-future-extensions.decision.md#local-only)
+(the projector returns no rows: [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
+It reserved a second class, `local-only`, *recorded locally, never
+exported/forwarded*, and [LLP 0051 §local-only](./0051-usage-policy-future-extensions.decision.md#local-only)
 deferred it, sketching three costs that made it "bigger than `ignore`":
 
-1. a **persistent marker** on cached rows surviving restart — an additive
+1. a **persistent marker** on cached rows surviving restart: an additive
    cache-schema column ([LLP 0029](./0029-additive-cache-schema-evolution.decision.md));
 2. a new **filter in the export driver** every sink path honors;
-3. a **granularity** decision — per-row attribute vs. riding the partition key
+3. a **granularity** decision: per-row attribute vs. riding the partition key
    ([LLP 0030](./0030-session-id-partition-key.decision.md)).
 
 [LLP 0069](./0069-local-only-dir-selection.spec.md) now needs `local-only`
-shipped. This decision resolves all three — and collapses the first one to
+shipped. This decision resolves all three, and collapses the first one to
 nothing.
 
 ## Decision {#enforce}
@@ -59,18 +59,18 @@ derived from the row's existing `cwd` at export time; there is no capture-time
 marker and no cache-schema change.**
 
 The physical cache partition is `source=<client>` (all Claude/Codex traffic for
-a client — `src/core/cache/partition.js`, `ai-gateway/src/dataset.js`
+a client: `src/core/cache/partition.js`, `ai-gateway/src/dataset.js`
 `cachePartitioning.source`), **not** keyed by `cwd`; a single partition holds
 many directories' rows. So there is no whole-partition-skip-by-`cwd`: the filter
 is necessarily per row. That costs nothing extra, because every sink **already
-scans every row** of a ready partition through one API — `storage.readRowsSince`
+scans every row** of a ready partition through one API: `storage.readRowsSince`
 (`src/core/cache/storage.js`), used by the `@hypaware/central` forward sink
 (`central/src/sink.js` `forwardPartition`) directly and by every blob/Iceberg
 sink via `src/core/sinks/incremental.js`. The filter lives at that one seam:
 `readRowsSince` resolves each row's `cwd` through the shared usage-policy
 resolver (§[resolver](#resolver)) and omits `local-only` rows from what it yields
 to the sink, so **every** sink honors it by construction (central forward, blob,
-Iceberg alike — [LLP 0051](./0051-usage-policy-future-extensions.decision.md#local-only)
+Iceberg alike; [LLP 0051](./0051-usage-policy-future-extensions.decision.md#local-only)
 requires all of them skip it). The rows stay in the cache and, because local
 query does not go through `readRowsSince` (§[why-export](#why-export)), remain
 locally queryable.
@@ -79,47 +79,47 @@ locally queryable.
 
 [LLP 0051](./0051-usage-policy-future-extensions.decision.md#local-only)'s cost
 (1) assumed `local-only` needs a persistent per-row column written at capture
-time. It does not, because the fact enforcement needs — *which directory did this
-row come from* — is **already persisted on the row itself**: `cwd` is a
+time. It does not, because the fact enforcement needs, *which directory did this
+row come from*, is **already persisted on the row itself**: `cwd` is a
 first-class column on `ai_gateway_messages` (`message_projector.js`), carried on
 every row the export read yields. (It is *also* an Iceberg sub-partition field
-inside each `source=` table — [LLP 0022](./0022-iceberg-export-partitioning.spec.md),
-[LLP 0030](./0030-session-id-partition-key.decision.md) — but the export path
+inside each `source=` table, [LLP 0022](./0022-iceberg-export-partitioning.spec.md),
+[LLP 0030](./0030-session-id-partition-key.decision.md), but the export path
 reads rows, not manifest partition values, so that is incidental here.) The
 `local-only` membership is not an intrinsic property of the row frozen at
 capture; it is a function of *the user's current exclusion list* applied to that
 row's `cwd`. So the honest place to evaluate it is **at export time**, against
-the list as it stands then — not a stale boolean baked in when the row was
+the list as it stands then, not a stale boolean baked in when the row was
 written.
 
 This is strictly better than the additive-column sketch:
 
-- **No cache-schema change** — no [LLP 0029](./0029-additive-cache-schema-evolution.decision.md)
+- **No cache-schema change**: no [LLP 0029](./0029-additive-cache-schema-evolution.decision.md)
   migration, no backfill to populate the column on historical rows.
-- **Retroactive by construction** — the instant a directory is added to the
+- **Retroactive by construction**: the instant a directory is added to the
   list, *every* already-cached partition from it (including backfilled history)
   stops being forwarded on the next export pass. A capture-time marker would
-  cover only rows written after the marker existed, leaving the backlog exposed —
+  cover only rows written after the marker existed, leaving the backlog exposed:
   the exact history [LLP 0069](./0069-local-only-dir-selection.spec.md) exists to
   withhold.
-- **Reversible by construction** — removing a directory from the list resumes
+- **Reversible by construction**: removing a directory from the list resumes
   forwarding with no row rewrite. (Rows already forwarded before exclusion are
-  not recalled — that is [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals).)
+  not recalled: that is [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals).)
 
 ### Granularity: per row, keyed on the row's `cwd` {#granularity}
 
 Resolving [LLP 0051](./0051-usage-policy-future-extensions.decision.md#local-only)'s
-cost (3): `local-only` is evaluated **per row**, keyed on each row's `cwd` — not
+cost (3): `local-only` is evaluated **per row**, keyed on each row's `cwd`, not
 at partition granularity. The physical partition (`source=<client>`) mixes many
 directories, so a partition-level verdict would be wrong (it would forward or
 withhold a whole client's traffic indiscriminately). Per-row is also exactly the
-right grain for the motivating case — a session that `cd`s between an org repo
+right grain for the motivating case: a session that `cd`s between an org repo
 and a personal tree emits rows with different `cwd`s into the *same* partition,
 and per-row filtering forwards the org-repo rows while withholding the
 personal-tree rows of that one session.
 
 Per-row does **not** mean per-row cost. The export read already visits every row
-(to serialize and chunk it — `central/src/sink.js`), and the resolver is memoized
+(to serialize and chunk it: `central/src/sink.js`), and the resolver is memoized
 per distinct `cwd` ([LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements)),
 of which a partition has few, so the added work is one cached lookup per row and
 one real resolve per distinct directory.
@@ -137,18 +137,18 @@ Given a `cwd`, the resolver now considers both `.hypignore` ancestors and the
 `ignore` (never recorded) **>** `local-only` (recorded, not forwarded) **>**
 `full` (default).
 
-`ignore` dominating `local-only` is not a special case — an `ignore`d row never
+`ignore` dominating `local-only` is not a special case: an `ignore`d row never
 enters the cache, so it never reaches the export seam and the `local-only` check
 is moot. The ordering just makes the precedence explicit and total. This is the
 extension [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md#consequences)
 anticipated ("a future call site reuses the same core matcher"); it does **not**
-reopen LLP 0050 — the gateway stays `cwd`-blind, and the new call site is the
+reopen LLP 0050: the gateway stays `cwd`-blind, and the new call site is the
 shared export read (`storage.readRowsSince`), not the gateway.
 
 ## Why `readRowsSince`, the one seam that is export-only {#why-export}
 
 `local-only`'s definition is *recorded locally, not forwarded*. Recording locally
-means the row must pass the capture seam and enter the cache — so enforcement
+means the row must pass the capture seam and enter the cache, so enforcement
 cannot live there (that is `ignore`). It must live on the read path *to sinks*,
 and the seam has to satisfy two constraints at once
 ([LLP 0000 cross-cutting invariant](./0000-hypaware.explainer.md): *sources write
@@ -158,7 +158,7 @@ only to the cache; the export pipeline reads the cache and pushes to sinks*):
    requires central forward, blob, and Iceberg sinks all skip `local-only`; a
    per-sink filter is one a new sink forgets, and duplicating privacy-critical
    logic is what [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md) forbids.
-2. **Not touch local query.** `local-only` rows must stay locally queryable — that
+2. **Not touch local query.** `local-only` rows must stay locally queryable: that
    is the whole difference from `ignore`. So the filter must sit on a read path
    that sinks use but query does not.
 
@@ -166,8 +166,8 @@ only to the cache; the export pipeline reads the cache and pushes to sinks*):
 is the **shared export read**: the forward sink reads through it
 (`central/src/sink.js` `forwardPartition`) and every blob/Iceberg sink reads
 through it via `src/core/sinks/incremental.js`. Local query uses an entirely
-different path — `executeQuerySql` → `squirreling` → `parquet-source.js`
-([LLP 0015](./0015-query-and-datasets.spec.md)) — which never calls
+different path, `executeQuerySql` → `squirreling` → `parquet-source.js`
+([LLP 0015](./0015-query-and-datasets.spec.md)), which never calls
 `readRowsSince`. Filtering inside `readRowsSince` therefore covers all sinks by
 construction *and* leaves local query untouched, making "recorded locally,
 queryable, never forwarded" a **structural property of the read-path split**
@@ -192,10 +192,10 @@ per-row drop introduces one requirement the naïve filter would get wrong:
 row it drops (e.g. yield it marked drop-only, payload omitted), so the sink
 advances the cursor across it. Otherwise a partition ending in a run of
 `local-only` rows would never checkpoint past them, and every tick would
-re-scan-and-re-drop the same tail forever — wasteful, and it would also re-send
+re-scan-and-re-drop the same tail forever: wasteful, and it would also re-send
 those rows the instant they were un-excluded (the seq never having advanced).
 With the cursor advancing across drops, a `local-only` row is **durably passed**:
-not re-scanned, and **not re-sent on un-exclusion** — consistent with
+not re-scanned, and **not re-sent on un-exclusion**, consistent with
 [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals) (no
 re-send of already-passed history) while all *future* rows from a still-excluded
 directory keep being dropped. The exact "drop-but-advance" shape of the
@@ -212,7 +212,7 @@ advances the cursor across it.**
   invariant ([incremental](#incremental)) carries
   `@ref LLP 0070#incremental [constrained-by]` at the watermark write site.
 - **No [LLP 0029](./0029-additive-cache-schema-evolution.decision.md) migration**
-  and no capture-path change — the AI gateway, the adapters, and the recorder are
+  and no capture-path change: the AI gateway, the adapters, and the recorder are
   untouched. This is purely an export-read + resolver change, confined to
   `src/core/cache/storage.js` and `src/core/usage-policy/`.
 - [LLP 0051 §local-only](./0051-usage-policy-future-extensions.decision.md#local-only)
@@ -220,7 +220,7 @@ advances the cursor across it.**
   here (mirroring how session-opt-out was promoted to LLP 0066).
 - **Fail-safe preserved.** [LLP 0049 §fail-safe](./0049-hypignore-usage-policy.spec.md#fail-safe)
   guaranteed a version that cannot honor `local-only` resolves it to `ignore`
-  (suppress more). A version that *can* (this one) records-and-withholds — a
+  (suppress more). A version that *can* (this one) records-and-withholds: a
   loosening the user explicitly asked for, never the reverse. The invariant
   "upgrading can only ever expose *less*" holds.
 
@@ -237,7 +237,7 @@ advances the cursor across it.**
 - **Filter in the sink driver / change the `exportBatch` contract.** The driver
   (`src/core/sinks/driver.js`) hands whole `source=` partitions to
   `sink.exportBatch` and never sees rows, so it cannot filter by `cwd` without a
-  new contract passing a row predicate into every sink — heavier than, and
+  new contract passing a row predicate into every sink: heavier than, and
   redundant with, the one read seam the sinks already share. Rejected in favor of
   `readRowsSince` ([why-export](#why-export)).
 - **Reuse `ignore` (capture seam) and skip `local-only` entirely.** Rejected at

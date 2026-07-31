@@ -10,8 +10,8 @@ import path from 'node:path'
  * byte-identical to the GitHub plugin (LLP 0032 §shared-key-vocabulary) and must
  * not accrete host-only recipes; these facets have no cross-repo twin.
  *
- * Every function here is a pure, deterministic function of a single row's data —
- * no cross-row state, no data-window thresholds — so projection stays
+ * Every function here is a pure, deterministic function of a single row's data,
+ * no cross-row state, no data-window thresholds, so projection stays
  * content-addressed and idempotent (LLP 0023 §content-addressed-ids), and every
  * derived value passes an explicit validity gate before it can key a node
  * (§boundedness-contract). Anything that fails a step returns `null` and mints
@@ -58,7 +58,7 @@ export const CLAUDE_BUILTIN_COMMANDS = new Set([
  * The SKILL.md injection marker, anchored at offset 0. The leading anchor is
  * the entire false-positive defense (LLP 0074 §strict-filters: loose matching
  * pulls ~23% false positives), so it is enforced twice: the rule's SQL
- * prefix-LIKE and this regex — deliberately without the `m` flag: `^` must
+ * prefix-LIKE and this regex, deliberately without the `m` flag: `^` must
  * only match true string offset 0, never "start of any line", or a marker
  * embedded after a newline (assistant quoting, pasted transcripts) would
  * start minting nodes. The capture takes the rest of the line (not `\S+`): a
@@ -113,7 +113,7 @@ const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** A short single-dash flag cluster like `-lc` (not a `--long` option). */
 const SHORT_FLAG_RE = /^-[A-Za-z]+$/
 
-/** A bare numeric / duration token (`5`, `5s`, `1.5`, `10m`) — a wrapper arg, not a program. */
+/** A bare numeric / duration token (`5`, `5s`, `1.5`, `10m`): a wrapper arg, not a program. */
 const NUMERICISH_RE = /^\d+(\.\d+)?[A-Za-z]?$/
 
 /**
@@ -138,7 +138,7 @@ const WRAPPER_ARG_FLAGS = {
 }
 
 /**
- * Per-wrapper flags known to take NO argument — safe to skip alone. A flag
+ * Per-wrapper flags known to take NO argument: safe to skip alone. A flag
  * that is neither here nor in `WRAPPER_ARG_FLAGS` (and not an attached form of
  * one) is an unrecognized shape for that wrapper: `classifyWrapperFlag` fails
  * closed rather than risk treating an unknown flag's value as argv[0].
@@ -159,12 +159,12 @@ const NO_FLAGS = new Set()
 
 /**
  * Classify a flag token seen while skipping a known wrapper's own args:
- * - `'pair'` — an option-with-arg in its separate-token form (`-u`, then the
+ * - `'pair'`, an option-with-arg in its separate-token form (`-u`, then the
  *   next token is its value): consume both.
- * - `'attached'` — either a no-arg flag, or an option-with-arg whose value is
+ * - `'attached'`, either a no-arg flag, or an option-with-arg whose value is
  *   already attached to this token (`-uroot`, `--chdir=/tmp`): consume just
  *   this one token.
- * - `'unrecognized'` — not a known shape for this wrapper: fail closed
+ * - `'unrecognized'`, not a known shape for this wrapper: fail closed
  *   (MAJOR 2) rather than risk misreading a flag's value as argv[0].
  *
  * @param {string} wrapperName
@@ -269,7 +269,7 @@ export function skillFromSlash(contentText) {
  * `.codex/skills/<name>/SKILL.md` (LLP 0075 surface 4, Codex's only
  * activation trace: no marker, no `Skill` tool, no `<command-name>` tag).
  * Takes the already-resolved command string (`commandStringFrom('exec_command',
- * tool_args)` — the wire shape this repo's Codex fixtures pin is
+ * tool_args)`, the wire shape this repo's Codex fixtures pin is
  * `{"cmd": …}`, `command` as fallback), not raw `tool_args`, so the caller
  * shares the one command-string recipe with `programFrom`.
  *
@@ -311,7 +311,7 @@ function gateSkill(name) {
 }
 
 /**
- * Extract the `Program` node key — the validity-gated, lowercased
+ * Extract the `Program` node key: the validity-gated, lowercased
  * `basename(argv[0])` of the *first* command in a shell string. Deterministic
  * and fail-closed: any step that cannot cleanly resolve a bounded token returns
  * `null` (mint nothing rather than mis-key).
@@ -351,7 +351,7 @@ export function programFrom(command, depth = 0) {
     const norm = basenameLower(tok)
 
     // 4. Unwrap a known wrapper: drop it, then skip its own flags (consuming
-    //    a known option-with-arg's separate value too, e.g. `sudo -u root` —
+    //    a known option-with-arg's separate value too, e.g. `sudo -u root`:
     //    MAJOR 2 fix), further env assignments, and bare numeric/duration
     //    args (e.g. `timeout 5 …`). A flag shape this wrapper's map doesn't
     //    recognize fails closed (mints nothing) rather than risk misreading

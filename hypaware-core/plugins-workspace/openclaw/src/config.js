@@ -53,7 +53,7 @@ export function validateOpenclawConfig(value) {
  * (`on_joins`) surfaces instead of being silently ignored. Pure - the
  * caller chooses where the returned pointers mount.
  *
- * @ref LLP 0045#part-4--per-plugin-attach-config--status-surface [implements]:
+ * @ref LLP 0045#part-4-per-plugin-attach-config--status-surface [implements]:
  *   attach.on_join rides the client adapter's own config block, validated
  *   by this plugin's config-section validator; no top-level/core schema.
  *

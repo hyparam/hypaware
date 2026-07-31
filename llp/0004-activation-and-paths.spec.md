@@ -14,7 +14,7 @@
 
 After dependency resolution ([LLP 0006](./0006-dependencies-and-capabilities.spec.md)),
 the kernel calls each plugin's exported `activate(ctx)`. The plugin uses `ctx`
-to populate the surfaces its manifest declared — sources, datasets, commands,
+to populate the surfaces its manifest declared: sources, datasets, commands,
 init presets, skills, capabilities. Concrete implementations (callbacks,
 schemas, render functions) only exist at activation time; anything depending on
 them (schema validation, SQL execution, command dispatch into a plugin's `run`)
@@ -34,10 +34,10 @@ export async function activate(ctx) {
 
 `ctx` carries, per plugin:
 
-- `config` — a fresh slice of this plugin's validated config section
+- `config`: a fresh slice of this plugin's validated config section
 - the registry facades (`sources`, `sinks`, `commands`, `query`, `initPresets`,
   `skills`, `capabilities`)
-- `requireCapability(name, range)` — the only sanctioned cross-plugin channel
+- `requireCapability(name, range)`: the only sanctioned cross-plugin channel
 - scoped paths, a permission context, and a scoped logger
 
 ### Same-shape reload

@@ -76,7 +76,7 @@ export interface BootKernelResult {
   /** Full per-plugin activation results. */
   activations: ActivationResult[]
   /**
-   * Effective config the kernel booted — the merge of the central and
+   * Effective config the kernel booted: the merge of the central and
    * local layers (LLP 0031). Null when neither layer exists.
    */
   config: HypAwareV2Config | null
@@ -86,7 +86,7 @@ export interface BootKernelResult {
   centralConfigPath: string | null
   /** Local entries dropped at merge (collisions with a locked central key). */
   configDrops: ConfigLayerDrop[]
-  /** True when the central layer carried a `query` block (ignored — local-only). */
+  /** True when the central layer carried a `query` block (ignored: local-only). */
   centralQueryIgnored: boolean
   mode: string
   runId: string
@@ -97,7 +97,7 @@ export interface BootKernelResult {
    * derived from the very manifests this boot discovered. The daemon threads
    * it onto the client-action reconcile context so the attach handler can
    * enumerate `desired()` and reach each descriptor's `attachProbe` for the
-   * disk-driven undo (LLP 0045 §Part 1). Always present — empty when no plugin
+   * disk-driven undo (LLP 0045 §Part 1). Always present: empty when no plugin
    * contributes a client.
    */
   clientDescriptors: Map<string, ClientDescriptor>

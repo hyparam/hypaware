@@ -62,8 +62,10 @@ test('buildClassificationPrompt names the folder, all three classes, and each po
   assert.match(prompt, /selection menu/)
   assert.match(prompt, /AskUserQuestion/)
   assert.match(prompt, /unless no such tool exists/)
-  // Repo style: no em dashes anywhere in the consent copy.
-  assert.equal(prompt.includes('—'), false)
+  // Repo style: no em dashes anywhere in the consent copy. Spelled as an escape
+  // so the assertion survives the repo-wide U+2014 gate that now backs it
+  // (`house-style-em-dash.test.js`) instead of being swept into a hyphen.
+  assert.equal(prompt.includes('\u2014'), false)
 })
 
 test('decideClassification: prompt only when enrolled AND interactive AND unclassified', () => {

@@ -5,7 +5,7 @@ export type GraphRow = Record<string, unknown>
 
 /**
  * A partition the dedup compaction refused to rewrite, with the reason:
- * `unreadable-cursor` (cursor.json missing/corrupt — never treat as a
+ * `unreadable-cursor` (cursor.json missing/corrupt, never treat as a
  * synthetic default when about to retire a generation), `unexpected-layout`
  * (not the source-table layout graph tables use), or `concurrent-write`
  * (the cursor changed between scan and swap; retiring the old generation
@@ -97,7 +97,7 @@ export interface Contract {
   /** Projector id stamped into provenance (e.g. `ai-gateway.t0`). */
   projector: string
   /**
-   * Projector version, stamped into every row's provenance — a marker for
+   * Projector version, stamped into every row's provenance: a marker for
    * which generation of this source's projector minted the row, not a
    * re-projection trigger. Ids are content-addressed (LLP 0023
    * §content-addressed-ids), so a bump alone rewrites nothing: committed rows
@@ -143,7 +143,7 @@ export interface ContextGraphCapability {
   }
 }
 
-/** A node as the traversal reads it — graph identity plus display fields. */
+/** A node as the traversal reads it: graph identity plus display fields. */
 export interface GraphNode {
   node_id: string
   node_type: string
@@ -151,7 +151,7 @@ export interface GraphNode {
   label: string | null
 }
 
-/** An edge as the traversal reads it — endpoints and relation type. */
+/** An edge as the traversal reads it: endpoints and relation type. */
 export interface GraphEdge {
   src_id: string
   dst_id: string

@@ -15,7 +15,7 @@
 ## Summary
 
 A gateway can be configured entirely from the central server. MDM deploys a
-**seed** — server URL + policy token, nothing else — and the gateway joins the
+**seed** (server URL + policy token, nothing else) and the gateway joins the
 fleet, pulls its full config, installs any plugins that config names, and
 becomes operational without the user ever touching a config file. Later edits
 to the central config reconfigure the fleet on the poll cadence. This document
@@ -47,19 +47,19 @@ The central plugin is configured as a **sink instance**
 in its sink config block as `poll_interval_seconds` (already validated by
 `central/src/config.js`, 5–3600s), separate from the cron `schedule` that
 drives ingest exports. The pull and identity-refresh timers are
-plugin-internal: started at activation, stopped at `close()` — no change to
+plugin-internal: started at activation, stopped at `close()`, no change to
 the LLP 0014 sink contract.
 
 `@hypaware/central`'s `src/sink.js` notes that refresh and config pull "live
-on their own timers when wired in" — this spec wires the config pull:
+on their own timers when wired in": this spec wires the config pull:
 
 - Pull **immediately on bootstrap success**, then on a steady timer
-  (`poll_interval_seconds`, default **300 s** — 304s are cheap; the server
+  (`poll_interval_seconds`, default **300 s**: 304s are cheap; the server
   ETag is a content hash of the served revision).
 - The `proto.md` ETag/304/404/429 semantics are unchanged. The running
   config's etag persists across restarts so a relaunch short-circuits to
   304; it is kernel-managed state read through the facade (below).
-- A pulled 200 body above **1 MiB** is dropped — enforced at both the
+- A pulled 200 body above **1 MiB** is dropped: enforced at both the
   transport and the apply engine. The transport check is a genuine memory
   bound, not a post-hoc one: an oversized `Content-Length` is rejected
   without reading, and a chunked body is streamed through a byte counter
@@ -68,7 +68,7 @@ on their own timers when wired in" — this spec wires the config pull:
   is one line of defense-in-depth.
 - Every poll runs under its own abort controller with a **hard request
   deadline (30 s)** covering the request and the body read, and the loop's
-  `stop()` aborts an in-flight poll after a short drain grace (1 s) — a
+  `stop()` aborts an in-flight poll after a short drain grace (1 s): a
   stalled config GET must not be able to wedge daemon shutdown or a staged
   restart behind it.
 - **`If-None-Match` must reflect the *running* config, never a
@@ -83,7 +83,7 @@ on their own timers when wired in" — this spec wires the config pull:
 > the seed is the initial **central layer**, written by `join` to a **dedicated
 > central-seed file** under `config-control/` (not `hypaware-config.json`, which
 > is the user-owned local layer). The first successful apply retires the seed
-> *file* — its bytes survive as the rollback slot; the local layer is never
+> *file*: its bytes survive as the rollback slot; the local layer is never
 > touched. This is why `join` is no longer destructive
 > ([#111](https://github.com/hyparam/hypaware/issues/111)).
 
@@ -98,7 +98,7 @@ what its config says).
 
 Such a config must boot cleanly: no sources, no other sinks, collecting
 nothing, polling for config. This is a legitimate steady state for the
-seconds between enrollment and first 200 — not an error.
+seconds between enrollment and first 200, not an error.
 
 The policy token lives in the seed file itself (mode 0600). Policy tokens are
 multi-use (server LLP 0008), so it is not consumed on bootstrap; the first
@@ -109,24 +109,24 @@ JWT.
 
 `hypaware join <url> <token>` is convenience sugar for MDM install scripts:
 it writes the seed config and performs the non-interactive daemon install,
-and is specified as **exactly equivalent** to doing those two steps by hand —
+and is specified as **exactly equivalent** to doing those two steps by hand,
 a wrapper, not a second code path. It joins `init <preset>` and
 `init --from-file` as a non-interactive entry point
 ([LLP 0011](./0011-setup-and-onboarding.decision.md#non-interactive-entry)).
 Because a policy token is a multi-use, fleet-wide credential, `join` also
 accepts `--token-file <path>` and stdin, and MDM scripts should prefer those
-forms — a bare argv token lands in shell history and process listings.
+forms: a bare argv token lands in shell history and process listings.
 
 ## Apply semantics: staged restart
 
 > **Amended by [LLP 0031](./0031-layered-config.decision.md).** A pulled config
-> replaces the **central layer** wholesale; that layer is one of two — the
+> replaces the **central layer** wholesale; that layer is one of two: the
 > user-owned local layer (`hypaware-config.json`) is client-owned and additive,
 > and a host's effective config is the boot-time merge of the two. "Wholesale,
 > no merging" below describes the central layer's apply, not the whole config.
 
 A pulled 200 body is a **full HypAware v2 config and replaces the central
-layer wholesale** — the apply engine never merges into it, and the central
+layer wholesale**: the apply engine never merges into it, and the central
 layer carries no client-owned sections. Persist the document to an A/B slot,
 then restart; the boot-time merge with the additive local layer happens on
 relaunch. Never live-mutate.
@@ -134,12 +134,12 @@ relaunch. Never live-mutate.
 Staged restart is a **process-level restart**: the daemon persists the new
 config and exits; the service manager relaunches it
 ([LLP 0017](./0017-daemon-runtime.decision.md#staged-restart-for-config-replacement)
-records the decision and why in-process re-activation is unsound — Node's ESM
+records the decision and why in-process re-activation is unsound, Node's ESM
 module cache would run stale plugin code past the artifact hash check). The
 in-place [same-shape reload](./0004-activation-and-paths.spec.md#same-shape-reload)
 path is never used for remote apply.
 
-Recommended persistence idiom: **A/B slots** — write each config to its own
+Recommended persistence idiom: **A/B slots**, write each config to its own
 path and flip an atomic pointer (symlink or one-line file) as the last step
 before exit. Same semantics as "file swap," but a crash between persist and
 restart can never leave an ambiguous operative config, and last-known-good
@@ -149,19 +149,19 @@ a relative symlink to the active slot (replaced atomically via tmp + rename;
 relocated here off the user-facing config path by
 [LLP 0031](./0031-layered-config.decision.md#physical-layout) so the local
 layer stays a plain file), and each slot carries its served etag in a per-slot
-sidecar written before the flip — so the document and its etag commit on the
+sidecar written before the flip, so the document and its etag commit on the
 same rename, in both directions.
 
 ### Apply engine is kernel surface
 
 The central plugin is **transport only**: pull, ETag bookkeeping, auth. It
-hands a downloaded document to a narrow kernel facade —
+hands a downloaded document to a narrow kernel facade:
 `ctx.configControl.stage(document, etag)`, plus `confirmPoll()` (poll
 liveness) and `runningEtag()` (for `If-None-Match`); the **kernel** owns
 shape-check → install pinned plugins → validate → persist last-known-good →
 swap → restart, and the rollback bookkeeping. The facade exists only where an
 apply engine runs (the daemon); plain CLI boots leave `ctx.configControl`
-undefined and the plugin keeps its pull loop off — `hyp status` must not
+undefined and the plugin keeps its pull loop off: `hyp status` must not
 fire config polls as a side effect. Recorded in
 [LLP 0003](./0003-core-vs-plugin-surface.spec.md#core-owns).
 
@@ -179,7 +179,7 @@ moves it forward and rollback reverts it (otherwise a rolled-back gateway
 would present a converged etag while running last-known-good). Since every
 sidecar change coincides with an apply or rollback, the facade takes the
 etag alongside the document and the **apply engine stages the sidecar with
-the swap** (realized as the per-slot etag files above — flipping the
+the swap** (realized as the per-slot etag files above: flipping the
 pointer flips the etag); the central plugin only reads it, through
 `configControl.runningEtag()`, to populate `If-None-Match`.
 
@@ -191,8 +191,8 @@ never touched by config application.
 A pulled config may name plugins not installed on the machine. The client
 installs them through the **existing
 [LLP 0007](./0007-plugin-install-and-locking.decision.md) install path**
-(prebuilt git artifact, never `npm install` —
-[LLP 0008](./0008-plugin-runtime-dependencies.decision.md) — recorded in the
+(prebuilt git artifact, never `npm install`;
+[LLP 0008](./0008-plugin-runtime-dependencies.decision.md), recorded in the
 plugin lock file). Served configs always pin **version + artifact content
 hash** (the server's save pipeline guarantees this); the client must verify
 the artifact hash and treat a mismatch as an apply failure (→ rollback,
@@ -205,8 +205,8 @@ very config that names a not-yet-installed plugin. The apply engine instead
 shape-checks the document (including the pin fields' types), installs the
 pinned plugins it names, and only then runs full validation against the
 freshly rebuilt catalog. Acting on a not-yet-fully-validated document is
-bounded by the shape gate and the hash pin — an install can only bring in
-the exact artifact the config authored — and plugin trees installed for a
+bounded by the shape gate and the hash pin, an install can only bring in
+the exact artifact the config authored, and plugin trees installed for a
 config that then fails validation stay on disk by the same rule as rollback
 (the lock records what is installed, not what is active).
 
@@ -218,7 +218,7 @@ never fetched at apply time. For a pinned plugin that is bundled with the
 running kernel:
 
 - The bundled copy satisfies the pin; the **artifact hash is not checked**.
-  Bundled code is inside the existing trust boundary — it ships in the same
+  Bundled code is inside the existing trust boundary: it ships in the same
   npm package as the kernel performing the verification, and the server's
   hash refers to a git release artifact that legitimately differs from the
   npm-bundled tree.
@@ -227,38 +227,38 @@ running kernel:
 
 Version-strictness means a fleet with mixed kernel versions (e.g. mid
 rolling upgrade) can only converge on a config whose first-party pins match
-every gateway's bundled versions — see open questions.
+every gateway's bundled versions: see open questions.
 
 ## Last-known-good rollback
 
 If an applied config fails validation, a pinned install fails its hash check,
 or the post-apply probation window (below) expires unsatisfied, revert to the
-previous operative config (file swap + staged restart — cheap by
+previous operative config (file swap + staged restart: cheap by
 construction). Remember the failed revision's etag and **back off re-apply
-attempts for that etag until the etag changes** — re-polling is fine, an
+attempts for that etag until the etag changes**: re-polling is fine, an
 apply-crash loop is not. One remembered bad-etag value, no persistent
 denylist. The client records a **structured rollback reason** (validation
 failure / hash mismatch / probation expiry, plus the offending etag) from day
-one — the server only sees non-convergence via `If-None-Match` and cannot
+one: the server only sees non-convergence via `If-None-Match` and cannot
 distinguish "rolled back" from "never applied," so if a rollback column is
 ever added to the `gateways` dataset, the data must already exist
 client-side. For V1 it surfaces in client logs and in `hypaware status`
 ([LLP 0009](./0009-cli-registry.spec.md#core-rendered-status)): probation
-state, last rollback + reason, and the remembered bad etag — an operator at
+state, last rollback + reason, and the remembered bad etag, an operator at
 the machine must not need log spelunking to learn the gateway rejected a
 config.
 
 Rollback restores the config, **not the install root**: plugin trees and
 lock-file entries installed for the failed config stay on disk. The lock
-file records what is installed, not what is active — the operative config
-defines the active set — and keeping the artifacts makes re-apply after a
+file records what is installed, not what is active, the operative config
+defines the active set, and keeping the artifacts makes re-apply after a
 fixed revision cheaper.
 
 **Invariant: the active slot's etag is never the remembered bad etag**
 ([#141](https://github.com/hyparam/hypaware/issues/141)). A rollback needs a
 **distinct** slot to flip to. With only one usable slot (a first apply on a host
 with no seed leaves `previous_slot` null), the "rollback" is a no-op flip that
-leaves the failed config operative — and recording *its* etag as the bad etag
+leaves the failed config operative, and recording *its* etag as the bad etag
 wedges the gateway: the bad-etag backoff then refuses to re-apply the running
 revision, probation bookkeeping never clears, and a boot does not recover. So a
 rollback with no distinct `previous_slot` **does not record a bad etag** and
@@ -267,8 +267,8 @@ re-probates and re-fails); it clears probation, surfaces a clear error
 (`config.rollback_no_target`), and the gateway keeps running the only config it
 has. Independently, **boot re-derives consistency before activation**: if the
 active slot's etag is already marked bad (a host wedged by older code, or
-hand-edited state), boot recovers — fall back to the seed if one survives, else
-drop the contradictory bad etag so the next poll can re-pull — rather than
+hand-edited state), boot recovers, fall back to the seed if one survives, else
+drop the contradictory bad etag so the next poll can re-pull, rather than
 persisting the contradiction.
 
 ### Post-apply probation
@@ -277,7 +277,7 @@ Because apply is a process restart, the apply engine writes a **probation
 marker to kernel-managed state before restarting** ("revision X applied at T,
 probation until T+W"); the relaunched daemon reads it at boot. Probation is
 cleared by the **first successful authenticated config poll** (200 or 304 on
-`GET /v1/config`) after the restart — that one request proves identity
+`GET /v1/config`) after the restart: that one request proves identity
 survived, the server is reachable, and the new config's central sink runs,
 and its `If-None-Match` is simultaneously the server-side convergence signal,
 so client probation and fleet convergence clear on the same packet. An ingest
@@ -286,7 +286,7 @@ must still be able to clear probation. If the window expires unsatisfied, the
 kernel rolls back: staged restart onto last-known-good, bad etag remembered.
 
 The **kernel owns the probation timer and the rollback decision,
-independently of the central plugin functioning** — a wedged or
+independently of the central plugin functioning**: a wedged or
 wrongly-pointed central sink is precisely a case probation must catch. The
 plugin reports a successful poll through the apply facade (a confirmation
 call); **it never touches probation state directly**. Probation expiry is
@@ -298,10 +298,10 @@ has passed.
 
 A probation-clearing poll may itself return 200 with a newer revision; that
 triggers an immediate next apply, with its own probation. This chaining is
-correct — do not serialize or suppress it.
+correct: do not serialize or suppress it.
 
 W must comfortably exceed one poll interval plus retry backoff:
-`W = max(3 × poll_interval_seconds, 120 s)` — a formula, not a fixed
+`W = max(3 × poll_interval_seconds, 120 s)`, a formula, not a fixed
 constant, so a slow operator-chosen poll cadence cannot make every apply
 roll back, and the 120 s floor leaves room for relaunch + identity refresh
 + one retry even at the fastest cadence. The interval is taken from the
@@ -309,12 +309,12 @@ roll back, and the 120 s floor leaves room for relaunch + identity refresh
 won't, confirm the poll); the kernel falls back to the 300 s default when
 the block doesn't set one.
 
-Rollback from the **first** applied config lands back on the seed config —
+Rollback from the **first** applied config lands back on the seed config,
 fine by construction: seed-config mode is a legitimate polling steady state,
 and the bad-etag backoff prevents a re-apply loop.
 
 A **confirmed** config (probation cleared) is also the trigger point for
-**central-config-driven client actions** — daemon-side machine effects the
+**central-config-driven client actions**: daemon-side machine effects the
 config calls for, run only after confirmation so an irreversible effect never
 fires for a config about to roll back. The apply engine itself stays unchanged;
 the action reconciler is separate kernel surface. See
@@ -341,13 +341,13 @@ reference and is amended by this spec:
 > **Amended by [LLP 0031](./0031-layered-config.decision.md).** The served
 > document is now **the central layer**. The "fleet can't be disconnected"
 > guarantee *strengthens*: because the local layer is additive-only, a user
-> cannot remove or override the central sink even from their own config — a
+> cannot remove or override the central sink even from their own config, a
 > colliding local entry is dropped at the boot-time merge. The server save
 > pipeline should also **forbid / strip a `query` block** in served configs
 > (query is structurally local-only; the client ignores a central `query`
-> regardless — see [LLP 0031 §Query is local-only](./0031-layered-config.decision.md#query-is-local-only)).
+> regardless: see [LLP 0031 §Query is local-only](./0031-layered-config.decision.md#query-is-local-only)).
 
-- Every gateway enrolled through a policy token resolves to a config —
+- Every gateway enrolled through a policy token resolves to a config:
   join-time 404 is structurally impossible for new enrollments.
 - The served document passed the server's save pipeline: schema-valid,
   plugins hash-pinned, and **always contains a central sink targeting the
@@ -385,12 +385,12 @@ Three knobs the draft left open were fixed when the client landed:
   updated, and a mixed-version fleet cannot fully converge on one config.
   Considered alternative: treat the pin as enforced only for fetched
   artifacts and let config *validation* gate apply for bundled plugins,
-  reporting the bundled version upward. Deliberately deferred — strict now,
+  reporting the bundled version upward. Deliberately deferred: strict now,
   relax if upgrade thrash shows up in practice.
 
 ## References
 
-- hypaware-server LLP 0009 (`0009-remote-config.spec.md`) — design authority
-- hypaware-server LLP 0008 — policy tokens
-- [`proto.md`](../hypaware-core/plugins-workspace/central/proto.md) — wire reference
+- hypaware-server LLP 0009 (`0009-remote-config.spec.md`): design authority
+- hypaware-server LLP 0008: policy tokens
+- [`proto.md`](../hypaware-core/plugins-workspace/central/proto.md): wire reference
 - [LLP 0007](./0007-plugin-install-and-locking.decision.md), [LLP 0008](./0008-plugin-runtime-dependencies.decision.md), [LLP 0010](./0010-config-model.spec.md), [LLP 0014](./0014-sinks.spec.md)

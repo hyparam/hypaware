@@ -10,7 +10,7 @@
 > Adding a **nullable** column to a cached dataset (e.g. `agent_id` v5,
 > `parent_thread_id`, `session_id` on `ai_gateway_messages`) evolves the
 > cache table's schema **in place**: the new column is queryable after a plain
-> append, old rows read it as `null`, new rows populate it — **no recreate, no
+> append, old rows read it as `null`, new rows populate it, **no recreate, no
 > backfill**. A full recreate stays necessary only for genuinely breaking
 > changes (resolves issue #102).
 
@@ -28,7 +28,7 @@ mechanically safe (additive) change.
 
 The pieces to avoid it already existed:
 
-- icebird reads data files that predate a column as `null` for that column —
+- icebird reads data files that predate a column as `null` for that column:
   old data stays readable under a newer schema.
 - `mergeFieldIdsFromTable` (`src/core/cache/iceberg/schema.js`) already
   reconciles the declared `ColumnSpec[]` with the table's current schema:
@@ -46,7 +46,7 @@ The pieces to avoid it already existed:
 Issue #102 recorded the schema-evolution path as "not reachable from here yet"
 (icebird#25). That is true of icebird's **top-level transaction API**:
 `icebergTransaction`'s `tx` object exposes only `append`, `delete`, `setRef`,
-`expireSnapshots` — no schema-update method (`icebird/src/types.d.ts`
+`expireSnapshots`, no schema-update method (`icebird/src/types.d.ts`
 `IcebergTransaction`). So you cannot stage `add-schema` + an append atomically
 through the public `tx`.
 
@@ -62,8 +62,8 @@ patching:
   map declares `"./src/*.js"`, so `icebird/src/write/commit.js` and
   `icebird/src/catalog/loadTable.js` are deep-importable public API, not
   internals. The cache **already** deep-imports icebird write internals this
-  way — e.g. `retention.js` reaches `icebird/src/write/stage-position-delete.js`
-  and `icebird/src/delete.js` for position-delete maintenance — and the
+  way: e.g. `retention.js` reaches `icebird/src/write/stage-position-delete.js`
+  and `icebird/src/delete.js` for position-delete maintenance, and the
   top-level compaction path (`compactExportTable`) commits through icebird's
   public `icebergRewrite`.
 - `fileCatalogCommit` applies `staged.updates` and never reads
@@ -75,7 +75,7 @@ subsequent ordinary `icebergAppend` reloads metadata, sees the new
 `current-schema-id`, and writes the new columns under it.
 
 (Spiked and verified end-to-end before committing: create one-column table,
-append a row, evolve in place, append a second row populating the new column —
+append a row, evolve in place, append a second row populating the new column;
 the first row reads `null`, the second reads the value, `current-schema-id`
 advances 0→1.)
 
@@ -83,8 +83,8 @@ advances 0→1.)
 
 `appendRowsToTable`, for an existing table with a declaration, now evolves the
 table's current schema to the merged schema when (and only when) the merge adds
-field ids the table doesn't have. The merged schema — `effectiveSchema`, the
-one thing that has to flow into the write — is the single value the switch point
+field ids the table doesn't have. The merged schema, `effectiveSchema`, the
+one thing that has to flow into the write, is the single value the switch point
 acts on.
 
 ### The single switch point {#in-place-evolution}
@@ -110,7 +110,7 @@ and commits them through `fileCatalogCommit`. The annotation
 
 This is the **one** change that flips additive evolution on. Were icebird to
 later expose a `tx.updateSchema(...)` (icebird#25), the helper's body would
-collapse to that single staged call inside the existing append's transaction —
+collapse to that single staged call inside the existing append's transaction:
 the call site and the `effectiveSchema`-flows-to-the-write contract are
 unchanged.
 
@@ -125,15 +125,15 @@ The boundary is drawn entirely by `mergeFieldIdsFromTable`, with icebird's
   column, **any change to a partition column** (type/removal), a new
   **required** column (Iceberg cannot back-fill it), or a nullable→required
   **tightening**. `mergeFieldIdsFromTable` throws for each before any commit, so
-  the append rejects exactly as it did before this change — no half-evolved
+  the append rejects exactly as it did before this change: no half-evolved
   table.
 
 The **partition-key move** is the canonical breaking change and is tracked
 separately as issue #104: changing the partition axis is partition-spec drift,
 which both the cache and the iceberg export **reject** in V1 rather than
 evolve ([LLP 0022](./0022-iceberg-export-partitioning.spec.md#drift-rejection)).
-Additive column evolution deliberately does **not** touch the partition spec —
-new nullable columns are never partition fields here — so it composes with that
+Additive column evolution deliberately does **not** touch the partition spec,
+new nullable columns are never partition fields here, so it composes with that
 rejection rather than weakening it.
 
 ## Consequences
@@ -150,9 +150,9 @@ rejection rather than weakening it.
 ## References
 
 - Code: `src/core/cache/iceberg/store.js` (`appendRowsToTable`,
-  `evolveSchemaInPlace`, `schemaNeedsEvolution` — triggers on a new field id
+  `evolveSchemaInPlace`, `schemaNeedsEvolution`; triggers on a new field id
   OR a required→nullable widening of an existing one),
-  `src/core/cache/iceberg/schema.js` (`mergeFieldIdsFromTable` — the
+  `src/core/cache/iceberg/schema.js` (`mergeFieldIdsFromTable`, the
   additive/breaking boundary).
 - Tests: `test/core/cache-iceberg-schema-evolution.test.js` (in-place
   evolution, backfill, no-op, breaking rejection);
@@ -160,12 +160,12 @@ rejection rather than weakening it.
   asserts the new column is queryable).
 - icebird `0.8.10`: `src/write/commit.js` (`fileCatalogCommit`, `applyUpdates`
   `add-schema`/`set-current-schema`), `src/catalog/loadTable.js`,
-  `src/types.d.ts` (`IcebergTransaction` — no schema method, icebird#25),
+  `src/types.d.ts` (`IcebergTransaction`, no schema method, icebird#25),
   package `exports` (`"./src/*.js"` makes the deep imports public).
-- [LLP 0013](./0013-local-query-cache.decision.md) — the cache this evolves.
-- [LLP 0022](./0022-iceberg-export-partitioning.spec.md) — the shared icebird
+- [LLP 0013](./0013-local-query-cache.decision.md): the cache this evolves.
+- [LLP 0022](./0022-iceberg-export-partitioning.spec.md): the shared icebird
   engine and partition-spec drift rejection.
-- `src/core/cache/retention.js` — existing precedent for deep-importing
+- `src/core/cache/retention.js`: existing precedent for deep-importing
   icebird `src/` write internals via the published `"./src/*.js"` exports.
-- Issue #102 (this work); issue #104 (partition-key move — the breaking case).
-- icebird#25 — request to expose schema evolution from the transaction API.
+- Issue #102 (this work); issue #104 (partition-key move: the breaking case).
+- icebird#25: request to expose schema evolution from the transaction API.

@@ -13,7 +13,7 @@ import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hy
  * Writes are atomic (temp file + rename) and gated on mtime so a
  * concurrent edit is detected instead of silently overwritten. The
  * `_hypaware` marker is the self-describing undo record the single core
- * undo (`detachClientFromDisk`, LLP 0045 §Part 3) replays — there is no
+ * undo (`detachClientFromDisk`, LLP 0045 §Part 3) replays: there is no
  * adapter `detach()`; the reverse lives in core so it survives the
  * plugin being unloaded (legacy pre-record markers included).
  *
@@ -21,7 +21,7 @@ import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hy
  * `prev_base_url` (the restore target) and the managed
  * `env.ANTHROPIC_BASE_URL` / session-context hook entries it added, so
  * a format-aware but plugin-agnostic core routine can reverse the
- * attach from disk alone — with the plugin unloaded. See LLP 0045
+ * attach from disk alone, with the plugin unloaded. See LLP 0045
  * Part 3.
  *
  * The same record carries `prev_malformed`: any `env` / `hooks` block
@@ -195,7 +195,7 @@ export async function attach(opts) {
   // over it. A first attach backs up whatever was live. Presence again:
   // attach only ever writes the field when there was something to record, so
   // the field being there is the fact, and `null` is a value we must give back.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
+  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
   const prevBaseUrl = priorMarker
     ? (Object.hasOwn(priorMarker, 'prev_base_url') ? priorMarker.prev_base_url : undefined)
     : liveBaseUrl
@@ -224,14 +224,14 @@ export async function attach(opts) {
   // entry wins over anything found this run at the same path - the earliest
   // backup is the one holding the user's own content. `recordDisplaced` already
   // refuses to collect a colliding path, so the spread order is belt and braces.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, so it must survive re-attach
+  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, so it must survive re-attach
   const prevMalformed = { ...displaced, ...priorMalformed }
 
   // Self-describing undo record: enough for the format-aware core undo
   // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
   // we added, strip the managed hook entries, and delete the marker without
   // loading this plugin, leaving no orphaned `hyp claude-hook` entries.
-  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: claude marker records prev_base_url + managed env/hook entries
+  // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,

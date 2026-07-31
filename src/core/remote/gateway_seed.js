@@ -90,7 +90,7 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
 
 /**
  * The URL origins that `@hypaware/central` sinks target in the **central
- * config layer** — i.e. which server(s) this machine is *enrolled* to. A
+ * config layer**: i.e. which server(s) this machine is *enrolled* to. A
  * fresh, login-first box returns `[]`. Drives login's D4 exclusivity gate
  * (LLP 0063): already enrolled to this origin (re-login, idempotent), enrolled
  * to a different origin (reject), or not enrolled (may enroll).
@@ -98,7 +98,7 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  * Deliberately reads the central layer, **not** the effective (local+central)
  * config: a hand-authored `@hypaware/central` sink in the user-owned local
  * layer is not an enrollment (`hyp leave` refuses to touch it, #111), so it
- * must not count as "connected" — otherwise the gate would block login to a
+ * must not count as "connected", otherwise the gate would block login to a
  * different server with `hyp leave` advice that cannot clear a local sink. The
  * gate and `hyp leave` therefore agree that enrollment == the central layer.
  *

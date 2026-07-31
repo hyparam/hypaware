@@ -217,7 +217,7 @@ test('purge preserves surviving rows\' part_id (dedupe identity) and does not re
     assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m3#0', 'm4#0'])
 
     // Watermark integrity: the streaming scan (what the export seam reads)
-    // yields exactly the survivors, and a second scan is stable — the deletes
+    // yields exactly the survivors, and a second scan is stable, the deletes
     // are durable, no purged row resurrects.
     /** @param {AsyncIterable<Record<string, unknown>>} it */
     const collect = async (it) => { const out = []; for await (const r of it) out.push(r.part_id); return out.sort() }

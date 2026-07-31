@@ -10,7 +10,7 @@ import { createAttachHandler, attachHandler } from '../../src/core/config/action
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 
 /**
- * T6 (LLP 0044/0045/0046): the attach action handler — the reversible
+ * T6 (LLP 0044/0045/0046): the attach action handler, the reversible
  * instance of the client-action reconciler, the `action_backfill.js` twin.
  * These tests drive the handler hooks directly with injected fake
  * `clientDescriptors` + `clients` + filesystem, the way the plan prescribes;
@@ -610,7 +610,7 @@ test('reverse() of a marker with no installed_assets touches no files', async ()
 test('reverse() invokes the disk-driven undo once and never consults ctx.clients', async () => {
   /** @type {any[]} */
   const calls = []
-  // A registry that explodes if the handler ever touches it — proving reverse
+  // A registry that explodes if the handler ever touches it: proving reverse
   // is adapter-independent (the dropped client is gone after the restart).
   const poisonClients = {
     getClient() { throw new Error('reverse() must not consult ctx.clients') },
@@ -696,7 +696,7 @@ test('reverse() replays the real core undo from disk with no adapter loaded (fs 
   try {
     const settingsPath = path.join(home, '.claude', 'settings.json')
     await fs.mkdir(path.dirname(settingsPath), { recursive: true })
-    // A hand-written self-describing marker — what claude `attach()` records:
+    // A hand-written self-describing marker, what claude `attach()` records:
     // the managed env value plus the prior base URL to restore (LLP 0045 §Part 3).
     const original = JSON.stringify({
       env: { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: ENDPOINT },
@@ -707,7 +707,7 @@ test('reverse() replays the real core undo from disk with no adapter loaded (fs 
     }, null, 2) + '\n'
     await fs.writeFile(settingsPath, original)
 
-    // No ctx.clients at all — the adapter is unloaded post-restart. Bind the
+    // No ctx.clients at all: the adapter is unloaded post-restart. Bind the
     // fixture home through the injected (real) detach.
     const handler = createAttachHandler({
       detach: ({ descriptor }) => detachClientFromDisk({ descriptor, homeDir: home }),

@@ -104,13 +104,13 @@ const CASES = [
   ['env --chdir= attached value', 'env --chdir=/tmp git', 'git'],
 
   // fail-closed: an unrecognized flag shape for a known wrapper must not
-  // have its value mis-read as argv[0] either — mint nothing rather than
+  // have its value mis-read as argv[0] either, mint nothing rather than
   // guess (MAJOR 2, the general case beyond the specific enumerated forms).
   ['sudo with an unrecognized flag+value shape mints nothing', 'sudo -z VALUE git status', null],
   ['env with an unrecognized flag+value shape mints nothing', 'env -z VALUE git status', null],
 
   // `--` ends option parsing: the next token is argv[0], not an unrecognized
-  // flag (round-2 regression fix — the fail-closed classifier would otherwise
+  // flag (round-2 regression fix, the fail-closed classifier would otherwise
   // drop these to nothing).
   ['sudo -- ends options, next token is argv[0]', 'sudo -- git status', 'git'],
   ['env -- ends options', 'env -- duckdb query.sql', 'duckdb'],

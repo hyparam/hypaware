@@ -1,4 +1,4 @@
-# LLP 0051: usage-policy future extensions — local-only and session opt-out
+# LLP 0051: usage-policy future extensions: local-only and session opt-out
 
 **Type:** Decision
 **Status:** Draft
@@ -27,7 +27,7 @@
 
 V1 ships one class (`ignore`) and one mechanism (folder `.hypignore`). Recording
 the deferred designs up front is what lets V1 avoid choices that would later
-require a repaint — chiefly the file-format
+require a repaint: chiefly the file-format
 [fail-safe](./0049-hypignore-usage-policy.spec.md#fail-safe) and the single
 shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
 
@@ -37,26 +37,26 @@ shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
 2026-07-06**, driven by the interactive login picker
 ([LLP 0069](./0069-local-only-dir-selection.spec.md)). The notes below are the
 original deferred sketch, kept for provenance. LLP 0070 supersedes cost (1): no
-additive cache column is needed — the `local-only` verdict is derived from the
+additive cache column is needed, the `local-only` verdict is derived from the
 partition's existing `cwd` at export time, not stamped at capture.
 
 **Intent.** A scope marked `local-only` is recorded into the local cache (so it
-is queryable locally) but is **never exported or forwarded** — sinks, central
+is queryable locally) but is **never exported or forwarded**: sinks, central
 forward, and S3/Iceberg export all skip it.
 
 **Seam.** Unlike `ignore` (capture seam), `local-only` is enforced at the
 **export seam**: the row enters the cache normally, and the export driver filters
 it out before forming a batch for any sink
-([LLP 0014](./0014-sinks.spec.md) — sinks receive "ready cache partitions").
+([LLP 0014](./0014-sinks.spec.md), sinks receive "ready cache partitions").
 
 **Why it is bigger than `ignore`, hence deferred.** It requires:
 
-- a **persistent marker** on cached rows that survives restart — an additive
+- a **persistent marker** on cached rows that survives restart: an additive
   cache-schema column ([LLP 0029](./0029-additive-cache-schema-evolution.decision.md));
 - a new **filter in the export driver** that every sink path honors (blob
   sinks, `@hypaware/central`, incremental sink reads
   [LLP 0039](./0039-incremental-sink-reads.spec.md));
-- a decision on **granularity** — whether `local-only` is a per-row attribute or
+- a decision on **granularity**: whether `local-only` is a per-row attribute or
   rides the session-id partition key ([LLP 0030](./0030-session-id-partition-key.decision.md)),
   since a scope typically maps to whole sessions/partitions.
 

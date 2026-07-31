@@ -16,7 +16,7 @@
 
 The kernel emits its own traces, logs, and metrics through OpenTelemetry. The
 same signal stream is the basis for smoke assertions (via on-disk JSONL) and for
-production export (via OTLP) — and the two paths are **mutually exclusive** so a
+production export (via OTLP), and the two paths are **mutually exclusive** so a
 daemon never exports into its own listener. Every emission carries a small,
 normalized, queryable attribute set so `hyp query` / `ctvs query` can run SQL
 over it.
@@ -24,8 +24,8 @@ over it.
 ## OTEL is the substrate
 
 `installObservability()` builds tracer, logger, and meter providers from a
-single shared `Resource` derived from env. It is **idempotent** — a second call
-returns the existing handle — and returns a `shutdown()` that flushes and closes
+single shared `Resource` derived from env. It is **idempotent**, a second call
+returns the existing handle, and returns a `shutdown()` that flushes and closes
 exporters in reverse order. Telemetry is **safe-by-default**: `getTracer()`
 always returns a usable tracer (the global no-op when no provider is installed),
 so instrumented code never has to null-check the telemetry layer.
@@ -43,7 +43,7 @@ The provider's exporter set is chosen from env, with three states:
 
 ### Self-loop guard
 
-The OTLP branch is gated on `!devTelemetry && otlpEndpoint` — the two export
+The OTLP branch is gated on `!devTelemetry && otlpEndpoint`: the two export
 modes are **mutually exclusive by construction**. This is the load-bearing
 invariant behind the `otel_self_loop_guard` acceptance smoke
 ([LLP 0002](./0002-v1-scope.decision.md#v1-acceptance-criteria-summary)): a
@@ -57,8 +57,8 @@ Every kernel/plugin emission uses the normalized vocabulary in `Attr` and is
 passed through `buildAttrs`, which:
 
 - normalizes keys to **snake_case**,
-- constrains `status` to a fixed set — **`ok` / `failed` / `skipped` /
-  `degraded` / `cancelled`** — coercing anything else to `failed`,
+- constrains `status` to a fixed set, **`ok` / `failed` / `skipped` /
+  `degraded` / `cancelled`**, coercing anything else to `failed`,
 - bounds cardinality (≤64 attrs) and value length (≤512 chars).
 
 The canonical keys: `hyp_component`, `hyp_plugin`, `hyp_capability`,
@@ -73,11 +73,11 @@ vocabulary breaks queryability.
 
 Two wrappers carry the contract so callers don't hand-roll spans:
 
-- **`withSpan(name, attrs, fn)`** — runs `fn` inside a span that inherits the
+- **`withSpan(name, attrs, fn)`**: runs `fn` inside a span that inherits the
   active OTel context as parent. Records `status` from the attrs, captures thrown
   errors as `error_kind` (default `unhandled_exception`), and always ends the
   span.
-- **`runRoot(name, attrs, fn)`** — same, but starts a *fresh root* span with no
+- **`runRoot(name, attrs, fn)`**: same, but starts a *fresh root* span with no
   parent. For units of work that are logically a boot or a top-level command.
 
 These are the sanctioned way to instrument a lifecycle transition. The source
@@ -90,7 +90,7 @@ smokes can observe the active set without reaching into plugin internals.
 Dev telemetry is local and must stay secret-safe: **never record credentials,
 raw prompts, private customer data, or hidden reasoning.** Use hashes or short
 redacted excerpts when payload identity matters. The 512-char value truncation
-in `buildAttrs` is a backstop, not the policy — emitters are responsible for not
+in `buildAttrs` is a backstop, not the policy: emitters are responsible for not
 putting secrets in attributes in the first place.
 
 ## Shutdown and flush

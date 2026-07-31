@@ -1,4 +1,4 @@
-# LLP 0053: hypignore usage policy — implementation plan
+# LLP 0053: hypignore usage policy (implementation plan)
 
 **Type:** plan
 **Status:** Active
@@ -10,7 +10,7 @@
 > Implementation steps for the `.hypignore` usage policy designed in
 > [LLP 0052](./0052-hypignore-usage-policy.design.md). Small, independently-mergeable
 > tasks: the shared core matcher first, then the two adapters and the CLI in parallel,
-> then a hermetic smoke. V1 enforces only the capture seam (LLP 0050) — no cache schema,
+> then a hermetic smoke. V1 enforces only the capture seam (LLP 0050): no cache schema,
 > export driver, or gateway change.
 
 ## Tasks
@@ -23,7 +23,7 @@
 ## Notes
 
 - The design (LLP 0052) is already `Status: Active` (neutral-minted), so no status-flip task
-  is needed — merging the change set ships it.
+  is needed, merging the change set ships it.
 - T2/T3/T4 are independent after T1 and run in parallel; T5 closes the loop end-to-end.
 - No task touches the cache schema, the export driver, `@hypaware/ai-gateway`, or settlement
-  (`claude/src/settle.js`) — capture-seam only, per LLP 0050.
+  (`claude/src/settle.js`): capture-seam only, per LLP 0050.

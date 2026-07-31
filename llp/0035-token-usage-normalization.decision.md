@@ -26,7 +26,7 @@ analyst (human or model) having to special-case the provider:
 `total_tokens`, when a provider supplies it, is stored **raw** (the provider's
 own total, which is gross-input + output). Because input is stored net, the
 identity `input_tokens + cache_read_tokens + output_tokens == total_tokens`
-holds — a cheap reconciliation check.
+holds: a cheap reconciliation check.
 
 ## Context
 
@@ -39,7 +39,7 @@ holds — a cheap reconciliation check.
 
 OpenAI and ChatGPT Codex report usage differently:
 
-- `input_tokens` (Responses) / `prompt_tokens` (Chat) is **gross** — it
+- `input_tokens` (Responses) / `prompt_tokens` (Chat) is **gross**: it
   *includes* the cached reads. The cached subset is
   `input_tokens_details.cached_tokens` (live) or `cached_input_tokens` (the
   Codex rollout `token_count` event).
@@ -48,7 +48,7 @@ OpenAI and ChatGPT Codex report usage differently:
   `last_token_usage` (this turn).
 
 If those raw shapes were stored as-is, `usage.input_tokens` would mean
-"uncached input" for Claude and "input incl. cache" for Codex — the same
+"uncached input" for Claude and "input incl. cache" for Codex: the same
 column, two meanings. Any cross-provider `SUM`/comparison would silently
 mismix net and gross, and `input_tokens + cache_read_tokens` would
 double-count cache for Codex. That is a confidently-wrong-numbers trap for an
@@ -61,24 +61,24 @@ LLM querying the data, which is HypAware's primary consumer.
   (`backfill.js#codexUsageAttributes`) compute
   `input_tokens = grossInput − cachedInput` (floored at 0) and put the cached
   count on `cache_read_tokens`. The Claude adapter already produces net input
-  and is unchanged — Claude/net is the anchor convention.
+  and is unchanged: Claude/net is the anchor convention.
 - <a id="per-turn"></a>**Per-turn, not cumulative.** Codex backfill reads the
   `token_count` event's `last_token_usage`, never `total_token_usage`. The
   event is consumed as a turn-boundary marker (it never projects a row); its
   usage is stamped per the one-carrier rule below.
 - <a id="one-carrier"></a>**One carrier per response, on the last assistant
-  row.** A billed response fans into several rows — Claude splits one API
+  row.** A billed response fans into several rows: Claude splits one API
   message into one row per content block (LLP 0026); Codex fans a response into
   separate messages and a turn into reasoning/text/tool rows. Response-level
   `usage` is stamped onto exactly **one** of those rows: the **last** assistant
-  row of the response (the terminal output item — a `tool_use` on tool-calling
+  row of the response (the terminal output item, a `tool_use` on tool-calling
   turns, else the final `text`). This holds for all four paths:
   - Claude live (`projector.js#projectAssistantMessage`) and backfill
-    (`backfill.js`, last block per `messageId`) — usage rides the same
+    (`backfill.js`, last block per `messageId`): usage rides the same
     last-block row as `stop_reason`, instead of being duplicated onto every
     block.
   - Codex live (`exchange-projector.js#stampUsageOnLastAssistant`) and backfill
-    (`backfill.js#stampUsageOnTurn`, last eligible) — switched from first to
+    (`backfill.js#stampUsageOnTurn`, last eligible): switched from first to
     last so the carrier row matches Claude. Both apply the **same** eligibility
     predicate (`hasTextOrToolUse`: the last assistant row carrying text or a
     tool_use, skipping reasoning-only rows), so the two paths select the same
@@ -97,8 +97,8 @@ LLM querying the data, which is HypAware's primary consumer.
   (`message_projector.js#stripUsage`), so a multi-block carrier no longer
   replicates (over-counts) its usage across every block. This edge was assumed
   not to occur ("carrier messages are single-block"), but Claude backfill does
-  emit multi-block carrier messages — `reasoning + text`, `reasoning + tool_use`,
-  and parallel-tool-call turns (`reasoning + reasoning + tool_use + tool_use`) —
+  emit multi-block carrier messages, `reasoning + text`, `reasoning + tool_use`,
+  and parallel-tool-call turns (`reasoning + reasoning + tool_use + tool_use`),
   where the transcript records several blocks under one `messageId`. Those were
   the only rows where a plain `SUM` over-counted before this rule was made
   unconditional.
@@ -115,7 +115,7 @@ Token accounting reads **`attributes.usage`** (a JSON column), never
 and capture mode (Claude live + backfill, Codex live + backfill). The
 provider-raw frame is unreliable: `raw_frame` is null for Claude *live* and all
 Codex; only Claude *backfill* stashes the transcript line. And the id, when
-present, is the **flat `raw_frame.message_id`** — not the nested
+present, is the **flat `raw_frame.message_id`**, not the nested
 `raw_frame.message.id` / `raw_frame.message.usage` some older notes cite (both
 null in the data).
 
@@ -168,7 +168,7 @@ things per provider - one layer down, in null handling.
   no shipped Codex rows used the gross form.
 - Claude **field values** are unchanged (already net), but Claude usage
   **placement** changed: it now rides one row (the last block) instead of every
-  block — see #one-carrier and the LLP 0026 consequence revision. No in-app
+  block, see #one-carrier and the LLP 0026 consequence revision. No in-app
   consumer reads `attributes.usage` (verified: context graph, enrichment, sinks,
   datasets, and vector search all ignore it), so only ad-hoc/skill SQL is
   affected, and the `max()`-per-message-id form still works.
@@ -176,8 +176,8 @@ things per provider - one layer down, in null handling.
 ## Alternatives considered
 
 - **Gross everywhere** (fold Claude's cache into `input_tokens`): rewrites the
-  meaning of already-shipped Claude rows and touches more adapters. Rejected —
+  meaning of already-shipped Claude rows and touches more adapters. Rejected:
   larger blast radius, and it discards the clean additive cache breakdown.
 - **Leave provider-native, document the asymmetry**: zero code, but the
   footgun stays in the data forever and every consumer must re-learn it.
-  Rejected — pushes the cost onto every future query.
+  Rejected: pushes the cost onto every future query.

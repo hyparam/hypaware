@@ -30,8 +30,8 @@ and use it to register upstream presets, attach/detach client settings, install
 client-side skills, and enrich rows in `ai_gateway_messages` from local
 transcripts (Claude only).
 
-The gateway exposes typed hooks — `registerUpstreamPreset`, `registerClient`,
-`registerMessageEnricher` — so a new adapter never modifies gateway code.
+The gateway exposes typed hooks, `registerUpstreamPreset`, `registerClient`,
+`registerMessageEnricher`, so a new adapter never modifies gateway code.
 
 ## Naming rule
 
@@ -43,7 +43,7 @@ ownership unambiguous: the producing plugin evolves its own shape without
 cross-plugin coordination, and adapter enrichers/skills compile against a
 stable, single-owner table.
 
-A different source for similar data — say a `@hypaware/litellm` plugin —
+A different source for similar data, say a `@hypaware/litellm` plugin,
 registers its **own** table (`litellm_messages`). It may adopt the same column
 shape as a stylistic convergence, but that is not a shared contract enforced by
 core. Users who run both and want a unified view define a SQL view over the

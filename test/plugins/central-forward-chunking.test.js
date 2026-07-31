@@ -523,7 +523,7 @@ test('a tick after N new rows reads/sends only the new suffix and advances the w
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(result.status, 'exported')
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].rowCount, 3) // not 10 — the prefix is skipped
+  assert.equal(calls[0].rowCount, 3) // not 10 - the prefix is skipped
   // watermark advanced to the last row's seq, count carried forward
   assert.equal(watermarks.record?.continuation.seq, '10')
   assert.equal(watermarks.record?.exportedRowCount, 10)
@@ -532,7 +532,7 @@ test('a tick after N new rows reads/sends only the new suffix and advances the w
 test('the watermark advances once, at end-of-partition, to the high-water after', async () => {
   // 12000 rows -> chunks of 5000,5000,2000. The watermark is NOT advanced per
   // chunk (that would be unsafe under an unordered scan: a chunk's running-max
-  // `after` could skip lower-seq rows in a later chunk — LLP 0040 §4 risk #3).
+  // `after` could skip lower-seq rows in a later chunk, LLP 0040 §4 risk #3).
   // It advances exactly once, after every chunk acks, to the partition max.
   const { sink, watermarks } = buildSink({ count: 12_000 })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
@@ -609,7 +609,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   // running-max `after` saturates inside chunk 0 while chunk 1 holds LOWER seqs.
   // Per-chunk advance would jump the watermark past chunk 1's rows on the
   // chunk-0 ack; a chunk-1 failure would then strip them from every future
-  // `seq > watermark` read — silent permanent data loss. End-of-partition advance
+  // `seq > watermark` read: silent permanent data loss. End-of-partition advance
   // refuses to checkpoint a partial partition, so the next tick re-reads them.
   const TOTAL = 5006 // chunk 0 = 5000 rows (MAX_CHUNK_ROWS), chunk 1 = 6 rows
   /** @type {{ id: number, seq: bigint }[]} */
@@ -672,7 +672,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   assert.equal(r1.status, 'failed')
 
   // Tick 2: server healthy. The whole partition re-reads (watermark unadvanced),
-  // so the low-seq chunk-1 rows are delivered — never skipped.
+  // so the low-seq chunk-1 rows are delivered, never skipped.
   const r2 = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(r2.status, 'exported')
 

@@ -17,12 +17,12 @@
 
 The intrinsic query surface ([LLP 0015](./0015-query-and-datasets.spec.md)) runs
 SQL over a streaming `AsyncDataSource` per dataset, but three blocking operators
-— `ORDER BY`, `GROUP BY`, and `COUNT(DISTINCT …)` — buffer the **whole scanned
+(`ORDER BY`, `GROUP BY`, and `COUNT(DISTINCT …)`) buffer the **whole scanned
 input** before producing a row, and `collect()` then re-materializes the result.
 Peak memory therefore scales with the **scanned/intermediate row volume**, not
 the (already-capped) result size. Over the ~495k-row `ai_gateway_messages`
 dataset a single such query exhausts the heap and the process is OOM-killed
-mid-request — taking the whole daemon down for every caller.
+mid-request: taking the whole daemon down for every caller.
 
 This spec makes peak execution memory a function of a **declared per-query
 budget**, not of the scanned row count. It does so through three coordinated
@@ -34,7 +34,7 @@ rather than crashing when it is exceeded
 ([LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md)).
 
 The bound is exposed through the kernel's **public** `hypaware/core/query`
-surface, so every caller of that surface inherits it — the local `hyp query`
+surface, so every caller of that surface inherits it: the local `hyp query`
 CLI, the `query_sql` MCP tool ([LLP 0034](./0034-mcp-host-intrinsic.decision.md)),
 and HypAware Server's `POST /v1/query`. This is the reusable budget primitive
 that HypAware Server LLP 0006 `#result-caps` named as a follow-up ("the kernel's
@@ -54,7 +54,7 @@ The crash is driven by intermediate buffering, not result size:
   ([LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md)).
 - The result is then re-materialized a second time by `collect()`.
 
-No layer bounds this. `scope.limit` is **not** a row cap — on a multi-partition
+No layer bounds this. `scope.limit` is **not** a row cap: on a multi-partition
 union it is stripped per [LLP 0015](./0015-query-and-datasets.spec.md) ("Multi-partition
 union"), and the ai-gateway scope builder reads only date fields. The operators
 already check `context.signal`, but the kernel never constructs or passes a
@@ -63,8 +63,8 @@ signal, so that abort path is dead code. HypAware Server's response-edge caps
 returned payload but cannot prevent the blowup.
 
 This exposure is not server-only: the same operators back the local `hyp query`
-CLI and the `query_sql` MCP tool. The fix belongs where the buffering lives — the
-kernel query plane — not behind any one caller.
+CLI and the `query_sql` MCP tool. The fix belongs where the buffering lives, the
+kernel query plane, not behind any one caller.
 
 This spec **bounds the common case**. It is defense-in-depth with the
 separately-owned process-isolation track ([LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md)):
@@ -138,8 +138,8 @@ error** carrying the limit that was hit. Per
 or a partial `COUNT` would be a silent wrong answer. The error is distinct from
 HypAware Server LLP 0006 `#result-caps`' `truncated: true`, which trims an
 already-correct, already-materialized result at the response edge. Callers
-render the refusal as actionable guidance ("query exceeded its execution budget
-— add a `WHERE`/`date` filter or aggregate"): HypAware Server maps it to a 4xx;
+render the refusal as actionable guidance ("query exceeded its execution budget,
+add a `WHERE`/`date` filter or aggregate"): HypAware Server maps it to a 4xx;
 the CLI prints the same message to stderr with a non-zero exit.
 
 ### <a id="uniform-surface"></a>One bound, every surface
@@ -148,7 +148,7 @@ Because query is intrinsic ([LLP 0015](./0015-query-and-datasets.spec.md)) and
 MCP hosting is intrinsic ([LLP 0034](./0034-mcp-host-intrinsic.decision.md)), the
 `query_sql` MCP tool and the remote-attach path run the **same**
 `executeQuerySql` / `collect()` code. The budget and refusal therefore apply to
-CLI, MCP, and server callers from the single kernel implementation — no
+CLI, MCP, and server callers from the single kernel implementation: no
 per-surface re-derivation. HypAware Server passes its operator-configured budget
 through the existing `hypaware/core/query` import path (it already depends on
 exactly that path per HypAware Server LLP 0002 `#kernel-compatibility`); this
@@ -158,7 +158,7 @@ adds options to `ExecuteSqlOptions`, not a new import surface or a shim.
 
 - **Default budget values.** The conservative defaults (buffered-row and
   buffered-byte ceilings) need a measurement pass against real
-  `ai_gateway_messages` volume on a representative box — deferred to
+  `ai_gateway_messages` volume on a representative box: deferred to
   [LLP 0057](./0057-bounded-query-execution.plan.md). Until measured, ship a
   safe-low default and let operators raise it.
   *Measured 2026-07-10; resolved by [LLP 0097](./0097-heap-growth-query-budget.decision.md),
@@ -175,20 +175,20 @@ adds options to `ExecuteSqlOptions`, not a new import surface or a shim.
 
 ## References
 
-- [LLP 0015](./0015-query-and-datasets.spec.md) — Query, Datasets, and Collect
+- [LLP 0015](./0015-query-and-datasets.spec.md): Query, Datasets, and Collect
   (the surface this extends; `#query-is-intrinsic`, "Multi-partition union").
-- [LLP 0034](./0034-mcp-host-intrinsic.decision.md) — MCP hosting is intrinsic
+- [LLP 0034](./0034-mcp-host-intrinsic.decision.md): MCP hosting is intrinsic
   (`query_sql` runs the same execution path).
-- [LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md) — stream
+- [LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md): stream
   aggregates via `scanColumn` rather than buffering rows.
-- [LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md) — refuse over
+- [LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md): refuse over
   spill/truncate on budget exceed.
-- [LLP 0057](./0057-bounded-query-execution.plan.md) — implementation plan.
-- [LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md) — process
+- [LLP 0057](./0057-bounded-query-execution.plan.md): implementation plan.
+- [LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md): process
   isolation (defense-in-depth sibling).
-- HypAware Server LLP 0006 `#result-caps` — the response-edge cap and its V1
+- HypAware Server LLP 0006 `#result-caps`: the response-edge cap and its V1
   note naming this kernel budget primitive as the follow-up.
-- HypAware Server LLP 0002 `#kernel-compatibility` / `#host-shim` — the server's
+- HypAware Server LLP 0002 `#kernel-compatibility` / `#host-shim`: the server's
   public-import-path contract and named-kernel-extension pattern.
 - GitHub issue [hyparam/hypaware-server#9](https://github.com/hyparam/hypaware-server/issues/9).
 - Engines: [squirreling](https://github.com/hyparam/squirreling) (operators +

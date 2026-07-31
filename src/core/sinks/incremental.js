@@ -24,10 +24,10 @@ const INSTANCE_DIR = 'sink-instances'
  * Build a watermark store scoped to a single sink instance.
  *
  * `PluginPaths.stateDir` is per-**plugin** (`<state>/plugins/<plugin>`), not per
- * sink **instance** — but the design's watermark contract is one watermark per
+ * sink **instance**, but the design's watermark contract is one watermark per
  * `(sink instance, partition)`. Two instances of one destination plugin (e.g.
- * dual-writing the same dataset to two buckets) would otherwise share — and
- * clobber — a single watermark file, silently skipping rows the other instance
+ * dual-writing the same dataset to two buckets) would otherwise share, and
+ * clobber, a single watermark file, silently skipping rows the other instance
  * exported. The wiring layer is the only place that knows the instance name, so
  * it scopes the store here, satisfying `watermarks.js`'s documented precondition
  * that the `stateDir` it receives is already instance-scoped.
@@ -68,7 +68,7 @@ function emptyAsyncIterable() {
  * Derive the stable logical watermark key for a partition, or `null` when the
  * partition has no `tablePath` (registered-but-not-materialized) so the caller
  * exports without persisting a watermark. A `tablePath` that is set but not
- * under the cache datasets root throws via `keyFor` — a genuine misconfiguration
+ * under the cache datasets root throws via `keyFor`: a genuine misconfiguration
  * the per-partition error path should surface, not silently ignore.
  *
  * @param {SinkWatermarkStore} watermarks
@@ -89,18 +89,18 @@ export function watermarkKeyFor(watermarks, storage, partition) {
  *
  * - decides emptiness up front by **peeking** the first row, so the skip-empty
  *   decision never depends on the encoder actually draining the stream;
- * - exposes `rows` — the clean (internal-stripped) rows to feed straight into
+ * - exposes `rows`: the clean (internal-stripped) rows to feed straight into
  *   the unchanged `encoder.encodePartition` contract;
  * - tracks `rowCount` and the high-water `lastAfter` continuation as the encoder
  *   consumes `rows` (both are final once the encoder has drained the stream,
  *   which it must to encode them).
  *
  * A partition with no `tablePath`, or whose table does not exist on disk yet, is
- * reported `empty` (yield nothing) rather than throwing — the caller writes no
+ * reported `empty` (yield nothing) rather than throwing: the caller writes no
  * blob, exactly as for a partition with no new rows.
  *
  * `readRowsSince` may yield `local-only` rows as drop-only entries (no payload,
- * LLP 0070): those are never encoded, but they still advance `lastAfter` — even
+ * LLP 0070): those are never encoded, but they still advance `lastAfter`, even
  * a partition that is *entirely* drops reports `empty` yet exposes a
  * `droppedRowCount > 0` and an advanced `lastAfter`, so the caller checkpoints
  * past the withheld tail rather than re-scanning it every tick. `empty`
@@ -152,7 +152,7 @@ export async function openIncrementalRows(storage, partition, since) {
       entry = await iterator.next()
     }
     if (entry.done) {
-      // Release the underlying scan immediately — no payload row to export.
+      // Release the underlying scan immediately: no payload row to export.
       await iterator.return?.()
     } else {
       first = entry
@@ -205,7 +205,7 @@ export async function openIncrementalRows(storage, partition, since) {
  *
  * The range is a deterministic function of the watermark and the rows read, so a
  * crash-retry (watermark not yet advanced) reproduces the **same** filename and
- * thus the same object key — an idempotent overwrite. This is the blob sink's
+ * thus the same object key: an idempotent overwrite. This is the blob sink's
  * stand-in for the central sink's server-side idempotency ledger.
  *
  * @ref LLP 0040#applying-it-to-both-sinks [implements]: [sinceSeq,lastSeq] filename ⇒ idempotent re-PUT

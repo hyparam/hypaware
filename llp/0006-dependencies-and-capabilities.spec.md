@@ -15,15 +15,15 @@
 Most plugins have no dependencies. When a plugin *does* need cross-plugin
 behavior it declares one of two kinds:
 
-- **Plugin dependency** — "this named plugin must be installed and activated
+- **Plugin dependency**: "this named plugin must be installed and activated
   before me." Used when you specifically need that plugin's presence (e.g. an
   adapter that exists *for* it).
-- **Capability dependency** — "some plugin must provide this versioned API."
+- **Capability dependency**: "some plugin must provide this versioned API."
   Used when the implementation is interchangeable.
 
 Capability identifiers are bare names (`hypaware.ai-gateway`); the version
 requirement travels alongside as a semver range, **never baked into the
-identifier**. Adapters often use both kinds — e.g. `@hypaware/claude` depends on
+identifier**. Adapters often use both kinds: e.g. `@hypaware/claude` depends on
 `@hypaware/ai-gateway` as a plugin (it makes no sense without it) **and**
 requires the `hypaware.ai-gateway` capability (so a drop-in replacement could
 satisfy the contract):
@@ -58,5 +58,5 @@ const proxy = ctx.requireCapability('hypaware.ai-gateway', '^1.0.0')
 proxy.registerClient({ name: 'claude-code', defaultUpstream: 'anthropic', attach, detach })
 ```
 
-The capability registry is the single sanctioned cross-plugin channel — it is
+The capability registry is the single sanctioned cross-plugin channel: it is
 what keeps the plugin graph decoupled and replaceable.

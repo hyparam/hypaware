@@ -12,7 +12,7 @@
 > session-start hook record had not landed yet), the flush-time settlement
 > enricher ([LLP 0027](./0027-cache-settlement.decision.md)) re-resolves its
 > `cwd` from the now-present session context and, if the cwd resolves to a
-> `.hypignore` `ignore`, **drops the row** — before partition write, before
+> `.hypignore` `ignore`, **drops the row**: before partition write, before
 > export. Settlement may now REMOVE a row, not only upgrade its identity. This
 > is an accepted realization of the `.hypignore` `ignore` guarantee
 > ([LLP 0049](./0049-hypignore-usage-policy.spec.md#requirements) R1 /
@@ -34,11 +34,11 @@ the first exchange(s) of a Claude session can be projected *before* the
 session-context hook record lands, so the row is written with `cwd = null`, the
 projector's policy check is skipped (`const policy = cwd ? resolver.resolve(cwd) : null`,
 failing **open**), and the row is never revisited. A `.hypignore` therefore
-could not protect a session's opening exchanges — often the rows carrying the
-user's full prompt — and those rows also stayed permanently unenriched
+could not protect a session's opening exchanges, often the rows carrying the
+user's full prompt, and those rows also stayed permanently unenriched
 (`cwd`/`git_branch`/`repo_root` null), degrading folder attribution. This is the
 sibling of [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md) (Codex
-subscription-route cwd blindness): same fail-open seam, different cause — there
+subscription-route cwd blindness): same fail-open seam, different cause, there
 the wire never carries a cwd; here the sidecar carries it but loses a race.
 
 Shrinking the window at the source (write `cwd` before the hook's git
@@ -57,12 +57,12 @@ already durably captured).
 
 ## Decision
 
-**Yes — flush-time settlement MAY drop a late-resolved `ignore` row, and that
+**Yes: flush-time settlement MAY drop a late-resolved `ignore` row, and that
 drop honors the `.hypignore` `ignore` guarantee for the race case.**
 
 The change set has two layers:
 
-- **Part (a) — shrink the window at the source.** The Claude hook
+- **Part (a): shrink the window at the source.** The Claude hook
   (`claude/src/hook_command.js`) appends a minimal `{session_id, cwd, ts}`
   record **immediately** (cwd is in hand from stdin, and is the only field the
   policy check needs), then runs the two git subprocesses and appends a second
@@ -70,7 +70,7 @@ The change set has two layers:
   enriched one wins once it lands. The window collapses from "hook latency + 2
   git execs" to ~one file append. Do-regardless; necessary but not sufficient.
 
-- **Part (b) — settlement backstop.** The Claude settlement enricher
+- **Part (b): settlement backstop.** The Claude settlement enricher
   (`claude/src/settle.js`) gives a **null-cwd** row a second look at flush:
   re-read the session context (now present), and
   - cwd resolves to `ignore` → **DROP** the row (emit a structured
@@ -96,10 +96,10 @@ purge, which this decision does not authorize.
 ### Why this honors the guarantee
 
 For a row that raced past the capture seam with `cwd = null`, a strict "never
-enters the cache" is physically unattainable without a fail-closed hold — which
+enters the cache" is physically unattainable without a fail-closed hold, which
 is rejected, because it would drop legitimate SDK/headless traffic that never
-gets a hook record. Allowing settlement to drop the row at flush — **before
-partition write, before export** — makes the leak **bounded-until-flush (~2
+gets a hook record. Allowing settlement to drop the row at flush, **before
+partition write, before export**: makes the leak **bounded-until-flush (~2
 min)** and guarantees the row is **never written to a durable/queryable
 partition and never forwarded to a sink**, which is the outcome that actually
 matters for privacy. The literal "never enters the cache" is honestly relaxed to
@@ -109,7 +109,7 @@ matters for privacy. The literal "never enters the cache" is honestly relaxed to
 
 The settlement drop emits `plugin.claude.usage_policy_drop` with
 `policy_source: 'settlement_late_resolve'`, the `session_id`, and a **hashed**
-`cwd` (`cwd_hash`, never a raw local path — mirroring the export-drop aggregate,
+`cwd` (`cwd_hash`, never a raw local path; mirroring the export-drop aggregate,
 [LLP 0080 #telemetry](./0080-local-only-dir-selection.design.md)). This
 distinguishes it from the projector's capture-seam drop and makes the
 bounded-until-flush leak observable and countable.
@@ -118,7 +118,7 @@ bounded-until-flush leak observable and countable.
 
 - **Fail-closed hold** (block projection until the context arrives). Rejected:
   some Claude traffic (SDK/headless) never gets a hook record, so a hard wait
-  either drops real data or reintroduces fail-open after a timeout — complexity
+  either drops real data or reintroduces fail-open after a timeout, complexity
   without closing the hole the backstop closes anyway.
 - **Part (a) alone.** Shrinks the window to ~one file append but cannot close it
   (hook latency; SDK sessions with no hook). Shipped, but insufficient on its
@@ -153,7 +153,7 @@ bounded-until-flush leak observable and countable.
 
 ## References
 
-- [Issue #258](https://github.com/hyparam/hypaware/issues/258) — the race, and the repo-owner decision comment that unblocked this.
-- [LLP 0027](./0027-cache-settlement.decision.md) — flush-time identity settlement (the machinery extended here).
-- [LLP 0049](./0049-hypignore-usage-policy.spec.md) / [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md) — the `.hypignore` usage policy and its adapter-seam enforcement.
-- [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md) — the Codex sibling of the same fail-open seam.
+- [Issue #258](https://github.com/hyparam/hypaware/issues/258), the race, and the repo-owner decision comment that unblocked this.
+- [LLP 0027](./0027-cache-settlement.decision.md): flush-time identity settlement (the machinery extended here).
+- [LLP 0049](./0049-hypignore-usage-policy.spec.md) / [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md): the `.hypignore` usage policy and its adapter-seam enforcement.
+- [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md): the Codex sibling of the same fail-open seam.

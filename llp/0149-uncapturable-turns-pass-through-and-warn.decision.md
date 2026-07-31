@@ -7,7 +7,7 @@
 **Date:** 2026-07-29
 **Related:** LLP 0152 (plugin-steered shadow providers), LLP 0145 (borrowed credentials), LLP 0146 (deferred providers), LLP 0147 (CLI backends)
 
-> When the plugin cannot capture a turn, the turn still runs — direct to the
+> When the plugin cannot capture a turn, the turn still runs: direct to the
 > vendor, uncaptured, with a warning that makes the gap visible. One rule
 > for every cause. This was previously an open question duplicated across
 > LLP 0152 and LLP 0145; both now cite this decision.
@@ -32,7 +32,7 @@ and the knob is easy to add later without breaking anything.
 
 ## Decision
 
-- If the plugin cannot steer a provider — any cause — it leaves the turn on
+- If the plugin cannot steer a provider, any cause, it leaves the turn on
   its original provider, unmodified. The user's turn never fails because of
   capture.
 - Every pass-through emits a structured uncaptured-provider warning naming

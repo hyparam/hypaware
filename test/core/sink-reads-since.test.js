@@ -208,7 +208,7 @@ test('an invalid continuation token is rejected', async () => {
   await svc.flushTable(tablePath, { reason: 'manual' })
 
   await assert.rejects(async () => {
-    // @ts-expect-error — deliberately malformed token
+    // @ts-expect-error: deliberately malformed token
     for await (const _ of svc.readRowsSince(tablePath, { since: { v: 2, seq: '1' } })) { /* drain */ }
   }, /invalid SinkContinuation/)
 

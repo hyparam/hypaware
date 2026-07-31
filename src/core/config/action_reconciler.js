@@ -80,11 +80,11 @@ export function createActionReconciler(opts) {
    */
   async function reconcile(input) {
     // Thread the daemon-resolved client seam (LLP 0045 §Part 1) onto the
-    // context unchanged — the reconciler core stays ignorant of what they mean
+    // context unchanged: the reconciler core stays ignorant of what they mean
     // ("knows nothing about Claude vs Codex"); only a client handler
     // (`action_attach`) reads `clientDescriptors`/`clients`/`endpoint`. Absent
     // on a plain CLI boot, so any client handler stays inert.
-    // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements]: clientDescriptors/clients/endpoint live on the context, not a handler closure
+    // @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors/clients/endpoint live on the context, not a handler closure
     /** @type {ActionContext} */
     const ctx = {
       config: input.config,
@@ -128,7 +128,7 @@ export function createActionReconciler(opts) {
 
       // Forward gap: run-once / retry the desired units not yet `done`. A
       // `done` marker short-circuits, UNLESS the handler's optional freshness
-      // predicate reports it stale — then the still-desired unit is a forward
+      // predicate reports it stale, then the still-desired unit is a forward
       // gap and re-`perform()`s this pass. That is how an attach re-fires after
       // the gateway rebinds to a new ephemeral port: the marker is `done` but no
       // longer current (issue #277 / LLP 0086). Handlers without `isCurrent`
@@ -314,7 +314,7 @@ export function createActionReconciler(opts) {
 /**
  * Decide whether a `done` marker still short-circuits its still-desired action,
  * by consulting the handler's optional `isCurrent` freshness predicate. A
- * handler without one (backfill) is always current — a `done` marker is
+ * handler without one (backfill) is always current: a `done` marker is
  * permanently done. A predicate that throws is treated as *current* (skip): an
  * unexpected error must never spuriously re-perform a `done` effect on a loop,
  * so it degrades to the pre-LLP-0086 level-triggered behavior.
@@ -450,7 +450,7 @@ export function readClientActionStatus({ stateRoot }) {
  *
  * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
  * @returns {boolean} whether a marker was found and the store rewritten
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
  */
 export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)

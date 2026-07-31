@@ -10,9 +10,9 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
 
 /**
- * `hyp leave` — the level-3 exit verb (LLP 0063 §prerequisites): removes the
+ * `hyp leave`, the level-3 exit verb (LLP 0063 §prerequisites): removes the
  * central config layer, reverses org-driven attaches via the one core undo,
- * and drops the forward identity — while leaving the query-session store, the
+ * and drops the forward identity, while leaving the query-session store, the
  * user-owned local layer, and the daemon service untouched.
  */
 

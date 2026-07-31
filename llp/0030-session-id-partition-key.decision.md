@@ -23,7 +23,7 @@ two concepts the single `conversation_id` column had been overloading:
 
 This is a **breaking** schema change (the partition key moved): the cache must
 be **recreated and backfilled**, and it must **not** be bundled with any
-additive (in-place evolvable) schema change — those follow a different upgrade
+additive (in-place evolvable) schema change, those follow a different upgrade
 path (LLP 0029, the additive-cache-schema-evolution decision, claimed by an
 open PR; this doc is numbered 0030 to avoid the collision).
 
@@ -36,17 +36,17 @@ the **fallback-hash scope** for synthesized `message_id`s. Both providers were
 forced to stuff their container id into it:
 
 - **Claude** has no per-thread "conversation" id. A Claude *session* is a
-  container of many threads — the main agent loop, N subagent side-chains, and
-  side chats — all sharing one session id (`metadata.user_id.session_id` /
+  container of many threads, the main agent loop, N subagent side-chains, and
+  side chats, all sharing one session id (`metadata.user_id.session_id` /
   `x-claude-code-session-id`). The plugin put that session id in
-  `conversation_id`, so "conversation_id is a session id for Claude" — the
+  `conversation_id`, so "conversation_id is a session id for Claude": the
   premise the code and LLP 0026 were written against.
 - **Codex** genuinely has both: a `metadata.session_id` (the session) and a
   thread id (`x-codex-turn-metadata.thread_id`). With one column it could
   expose only one, and chose the thread, dropping the session grouping.
 
 Overloading one column meant queries could not ask "all threads in this
-session" for Codex, and the partition key's semantics differed per provider —
+session" for Codex, and the partition key's semantics differed per provider:
 the same column was a session for Claude and a thread for Codex. Subagent
 threads (which carry `agent_id` / `parent_thread_id`) had no stable container
 key distinct from the thread.
@@ -65,7 +65,7 @@ key distinct from the thread.
 3. **The fallback-hash scope and the prior-message chain scope on
    `conversation_id ?? session_id`** (with `agent_id` separating a subagent's
    chain from the main loop's). For Claude (conversation_id null) this is the
-   session id — the same value the pre-split `conversation_id` held — so
+   session id, the same value the pre-split `conversation_id` held, so
    **Claude fallback ids are unchanged**. For Codex it is the thread, also
    unchanged. The split is identity-preserving by construction.
 4. **The Iceberg partition fields become
@@ -124,13 +124,13 @@ the upgrade story.
 
 ## References
 
-- [LLP 0016](./0016-ai-gateway.decision.md) — the gateway owns the schema;
+- [LLP 0016](./0016-ai-gateway.decision.md): the gateway owns the schema;
   adapters own message shape.
-- [LLP 0022](./0022-iceberg-export-partitioning.spec.md) — identity partition
+- [LLP 0022](./0022-iceberg-export-partitioning.spec.md): identity partition
   fields = export sort key; updated so `session_id` leads the clustering.
-- [LLP 0023](./0023-context-graph-projection.decision.md) — the graph contract
+- [LLP 0023](./0023-context-graph-projection.decision.md): the graph contract
   whose `Session` node keys on the session container.
-- [LLP 0026](./0026-claude-native-granularity.decision.md) — Claude native
+- [LLP 0026](./0026-claude-native-granularity.decision.md): Claude native
   granularity; its conversation_id-as-session premise is updated here.
 - Code: `hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js`
   (`AI_GATEWAY_MESSAGE_COLUMNS`, fallback-hash scope),

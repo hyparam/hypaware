@@ -10,14 +10,14 @@ import { runDetach } from '../../src/core/commands/clients.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 // Adapter helpers are used only to *build* realistic fixtures. The core undo
-// under test imports no plugin code — these prove the round-trip against what
+// under test imports no plugin code: these prove the round-trip against what
 // `attach()` actually wrote (LLP 0045 §Part 3, task T4).
 import { attach as claudeAttach } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
 import { prepareAttach as codexPrepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
 
 /**
  * T4 (LLP 0045/0046): the single core undo (= detach). `client_detach_disk.js`
- * reverses a client's attach from disk alone — the descriptor's `attachProbe`
+ * reverses a client's attach from disk alone: the descriptor's `attachProbe`
  * plus the settings-file marker, format-aware (json marker-key / toml
  * managed-block) but plugin-agnostic. These tests run the undo with **no plugin
  * loaded** at reverse time, proving it never depends on `ctx.clients`.
@@ -269,8 +269,8 @@ test('claude undo of a LEGACY pre-upgrade marker (no managed record) detaches fu
     // The old marker shape attach wrote before the self-describing `managed`
     // undo record existed: {attached_at,version,port,state_file} only, no
     // `managed`/`prev_base_url`. Reached by a manual `hyp detach` after upgrade.
-    // The undo must fall back to the original convention — remove the gateway
-    // base URL, strip the `claude-hook session-context` hooks — so nothing is
+    // The undo must fall back to the original convention, remove the gateway
+    // base URL, strip the `claude-hook session-context` hooks, so nothing is
     // left orphaned (deleting the marker alone is non-retryable half-reversal).
     const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
     const fixture = {
@@ -576,7 +576,7 @@ test('undo is a no-op for a descriptor without an attachProbe', async () => {
 
 /**
  * An `fs` double that delegates to the real `node:fs/promises` for everything
- * except the temp-file handle's `sync()`, which throws — simulating a
+ * except the temp-file handle's `sync()`, which throws, simulating a
  * write/fsync failure *after* the uniquely-named temp file is created but
  * *before* the final rename. Used to prove the atomic writer never orphans the
  * temp file on a partial write.
@@ -600,7 +600,7 @@ function makeSyncFailingFs() {
   })
 }
 
-test('the atomic write unlinks the temp file on a partial write — no orphaned .tmp', async () => {
+test('the atomic write unlinks the temp file on a partial write - no orphaned .tmp', async () => {
   const home = await stageHome()
   try {
     const original = { env: { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: 'https://foreign.example/api' } }
@@ -611,7 +611,7 @@ test('the atomic write unlinks the temp file on a partial write — no orphaned 
     const dir = path.dirname(settingsPath)
     const before = (await fs.readdir(dir)).sort()
 
-    // The injected fs fails the fsync — after the temp file exists, before rename.
+    // The injected fs fails the fsync: after the temp file exists, before rename.
     await assert.rejects(
       detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home, fs: makeSyncFailingFs() }),
       /simulated fsync failure/

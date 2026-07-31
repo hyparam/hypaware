@@ -70,7 +70,7 @@ export interface CentralSinkConfig {
   }
   /**
    * Poll cadence (seconds) for the config-pull loop. Default 300s
-   * (5 minutes) — 304s are cheap, and propagation latency equals this
+   * (5 minutes): 304s are cheap, and propagation latency equals this
    * cadence (no push channel in V1). The running config's etag is
    * kernel-managed (LLP 0025); the plugin reads it through the
    * `configControl` facade, so there is no plugin-side sidecar path.

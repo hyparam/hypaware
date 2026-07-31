@@ -12,7 +12,7 @@
 
 > **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** Query-shaped
 > operations register as **verbs** (`ctx.verbs.register`), from which the kernel
-> projects *both* a CLI command and an MCP tool — one typed `inputSchema`, no CLI
+> projects *both* a CLI command and an MCP tool: one typed `inputSchema`, no CLI
 > ↔ tool drift. Imperative/interactive commands stay `ctx.commands.register`. The
 > core `--remote` flag ([LLP 0033](./0033-remote-query-attach.spec.md)) routes a
 > verb to a remote MCP tool; being core-defined, it does not violate
@@ -41,10 +41,10 @@ The binary is `hypaware`, with `hyp` as an alias
 ### Top-level help lists plugin commands without booting
 
 `hyp --help` renders *before* `bootKernel`, so the activated registry holds
-only core commands at that point — booting just to populate it would import
+only core commands at that point: booting just to populate it would import
 every plugin entrypoint and bind the gateway/OTLP listeners some plugins open
 during activation. Instead, top-level help reads the same cheap inputs boot uses
-for *discovery* — plugin manifests (plain JSON) and the effective config — and
+for *discovery*, plugin manifests (plain JSON) and the effective config, and
 lists the commands each **config-active** plugin *declares* in its manifest
 `contributes.commands` ([LLP 0005](./0005-plugin-manifest.spec.md#declarative):
 "list datasets/commands before any plugin code is loaded"). The listing is

@@ -8,7 +8,7 @@
 **Related:** LLP 0016 (ai-gateway), LLP 0044 (client attach on join), LLP 0045 (client attach design), LLP 0109 (OpenClaw client adapter)
 
 > Reverses the *mechanism* in LLP 0109, not its goal. The AI gateway proxy
-> stays the capture path — it is the only seam that yields real request
+> stays the capture path: it is the only seam that yields real request
 > bodies, real status codes, stream events, and a record that cannot be
 > silently skipped. What changes is how OpenClaw traffic is steered into
 > it: an OpenClaw-side plugin instead of an edit to the user's
@@ -46,13 +46,13 @@ modelOverride }` and is awaited before model resolution
 (`openclaw` repo, `src/agents/pi-embedded-runner/run/setup.ts`). It
 re-fires per fallback candidate: `runWithModelFallback` loops candidates,
 each candidate calls `runAgentAttempt`, which calls `runEmbeddedPiAgent`,
-which calls `resolveHookModelSelection` — so every candidate gets a fresh
+which calls `resolveHookModelSelection`, so every candidate gets a fresh
 hook invocation, not just the primary. Image-model fallbacks run through
 the same candidate collector.
 
-A plugin can also contribute provider catalog entries programmatically —
+A plugin can also contribute provider catalog entries programmatically,
 `api.registerProvider({ catalog: { run } })` returning
-`providers: { <id>: { baseUrl, api, apiKey } }` — so the shadow provider
+`providers: { <id>: { baseUrl, api, apiKey } }`, so the shadow provider
 does not have to exist in the user's config file at all.
 
 Two further facts bound the alternatives:
@@ -60,8 +60,8 @@ Two further facts bound the alternatives:
 - OpenClaw does not honor `ANTHROPIC_BASE_URL` anywhere (verified: no
   reads in core or the bundled Anthropic plugin), so environment steering
   is not available.
-- `wrapStreamFn` and `prepareRuntimeAuth` — the hooks that wrap the actual
-  model call — are **owner-scoped**: `resolveProviderRuntimePlugin`
+- `wrapStreamFn` and `prepareRuntimeAuth`: the hooks that wrap the actual
+  model call, are **owner-scoped**: `resolveProviderRuntimePlugin`
   resolves only the plugin that owns the provider id, then filters by
   `matchesProviderId`. A third-party plugin cannot wrap another vendor's
   provider. This rules out a pure in-process observer, and is also why
@@ -76,7 +76,7 @@ Two further facts bound the alternatives:
 2. **Global `undici` dispatcher interceptor from a plugin service.** Sits
    below provider resolution, so it catches everything in-process with no
    steering at all. Rejected: it is monkeypatching an undocumented
-   internal, so an OpenClaw upgrade can break capture *silently* — the
+   internal, so an OpenClaw upgrade can break capture *silently*, the
    same class of failure this decision exists to remove. It also misses
    call sites that pass an explicit dispatcher, of which OpenClaw has
    several.
@@ -118,7 +118,7 @@ nothing is written to disk is LLP 0143.
   **is** subject to preservation. Two things make that harmless: the
   gateway listens on a fixed default port (LLP 0114), so the preserved
   value equals the fresh one; and `prepareRuntimeAuth` may return a
-  `baseUrl` per request, which overrides whatever the cache holds — the
+  `baseUrl` per request, which overrides whatever the cache holds, the
   same mechanism GitHub Copilot uses to swap endpoints at request time.
   The plugin should return the gateway baseUrl there as a belt-and-braces
   measure.
@@ -129,14 +129,14 @@ nothing is written to disk is LLP 0143.
   reason the plugin does not simply consume OpenClaw's `llm_input` /
   `llm_output` hooks instead: those fire once per turn (not per HTTP call),
   carry no response bodies or status codes, and are dispatched
-  fire-and-forget with errors swallowed — so mid-turn model inputs are
+  fire-and-forget with errors swallowed, so mid-turn model inputs are
   invisible and dropped events leave no gap marker.
 - LLP 0109 is superseded in its attach mechanism. Its status is its
   author's to change; this document does not flip it.
 
 **Subagents are covered.** Verified: a subagent spawn is a
 `callGateway({ method: "agent" })` call (`src/agents/subagent-spawn.ts`),
-which re-enters the same agent pipeline — fallback loop, embedded runner,
+which re-enters the same agent pipeline, fallback loop, embedded runner,
 and the `before_model_resolve` hook with it.
 
 **Direct-fetch tool paths are not covered, and must be named.** OpenClaw's

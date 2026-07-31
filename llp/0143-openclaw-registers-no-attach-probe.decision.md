@@ -21,8 +21,8 @@ that attach performed a **reversible write to the client's own settings
 file**, with the marker doubling as the backup.
 
 LLP 0109 satisfied that precondition by inventing a third probe format,
-`json_path`, because OpenClaw's config is strictly validated — a top-level
-`_hypaware` key would stop the OpenClaw gateway from starting — so the undo
+`json_path`, because OpenClaw's config is strictly validated, a top-level
+`_hypaware` key would stop the OpenClaw gateway from starting, so the undo
 record had to ride inside the injected provider's free-form `headers` map.
 
 LLP 0152 removes the write. There is nothing left on disk to reverse.
@@ -64,7 +64,7 @@ One further fact makes this cheap: **OpenClaw is the sole remaining
   `skill_dir` (and `agent_dir` if added) stay, since those are labels and
   are read as such.
 - `hyp detach --client openclaw` returns `{ changed: false }` at
-  `detachClientFromDisk`'s existing no-probe guard — an honest no-op,
+  `detachClientFromDisk`'s existing no-probe guard, an honest no-op,
   matching Desktop.
 - The retraction path is OpenClaw's own: uninstall or disable the HypAware
   OpenClaw plugin. Attach's forward path is likewise plugin installation,
@@ -83,7 +83,7 @@ untouched. Nothing about `json`/`toml` clients changes.
 ## Consequences
 
 - Core loses a whole probe/undo format that LLP 0109 added and that now has
-  no callers — a net simplification of the attach surface, not a
+  no callers: a net simplification of the attach surface, not a
   workaround.
 - `hyp status` no longer reports OpenClaw attach state from disk. Whether
   it should learn to report it from OpenClaw's plugin registry instead is
@@ -94,7 +94,7 @@ untouched. Nothing about `json`/`toml` clients changes.
   removing the format removes the code that would have reversed it. This is
   accepted as a **breaking change**: the OpenClaw adapter has no meaningful
   installed base yet, so paying for a migration path costs more than it
-  saves. No deprecation window, no one-release grace period — the format
+  saves. No deprecation window, no one-release grace period: the format
   goes with the write it described.
 - Anyone who did attach under LLP 0109 removes the leftovers by hand: delete
   the `models.providers.hypaware` block and restore `model.primary` to the

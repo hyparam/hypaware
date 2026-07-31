@@ -50,7 +50,7 @@ export const ATTACH_WAIT_DEFAULT_MS = 30000
  *
  * We probe *only* those markers (`probeAttachedClients`), not the full
  * `collectHypAwareStatus`: the descriptors are loaded once and each poll just
- * re-reads the client settings files, so a poll is cheap and — the point — never
+ * re-reads the client settings files, so a poll is cheap and, the point, never
  * walks the cache, whose fs errors the full collector's `walkForStats` re-throws
  * (EACCES/EMFILE/EIO). As belt-and-suspenders the poll is still guarded, so even
  * a probe that somehow throws is swallowed as "not attached this tick" and the
@@ -289,7 +289,7 @@ export async function runRemoteAdd(argv, ctx) {
  * the advisory machine label sent with the token exchange (LLP 0061 D6).
  *
  * `--no-forward` declines fleet enrollment (LLP 0063 D3): sign in for queries
- * only — the login-minted gateway is discarded, no central sink is written.
+ * only, the login-minted gateway is discarded, no central sink is written.
  * `--no-daemon` provisions the sink but skips the service install (D5).
  *
  * @param {string[]} argv
@@ -485,7 +485,7 @@ async function persistStaticToken(name, token, ctx) {
  * login gateway (LLP 0061), the returned credential is seeded into the
  * matching `central` forward sinks' persisted identity. On a fresh box with
  * no such sink, an enrolling login *provisions* one (LLP 0063) so logs forward
- * from one command — unless `--no-forward` declines it.
+ * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts

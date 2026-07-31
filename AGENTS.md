@@ -241,7 +241,7 @@ release notes.
 Design rationale lives in numbered **LLP** documents under `llp/`, driven by neutral.
 
 - **Immutable docs; change is a new request.** An Accepted/Active LLP is a
-  *record*, not a worksheet — do not edit what it decided or required. To change
+  *record*, not a worksheet: do not edit what it decided or required. To change
   intent, mint a **new request** (`rfc`/`spec`/`issue`) that `@ref`s what it
   supersedes, and append a `Superseded-by:`/`Extended-by: LLP NNNN` forward-ref to
   the applicable parts of the old doc. Trivial editorial fixes (typos, links,
