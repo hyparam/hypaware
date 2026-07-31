@@ -7,7 +7,7 @@ import { asyncRow, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanColumnOptions, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanColumnOptions, ScanColumnResults, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /**
@@ -77,12 +77,17 @@ function fakeColumnSource(column, values, seenOptions, chunkSize = 2) {
 }
 
 /**
- * @param {AsyncIterable<ArrayLike<SqlPrimitive>>} chunks
+ * Normalizes squirreling's `scanColumn` return, which is a union: a bare
+ * `AsyncIterable` (what `unionSources` yields today) or the newer
+ * `ScanColumnResults` wrapper (`.chunks()`). `@ref LLP 0055`.
+ *
+ * @param {AsyncIterable<ArrayLike<SqlPrimitive>> | ScanColumnResults} result
  * @returns {Promise<SqlPrimitive[]>}
  */
-async function flattenColumn(chunks) {
+async function flattenColumn(result) {
   /** @type {SqlPrimitive[]} */
   const out = []
+  const chunks = 'chunks' in result ? result.chunks() : result
   for await (const chunk of chunks) {
     for (let i = 0; i < chunk.length; i++) out.push(chunk[i])
   }
@@ -144,6 +149,51 @@ test('unionSources does not expose scanColumn when any partition lacks it', () =
     fakeColumnSource('id', ['b1'], colSeen),
   ])
   assert.equal(union.scanColumn, undefined, 'engine falls back to the buffering scan path')
+})
+
+/**
+ * Fake AsyncDataSource whose `scanColumn` returns the newer
+ * `ScanColumnResults` shape (`.chunks()` plus the `appliedWhere`/
+ * `appliedLimitOffset` hint flags) instead of a bare `AsyncIterable`,
+ * matching what a future source (or squirreling's own type union) may
+ * return. `@ref LLP 0055`.
+ *
+ * @param {string} column
+ * @param {SqlPrimitive[]} values
+ * @param {number} [chunkSize]
+ * @returns {AsyncDataSource}
+ */
+function fakeColumnResultsSource(column, values, chunkSize = 2) {
+  return {
+    columns: [column],
+    numRows: values.length,
+    scan() {
+      return { appliedWhere: false, appliedLimitOffset: false, async *rows() {} }
+    },
+    scanColumn() {
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *chunks() {
+          for (let i = 0; i < values.length; i += chunkSize) {
+            yield values.slice(i, i + chunkSize)
+          }
+        },
+      }
+    },
+  }
+}
+
+test('unionSources concatenates a child scanColumn that returns ScanColumnResults, not just a bare AsyncIterable', async () => {
+  const union = unionSources([
+    fakeColumnResultsSource('id', ['a1', 'a2', 'a3']),
+    fakeColumnResultsSource('id', ['b1', 'b2']),
+  ])
+  const scanColumn = union.scanColumn
+  if (!scanColumn) throw new Error('expected union to expose scanColumn when every partition does')
+
+  const values = await flattenColumn(scanColumn({ column: 'id' }))
+  assert.deepEqual(values, ['a1', 'a2', 'a3', 'b1', 'b2'], 'chunks() results concatenated the same as a bare AsyncIterable')
 })
 
 test('emptySource scanColumn yields an empty column stream', async () => {

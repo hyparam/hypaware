@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { AsyncDataSource, ExprNode, ScanColumnOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, ScanColumnOptions, ScanColumnResults, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /**
@@ -98,7 +98,7 @@ export function unionSources(sources) {
         let yielded = 0
         for (const scanColumn of columnScanners) {
           if (yielded >= cap) return
-          for await (const chunk of scanColumn({ column, signal })) {
+          for await (const chunk of columnChunks(scanColumn({ column, signal }))) {
             let start = 0
             if (skipped < remainingOffset) {
               const toSkip = Math.min(remainingOffset - skipped, chunk.length)
@@ -119,6 +119,25 @@ export function unionSources(sources) {
       },
     }),
   }
+}
+
+/**
+ * Normalize a child source's `scanColumn` result to a plain chunk iterable.
+ * squirreling's `AsyncDataSource.scanColumn` return type is a union: legacy
+ * sources (icebird's current `scanColumn`, `@ref LLP 0055`) yield a bare
+ * `AsyncIterable` directly; newer sources may return `ScanColumnResults`
+ * (mirroring `ScanResults`' `appliedWhere`/`appliedLimitOffset` hint shape)
+ * with the chunks behind a `.chunks()` accessor. The union never forwards
+ * `where` into a child `scanColumn` call (`@ref LLP 0055`: the streaming
+ * aggregate path never carries a filter), so the hint flags on the newer
+ * shape don't need to be read here, only the chunk stream.
+ *
+ * @param {AsyncIterable<ArrayLike<SqlPrimitive>> | ScanColumnResults} result
+ * @returns {AsyncIterable<ArrayLike<SqlPrimitive>>}
+ * @ref LLP 0055 [implements]: normalize both scanColumn result shapes so the union can concatenate chunks uniformly
+ */
+function columnChunks(result) {
+  return 'chunks' in result ? result.chunks() : result
 }
 
 /**
