@@ -39,6 +39,8 @@ function makeBuf() {
 test('activate() registers the openclaw client with an honest no-op attach()', async () => {
   /** @type {any} */
   let registeredClient
+  /** @type {any} */
+  let registeredBackfill
   const gateway = /** @type {any} */ ({
     registerUpstreamPreset() {},
     registerExchangeProjector() {},
@@ -51,6 +53,7 @@ test('activate() registers the openclaw client with an honest no-op attach()', a
     env: {},
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
+    backfills: { register(contribution) { registeredBackfill = contribution } },
     requireCapability: () => gateway,
   })
 
@@ -59,6 +62,14 @@ test('activate() registers the openclaw client with an honest no-op attach()', a
   assert.ok(registeredClient, 'activate() registered a client')
   assert.equal(registeredClient.name, 'openclaw')
   assert.equal(registeredClient.defaultUpstream, 'anthropic')
+
+  // The session-transcript backfill provider rides the same activation, the
+  // imperative `ctx.backfills.register(...)` house pattern @hypaware/codex
+  // already follows. @ref LLP 0161#backfill-provider [tests]
+  assert.ok(registeredBackfill, 'activate() registered a backfill provider')
+  assert.equal(registeredBackfill.name, 'openclaw')
+  assert.equal(registeredBackfill.plugin, '@hypaware/openclaw')
+  assert.deepEqual(registeredBackfill.datasets, ['ai_gateway_messages'])
 
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -85,6 +96,7 @@ test('activate() attach() emits the same report under --json, still writing noth
     env: {},
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
+    backfills: { register() {} },
     requireCapability: () => gateway,
   })
   await activate(ctx)
@@ -125,14 +137,18 @@ test('activate() registers the settlement enricher right after the exchange proj
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
     requireCapability: () => gateway,
+    backfills: { register() { calls.push('backfill') } },
   })
 
   await activate(ctx)
 
   // Assert the ADJACENCY this test is about, not the preset count: how many
   // upstream presets activate() registers is Section 3.4's business (one per
-  // wire shape) and grows independently of this placement.
-  assert.deepEqual(calls.slice(calls.indexOf('projector')), ['projector', 'enricher', 'client'])
+  // wire shape) and grows independently of this placement. The backfill
+  // provider registers between the enricher and the client
+  // (LLP 0161#backfill-provider); this test only pins the
+  // projector/enricher adjacency, not the trailing registrations.
+  assert.deepEqual(calls.slice(calls.indexOf('projector')), ['projector', 'enricher', 'backfill', 'client'])
   assert.ok(calls.every((call, i) => i >= calls.indexOf('projector') || call === 'preset'))
   assert.equal(enricher.name, 'openclaw-settlement')
   assert.equal(enricher.clientName, 'openclaw')

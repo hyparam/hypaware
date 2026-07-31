@@ -4,6 +4,7 @@ import os from 'node:os'
 
 import { Attr, getLogger, readObservabilityEnv, withSpan } from '../../../../src/core/observability/index.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { createOpenclawBackfillProvider } from './backfill.js'
 import { OPENCLAW_CONFIG_SECTION, validateOpenclawConfig } from './config.js'
 import { anthropicUpstreamPreset, createOpenclawExchangeProjector, openaiUpstreamPreset } from './projector.js'
 import { createOpenclawSettlementEnricher } from './settle.js'
@@ -45,11 +46,12 @@ export const configSection = { section: OPENCLAW_CONFIG_SECTION, validate: valid
  * Activate the `@hypaware/openclaw` adapter plugin.
  *
  * Resolves the `hypaware.ai-gateway@^2.0.0` capability, registers the
- * Anthropic upstream preset, the header-gated OpenClaw exchange projector
- * and the flush-time settlement enricher that upgrades the projector's
- * fallback-identity rows to the session file's native identity, and
- * registers the `openclaw` client so `hyp attach openclaw` /
- * `hyp detach openclaw` / `hyp clients openclaw` keep resolving it.
+ * Anthropic upstream preset, the header-gated OpenClaw exchange projector,
+ * the flush-time settlement enricher that upgrades the projector's
+ * fallback-identity rows to the session file's native identity, and the
+ * session-transcript backfill provider, and registers the `openclaw`
+ * client so `hyp attach openclaw` / `hyp detach openclaw` / `hyp clients
+ * openclaw` keep resolving it.
  *
  * Routing is no longer a HypAware-side settings write (LLP 0152): OpenClaw
  * traffic is steered by the `@hypaware/openclaw-steering-plugin` npm
@@ -129,6 +131,28 @@ export async function activate(ctx) {
       homeDir: ctx.env.HOME ?? os.homedir(),
       env: ctx.env,
       clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
+    })
+  )
+
+  // Backfill provider: imports the OpenClaw session transcripts the gateway
+  // never saw (history written before the steering plugin was installed, or
+  // outside the proxy) into `ai_gateway_messages` via `hyp backfill openclaw`.
+  // Registered imperatively at activation, the house pattern the Codex adapter
+  // already follows, with the `backfill` policy (`on_join`, `window_days`)
+  // declared and validated in this plugin's own config section above.
+  // @ref LLP 0161#backfill-provider [implements]: registered via
+  //   ctx.backfills.register(...) in activate(), mirroring Codex's placement
+  // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
+  //   the backfill gate so a `--private` (`ignore`) dir is skipped here too,
+  //   never re-importing sessions live capture already dropped. The list lives
+  //   at the SHARED state root, not the per-plugin `ctx.paths.stateDir` where
+  //   the file never exists.
+  ctx.backfills.register(
+    createOpenclawBackfillProvider({
+      homeDir: ctx.env.HOME ?? os.homedir(),
+      clientName: CLIENT_NAME,
+      pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
     })
   )
