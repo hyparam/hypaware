@@ -2,7 +2,7 @@
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { OPENCLAW_CONFIG_SECTION, validateOpenclawConfig } from './config.js'
-import { anthropicUpstreamPreset, createOpenclawExchangeProjector } from './projector.js'
+import { anthropicUpstreamPreset, createOpenclawExchangeProjector, openaiUpstreamPreset } from './projector.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -11,6 +11,7 @@ import { anthropicUpstreamPreset, createOpenclawExchangeProjector } from './proj
 const PLUGIN_NAME = '@hypaware/openclaw'
 const CLIENT_NAME = 'openclaw'
 const UPSTREAM_NAME = 'anthropic'
+const OPENAI_UPSTREAM_NAME = 'openai'
 const STEERING_PLUGIN_NAME = '@hypaware/openclaw-steering-plugin'
 
 /**
@@ -90,6 +91,17 @@ export async function activate(ctx) {
   // so whichever registers last changes nothing.
   // @ref LLP 0109#gateway-capture [implements]: registers the anthropic upstream preset itself iff not already present
   gateway.registerUpstreamPreset(upstreamPreset)
+
+  const openaiPreset = openaiUpstreamPreset()
+  if (openaiPreset.name !== OPENAI_UPSTREAM_NAME) {
+    throw new Error(`@hypaware/openclaw: unexpected upstream preset name ${openaiPreset.name}`)
+  }
+  // Same "register iff not already present" reasoning as the anthropic
+  // preset above: the Codex plugin may or may not be active, and both
+  // plugins contribute the identical `openai` preset, so whichever
+  // registers last changes nothing.
+  // @ref LLP 0161#upstream-presets [implements]: registers the openai upstream preset itself iff not already present, so an OpenClaw-only install still routes steered OpenAI-shaped traffic
+  gateway.registerUpstreamPreset(openaiPreset)
 
   gateway.registerExchangeProjector(createOpenclawExchangeProjector())
 
