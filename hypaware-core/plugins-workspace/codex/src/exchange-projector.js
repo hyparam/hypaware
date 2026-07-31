@@ -754,7 +754,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
   // identifies the exchange on its own, so the API-key route's generic
   // `/v1/responses` resolves with no Codex header at all.
   const transportIsCodex = hasCodexTransportSignal(input, provider, path)
-  // @ref LLP 0164#flat-pair-corroboration [implements]: naming the client and
+  // @ref LLP 0165#flat-pair-corroboration [implements]: naming the client and
   // trusting its unnamespaced identity pair are two different questions, and the
   // user-agent may only answer the first. Passing the narrow predicate here is
   // the whole of that split.
@@ -907,7 +907,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
  *
  * This, and NOT the looser `hasCodexTransportSignal`, is what corroborates a
  * `client_metadata` map carrying no Codex-owned key of its own.
- * @ref LLP 0164#flat-pair-corroboration [implements]: the strict half of the
+ * @ref LLP 0165#flat-pair-corroboration [implements]: the strict half of the
  * split, the only half a partition key is allowed to rest on.
  *
  * @param {AiGatewayExchangeInput} input
@@ -932,7 +932,7 @@ function hasCodexNamespaceSignal(input, provider, path) {
  * label a row's client, which is a description, and not enough to promote an
  * unnamespaced `client_metadata` pair into `conversation_id` and the LLP 0030
  * partition key, which is an identity.
- * @ref LLP 0164#flat-pair-corroboration [implements]: the loose half, which may
+ * @ref LLP 0165#flat-pair-corroboration [implements]: the loose half, which may
  * name the client and nothing more.
  *
  * @param {AiGatewayExchangeInput} input
@@ -969,7 +969,7 @@ function hasCodexTransportSignal(input, provider, path) {
  * @ref LLP 0151#body-is-authority: the always-present lineage surface.
  * @ref LLP 0151#body-is-a-codex-signal [constrained-by]: which keys of the map
  * are evidence of Codex, and which only carry detail.
- * @ref LLP 0164#flat-pair-corroboration [constrained-by]: which transport signals
+ * @ref LLP 0165#flat-pair-corroboration [constrained-by]: which transport signals
  * may corroborate the pair.
  *
  * @param {unknown} reqBody
@@ -1118,7 +1118,7 @@ function resolveConversationId(reqBody, input, provider, path, codexContext) {
   // else. No Codex turn states its lineage in the `thread-id` / `session-id`
   // header names that used to be consulted here, so they could only ever have
   // let a non-Codex hop dictate this row's identity.
-  // @ref LLP 0164#header-audit-correction [constrained-by]: those two names are
+  // @ref LLP 0165#header-audit-correction [constrained-by]: those two names are
   // real on Codex's compaction and websocket paths, and still not read here,
   // because the turn-metadata blob states the same ids for that request kind.
   if (codexContext?.thread_id) return codexContext.thread_id

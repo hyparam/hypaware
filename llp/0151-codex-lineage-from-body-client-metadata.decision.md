@@ -43,7 +43,7 @@ Two consequences the projector was on the wrong side of:
    ([LLP 0030](./0030-session-id-partition-key.decision.md)). `parent-thread-id`
    was simply the wrong spelling of the real `x-codex-parent-thread-id`, so
    header-route subagent lineage never resolved at all.
-   (**Extended-by: [LLP 0164](./0164-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction)** -
+   (**Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction)** -
    two of the three are real names on paths this audit did not reach, and
    correctly unread anyway.)
 
@@ -95,7 +95,7 @@ defect class as the fictional `thread-id` header
 header, and in a capture product a misfiled client is a privacy question and not
 a cosmetic one.
 
-> **Extended-by: [LLP 0164](./0164-codex-flat-pair-needs-a-namespace-signal.decision.md#flat-pair-corroboration).**
+> **Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#flat-pair-corroboration).**
 > The user-agent branch is dropped from the corroborating predicate below. It
 > is a product-name convention any local process can copy, so it may name the
 > client but not promote the flat pair into the partition key. The other three
@@ -133,7 +133,7 @@ read.** The audit of every header this file reads:
 | `x-oai-request-id` (response) | yes | the service |
 | ~~`thread-id`~~, ~~`session-id`~~, ~~`parent-thread-id`~~ | **no** | nothing emits them; removed |
 
-> **Extended-by: [LLP 0164](./0164-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction).**
+> **Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction).**
 > The last row overstates: `session-id` and `thread-id` are real header names on
 > Codex's `/responses/compact` and websocket-handshake paths, though not on the
 > turn-streaming path this document audited, and `parent-thread-id` is fictional

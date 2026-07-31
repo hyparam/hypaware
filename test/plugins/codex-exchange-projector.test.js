@@ -1485,7 +1485,7 @@ test('Codex lineage resolves from the compatibility headers Codex actually sends
 // under these bare names, so reading them only let an unrelated proxy hop or a
 // hand-rolled client dictate `conversation_id`, which is the partition-adjacent
 // row identity. They must therefore resolve to nothing.
-// @ref LLP 0164#header-audit-correction [tests]: `parent-thread-id` is fictional
+// @ref LLP 0165#header-audit-correction [tests]: `parent-thread-id` is fictional
 // outright, while `thread-id` and `session-id` are real on the compaction and
 // websocket-handshake paths and still unread, since the turn-metadata blob
 // states the same ids for the one request kind that carries them.
@@ -1702,7 +1702,7 @@ test('a namespace-corroborated Codex request still resolves lineage from a flat-
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
-// @ref LLP 0164#flat-pair-corroboration [tests]: the user-agent is a product-name
+// @ref LLP 0165#flat-pair-corroboration [tests]: the user-agent is a product-name
 // convention any local process can copy, so it may name the client but must not
 // promote an uncorroborated flat pair into the LLP 0030 partition key. The two
 // halves are asserted together: the row is still called Codex (all four signals
@@ -1734,7 +1734,7 @@ test('a Codex user-agent alone does not let a flat client_metadata pair dictate 
   assert.equal(projection.session_id, control.session_id)
 })
 
-// @ref LLP 0164#flat-pair-corroboration [tests]: dropping the user-agent branch
+// @ref LLP 0165#flat-pair-corroboration [tests]: dropping the user-agent branch
 // from the strict predicate must not cost a Codex build that still writes an
 // `x-codex-*` entry into its map. That key names the client on its own, so a
 // user-agent-only transport keeps full lineage whenever the map is self-naming.
