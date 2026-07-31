@@ -170,6 +170,15 @@ one you ran it on.
   configured for **both** `anthropic` and `openai`. Both shapes are
   needed: the `openai` turn is the only observation that proves
   `x-hypaware-upstream` actually arrives (step 4).
+- **OpenClaw 2026.4.24 or newer** (`openclaw --version`). The
+  `before_model_resolve` hook this plugin steers from arrived in 2026.4.21,
+  and the `hooks.allowConversationAccess` gate below arrived with the
+  2026.4.23 plugin-config schema. On an older build the config key is
+  rejected outright (`Unrecognized key: "allowConversationAccess"`, and
+  OpenClaw rolls the file back to last-known-good), which leaves the plugin
+  loading and registering both providers while steering nothing. Check the
+  version first: every later step reads as a HypAware failure when the real
+  cause is the host.
 - HypAware installed from the package under test, `@hypaware/openclaw`
   enabled, daemon running.
 - The steering plugin installed into OpenClaw *from the tree under test*.
@@ -199,8 +208,12 @@ one you ran it on.
 
   `before_model_resolve` is one of OpenClaw's raw conversation hooks, and
   OpenClaw will not run it for a non-bundled plugin without
-  `allowConversationAccess`: without it the providers still register, no
-  turn is ever steered, and nothing says so. `HYP_GATEWAY_ENDPOINT` is read
+  `allowConversationAccess`: the gate applies only to plugins loaded from
+  `plugins.load.paths` (which is exactly where `--link` puts this one), and
+  when it blocks, `api.on(...)` returns without throwing. The providers
+  still register, the plugin still reports as loaded, no turn is ever
+  steered, and the only trace is a `pluginDiagnostics` warning in the
+  gateway log. `HYP_GATEWAY_ENDPOINT` is read
   once at plugin load; absent it the plugin assumes the fixed default port
   ([LLP 0114](../llp/0114-gateway-default-listen-port-fixed.decision.md)),
   which is wrong whenever the daemon fell back to an ephemeral bind. Put
@@ -225,19 +238,41 @@ requirements this procedure checks), [LLP 0161](../llp/0161-openclaw-full-captur
    jq -r '.sources[] | select(.plugin == "@hypaware/ai-gateway")
           | "http://\(.details.host):\(.details.port)"' \
      "${HYP_HOME:-$HOME/.hyp}/hypaware/run/status.json"
-   openclaw plugins inspect hypaware-openclaw-steering --runtime --json \
-     | jq '{status: .plugin.status, providers: .plugin.providerIds,
-            hooks: [.typedHooks[].name]}'
+   INSPECT=$(openclaw plugins inspect hypaware-openclaw-steering --runtime --json)
+   printf '%s\n' "$INSPECT"
+   for token in hypaware-anthropic hypaware-openai before_model_resolve; do
+     printf '%-24s %s\n' "$token" "$(printf '%s' "$INSPECT" | grep -c -- "$token")"
+   done
    ```
 
    Pass condition: `hyp status` shows a running daemon and `openclaw` among
    the clients; the printed gateway URL equals the `HYP_GATEWAY_ENDPOINT`
-   you configured; and the inspect JSON reports `status: "loaded"`,
-   `providers` containing both `hypaware-anthropic` and `hypaware-openai`,
-   and `hooks` containing `before_model_resolve`. `openclaw plugins list`
-   will not do instead: it is a cold registry read, while `inspect
-   --runtime` imports the module and reports what `register(api)` actually
-   registered.
+   you configured; the report says the plugin is loaded (not errored, not
+   disabled); and all three tokens are present in it. `openclaw plugins
+   list` will not do instead: it is a cold registry read, while `inspect
+   --runtime` imports the module and reports the tools, hooks, services,
+   gateway methods and commands a live gateway actually registered.
+
+   Read the report, do not assert against a key path. OpenClaw documents
+   `--runtime --json` as the machine-readable form of the same report and
+   describes its *contents* (identity, load status, source, registered
+   capabilities, hooks, diagnostics) without publishing a key schema, so
+   the field names are its to change between releases and a `jq` selector
+   written here would fail as a missing key rather than as a missing
+   registration - a false negative pointing at the wrong system. Grepping
+   the three tokens is version-proof by comparison: two are provider ids
+   this repo owns (`openclaw-steering-plugin/src/index.js`) and the third
+   is OpenClaw's own documented hook name. None of them is a key name
+   OpenClaw invents for the shape of its report.
+   `openclaw plugins inspect hypaware-openclaw-steering --runtime` without
+   `--json` prints the same report for a human to read.
+
+   If your build has no `--runtime` flag (it is absent from some published
+   CLI references, and `inspect` alone is a cold manifest and registry
+   check that cannot prove registration), do not substitute the cold read.
+   Skip to step 3 and let step 4 carry this assertion instead: an `openai`
+   row there is only reachable through both shadow providers and a hook
+   that steered, so it proves at once what this step checks separately.
 
    Expect `hyp status` to also carry a `client_attach_missing` warning for
    `openclaw`, telling you to run `hyp attach openclaw`. It is inert here
@@ -414,10 +449,15 @@ requirements this procedure checks), [LLP 0161](../llp/0161-openclaw-full-captur
 
 ### If it fails
 
-- Step 1 shows the providers but no `before_model_resolve` hook: the
-  `allowConversationAccess` entry is missing or names a different plugin
-  id. The id is `hypaware-openclaw-steering` (the manifest's `id`), not
-  the npm package name.
+- Step 1 finds both provider ids but a zero count for
+  `before_model_resolve`: the hook was registered and silently dropped, so
+  look for a `pluginDiagnostics` warning in `openclaw logs` naming this
+  plugin. The usual cause is an `allowConversationAccess` entry that is
+  missing or filed under a different key: it belongs to the plugin's
+  manifest `id`, `hypaware-openclaw-steering`, not the npm package name
+  (`@hypaware/openclaw-steering-plugin`) and not under `.config`. If the
+  entry is present and correct, check `openclaw --version` against the
+  floor in **Requires** before suspecting the plugin.
 - Step 4 finds no rows at all: check the printed gateway URL against
   `HYP_GATEWAY_ENDPOINT` first (a daemon that fell back to an ephemeral
   port leaves the plugin talking to whatever holds the default), then
