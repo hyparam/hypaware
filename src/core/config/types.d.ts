@@ -649,8 +649,8 @@ export interface DetachFromDiskResult {
    * The prior value restored from the undo record.
    *
    * **Single-primary only.** An undo whose replay restores more than one
-   * prior (a `json_path` record with two still-ours `set` entries that each
-   * carry a `prev`) restores them all on disk but reports only one of them
+   * prior (a record with two still-ours `set` entries that each carry a
+   * `prev`) restores them all on disk but reports only one of them
    * here, and *which* one is unspecified. Unlike `warning` there is no fold
    * available: both consumers render this as a bare scalar
    * (`src/core/commands/clients.js` puts it in the `hyp detach --json`
@@ -665,9 +665,29 @@ export interface DetachFromDiskResult {
    */
   restoredValue?: string
   /**
+   * Dotted paths whose `prev_malformed` backup the undo put back - the blocks
+   * attach had to rebuild because they were present on disk with the wrong JSON
+   * type (LLP 0163). Absent when the replay restored nothing.
+   *
+   * **Paths, never values.** A malformed `env` block is exactly where an API key
+   * ends up, and this list is printed to the terminal and echoed into
+   * `hyp detach --json`; LLP 0163 already forbids the attach-side warnings from
+   * echoing the displaced value, and the same rule applies on the way back.
+   * That is also why this cannot ride on `restoredValue`, which both consumers
+   * render as a bare value.
+   *
+   * It is a list rather than a joined string because the failure half of the
+   * same replay is already unsplittable prose in `warning`: a successful restore
+   * has nothing to say but the path, so there is no reason to hand callers
+   * something they would have to parse. Without it a restore that fired was
+   * completely silent - `hyp detach` printed only `✓ Detached claude` while it
+   * rewrote a block (#500 finding 3).
+   */
+  restoredPaths?: string[]
+  /**
    * Set when a managed value was overridden externally and left in place. The
-   * `json` and `json_path` undos emit one notice per overridden key and join
-   * them with ` | ` when the undo left more than one behind (LLP 0045
+   * `json` undo emits one notice per overridden key and joins them with
+   * ` | ` when the undo left more than one behind (LLP 0045
    * §never-clobber-a-user-edit).
    *
    * **Display only: do not parse or split this field.** No separator is safe.

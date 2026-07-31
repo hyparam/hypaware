@@ -27,6 +27,80 @@ export function stringValue(value) {
 }
 
 /**
+ * Default ceiling for a display label lifted off captured data. Long
+ * enough that no real client surface is truncated (`local-agent`,
+ * `codex-tui`, `Codex Desktop` are all well under it), short enough that
+ * a status file holding a bounded number of them stays small.
+ */
+export const MAX_LABEL_CHARS = 120
+
+// Everything a label may contain that either drives the terminal or
+// occupies no width on it. Three groups, one class:
+//
+//   - C0/DEL/C1 and the Unicode line/paragraph separators, so a label can
+//     never move the cursor, erase a line, open an escape sequence, or
+//     split into a second line.
+//   - Bidirectional formatting (embeddings, overrides, isolates, marks).
+//     These print nothing but reorder what follows, and an unterminated
+//     one keeps reordering past the end of the label into the rest of the
+//     status line. A label that renders as a different string than the one
+//     it stores defeats the point of naming a surface at all.
+//   - Zero-width and default-ignorable formatting (ZWSP/ZWNJ/ZWJ, word
+//     joiner, BOM, soft hyphen, variation selectors). These render as
+//     nothing, so keeping them lets two labels be distinct map keys while
+//     being indistinguishable on screen, which is what would otherwise
+//     dilute the tracker's eviction cap.
+//
+// Confusables are deliberately out of scope: this bounds what a label
+// *does*, not what it looks like. Two labels built from different but
+// similar-looking real letters stay distinct, as they must.
+const UNSAFE_LABEL_CHARS =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\uFEFF]/g
+
+// A high surrogate left stranded by the clamp below. Slicing counts UTF-16
+// code units, so a cut can land between the halves of an astral character
+// and leave behind a string that is not well-formed.
+const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/
+
+const TRUNCATION_MARKER = '...'
+
+/**
+ * Make a captured string safe to write into a status file and print to a
+ * terminal: strip control and invisible formatting characters, and clamp
+ * the length.
+ *
+ * Values like `entrypoint` are captured verbatim from whatever the client
+ * put on the wire or wrote into a transcript file on disk, so they carry
+ * no guarantee of being short, printable, or single-line. A raw value
+ * reaching a TTY lets a client repaint the operator's screen (an `ESC`
+ * sequence, or a newline that forges a plausible extra status line),
+ * reorder it (a bidi override), or hide inside it (a zero-width run), and
+ * an arbitrarily long one bloats every file the label lands in. None of
+ * this is hypothetical: transcript-sourced values are ordinary JSON
+ * strings with no parser bounding them.
+ *
+ * The result is at most `max` characters *including* the truncation
+ * marker, which is a plain ASCII ellipsis so the result stays
+ * single-byte-safe in a terminal. `max` counts UTF-16 code units, not
+ * bytes: a label of astral characters is still roughly 4x `max` bytes
+ * once encoded, which is why callers cap the count of labels too.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string | undefined} Cleaned non-empty string, else `undefined`.
+ */
+export function sanitizeLabel(value, max = MAX_LABEL_CHARS) {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const stripped = value.replace(UNSAFE_LABEL_CHARS, '')
+  if (stripped.length === 0) return undefined
+  if (stripped.length <= max) return stripped
+  const head = stripped
+    .slice(0, Math.max(0, max - TRUNCATION_MARKER.length))
+    .replace(TRAILING_HIGH_SURROGATE, '')
+  return head.length === 0 ? undefined : `${head}${TRUNCATION_MARKER}`
+}
+
+/**
  * Parse `value` as JSON when it is a string, falling back to the
  * original value when it is not a string or does not parse. Projectors
  * use this for fields that may arrive either encoded or already

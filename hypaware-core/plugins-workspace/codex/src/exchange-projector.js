@@ -1,8 +1,7 @@
 // @ts-check
 
-import { isAbsolute } from 'node:path'
-
-import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
+import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
+import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
   copyNumberAlias,
@@ -135,8 +134,14 @@ export function createCodexExchangeProjector(opts = {}) {
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? resolveRolloutCwd(rolloutCwd, codexContext)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
-      // observable, not silent - it means the gate is measuring a different
-      // directory than it would have. Paths are hashed: this seam sees LLM traffic.
+      // observable, not silent - it means the key named a tree the session did
+      // not run in, so the location inference behind it is in doubt.
+      // @ref LLP 0160#decision [constrained-by]: which is narrower than "a
+      // different directory", so this stays rare enough to be worth a `warn`.
+      // Note this reports the location inference, NOT "the verdict changed":
+      // nearest-governs is not monotone down the chain, so an ancestor key can
+      // still resolve more restrictively than the cwd and that stays silent.
+      // Paths are hashed: this seam sees LLM traffic.
       if (codexContext?.refused_workspace_cwd) {
         ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
           component: 'codex',
@@ -875,8 +880,10 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // request states none and the key is the only in-band source there is.
     cwd: firstString(inBandCwd, workspace?.path),
     // Set only when the substitution was refused, so the caller can log it
-    // rather than let a discarded guess vanish.
-    refused_workspace_cwd: workspace && inBandCwd && !pathsEqual(workspace.path, inBandCwd)
+    // rather than let a discarded guess vanish. Refused is narrower than
+    // "different bytes": see `workspaceCoversCwd`.
+    // @ref LLP 0160#decision [implements]: an ancestor key was never a guess.
+    refused_workspace_cwd: workspace && inBandCwd && !workspaceCoversCwd(workspace.path, inBandCwd)
       ? workspace.path
       : undefined,
     client_version: client.version,
@@ -1206,23 +1213,39 @@ function readRecordedCwd(reqBody) {
  * A drop that only holds while the daemon runs from the right directory is what
  * fail-closed would have to replace, and that is the larger call above.
  *
- * The same two checks guard the rollout-stated cwd as `sessionMetaCwd`
- * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`). They are
- * restated here rather than borrowed from there: LLP 0150 scopes the in-band path
- * out of its own mandate (in-band is a separate source, and its value is also
- * stamped on the row), and the `error_kind` split below needs the two conjuncts
- * apart, which that predicate's single answer does not give.
+ * The answer itself is not computed here. It comes from `sessionMetaCwd`
+ * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`), the one
+ * predicate that also guards the rollout-stated cwd, so the two sources that
+ * feed this gate cannot answer "is this a usable container?" differently. What
+ * stays local is only the refusal *diagnosis*: `error_kind` needs blank told
+ * apart from relative, and a single `undefined` does not carry that. Splitting
+ * the conjuncts for the log is safe because they are not the verdict; the
+ * verdict is whatever the shared predicate returned.
  *
- * One thing this does NOT reach, so nobody reads it as the whole gate: on the
- * Codex route the value passed in is usually not the request's `cwd` but the
- * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
- * first workspace when none matches, which is absolute and so accepted here even
- * when the session ran elsewhere (#476). The rollout fallback at the call site
- * sits outside this call, but it is not unguarded: `rollout-cwd.js` reads it
- * through `readRolloutSessionMeta`, which applies `sessionMetaCwd`.
+ * LLP 0150 scoped the in-band path out of its own mandate (in-band is a separate
+ * source with its own trust story, and its value is also stamped on the row), so
+ * this reuse is a de-duplication rather than an invariant it imposed (#478). It
+ * changes no behavior: only a non-empty string reaches here (`readStringKey` and
+ * `firstString` refuse the rest upstream), and over that whole domain the two
+ * former copies agreed.
+ *
+ * One thing this does NOT reach, so nobody reads it as the whole gate: when the
+ * request states no `cwd` at all, the value passed in is the workspace key
+ * `selectCodexWorkspace` picked for it, and that falls back to the first
+ * workspace when none matches, which is absolute and so accepted here even when
+ * the session ran elsewhere. A request that DOES state one no longer reaches
+ * here through the key (#476, closed), so the residue is the narrower ranking
+ * question: the key still outranks the rollout fallback (#480). The rollout
+ * fallback at the call site sits outside this call, but it is not unguarded:
+ * `rollout-cwd.js` reads it through `readRolloutSessionMeta`, which applies
+ * `sessionMetaCwd`.
+ * @ref LLP 0160#corrections-0083 [constrained-by]: LLP 0083's own statement of
+ * this limit predates its amendment landing, so read that correction with it.
  *
  * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
  * so the rollout fallback still gets its turn
+ * @ref LLP 0150#usable-cwd [implements]: both cwd sources for this gate share
+ * the one predicate; this wrapper adds only the refusal diagnosis
  * @param {string | undefined} cwd
  * @param {{
  *   log?: {
@@ -1234,12 +1257,11 @@ function readRecordedCwd(reqBody) {
  */
 function usableInBandCwd(cwd, ctx) {
   if (cwd === undefined) return undefined
-  // Byte-identical when it passes: the trim is only the emptiness test, and a
-  // path is not ours to normalize. The trim gates nothing on its own - a blank
-  // string is never absolute on either platform, so `isAbsolute` already refuses
-  // it - it is here to split `error_kind` below, which is the only thing that
-  // tells blank apart from relative. Keep both conjuncts or that split dies.
-  if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
+  // Byte-identical when it passes: `sessionMetaCwd` trims only to test
+  // emptiness and returns the value unchanged, because a path is not ours to
+  // normalize.
+  const usable = sessionMetaCwd(cwd)
+  if (usable !== undefined) return usable
   // Never silently: a refused cwd means this exchange reached the gate with
   // nothing to match, which is indistinguishable from "no cwd at all" in the
   // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
@@ -1249,6 +1271,9 @@ function usableInBandCwd(cwd, ctx) {
   // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
   // was already absent before this predicate existed), no diagnostic. Closing it
   // means loosening a helper with 16 other callers here, which is not worth it.
+  // The trim below re-tests a conjunct the shared predicate already weighed, but
+  // it decides nothing: the refusal is settled above. It only says WHICH way the
+  // value was unusable, which is the one thing a single `undefined` cannot carry.
   ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
     component: 'codex',
     operation: 'usage_policy_cwd',
@@ -1263,6 +1288,57 @@ function usableInBandCwd(cwd, ctx) {
 function resolveRequestId(input) {
   return readHeader(input.response_headers, 'x-oai-request-id')
     ?? readHeader(input.request_headers, 'x-client-request-id')
+}
+
+/**
+ * Whether the selected `workspaces` key is the directory the session ran in or
+ * an ancestor of it, i.e. whether the key was ever a *guess about where the
+ * session ran* rather than a less specific name for the same tree.
+ *
+ * This is the predicate behind `refused_workspace_cwd`, and it is deliberately
+ * not byte-equality. When the key is an ancestor of the in-band `cwd` it names
+ * the same tree, less specifically, and the `cwd` is strictly the better answer
+ * to the question the key stood in for; under the resolver's nearest-governs
+ * rule the most specific declaration is authoritative for the `cwd`, so the key
+ * never held authority over it and there is nothing about the location to
+ * report. A session running in a subdirectory of its declared workspace is
+ * exactly that shape, and it is the commonest Codex shape there is, so reporting
+ * it warned once per turn on the common case and devalued the privacy warns
+ * beside it (#481). Off the ancestor chain the key names a tree the session
+ * never ran in - a sibling, or a key *below* the `cwd` - and that doubt is what
+ * the signal exists for.
+ *
+ * What this does NOT mean, because the obvious reading is wrong: it is not that
+ * an ancestor key would have resolved the same or more loosely. Nearest-governs
+ * is not monotone down the chain (see `selectGoverning`'s "a nested loosening"),
+ * so an `ignore` at the key with a `local-only` or explicit `full` beneath it
+ * resolves the `cwd` LESS restrictively, and this predicate stays silent on
+ * that. Accepted because the warn carries no class field and fires identically
+ * on a subdirectory turn that loosens nothing: it could never have told the two
+ * apart, so narrowing it removes a constant, not information (LLP 0160#decision
+ * records which nested declarations are the user's own and which need not be).
+ * A real verdict-change detector would have to compare `resolve(key)` with
+ * `resolve(cwd)`; this is not that.
+ *
+ * Trailing slashes are trimmed on both sides, the one normalization the old
+ * byte comparison did; a path is not otherwise ours to normalize, and the
+ * spelling-agnostic predicates next door (`scopeGoverns`) buy their extra reach
+ * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
+ * So this compares paths, not directories, in both directions: a symlinked
+ * spelling of one tree reads as a refusal, and a lexical descendant that is
+ * really a symlink out of the key's tree reads as covered. Reporting-only, and
+ * the gate itself still resolves over every spelling.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
+ * test, never a second copy of the path rule
+ * @ref LLP 0160#decision [implements]: the refusal signal reports a discarded
+ * guess, not a spelling difference
+ * @param {string} workspacePath
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function workspaceCoversCwd(workspacePath, cwd) {
+  return isEqualOrDescendant(trimTrailingSlash(cwd), trimTrailingSlash(workspacePath))
 }
 
 /**

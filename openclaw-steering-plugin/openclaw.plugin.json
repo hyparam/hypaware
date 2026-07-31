@@ -1,0 +1,18 @@
+{
+  "id": "hypaware-openclaw-steering",
+  "name": "HypAware OpenClaw Steering",
+  "description": "Registers the hypaware-anthropic and hypaware-openai shadow providers and steers every steerable OpenClaw model call to them, so OpenClaw conversations are captured through the local HypAware AI gateway without editing openclaw.json.",
+  "version": "0.1.0",
+  "providers": ["hypaware-anthropic", "hypaware-openai"],
+  "syntheticAuthRefs": ["hypaware-anthropic", "hypaware-openai"],
+  "nonSecretAuthMarkers": ["hypaware-borrowed"],
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["provider", "hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

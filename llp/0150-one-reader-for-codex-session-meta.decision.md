@@ -211,12 +211,19 @@ resolving on half a record.
   diverge is the *test* for whether the field is there, which is why the raw-line
   read and the blank rule are the same on both sides even though the fallback
   differs.
-- **Still outstanding:** the live projector's *in-band* cwd
-  (`x-codex-turn-metadata` / body `metadata.cwd`, LLP 0083's fast path) reaches
-  the same `resolver.resolve` with no such predicate. It is a different source
-  with a different trust story, and its value is also stamped on the row for
-  workspace/git enrichment rather than only consulted for the gate, so tightening
-  it is its own decision rather than a consequence of this one.
+- **The in-band cwd now shares the predicate too, by its own decision.** The
+  live projector's *in-band* cwd (`x-codex-turn-metadata` / body `metadata.cwd`,
+  LLP 0083's fast path) reaches the same `resolver.resolve`. This document
+  scoped that path out of its own mandate, and still does: it is a different
+  source with a different trust story, and its value is also stamped on the row
+  for workspace/git enrichment rather than only consulted for the gate, so
+  tightening it was its own decision
+  ([LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md), #471) rather than
+  a consequence of this one. Having made it, `usableInBandCwd` calls
+  `sessionMetaCwd` rather than restating the rule (#478), keeping only the
+  `error_kind` split a single `undefined` cannot carry. So all three sites that
+  feed the gate now read the rule from here, which is the point: agreeing by
+  construction is what two copies could not be relied on to do.
 - Code that lands this carries `@ref LLP 0150` on the reader and on both
   callers' seams.
 - Nothing about which id either caller *uses* changes here. This is the

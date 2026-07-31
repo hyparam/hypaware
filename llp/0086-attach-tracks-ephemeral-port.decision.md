@@ -37,7 +37,10 @@ so "the proven value changes" is the common case, not an edge.
 
 The data to detect the drift already exists on disk: the gateway source's
 `status()` returns `details: { host, port, ... }`, which `startConfiguredSources`
-captures into each `SourceSnapshot.details` in `status.json`; and the client
+captures into each `SourceSnapshot.details` in `status.json` (and, since
+[LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md),
+the tick loop re-captures on the way past - which changes nothing here, since
+`host` and `port` are fixed at bind time); and the client
 settings marker records the `port` it attached at (`probeClientAttachFromDescriptor`
 reads it back). Nothing compared them.
 

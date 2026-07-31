@@ -1,0 +1,21 @@
+{
+  "name": "@hypaware/openclaw-steering-plugin",
+  "version": "0.1.0",
+  "private": false,
+  "description": "OpenClaw plugin that steers every steerable model call through the local HypAware AI gateway via two shadow providers (hypaware-anthropic, hypaware-openai), so OpenClaw conversations are captured without editing openclaw.json.",
+  "type": "module",
+  "main": "./src/index.js",
+  "openclaw": {
+    "extensions": ["./src/index.js"]
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "src/",
+    "openclaw.plugin.json"
+  ]
+}

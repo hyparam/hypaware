@@ -137,14 +137,23 @@ export async function runPurge(argv, ctx) {
   // is byte-identical to "that directory had nothing cached", which is exactly
   // how the pre-fix silent retention read.
   //
-  // The wording claims only what was established. `aliased` covers two
-  // outcomes, and only one of them is the filesystem adjudicating: two live
-  // directories with two inodes, *or* a `stat` that never landed because the
-  // spelling is no longer on disk (routine, and the common case when the user
-  // purges a project directory they already deleted). Saying "this filesystem
-  // reports it is a different directory" would assert a verdict that an
-  // `ENOENT` did not produce, so the note states the retention and the two
-  // reasons instead. LLP 0104 #spellings names both.
+  // The wording claims only what was established, and the enumeration has to be
+  // exhaustive or it is making the same kind of claim it exists to avoid.
+  // `aliased` covers three outcomes and only the first is the filesystem
+  // adjudicating: two live directories with two inodes; a `stat` that landed on
+  // nothing because the spelling is no longer on disk (routine, and the common
+  // case when the user purges a project directory they already deleted); or a
+  // `stat` that could not be taken at all, because `sameDirectoryOnDisk`
+  // returns `false` for *any* error, so an `EACCES` on an ancestor, an `ELOOP`
+  // on a self-referential symlink and an `ENOTDIR` all land here too. Saying
+  // "this filesystem reports it is a different directory" would assert a
+  // verdict none of the last two produced; naming only the first two would
+  // assert that the spelling is absent when it may be present and merely
+  // unreadable. So the note states the retention and all three reasons. The
+  // real `errno` stays in the `usage_policy.alias_probe_skipped` debug log
+  // rather than on stderr: it is a diagnostic, and surfacing it would mean
+  // plumbing a per-row cause through the deletion predicate for a message-only
+  // gain. LLP 0104 #spellings names all three.
   if (retainedAliases.length > 0) {
     const rows = summary.retainedAliasRows
     const dirs = retainedAliases.length
@@ -152,7 +161,7 @@ export async function runPurge(argv, ctx) {
       `note: ${rows} cached row${rows === 1 ? '' : 's'} under a similarly spelled ` +
       `director${dirs === 1 ? 'y' : 'ies'} ${rows === 1 ? 'was' : 'were'} left in place - ` +
       `this filesystem does not report ${dirs === 1 ? 'it' : 'them'} as the directory you named ` +
-      `(genuinely different, or no longer on disk):\n`
+      `(genuinely different, no longer on disk, or could not be checked):\n`
     )
     for (const dir of retainedAliases) ctx.stderr.write(`  ${dir}\n`)
     ctx.stderr.write('tip: purge that exact spelling too if you meant it as well\n')
