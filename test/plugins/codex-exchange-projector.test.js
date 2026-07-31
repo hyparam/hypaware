@@ -45,6 +45,17 @@ function clampingResolver(ignoredDir) {
   })
 }
 
+/**
+ * A real usage-policy resolver over an fs that holds no `.hypignore` anywhere.
+ * For a test about the cwd *predicate* rather than the gate: without it the
+ * matcher walks the real ancestors of the fixture path, so a `.hypignore`
+ * sitting above the checkout on whatever machine runs the suite would turn the
+ * assertion into a drop.
+ */
+function governsNothingResolver() {
+  return createUsagePolicyResolver({ existsSync: () => false })
+}
+
 // @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
 // the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
 test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
@@ -244,8 +255,9 @@ test('the in-band cwd seam answers exactly as the shared sessionMetaCwd predicat
     '\t\n',
     ' /work/repo', // non-blank but not absolute: the trim alone would accept it
   ]
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
   for (const cwd of cases) {
-    const projection = /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+    const projection = /** @type {any} */ (projector.project(exchange({
       path: '/v1/chat/completions',
       request_body: JSON.stringify({ cwd, messages: [{ role: 'user', content: 'hi' }] }),
       response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
