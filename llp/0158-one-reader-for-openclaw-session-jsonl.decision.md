@@ -80,7 +80,11 @@ answers wrong:
    which re-dates the row to session start, defeats the `--since` window
    (a timestamp-less item is kept unconditionally), and puts the settlement
    ordinal match outside every window so the turn never dedupes. Same
-   silent-drop family as #543, one level down.
+   silent-drop family as #543, one level down. "Reads as absent" is each
+   field's own answer, not one predicate for all of them: the string fields
+   refuse blank and non-string alike, while `content` has no single shape to
+   check (a string on some turns, a block array on others) and so refuses
+   only an explicit `null`.
 7. `id` is the one field read line-first, envelope-fallback, because it is
    identity rather than content: the record line is where this document
    verified message identity lives, and the nested envelope is OpenClaw's

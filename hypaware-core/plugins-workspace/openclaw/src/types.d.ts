@@ -20,9 +20,13 @@ export interface OpenclawSessionHeader {
  * `stopReason`, `usage`); each is read off the nested `message` envelope,
  * falling back to the record line, and is absent when the field is missing,
  * non-string (for the string fields), or blank, following the same
- * "unconfirmable is unresolvable" rule the header applies. `content` is
- * whatever the envelope wrote (a string or a block array), passed through
- * unnormalized. `record` is the full raw record LINE, for a caller that
+ * "unconfirmable is unresolvable" rule the header applies. `id` is the one
+ * field read the other way round, record line first and envelope second,
+ * because the line is where LLP 0158 rule 7 verified message identity
+ * lives. `content` is whatever the envelope wrote (a string or a block
+ * array), passed through unnormalized, so unlike the string fields it
+ * refuses only an explicit `null` rather than a blank or wrong-typed value.
+ * `record` is the full raw record LINE, for a caller that
  * needs a field this reader does not normalize: `parentId` is on the line
  * itself, while a message-level field (`idempotencyKey`, `toolCallId`) is
  * at `record.message`, one level down, and reading it off the line is the

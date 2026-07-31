@@ -371,20 +371,52 @@ test('a blank nested field with nothing on the record line is absent, not a subs
   assert.equal(messages[0].role, 'assistant')
 })
 
+test('a nulled-out nested content is unstated, so the record line still supplies it', async () => {
+  // `content` is the one normalized field with no single shape to test (a
+  // string on some turns, a block array on others), so its present-value test
+  // refuses an explicit `null` and nothing else. That refusal is load-bearing,
+  // not cosmetic: without it a nulled-out envelope field would suppress the
+  // line and land `content: null` on the message, which the backfill projector
+  // drops and the settlement content index hashes into a key no live row can
+  // match, the same silent drop as #543.
+  const file = tempSessionFile([
+    JSON.stringify({
+      type: 'message',
+      id: 'msg-1',
+      content: 'from the record line',
+      message: { role: 'user', content: null },
+    }),
+    JSON.stringify({ type: 'message', id: 'msg-2', message: { role: 'user', content: null } }),
+  ].join('\n') + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].content, 'from the record line')
+  assert.equal(
+    Object.hasOwn(messages[1], 'content'),
+    false,
+    'with nothing on the line either, content is absent, never a null the consumers must re-check'
+  )
+})
+
 test('a `message` key that is not an object leaves the record line as the only address', async () => {
   // `openclawMessageEnvelope` requires a plain object. A record whose
-  // `message` is a string or an array is not an envelope, so the reader does
-  // not treat it as one; the line is read instead, and a line that states no
-  // role yields a message the consumers drop rather than a half-read one.
+  // `message` is a string, an array or `null` is not an envelope, so the
+  // reader does not treat it as one; the line is read instead, and a line that
+  // states no role yields a message the consumers drop rather than a half-read
+  // one. The `null` case is why the guard is a plain-object test rather than a
+  // truthiness one: indexing a field off `null` would throw out of the whole
+  // file read, losing every later record with it.
   const file = tempSessionFile([
     JSON.stringify({ type: 'message', id: 'msg-1', message: 'not an envelope', role: 'user', content: 'hi' }),
     JSON.stringify({ type: 'message', id: 'msg-2', message: [{ type: 'text', text: 'x' }] }),
+    JSON.stringify({ type: 'message', id: 'msg-3', message: null, role: 'assistant', content: 'still read' }),
   ].join('\n') + '\n')
   const messages = await readOpenclawSessionMessages(file)
   assert.equal(messages[0].role, 'user')
   assert.equal(messages[0].content, 'hi')
   assert.equal(messages[1].role, undefined)
   assert.equal(messages[1].content, undefined)
+  assert.equal(messages[2].role, 'assistant')
+  assert.equal(messages[2].content, 'still read')
 })
 
 test('readOpenclawSessionMessages skips blank and unparseable lines without aborting the rest', async () => {
