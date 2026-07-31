@@ -7,7 +7,7 @@ import { asyncRow, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanColumnOptions, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /**
@@ -41,6 +41,119 @@ function fakeSource(rows, seenOptions) {
     },
   }
 }
+
+/**
+ * Fake AsyncDataSource that exposes `scanColumn` (like the icebird-backed
+ * sources behind each committed partition once T2 lands), yielding a single
+ * column's values in fixed-size chunks and recording the options it was
+ * called with.
+ *
+ * @param {string} column
+ * @param {SqlPrimitive[]} values
+ * @param {ScanColumnOptions[]} seenOptions
+ * @param {number} [chunkSize]
+ * @returns {AsyncDataSource}
+ */
+function fakeColumnSource(column, values, seenOptions, chunkSize = 2) {
+  return {
+    columns: [column],
+    numRows: values.length,
+    scan() {
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const v of values) yield asyncRow({ [column]: v }, [column])
+        },
+      }
+    },
+    async *scanColumn(options) {
+      seenOptions.push(options)
+      for (let i = 0; i < values.length; i += chunkSize) {
+        yield values.slice(i, i + chunkSize)
+      }
+    },
+  }
+}
+
+/**
+ * @param {AsyncIterable<ArrayLike<SqlPrimitive>>} chunks
+ * @returns {Promise<SqlPrimitive[]>}
+ */
+async function flattenColumn(chunks) {
+  /** @type {SqlPrimitive[]} */
+  const out = []
+  for await (const chunk of chunks) {
+    for (let i = 0; i < chunk.length; i++) out.push(chunk[i])
+  }
+  return out
+}
+
+test('unionSources forwards scanColumn, concatenating per-partition streams in source order', async () => {
+  /** @type {ScanColumnOptions[]} */
+  const seen = []
+  const union = unionSources([
+    fakeColumnSource('id', ['a1', 'a2', 'a3'], seen),
+    fakeColumnSource('id', ['b1', 'b2'], seen),
+  ])
+  const scanColumn = union.scanColumn
+  if (!scanColumn) throw new Error('expected union to expose scanColumn when every partition does')
+
+  const values = await flattenColumn(scanColumn({ column: 'id' }))
+  assert.deepEqual(values, ['a1', 'a2', 'a3', 'b1', 'b2'], 'values concatenated in source order across chunk boundaries')
+
+  assert.equal(seen.length, 2)
+  for (const options of seen) {
+    assert.equal(options.column, 'id')
+    assert.equal(options.limit, undefined, 'limit not pushed into per-partition scanColumn')
+    assert.equal(options.offset, undefined, 'offset not pushed into per-partition scanColumn')
+  }
+})
+
+test('unionSources scanColumn re-applies limit/offset over the merged column stream', async () => {
+  /** @type {ScanColumnOptions[]} */
+  const seen = []
+  const union = unionSources([
+    fakeColumnSource('id', ['a1', 'a2', 'a3'], seen),
+    fakeColumnSource('id', ['b1', 'b2', 'b3'], seen),
+  ])
+  const scanColumn = union.scanColumn
+  if (!scanColumn) throw new Error('expected union to expose scanColumn when every partition does')
+
+  // offset=2 skips into the first partition, limit=3 stops partway into the
+  // second, so both the offset skip and the limit cutoff must cross the
+  // partition/chunk boundary rather than being applied per partition (which
+  // would silently drop or duplicate values, per union-source.js:47's
+  // reasoning for the row-scan case).
+  const values = await flattenColumn(scanColumn({ column: 'id', limit: 3, offset: 2 }))
+  assert.deepEqual(values, ['a3', 'b1', 'b2'])
+
+  for (const options of seen) {
+    assert.equal(options.limit, undefined, 'limit still not pushed into per-partition scanColumn')
+    assert.equal(options.offset, undefined, 'offset still not pushed into per-partition scanColumn')
+  }
+})
+
+test('unionSources does not expose scanColumn when any partition lacks it', () => {
+  /** @type {ScanOptions[]} */
+  const rowSeen = []
+  /** @type {ScanColumnOptions[]} */
+  const colSeen = []
+  const union = unionSources([
+    fakeSource([{ id: 'a1' }], rowSeen),
+    fakeColumnSource('id', ['b1'], colSeen),
+  ])
+  assert.equal(union.scanColumn, undefined, 'engine falls back to the buffering scan path')
+})
+
+test('emptySource scanColumn yields an empty column stream', async () => {
+  const source = emptySource(['x'])
+  assert.equal(typeof source.scanColumn, 'function')
+  const scanColumn = source.scanColumn
+  if (!scanColumn) throw new Error('expected emptySource to expose scanColumn')
+  const values = await flattenColumn(scanColumn({ column: 'x' }))
+  assert.deepEqual(values, [])
+})
 
 test('unionSources unions columns and sums numRows', () => {
   const union = unionSources([
