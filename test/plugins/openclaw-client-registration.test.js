@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,14 +10,14 @@ import { activate } from '../../hypaware-core/plugins-workspace/openclaw/src/ind
 import { buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
 
 /**
- * LLP 0161 3.3: retiring `src/settings.js`'s settings-file write means
- * `attach()` becomes an honest no-op, but `gateway.registerClient({ name:
- * 'openclaw', ... })` stays registered so the manual `hyp attach openclaw`
- * / `hyp detach openclaw` / `hyp clients openclaw` commands keep resolving
- * the client instead of erroring `unknown client 'openclaw'` (a real
- * discoverability regression the manifest's `attach_probe` removal alone
- * would not cause, since `hyp clients`/`hyp attach` resolve `getClient()`
- * directly and do not gate on `attachProbe`).
+ * `gateway.registerClient({ name: 'openclaw', ... })` is what makes the
+ * manual `hyp attach openclaw` / `hyp detach openclaw` / `hyp clients
+ * openclaw` commands resolve the client instead of erroring `unknown client
+ * 'openclaw'`; those commands resolve `getClient()` directly and do not gate
+ * on `attachProbe`. These tests cover the registration itself and the wiring
+ * from `activate()` to the real effect in `attach.js` (LLP 0169 restored the
+ * settings write LLP 0161 had retired); `openclaw-attach.test.js` covers the
+ * effect's own contract.
  *
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -36,52 +36,20 @@ function makeBuf() {
   }
 }
 
-test('activate() registers the openclaw client with an honest no-op attach()', async () => {
-  /** @type {any} */
-  let registeredClient
-  /** @type {any} */
-  let registeredBackfill
-  const gateway = /** @type {any} */ ({
-    registerUpstreamPreset() {},
-    registerExchangeProjector() {},
-    registerSettlementEnricher() {},
-    registerClient(client) {
-      registeredClient = client
-    },
-  })
-  const ctx = /** @type {any} */ ({
-    env: {},
-    plugin: { version: '0.0.0-test' },
-    configRegistry: { registerSection() {} },
-    backfills: { register(contribution) { registeredBackfill = contribution } },
-    requireCapability: () => gateway,
-  })
+/**
+ * Stage a HOME with an OpenClaw config in it, and the activation context
+ * pointed at that HOME so `activate()`'s attach writes into the temp tree
+ * rather than the developer's own `~/.openclaw`.
+ *
+ * @param {Record<string, unknown>} config
+ * @returns {{ homeDir: string, settingsPath: string, ctx: any, client(): any }}
+ */
+function stageActivation(config) {
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-activate-'))
+  const settingsPath = path.join(homeDir, '.openclaw', 'openclaw.json')
+  mkdirSync(path.dirname(settingsPath), { recursive: true })
+  writeFileSync(settingsPath, JSON.stringify(config, null, 2))
 
-  await activate(ctx)
-
-  assert.ok(registeredClient, 'activate() registered a client')
-  assert.equal(registeredClient.name, 'openclaw')
-  assert.equal(registeredClient.defaultUpstream, 'anthropic')
-
-  // The session-transcript backfill provider rides the same activation, the
-  // imperative `ctx.backfills.register(...)` house pattern @hypaware/codex
-  // already follows. @ref LLP 0161#backfill-provider [tests]
-  assert.ok(registeredBackfill, 'activate() registered a backfill provider')
-  assert.equal(registeredBackfill.name, 'openclaw')
-  assert.equal(registeredBackfill.plugin, '@hypaware/openclaw')
-  assert.deepEqual(registeredBackfill.datasets, ['ai_gateway_messages'])
-
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  await registeredClient.attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, dryRun: false, json: false })
-
-  // Writes nothing to the "settings file" (there is none any more); it only
-  // reports that routing is owned by the steering plugin.
-  assert.match(stdout.text(), /openclaw-steering-plugin/)
-  assert.match(stdout.text(), /openclaw plugins install/)
-})
-
-test('activate() attach() emits the same report under --json, still writing nothing', async () => {
   /** @type {any} */
   let registeredClient
   const gateway = /** @type {any} */ ({
@@ -93,24 +61,93 @@ test('activate() attach() emits the same report under --json, still writing noth
     },
   })
   const ctx = /** @type {any} */ ({
-    env: {},
+    env: { HOME: homeDir },
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
     backfills: { register() {} },
     requireCapability: () => gateway,
   })
-  await activate(ctx)
+  return { homeDir, settingsPath, ctx, client: () => registeredClient }
+}
 
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  await registeredClient.attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, dryRun: false, json: true })
+test('activate() registers the openclaw client and wires attach() to the real write', async () => {
+  /** @type {any} */
+  let registeredBackfill
+  const staged = stageActivation({ models: { providers: {} } })
+  staged.ctx.backfills = { register(/** @type {any} */ contribution) { registeredBackfill = contribution } }
+  try {
+    await activate(staged.ctx)
 
-  const payload = JSON.parse(stdout.text().trim())
-  assert.equal(payload.status, 'ok')
-  assert.equal(payload.action, 'attach')
-  assert.equal(payload.client, 'openclaw')
-  assert.equal(payload.changed, false)
-  assert.match(payload.routing_owned_by, /openclaw-steering-plugin/)
+    const registeredClient = staged.client()
+    assert.ok(registeredClient, 'activate() registered a client')
+    assert.equal(registeredClient.name, 'openclaw')
+    assert.equal(registeredClient.defaultUpstream, 'anthropic')
+
+    // The session-transcript backfill provider rides the same activation, the
+    // imperative `ctx.backfills.register(...)` house pattern @hypaware/codex
+    // already follows. @ref LLP 0161#backfill-provider [tests]
+    assert.ok(registeredBackfill, 'activate() registered a backfill provider')
+    assert.equal(registeredBackfill.name, 'openclaw')
+    assert.equal(registeredBackfill.plugin, '@hypaware/openclaw')
+    assert.deepEqual(registeredBackfill.datasets, ['ai_gateway_messages'])
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    await registeredClient.attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, dryRun: false, json: false })
+
+    // Registration is wired to `attach.js`'s effect, not to the retired no-op:
+    // the two provider entries land on disk and the user is told to restart.
+    // The entries' exact shape is `openclaw-attach.test.js`'s business.
+    // @ref LLP 0169#decision [tests]
+    const written = JSON.parse(readFileSync(staged.settingsPath, 'utf8'))
+    assert.deepEqual(Object.keys(written.models.providers).sort(), ['anthropic', 'openai'])
+    assert.match(stdout.text(), /openclaw gateway restart/)
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+test('activate() attach() reports the same write under --json', async () => {
+  const staged = stageActivation({ models: { providers: {} } })
+  try {
+    await activate(staged.ctx)
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    await staged.client().attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, dryRun: false, json: true })
+
+    const payload = JSON.parse(stdout.text().trim())
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.action, 'attach')
+    assert.equal(payload.client, 'openclaw')
+    assert.equal(payload.changed, true)
+    assert.equal(payload.settings_path, staged.settingsPath)
+    assert.equal(payload.restart_command, 'openclaw gateway restart')
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+test('activate() attach() swallows a refusal instead of throwing it at the join', async () => {
+  const staged = stageActivation({
+    models: { providers: { anthropic: { baseUrl: 'https://mine.example', models: [] } } },
+  })
+  try {
+    await activate(staged.ctx)
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    // The kernel's registered `attach()` returns Promise<void>, so the
+    // refusal reaches the caller as reported output, never as a throw: that
+    // is what keeps a refuse during attach-on-join a warning (LLP 0169).
+    await staged.client().attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, json: true })
+
+    const payload = JSON.parse(stdout.text().trim())
+    assert.equal(payload.status, 'failed')
+    assert.match(payload.reason, /already exists/)
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
 })
 
 // @ref LLP 0161#settlement-enricher [tests]: the settlement enricher is
