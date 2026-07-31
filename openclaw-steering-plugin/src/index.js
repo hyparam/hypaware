@@ -210,6 +210,9 @@ export default definePluginEntry({
   name: 'HypAware OpenClaw Steering',
   description:
     'Registers the hypaware-anthropic and hypaware-openai shadow providers and steers every steerable OpenClaw model call to them, so OpenClaw conversations are captured through the local HypAware AI gateway without editing openclaw.json.',
+  // `definePluginEntry`'s own declaration cannot name `OpenclawPluginApi`
+  // (see `openclaw_plugin_sdk.d.ts`), so the parameter is annotated here.
+  /** @param {OpenclawPluginApi} api */
   register(api) {
     const baseUrl = resolveGatewayEndpoint()
     const ledger = createWarningLedger()
