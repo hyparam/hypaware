@@ -181,17 +181,27 @@ export interface PluginClientManifest {
 
 export interface PluginAttachProbeManifest {
   /**
-   * The `json_path` format is gone (LLP 0143 R7): core no longer carries a
-   * read side in `daemon/status.js` or an undo side in
-   * `config/client_detach_disk.js` for it. Keeping it in this union would be
-   * worse than a dead name, because nothing validates `attach_probe` at
-   * runtime (`src/core/manifest.js` treats `contributes` opaquely): a
-   * manifest declaring it would type-check, probe as never-attached, and
-   * then slip past `action_attach.js`'s `!descriptor.attachProbe` orphaning
-   * guard on reverse, dropping the marker with the client's settings still
-   * written. That is exactly #212.
+   * `json_path` returns here (LLP 0173 T1), reversing LLP 0143's removal.
+   * LLP 0143 pulled the format because, at the time, nothing validated
+   * `attach_probe` at runtime (`src/core/manifest.js` treats `contributes`
+   * opaquely): a manifest declaring `json_path` with no runtime support
+   * behind it would type-check, probe as never-attached, and then slip
+   * past `action_attach.js`'s `!descriptor.attachProbe` orphaning guard on
+   * reverse, dropping the marker with the client's settings still written.
+   * That was exactly #212. The danger was in the *gap* between declaring
+   * the format and a runtime that reads/undoes it, not in the format
+   * itself. LLP 0173 T2 restores the undo side
+   * (`client_detach_disk.js`'s `detachJsonPathProviders`) and T3 restores
+   * the read side (`daemon/status.js`'s `json_path` branch) before
+   * OpenClaw's manifest (T5) declares this format again, so the gap #212
+   * warned about is closed by construction: no manifest may reach this
+   * format without both runtime sides already merged.
+   *
+   * @ref LLP 0172#lane-a-detach [implements]: json_path's runtime undo
+   * (client_detach_disk.js) and read (daemon/status.js) sides, which close
+   * the #212 gap this format's prior removal warned about.
    */
-  format: 'json' | 'toml'
+  format: 'json' | 'toml' | 'json_path'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -204,6 +214,26 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /**
+   * `json_path` only: dotted path, relative to the parsed settings file,
+   * to the container object the probe/undo navigate (e.g.
+   * `models.providers`).
+   */
+  container_path?: string
+  /**
+   * `json_path` only: the container's keys the probe/undo consider, in
+   * order (e.g. `['anthropic', 'openai']`). `marker_header` (reused, not
+   * duplicated) is checked against each key's own header value to decide
+   * ownership.
+   */
+  provider_keys?: string[]
+  /**
+   * `json_path` only: glob, relative to the client's config home, of
+   * cache files the undo best-effort purges the same `provider_keys`
+   * entries from after the settings-file write (e.g.
+   * `agents/*\/agent/models.json`).
+   */
+  cache_glob?: string
 }
 
 /**
@@ -2257,6 +2287,21 @@ export interface BackfillContribution {
    * dataset-materializer registry.
    */
   run(ctx: BackfillRunContext): AsyncIterable<BackfillItem | BackfillEvent>
+  /**
+   * Opt-in scheduling metadata for the daemon's periodic sweep (LLP 0173
+   * T9's `backfill_sweep.js`), not a new mechanism: a contribution with no
+   * `sweep` field is never ticked by the sweep driver, so this is
+   * absent-by-default and zero behavior change for every provider that
+   * doesn't set it (Claude's and Codex's contributions today, and
+   * OpenClaw's own prior to LLP 0173). `cron` is a standard 5-field cron
+   * expression, evaluated by `cronMatches` (`src/core/sinks/driver.js`),
+   * the same schedule shape sinks already use.
+   *
+   * @ref LLP 0172#lane-b-sweep [implements]: the daemon-side scheduled
+   * sweep's opt-in contribution field, absent-by-default for every
+   * provider that doesn't set it.
+   */
+  sweep?: { cron: string }
 }
 
 export interface BackfillPlanContext {
