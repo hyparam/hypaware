@@ -1,14 +1,19 @@
 // @ts-check
 
+import { sanitizeLabel } from 'hypaware/core/util'
+
 /**
  * How many distinct `entrypoint` values the tracker keeps. The set is
  * naturally tiny (one per client surface on the machine: `codex-tui`,
  * whatever Codex Desktop reports, `local-agent`, ...), but `entrypoint`
- * is a client-supplied string that rides in from request headers and
- * rollout metadata, so an odd or hostile client must not be able to grow
- * a daemon-lifetime map without bound. On overflow the least recently
- * seen entry is evicted, which is exactly the entry a "recent clients"
- * readout would drop anyway.
+ * is a captured string nothing on the way in constrains, so an odd or
+ * hostile client must not be able to grow a daemon-lifetime map without
+ * bound. On overflow the least recently seen entry is evicted, which is
+ * exactly the entry a "recent clients" readout would drop anyway.
+ *
+ * A count cap alone is not a bound: 32 entries of unbounded length is
+ * still unbounded, and `status.json` is rewritten on every daemon tick.
+ * `sanitizeLabel` supplies the other half (see `record`).
  */
 const MAX_TRACKED_ENTRYPOINTS = 32
 
@@ -39,6 +44,16 @@ export function createEntrypointActivity(options = {}) {
      * placeholder: "unknown" is not a client surface, and inventing one
      * would put a name in `hyp status` that no query can reproduce.
      *
+     * `entrypoint` and `client_name` are sanitized before they are stored,
+     * because this map is the source for a file on disk and for text
+     * printed to a terminal. The values are captured verbatim from the
+     * wire (`originator`) or, for Claude, copied off a transcript `.jsonl`
+     * line on disk - and that second route has no HTTP parser bounding its
+     * length or rejecting control bytes. Sanitizing at the point of record
+     * (rather than at render) also keeps the map key itself clean, so the
+     * eviction cap above cannot be diluted by values that differ only in
+     * bytes no reader will ever see.
+     *
      * @param {readonly Record<string, unknown>[]} rows
      */
     record(rows) {
@@ -46,11 +61,9 @@ export function createEntrypointActivity(options = {}) {
       const at = now()
       for (const row of rows) {
         if (!row || typeof row !== 'object') continue
-        const entrypoint = row.entrypoint
-        if (typeof entrypoint !== 'string' || entrypoint.length === 0) continue
-        const clientName = typeof row.client_name === 'string' && row.client_name.length > 0
-          ? row.client_name
-          : null
+        const entrypoint = sanitizeLabel(row.entrypoint)
+        if (entrypoint === undefined) continue
+        const clientName = sanitizeLabel(row.client_name) ?? null
         const existing = seen.get(entrypoint)
         if (existing) {
           existing.lastSeenMs = at

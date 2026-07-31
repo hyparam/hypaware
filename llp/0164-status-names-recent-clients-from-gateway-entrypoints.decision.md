@@ -61,15 +61,33 @@ version of option 2:
   `local-agent` are all just strings that arrived in a column. The vendor
   owns them ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)
   pins none of them), and the value printed is byte-identical to the one a
-  follow-up `ai_gateway_messages` query filters on.
+  follow-up `ai_gateway_messages` query filters on - for every value a real
+  client surface produces. The one exception is deliberate: a value carrying
+  control bytes or running past 120 characters is cleaned before it is
+  displayed (see **Bounded** below), so it is the row, not the readout, that
+  stays authoritative for a pathological name.
 - **No placeholder.** A row with no `entrypoint` is skipped, not bucketed
   under "unknown". A name in `hyp status` that no query can reproduce would
   be worse than a short list.
-- **Bounded.** `entrypoint` is a client-supplied string riding in from
-  request headers, so the map is capped (32) with least-recently-seen
-  eviction. An odd or hostile client cannot grow daemon-lifetime state, and
-  the entry an overflow drops is the one a "recent" readout would have
-  dropped anyway.
+- **Bounded, in both dimensions.** The map is capped (32) with
+  least-recently-seen eviction, so an odd or hostile client cannot grow
+  daemon-lifetime state, and the entry an overflow drops is the one a
+  "recent" readout would have dropped anyway.
+
+  A count cap is only half a bound, because nothing on the way in
+  constrains the *value*. Two of the three routes into the column are
+  bounded by the HTTP parser (Codex's `originator` header and the
+  User-Agent product, which cannot carry C0 control bytes and cap around
+  16KB), but the third is not: for Claude the live projector copies
+  `entrypoint` off a transcript `.jsonl` line on disk
+  (`assignTranscriptIdentity`), and that is an ordinary JSON string of any
+  length containing any byte. Since this map is the source for a file on
+  disk and for text printed to a terminal, values are passed through
+  `sanitizeLabel` (control bytes stripped, clamped to 120 chars) at the
+  point of record, and again in core when read back. Without it, a
+  transcript value could repaint the operator's screen or forge a
+  plausible extra `hyp status` line, and 32 unbounded values would be
+  rewritten into `status.json` on every tick.
 
 This is an **activity signal, not a store**. It is in-memory and
 daemon-scoped: it dies with the process and is never written anywhere but the

@@ -27,6 +27,46 @@ export function stringValue(value) {
 }
 
 /**
+ * Default ceiling for a display label lifted off captured data. Long
+ * enough that no real client surface is truncated (`local-agent`,
+ * `codex-tui`, `Codex Desktop` are all well under it), short enough that
+ * a status file holding a bounded number of them stays small.
+ */
+export const MAX_LABEL_CHARS = 120
+
+// C0 and C1 control characters, plus the Unicode line/paragraph
+// separators. Kept as one class so a label can never move the cursor,
+// erase a line, open an escape sequence, or split into a second line.
+const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g
+
+/**
+ * Make a captured string safe to write into a status file and print to a
+ * terminal: strip control characters and clamp the length.
+ *
+ * Values like `entrypoint` are captured verbatim from whatever the client
+ * put on the wire or wrote into a transcript file on disk, so they carry
+ * no guarantee of being short, printable, or single-line. A raw value
+ * reaching a TTY lets a client repaint the operator's screen (an `ESC`
+ * sequence, or a newline that forges a plausible extra status line), and
+ * an arbitrarily long one bloats every file the label lands in. Neither
+ * is a hypothetical: transcript-sourced values are ordinary JSON strings
+ * with no parser bounding them.
+ *
+ * The truncation marker is a plain ASCII ellipsis so the result stays
+ * single-byte-safe in a terminal.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string | undefined} Cleaned non-empty string, else `undefined`.
+ */
+export function sanitizeLabel(value, max = MAX_LABEL_CHARS) {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const stripped = value.replace(CONTROL_CHARS, '')
+  if (stripped.length === 0) return undefined
+  return stripped.length > max ? `${stripped.slice(0, max)}...` : stripped
+}
+
+/**
  * Parse `value` as JSON when it is a string, falling back to the
  * original value when it is not a string or does not parse. Projectors
  * use this for fields that may arrive either encoded or already

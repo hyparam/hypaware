@@ -104,3 +104,48 @@ test('an empty or malformed batch is a no-op, not a throw', () => {
   activity.record(/** @type {any} */ ([null, 'nope', 7]))
   assert.deepEqual(activity.snapshot(), [])
 })
+
+// The tracker feeds a file on disk and a terminal, and one of the three routes
+// into `entrypoint` (Claude's transcript `.jsonl`, via `assignTranscriptIdentity`)
+// is not bounded by an HTTP parser: it is a JSON string of any length holding any
+// byte. A count cap alone does not bound that.
+test('a control-character entrypoint cannot forge lines or move the cursor', () => {
+  const ESC = String.fromCharCode(27)
+  const LF = String.fromCharCode(10)
+  const activity = createEntrypointActivity()
+  activity.record([
+    { entrypoint: `local-agent${ESC}[2K${LF}  daemon:   FORGED`, client_name: `cl${ESC}[31maude` },
+  ])
+
+  const [entry] = activity.snapshot()
+  assert.equal(entry.entrypoint.includes(ESC), false)
+  assert.equal(entry.entrypoint.includes(LF), false)
+  assert.equal(entry.client_name?.includes(ESC), false)
+  // Stripped, not dropped: the surface is still named.
+  assert.match(entry.entrypoint, /^local-agent/)
+})
+
+test('an over-long entrypoint is clamped, so status.json stays small', () => {
+  const activity = createEntrypointActivity()
+  activity.record([{ entrypoint: 'A'.repeat(50000), client_name: 'B'.repeat(50000) }])
+
+  const [entry] = activity.snapshot()
+  assert.ok(entry.entrypoint.length <= 128, `entrypoint length ${entry.entrypoint.length}`)
+  assert.ok((entry.client_name ?? '').length <= 128)
+  assert.ok(JSON.stringify(activity.snapshot()).length < 1024)
+})
+
+test('an entrypoint of nothing but control bytes is skipped, not stored blank', () => {
+  const activity = createEntrypointActivity()
+  activity.record([{ entrypoint: String.fromCharCode(27) + String.fromCharCode(7) }])
+  assert.deepEqual(activity.snapshot(), [])
+})
+
+// Pins the shipped default. The eviction tests above all pass an explicit
+// `max`, so without this the constant could be raised to any value and every
+// test would still pass.
+test('the default cap is 32 distinct entrypoints', () => {
+  const activity = createEntrypointActivity()
+  for (let i = 0; i < 200; i++) activity.record([{ entrypoint: `surface-${i}` }])
+  assert.equal(activity.size(), 32)
+})

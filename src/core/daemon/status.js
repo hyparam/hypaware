@@ -19,7 +19,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
-import { getAtDottedPath, isPlainObject } from '../util/json_util.js'
+import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
 import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -136,6 +136,13 @@ export function gatewaySourceDetails(sources) {
  * a name in `hyp status` that no query could reproduce would be worse than a
  * short list.
  *
+ * Labels are sanitized here as well as at the gateway that wrote them. This is
+ * not belt-and-braces: `status.json` is a file, and core must not assume the
+ * daemon that wrote it was this version, was this build, or was well behaved.
+ * Everything read here is about to be printed to a terminal, so control bytes
+ * (which can repaint the operator's screen or forge a plausible extra status
+ * line) and unbounded lengths are removed at the last point before render.
+ *
  * @param {SourceSnapshot[] | undefined} sources
  * @returns {RecentEntrypoint[]}
  * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status answers from status.json, with no dataset registry and no cache read
@@ -153,15 +160,13 @@ export function recentEntrypointsFromSources(sources) {
   const out = []
   for (const item of raw) {
     if (!isPlainObject(item)) continue
-    const entrypoint = item.entrypoint
+    const entrypoint = sanitizeLabel(item.entrypoint)
     const lastSeen = item.last_seen
-    if (typeof entrypoint !== 'string' || entrypoint.length === 0) continue
+    if (entrypoint === undefined) continue
     if (typeof lastSeen !== 'string' || Number.isNaN(Date.parse(lastSeen))) continue
     out.push({
       entrypoint,
-      clientName: typeof item.client_name === 'string' && item.client_name.length > 0
-        ? item.client_name
-        : null,
+      clientName: sanitizeLabel(item.client_name) ?? null,
       lastSeen,
       rows: typeof item.rows === 'number' && Number.isFinite(item.rows) ? item.rows : 0,
     })

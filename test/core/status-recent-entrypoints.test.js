@@ -256,3 +256,84 @@ test('a client with no client_name renders without inventing one', async () => {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
+
+// `status.json` is a file. Core must not assume the daemon that wrote it was
+// this version or was well behaved, and everything read here is about to be
+// printed to a terminal.
+test('recentEntrypointsFromSources cleans labels a foreign status file supplies', () => {
+  const ESC = String.fromCharCode(27)
+  const LF = String.fromCharCode(10)
+  const recent = recentEntrypointsFromSources([
+    {
+      name: 'ai-gateway',
+      plugin: '@hypaware/ai-gateway',
+      state: 'started',
+      details: {
+        recent_entrypoints: [
+          {
+            entrypoint: `local-agent${ESC}[2K${LF}  daemon:   FORGED ALL GOOD`,
+            client_name: `claude${LF}  x`,
+            last_seen: '2026-07-30T09:55:00.000Z',
+            rows: 3,
+          },
+          {
+            entrypoint: 'C'.repeat(40000),
+            client_name: null,
+            last_seen: '2026-07-30T09:50:00.000Z',
+            rows: 1,
+          },
+        ],
+      },
+    },
+  ])
+
+  assert.equal(recent.length, 2)
+  for (const e of recent) {
+    assert.equal(e.entrypoint.includes(ESC), false, 'no escape byte survives')
+    assert.equal(e.entrypoint.includes(LF), false, 'no newline survives')
+    assert.ok(e.entrypoint.length <= 128, `length ${e.entrypoint.length}`)
+    assert.equal((e.clientName ?? '').includes(LF), false)
+  }
+  assert.match(recent[0].entrypoint, /^local-agent/)
+})
+
+test('a rendered recent-clients block cannot be forged by a hostile entrypoint', async () => {
+  const ESC = String.fromCharCode(27)
+  const LF = String.fromCharCode(10)
+  const { hypHome, stateRoot } = await makeHome()
+  writeDaemonStatus(stateRoot, {
+    host: '127.0.0.1',
+    port: 18521,
+    recent_entrypoints: [
+      {
+        entrypoint: `x${LF}  daemon:   FORGED${LF}  cache:      /nowhere${ESC}[2K`,
+        client_name: 'claude',
+        last_seen: new Date().toISOString(),
+        rows: 1,
+      },
+    ],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const stdout = buffer()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(stateRoot, 'cache'),
+    stdout,
+  })
+  const text = stdout.text()
+
+  // The surface is still named, on exactly one line, and nothing it contained
+  // became a line of its own or an escape sequence.
+  assert.match(text, /recent clients:/)
+  assert.equal(text.includes(ESC), false, 'no escape byte reaches the terminal')
+  assert.equal(text.includes(`${LF}  daemon:   FORGED`), false, 'no forged daemon line')
+  // The whole payload collapses onto the single entry line, where it is inert
+  // text inside the `- <entrypoint>  (<client>)  last seen ...` shape rather
+  // than a line of its own.
+  const block = text.slice(text.indexOf('  recent clients:')).split(LF)
+  assert.match(block[1], /^ {4}- \S.* {2}\(claude\) {2}last seen just now, 1 row$/)
+  assert.match(block[2], /^ {2}cache:/, 'the next line is the real one, not a forged one')
+})
