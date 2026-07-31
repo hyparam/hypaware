@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
-import { runSessionIgnore, runSessionStatus } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
+import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
@@ -113,6 +113,22 @@ test('the --json receipt states its guarantee, so `status: ok` cannot read as "d
   })
 })
 
+test('the unignore receipt reports the removal, not a resumption it cannot verify', async () => {
+  // R14 mirrored. "recording resumed" is the same inference from the same
+  // `Set` answer, read the other way: a token nothing carried was suppressing
+  // nothing to resume, and `.hypignore` is an independent governor (R7) that
+  // can keep the session unrecorded regardless of what this verb just removed.
+  const set = new Set(['thread-subagent'])
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['thread-subagent'], ctx.ctx), 0)
+    assert.ok(!set.has('thread-subagent'), 'the removal itself happened - that much is true')
+    const out = ctx.stdout()
+    assert.match(out, /out of the gateway drop set/, 'report the membership that IS established')
+    assert.doesNotMatch(out, /recording resumed/, 'the gateway cannot know recording resumed')
+  })
+})
+
 test('the reader carries the same qualifier, so writer and reader cannot drift', async () => {
   // `status` answers the same `Set.has` question, so a confirmed `ignored`
   // there rests on the identical bound. One shared constant, as with the
@@ -157,6 +173,14 @@ for (const rel of SKILLS) {
       'the echoed session_id must be compared with the id that was sent'
     )
     assert.match(text, /isinstance\(r\.get\("total"\), int\)/, 'and `total` must be a real number')
+    // `isinstance(True, int)` is True in Python, so the int test alone is
+    // weaker than the CLI's `typeof total !== "number"` it claims to mirror:
+    // a responder answering `total: true` would pass here and fail there.
+    assert.match(
+      text,
+      /isinstance\(r\.get\("total"\), bool\)/,
+      'and a JSON `true` must not satisfy the numeric check the CLI applies'
+    )
     assert.doesNotMatch(
       text,
       /opt-out confirmed for session %s[^\n]*% \(r\.get\("session_id"\)/,

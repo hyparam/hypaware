@@ -41,7 +41,9 @@ try:
     r = json.load(sys.stdin)
 except Exception:
     sys.exit("opt-out NOT confirmed: the reply was not JSON, so it is not the control route")
-if not isinstance(r, dict) or r.get("ignored") is not True or not isinstance(r.get("total"), int):
+# bool is excluded because isinstance(True, int) is True in Python: the CLI
+# check this mirrors is `typeof total !== "number"`, which a JSON true fails.
+if not isinstance(r, dict) or r.get("ignored") is not True or isinstance(r.get("total"), bool) or not isinstance(r.get("total"), int):
     sys.exit("opt-out NOT confirmed: " + json.dumps(r))
 if r.get("session_id") != expected:
     sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))

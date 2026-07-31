@@ -323,10 +323,13 @@ async function runMutation(argv, ctx, method, usage) {
   }
   // The headline states the write that happened, not a drop nobody verified:
   // the route added an opaque token to a set (LLP 0066#receipt-is-membership).
+  // The removal says no more than that either. "recording resumed" was the same
+  // overclaim mirrored: a token nothing carried suppressed nothing to resume,
+  // and the folder governor below is a separate reason a session stays unrecorded.
   ctx.stdout.write(
     ignored
       ? `session ${resolvedId.sessionId}: ignored - this id is in the gateway drop set (${total} ignored)\n`
-      : `session ${resolvedId.sessionId}: not ignored - this id is out of the gateway drop set, so recording resumed (${total} ignored)\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the gateway drop set, so this opt-out suppresses nothing now (${total} ignored)\n`
   )
   if (ignored) {
     ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)

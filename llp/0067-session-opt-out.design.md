@@ -274,6 +274,13 @@ more. It never inspects traffic, so an exchange is dropped only where the client
 adapter stamps it with this same session_id ...
 ```
 
+`unignore` is held to the same bound, since it is the same `Set` answer read the
+other way. It used to print "recording resumed", which the route cannot know
+either: a token no exchange carried was suppressing nothing to resume, and
+`.hypignore` is an independent governor (R7) that can keep the session
+unrecorded whatever this verb just removed. It now reports the removal - "this
+id is out of the gateway drop set, so this opt-out suppresses nothing now".
+
 `--json` carries `guarantee: "set_membership"` beside its `status: "ok"`, since
 an agent parsing the receipt reads a bare `ok` as "done" (the skills are the
 consumer here). The reader prints the same qualifier next to a confirmed
