@@ -110,6 +110,16 @@ The undo record shape:
 
 ### Probe and detach (core-owned)
 
+> **Superseded by [LLP 0143](./0143-openclaw-registers-no-attach-probe.decision.md).**
+> This section describes a format core no longer has. The adapter stopped
+> writing `openclaw.json` (routing moved to the OpenClaw-side steering
+> plugin, [LLP 0152](./0152-openclaw-plugin-steered-shadow-providers.decision.md)),
+> which left `json_path` with no consumer, so LLP 0143 R7 removed it from
+> `src/core/daemon/status.js`, `src/core/config/client_detach_disk.js`, and
+> the `PluginAttachProbeManifest` contract. `json` and `toml` are unaffected.
+> Everything below is kept as the record of what was built and retired; do
+> not implement it.
+
 A third probe format, `json_path`, joins `json` and `toml` in the
 core format dispatch (probe + `detachClientFromDisk`):
 

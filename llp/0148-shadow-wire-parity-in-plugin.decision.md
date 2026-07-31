@@ -79,11 +79,18 @@ OpenClaw's Anthropic plugin uses, available to us for our providers.
 
 ## Open questions
 
-- The `PI_AI_*` beta constants in OpenClaw's plugin suggest the underlying
+- ~~The `PI_AI_*` beta constants in OpenClaw's plugin suggest the underlying
   `pi-ai` library may add the default betas itself when no wrapper runs
-  (it can detect OAuth by key shape). Unverified: `node_modules` was not
-  available. If true, the mirror shrinks; the merge must dedupe either way
-  so mirroring stays idempotent. Check at implementation.
+  (it can detect OAuth by key shape).~~ **Answered at implementation
+  (LLP 0161 Section 10, LLP 0162 T2), and it is true.** `pi-ai@0.73.1`'s
+  Anthropic provider adds both default betas from its own flags and prepends
+  the two OAuth betas whenever the key matches `sk-ant-oat`, the same
+  predicate OpenClaw uses. The mirror shrank as anticipated: it now installs
+  only under OpenClaw's own `needsAnthropicBetaWrapper` condition, since
+  merging unconditionally would *add* the interleaved beta on adaptive-thinking
+  models that pi-ai deliberately omits it for, which is a parity change in the
+  other direction. The merge is a header-name-keyed `Set` union and stays
+  idempotent regardless.
 
 ## References
 

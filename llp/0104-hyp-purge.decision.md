@@ -117,15 +117,39 @@ one directory; comparing the pair directly needs no inference and no assumption
 that the probed volume is the volume both spellings live on.
 
 **A retention that cannot be proven is reported, never silent.** When the fold
-proposes an alias and the filesystem refuses it (the usual reasons: this really
-is a case-sensitive volume, or the aliased directory no longer exists), the rows
-stay, which is correct, and `PurgeSummary` carries `retainedAliasRows` /
-`retainedAliasCwds` so the CLI can name them on stderr. That closes the half of
-the defect the counts alone do not: the original complaint was not only that
-rows survived but that `purged 0 rows` with empty stderr is byte-identical to
-"that directory had nothing cached". Note the inversion this repairs - a purge
-that *deletes* prints the resurrection warning, so before this the failing case
-was the quieter of the two.
+proposes an alias and the filesystem does not confirm it, the rows stay, which is
+correct, and `PurgeSummary` carries `retainedAliasRows` / `retainedAliasCwds` so
+the CLI can name them on stderr. That closes the half of the defect the counts
+alone do not: the original complaint was not only that rows survived but that
+`purged 0 rows` with empty stderr is byte-identical to "that directory had
+nothing cached". Note the inversion this repairs - a purge that *deletes* prints
+the resurrection warning, so before this the failing case was the quieter of the
+two.
+
+**The report enumerates three causes, because there are three.** A note that
+under-enumerates is making the same unearned claim it was written to avoid, so
+this is a constraint on the wording and not a stylistic preference. Unproven
+covers:
+
+1. **Two directories.** This really is a case-sensitive (or normalization-
+   sensitive) volume and the two spellings have two inodes. Only this one is the
+   filesystem adjudicating "different".
+2. **Not on disk.** The aliased spelling no longer exists, so the `stat` landed
+   on nothing. The ordinary case: the user is purging a project directory they
+   already deleted.
+3. **Not checkable.** The `stat` could not be taken at all.
+   `sameDirectoryOnDisk` answers `false` for **every** error, not only `ENOENT`,
+   so an `EACCES` on an ancestor, an `ELOOP` on a self-referential symlink and
+   an `ENOTDIR` all arrive here. The spelling may well be present and simply
+   unreadable.
+
+That collapse in `sameDirectoryOnDisk` is deliberate and stays: an unprovable
+alias must not be widened onto whatever the errno was, or the `dev`/`ino` proof
+above stops being a proof. It bounds only what the *message* may assert. So the
+stderr note says "genuinely different, no longer on disk, or could not be
+checked" and asserts none of the three; the concrete errno stays a diagnostic on
+the `usage_policy.alias_probe_skipped` log line, since surfacing it per row would
+mean threading a cause through the deletion predicate to improve a sentence.
 
 **Deliberately unchanged.** Only the deletion predicate opts in. `policy unset`,
 `policy show` and `hyp ignore --check` share `scopeGoverns` and keep their
@@ -150,5 +174,15 @@ already classified each row through the folded gate.
   target issues no extra syscall. `purgeCache` memoizes the verdict per `cwd`
   for the run.
 - The residue is one-directional and safe: an aliased directory that has since
-  been deleted cannot be proven, so its rows are retained. They are reported, so
-  the user can name that spelling directly.
+  been deleted, or that cannot be `stat`ed for any other reason, cannot be
+  proven, so its rows are retained. They are reported, so the user can name that
+  spelling directly.
+- A row whose `cwd` is *lexically* inside the target while a symlink inside the
+  target resolves it elsewhere is deleted. That is not this section's fold: it
+  is the plain `canonicalSpellings` / `matchDepth` match, and it predates
+  `proveAliases` (`scopeGoverns` returns `true` for the same fixture with the
+  opt-in off). It is also what keeps the first consequence above true, since
+  purge has to be able to clear exactly what the gate governs. Revisiting it is
+  a change to
+  [LLP 0050 §canonicalization](./0050-ignore-enforced-in-adapters.decision.md#canonicalization)'s
+  set-of-spellings semantics, not to this decision.

@@ -180,7 +180,18 @@ export interface PluginClientManifest {
 }
 
 export interface PluginAttachProbeManifest {
-  format: 'json' | 'toml' | 'json_path'
+  /**
+   * The `json_path` format is gone (LLP 0143 R7): core no longer carries a
+   * read side in `daemon/status.js` or an undo side in
+   * `config/client_detach_disk.js` for it. Keeping it in this union would be
+   * worse than a dead name, because nothing validates `attach_probe` at
+   * runtime (`src/core/manifest.js` treats `contributes` opaquely): a
+   * manifest declaring it would type-check, probe as never-attached, and
+   * then slip past `action_attach.js`'s `!descriptor.attachProbe` orphaning
+   * guard on reverse, dropping the marker with the client's settings still
+   * written. That is exactly #212.
+   */
+  format: 'json' | 'toml'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -193,29 +204,6 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
-  /**
-   * `json_path` only: dotted path to the managed object whose presence
-   * means the client is attached (e.g. `models.providers.hypaware`).
-   * Segments are plain literals split on `.` with no escaping, so a
-   * key containing a dot cannot be addressed.
-   */
-  marker_path?: string
-  /**
-   * `json_path` only: dotted path RELATIVE to the marker object to a
-   * string property holding the JSON-encoded self-describing undo
-   * record (e.g. `headers.x-hypaware-marker`).
-   *
-   * The record's `set` list is **unordered**: core replays every entry and
-   * nothing in this contract makes the first one primary. A record whose
-   * replay restores more than one prior value restores them all on disk,
-   * but the single `DetachFromDiskResult.restoredValue` reported back (and
-   * the `restored_value` field of `hyp detach --json`) is only meaningful
-   * for a record with at most one restoring entry; for several, which one
-   * is reported is unspecified. Declare at most one restoring `set` entry
-   * per record if the restored value must be reported (LLP 0109
-   * §restoredValue is single-primary only).
-   */
-  marker_record?: string
 }
 
 /**

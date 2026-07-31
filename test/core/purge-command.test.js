@@ -710,13 +710,17 @@ test('scopeGovernance stays unwidened for callers that do not opt in', () => {
 })
 
 // The near-miss note has to be true of *this* run, not only of the run the
-// report was designed around. `aliased` has two causes and only one of them is
-// the filesystem adjudicating; the other is an `ENOENT`, which is the ordinary
-// case when the user purges a project directory they already deleted. Both
-// tests below use spellings that exist on no host, so neither depends on
-// whether the test volume folds.
+// report was designed around. `aliased` has three causes and only the first is
+// the filesystem adjudicating: two live directories with two inodes, a spelling
+// no longer on disk (the ordinary case, when the user purges a project
+// directory they already deleted), and a `stat` that could not be taken at all,
+// because `sameDirectoryOnDisk` answers `false` for every errno rather than for
+// `ENOENT` alone. The tests below use spellings that exist on no host, or exist
+// but cannot be read, so none of them asks the volume for a folding verdict. The
+// last one is the single fixture in this file that has to *build* both
+// spellings, so it alone needs them to be two entries, and skips where they are
+// not.
 // @ref LLP 0104#spellings [tests]: the retention note claims only what the run established
-
 test('the near-miss note does not claim a verdict an ENOENT never gave', async () => {
   const cacheRoot = await makeTmpDir('cli-alias-gone')
   const hypHome = await makeTmpDir('cli-alias-gone-home')
@@ -764,5 +768,100 @@ test('the near-miss note agrees in number with the rows it is counting', async (
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })
     await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+// The third cause, and the one the note used to misdescribe (#497 finding 1).
+// `sameDirectoryOnDisk` answers `false` for *any* `stat` error, so an alias that
+// is present on disk but unreadable retains exactly like one that is absent, and
+// the run has no way to tell them apart. That collapse is correct and stays: the
+// alternative is widening a deletion onto an unproven pair. What it constrains
+// is the sentence, which used to offer "genuinely different, or no longer on
+// disk" as an exhaustive pair when neither holds here.
+//
+// The fixture uses a self-referential symlink for `ELOOP` rather than a
+// chmod-ed ancestor for `EACCES`: it needs no injection, needs the real
+// predicate rather than a stubbed one, and unlike a permission bit it still
+// fails the `stat` when the suite runs as root.
+//
+// Unlike every other fixture here it creates *both* spellings, which is the one
+// thing a normalization-insensitive volume will not allow: on APFS or HFS+ the
+// NFD spelling already names the NFC directory just made, so the `symlink` below
+// would land `EEXIST` instead of building the loop. That host cannot host this
+// cause at all (a folded volume proves the alias and deletes), so it skips
+// rather than erroring, and the `ENOENT` case above still covers the retention.
+test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', async (t) => {
+  const cacheRoot = await makeTmpDir('cli-alias-eloop')
+  const hypHome = await makeTmpDir('cli-alias-eloop-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-eloop-'))
+  try {
+    const root = await fs.realpath(projects)
+    await fs.mkdir(path.join(root, NFC))
+    const folds = await fs.lstat(path.join(root, NFD)).then(() => true, () => false)
+    if (folds) {
+      t.skip('this volume folds the two spellings into one entry, so the alias cannot be made unreadable here')
+      return
+    }
+    // Present (`lstat` finds it), unreadable (`stat` gives `ELOOP`), and so
+    // neither "genuinely different" nor "no longer on disk".
+    await fs.symlink(path.join(root, NFD), path.join(root, NFD))
+    assert.ok(await fs.lstat(path.join(root, NFD)), 'the alias spelling is on disk')
+    await assert.rejects(fs.stat(path.join(root, NFD)), { code: 'ELOOP' })
+
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+    ])
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([path.join(root, NFC), '--yes'], ctx), 0)
+
+    // Retention is the safe direction and must not move: an unprovable alias is
+    // never deleted, whatever stopped the `stat`.
+    assert.match(stdout.text, /purged 0 rows /)
+    assert.deepEqual((await remainingRows(cacheRoot)).map((r) => r.part_id), ['m1#0'])
+
+    assert.match(stderr.text, /1 cached row under a similarly spelled directory was left in place/)
+    assert.match(
+      stderr.text,
+      /\(genuinely different, no longer on disk, or could not be checked\)/,
+      'the enumeration has to admit the cause this run actually hit'
+    )
+    assert.doesNotMatch(
+      stderr.text,
+      /\(genuinely different, or no longer on disk\)/,
+      'the alias is on disk and nothing adjudicated it different, so neither of the old two holds'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+// The other half of #497 finding 1, and the reason it is a message defect and
+// not a data-loss one: pin that a swallowed error resolves to `aliased` and
+// never to `governs`, for every errno anyone has proposed. A future attempt to
+// "improve" the swallow by treating some errno as reachable would delete rows
+// under a directory no filesystem ever identified with the target, and would
+// fail here rather than in someone's cache.
+// @ref LLP 0104#spellings [tests]: an unprovable alias is retained whatever the errno, so the fix to the wording cannot move a deletion
+test('no stat errno makes an unprovable alias deletable', () => {
+  for (const code of ['ENOENT', 'EACCES', 'EPERM', 'ELOOP', 'ENOTDIR', 'EIO']) {
+    let calls = 0
+    const statSync = () => {
+      calls++
+      const err = new Error(code)
+      Object.assign(err, { code })
+      throw err
+    }
+    assert.equal(
+      scopeGovernance(`/vol/${NFD}/sub`, `/vol/${NFC}`, { proveAliases: true, statSync }),
+      'aliased',
+      `${code} must retain and report, never widen the deletion`
+    )
+    // Without this the test could not fail: neither spelling exists on any
+    // host, so a build that stopped threading `statSync` down to
+    // `sameDirectoryOnDisk` would reach the same `aliased` through a real
+    // `ENOENT`, and the errno under test would never have been raised at all.
+    assert.ok(calls > 0, `the injected ${code} has to be the errno the predicate actually saw`)
   }
 })

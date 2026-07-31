@@ -90,6 +90,35 @@ load/config error (any non-EIO failure) is *not* retried: it surfaces
 immediately as a `LaunchAgentError`. This makes "reinstall over a live agent"
 reliable without masking real failures.
 
+<a id="status-queries-never-raise"></a>
+## The service status query never raises
+
+`serviceDaemonStatus` answers "is the service installed, and is it loaded?" and
+it **always answers**. Two rules make that true:
+
+1. **No unit file on disk means no runtime probe.** Installedness is a file
+   check under the caller's `homeDir`; when it comes back false there is
+   nothing for the service manager to report on, so `launchctl` / `systemctl`
+   is not spawned at all.
+2. **An unusable service manager reports "not loaded", not an error.** A host
+   with no `systemctl` on `PATH` (a container, a minimal image, WSL without
+   systemd) or no user bus observably has nothing loaded. The probe failure is
+   logged (`daemon.status.runtime_unavailable`, with `error_kind`) and the
+   query returns `loaded: false`.
+
+The reason is caller shape, not tidiness: every caller of this query branches
+on `installed` inside a best-effort teardown or lifecycle path. `hyp leave` is
+the sharp case - its contract is best-effort and idempotent
+([LLP 0063](./0063-login-auto-provision-forward-sink.decision.md#prerequisites)),
+so a *status* call that throws aborts the run between the config-layer teardown
+and the attach reversal, leaving a half-disconnected machine. Raising here buys
+nothing: a status query has no failure a caller could act on that
+`loaded: false` does not already express.
+
+Reporting is not the same as suppressing. Operations that *change* state
+(install, start, restart, uninstall) still surface their failures as
+`ServiceOpError` subclasses; only the query degrades.
+
 ## Attach is idempotent and reversible
 
 Client attach/detach (Claude Code, Codex) performed during install must be

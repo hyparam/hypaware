@@ -569,6 +569,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
  *     settingsPath?: string,
  *     removed?: string,
  *     restoredValue?: string,
+ *     restoredPaths?: string[],
  *     warning?: string,
  *   },
  * }} args
@@ -587,6 +588,7 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
     if (settingsPath !== undefined) payload.settings_path = settingsPath
     if (result.removed !== undefined) payload.removed = result.removed
     if (result.restoredValue !== undefined) payload.restored_value = result.restoredValue
+    if (result.restoredPaths !== undefined) payload.restored_paths = result.restoredPaths
     if (result.warning !== undefined) payload.warning = result.warning
     ctx.stdout.write(JSON.stringify(payload) + '\n')
     return
@@ -595,6 +597,12 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
     ctx.stdout.write(`✓ Detached ${name}${settingsPath !== undefined ? ` (${settingsPath})` : ''}\n`)
     if (result.removed !== undefined) ctx.stdout.write(`  Removed ${result.removed}\n`)
     if (result.restoredValue !== undefined) ctx.stdout.write(`  Restored ${result.restoredValue}\n`)
+    // Named by path, never by value: this is the block attach repaired, and a
+    // malformed `env` is exactly where an API key ends up (LLP 0163). Silence
+    // here meant a detach that rewrote a block said only "✓ Detached".
+    for (const restoredPath of result.restoredPaths ?? []) {
+      ctx.stdout.write(`  Restored ${restoredPath} from the marker's malformed-block backup\n`)
+    }
     if (result.warning !== undefined) ctx.stdout.write(`  warning: ${result.warning}\n`)
   } else {
     ctx.stdout.write(

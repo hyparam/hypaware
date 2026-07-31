@@ -95,17 +95,20 @@ a `covered_by` attribute naming both routes, so the flag cannot be read as
 
 - The picker gains no new row. Codex Desktop is not a separate pick, because
   it is not a separate attach.
-- `hyp status` still cannot say "Codex Desktop traffic arrived recently".
-  It boots with no plugins activated by design (`decideBootProfile` returns
+- `hyp status` can say "Codex Desktop traffic arrived recently" as of
+  [LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md),
+  which resolved what this document left open. The constraint that made it a
+  design decision rather than a bug fix still holds: `hyp status` boots with
+  no plugins activated by design (`decideBootProfile` returns
   `{ activate: [] }` for `status`), so it has no dataset registry and no
-  cache read; and client-specific knowledge in core would contradict
+  cache read, and client-specific knowledge in core would contradict
   [LLP 0130](./0130-declarative-picker-descriptors.decision.md)'s
-  "rendering needs no plugin code" and LLP 0003's core/plugin split. Closing
-  that gap needs a design decision (a declarative activity-probe descriptor,
-  a status boot-profile change, an entrypoint section in
-  `hyp query overview`, or gateway-tracked last-seen entrypoints in
-  `status.json`), and is deliberately left open here. Until then the
-  supported check is the query itself, documented in
+  "rendering needs no plugin code" and LLP 0003's core/plugin split. Of the
+  four candidate shapes named here, the gateway-tracked one was chosen: the
+  gateway counts and timestamps the `entrypoint` values it writes, the daemon
+  carries them into `status.json`, and core renders them without
+  interpreting any of them. The list is in-memory and daemon-scoped, so the
+  **query remains the durable check** and is still the pass condition in
   [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md).
 - Proving the live Desktop route end to end needs Codex Desktop on a real
   machine, which no hermetic smoke can supply. `docs/ACCEPTANCE.md` carries

@@ -350,13 +350,23 @@ export interface ClientResult {
   removed?: string
   /**
    * Prior value restored on detach. Emitted by every core undo format that
-   * records a prior (`json`, `toml`, `json_path`), not just codex.
+   * records a prior (`json`, `toml`), not just codex.
    *
    * Single-primary only: an undo that restores several priors restores them
    * all on disk but reports one unspecified value here (LLP 0109
    * §restoredValue is single-primary only).
    */
   restored_value?: string
+  /**
+   * Dotted paths whose `prev_malformed` backup the `json` undo put back on
+   * detach - the blocks attach had to rebuild because they were present with
+   * the wrong JSON type (LLP 0163). Absent when the replay restored nothing.
+   *
+   * Paths, never values: a malformed `env` block is exactly where an API key
+   * ends up, and this is printed and logged. That is also why it is not folded
+   * into `restored_value`, which is rendered as a bare value.
+   */
+  restored_paths?: string[]
   /** Non-fatal warning emitted by the adapter. */
   warning?: string
   /** Machine-readable failure category on the error path. */

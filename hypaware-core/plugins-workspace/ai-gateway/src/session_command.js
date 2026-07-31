@@ -39,6 +39,38 @@ const EPHEMERAL_NOTE =
   'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
 
 /**
+ * The control plane's authenticity contract, printed beside every **confirmed**
+ * answer, by the writer and the reader alike.
+ *
+ * `validateControlResponse` proves the responder saw our token; nothing proves
+ * the responder IS the gateway. A local process that binds the resolved port and
+ * echoes the token back yields a confident `ignored: true` for a session nothing
+ * is dropping (issue #451). Authenticating it would need peer-process identity,
+ * which has no portable form, and a gateway-written secret defends nothing
+ * because whoever can bind that port runs as the same uid and can read the same
+ * file ([LLP 0067 §cli-response-check](../../../../llp/0067-session-opt-out.design.md#cli-response-check)).
+ *
+ * So the guarantee is stated rather than proved, and the statement is
+ * **unconditional**: the verb cannot tell the gateway from the impostor, so a
+ * note printed only "when spoofed" would be a claim it cannot make, and its
+ * absence would read as proof of authenticity.
+ *
+ * The endpoint is named in the note rather than left as "that port": on the
+ * `daemon_status` path this is the only line about the endpoint at all, and a
+ * reader pasting the output into a support thread should not have to reconstruct
+ * which address was trusted.
+ *
+ * @ref LLP 0166#stated-not-proved [implements]: the responder is never
+ * authenticated, and every confirmed answer says so.
+ *
+ * @param {string} endpoint
+ * @returns {string}
+ */
+function responderTrustNote(endpoint) {
+  return `trust:   nothing proves the responder at ${endpoint} is the HypAware gateway - any process on this machine could bind that port and answer. This answer is only as trustworthy as this machine.`
+}
+
+/**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
  * being dropped" read. Distinct from `SESSION_EXIT_UNKNOWN` on purpose: the
  * whole point of the verb is that "recording, confirmed" and "could not
@@ -276,6 +308,9 @@ async function runMutation(argv, ctx, method, usage) {
         total,
         endpoint: endpoint.endpoint,
         endpoint_source: endpoint.source,
+        // Same field, same constant, on the verbs whose output reads as done.
+        // @ref LLP 0166#stated-not-proved [implements]
+        endpoint_authenticated: false,
       }) + '\n'
     )
     return 0
@@ -295,6 +330,7 @@ async function runMutation(argv, ctx, method, usage) {
     idSource: resolvedId.source,
     idEvidence: resolvedId.evidence ?? null,
     threadId: resolvedId.threadId ?? null,
+    endpoint: endpoint.endpoint,
     endpointSource: endpoint.source,
   })) {
     ctx.stdout.write(`${note}\n`)
@@ -313,7 +349,19 @@ async function runMutation(argv, ctx, method, usage) {
  */
 function writeStatus(ctx, json, report) {
   if (json) {
-    ctx.stdout.write(JSON.stringify({ ...report, folder_policy: 'hyp policy show' }) + '\n')
+    ctx.stdout.write(
+      JSON.stringify({
+        ...report,
+        // The human note's machine-readable twin, so a JSON consumer does not
+        // have to parse prose (or, worse, infer authenticity from silence).
+        // Constant by contract, `unknown` reports included: it is `false`
+        // because no answer this verb can obtain is authenticated, not because
+        // this particular one failed a check.
+        // @ref LLP 0166#stated-not-proved [implements]
+        endpoint_authenticated: false,
+        folder_policy: 'hyp policy show',
+      }) + '\n'
+    )
   } else if (report.status === 'unknown') {
     const who = report.session_id ?? '(unresolved)'
     ctx.stdout.write(`session ${who}: UNKNOWN - cannot confirm the opt-out is in effect\n`)
@@ -327,6 +375,7 @@ function writeStatus(ctx, json, report) {
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
+      endpoint: report.endpoint,
       endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
@@ -339,6 +388,7 @@ function writeStatus(ctx, json, report) {
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
+      endpoint: report.endpoint,
       endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
@@ -368,9 +418,12 @@ function writeStatus(ctx, json, report) {
  * bound, and qualifying it too would train the reader to skip the caveat on the
  * paths where it is load-bearing.
  *
- * A live daemon's `status.json` proves the second; a
- * pinned `listen` only asserts it, and `validateControlResponse` can prove the
- * responder saw our token but not that it is the gateway. Naming the weaker
+ * The second claim is never proved, only graded. A live daemon's `status.json`
+ * says the gateway bound that port; a pinned `listen` says only that it was
+ * asked to, so the weaker source gets its own note. Neither says who answers
+ * there NOW, and `validateControlResponse` can prove the responder saw our
+ * token but not that it is the gateway, so `responderTrustNote` rides every
+ * confirmed answer under both sources (issue #451, LLP 0166). Naming the
  * evidence in the output is the only remedy available at this layer, and it is
  * this change's own thesis: a control that can be wrong must at least say so.
  *
@@ -388,12 +441,13 @@ function writeStatus(ctx, json, report) {
  *   idSource: SessionStatusReport['session_id_source'],
  *   idEvidence: string | null,
  *   threadId: string | null,
+ *   endpoint: string | null,
  *   endpointSource: SessionStatusReport['endpoint_source'],
  * }} args
  * @returns {string[]}
  */
 function provenanceNotes(args) {
-  const { idSource, idEvidence, threadId, endpointSource } = args
+  const { idSource, idEvidence, threadId, endpoint, endpointSource } = args
   /** @type {string[]} */
   const notes = []
   if (idSource === 'codex_rollout') {
@@ -416,6 +470,10 @@ function provenanceNotes(args) {
       'endpoint:  from the pinned `listen`, not a live daemon - nothing proved the gateway still owns that port.'
     )
   }
+  // Last, and on every confirmed answer: the weaker of the two endpoint
+  // sources gets the extra note above, but neither of them authenticates the
+  // responder, so the contract is stated whichever one produced the port.
+  if (endpoint) notes.push(responderTrustNote(endpoint))
   return notes
 }
 
@@ -576,7 +634,13 @@ export function resolveSessionIdForCli(args) {
     }
   }
 
-  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
+  // Recording the cwd is the whole of what makes a rollout a candidate here.
+  // Nothing further about it may filter the list, because the list is counted
+  // below and the count is the uniqueness claim: a header dropped for a field
+  // this path does not resolve on would take the ambiguity with it and leave a
+  // confident answer behind. Whether a candidate is usable is decided after the
+  // count, one candidate at a time.
+  /** @type {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
   const candidates = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -603,6 +667,27 @@ export function resolveSessionIdForCli(args) {
         error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
       }
     }
+    // Every `session_meta` Codex writes states `payload.id`, so a header
+    // without one is a file nothing accounts for - truncated, hand-edited, or
+    // written by something that is not Codex. Its `session_id` reads like an
+    // answer and there is no second field left to check it against, and this
+    // one goes to a privacy control that reports success for whatever token it
+    // is handed. Unconfirmable is unresolvable, the same rule that refuses a
+    // blank container.
+    //
+    // This is asked BEFORE the missing-container question, because
+    // `legacyRolloutError` diagnoses one specific file - a Codex old enough to
+    // predate `session_id` - and names the thread id it does carry as the thing
+    // not to key on. A header stating neither field is not an old Codex, so
+    // answering it with "Upgrade Codex" would send the user after a fix for a
+    // problem this file does not have. Both refuse either way; only the
+    // diagnosis differs.
+    if (only.threadId === undefined) {
+      return {
+        ok: false,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) states no thread id (payload.id), which every session_meta Codex writes carries, so the header cannot be vouched for and nothing it states about the session is evidence of the session you are in. Pass the session id explicitly: hyp session status <session-id>.`,
+      }
+    }
     if (only.sessionId === undefined) {
       return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
     }
@@ -620,7 +705,12 @@ export function resolveSessionIdForCli(args) {
       error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
-  const named = candidates.map((c) => `${c.threadId} (${path.basename(c.file)})`).join(', ')
+  // A candidate with no thread id still has to appear: it is one of the reasons
+  // the answer is ambiguous, and a user reading the list needs to see the file
+  // rather than wonder why the count exceeds the names.
+  const named = candidates
+    .map((c) => `${c.threadId ?? 'no thread id'} (${path.basename(c.file)})`)
+    .join(', ')
   return {
     ok: false,
     error: `could not resolve a session id: ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
@@ -666,8 +756,13 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
     if (!meta) continue
-    if (meta.threadId !== threadId) continue
-    matches.push({ ...meta, file })
+    // Unlike the cwd scan, this path is an identity test rather than a count,
+    // so a header stating no thread cannot be a match and cannot be missing
+    // one either: it names nothing to compare.
+    const found = meta.threadId
+    if (found === undefined) continue
+    if (found !== threadId) continue
+    matches.push({ ...meta, threadId: found, file })
   }
 
   if (matches.length === 0) {
@@ -711,6 +806,12 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
  * resolution exists to remove, and it would be invisible: on a root thread the
  * two coincide, so the wrong key only shows up on the subagent threads nobody
  * tests by hand.
+ *
+ * Both callers establish a thread id before reaching this, which the message
+ * relies on twice: "upgrade Codex" is only the right advice for a rollout old
+ * enough to predate the field, and "its thread id is NOT that container" names
+ * a value the header has to be carrying. A header stating neither field is a
+ * different failure and gets its own refusal.
  *
  * @param {string} which  how the rollout was selected, for the message
  * @param {string} names  rollout basename(s) the refusal is about
@@ -801,7 +902,19 @@ function describeAge(ms) {
 
 /**
  * The thread id, session container and cwd a rollout's `session_meta` header
- * states, or `undefined` when the file states no thread at all.
+ * states, or `undefined` when the file's first line is not that header at all.
+ *
+ * **`undefined` means "this file establishes nothing about any session", and
+ * nothing else.** It used to also swallow a header that states a `cwd` and a
+ * container but no `payload.id`, which made such a rollout invisible to the
+ * caller rather than unresolvable to it. The cwd scan counts its candidates to
+ * decide whether the match is unique, so a discarded match did not merely fail
+ * to resolve, it removed the evidence that the survivor was not alone: two
+ * rollouts recording one cwd resolved confidently to whichever of them happened
+ * to carry a thread id. That is the artefact-of-the-bound failure LLP 0067
+ * §cli-session-id refuses on, reached by discard instead of by truncation.
+ * Judging a header is the caller's job, so a header is now returned whenever it
+ * is one and the callers refuse on what they need.
  *
  * The read itself is `readRolloutSessionMeta`, shared with `@hypaware/codex`'s
  * live cwd resolver, which asks this exact line the same question for the
@@ -832,13 +945,13 @@ function describeAge(ms) {
  * rollout whose header records no usable `cwd` still answers it.
  *
  * @param {string} file
- * @returns {{ threadId: string, sessionId: string | undefined, cwd: string | undefined } | undefined}
+ * @returns {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined } | undefined}
  * @ref LLP 0067#cli-session-id [implements]: an absent or unusable session_id is
  * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
   const meta = readRolloutSessionMeta(file)
-  if (meta?.threadId === undefined) return undefined
+  if (!meta) return undefined
   return { threadId: meta.threadId, sessionId: meta.sessionId, cwd: meta.cwd }
 }
 

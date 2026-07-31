@@ -288,6 +288,44 @@ export async function restartServiceDaemon(options) {
 }
 
 /**
+ * Probe the runtime status of an installed service, degrading to "not loaded"
+ * when the service manager itself is unusable (binary absent, no user bus).
+ *
+ * A status query's job is to report what it can observe, and a host where
+ * `systemctl` / `launchctl` cannot even be spawned observably has nothing
+ * loaded. Letting the spawn failure out instead would abort the best-effort
+ * teardown paths that call this (`hyp leave` above all), which are required to
+ * tolerate already-gone state rather than wedge.
+ *
+ * @ref LLP 0017#status-queries-never-raise [implements]: the query degrades to
+ *   "not loaded"; only state-changing service ops surface failures
+ *
+ * @param {NodeJS.Platform} platform
+ * @param {DaemonServiceOptions} options
+ * @param {string} label
+ * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ */
+async function serviceRuntimeStatus(platform, options, label) {
+  try {
+    return platform === 'darwin'
+      ? await macos.launchAgentStatus(options)
+      : await linux.systemdUnitStatus(options)
+  } catch (err) {
+    const code = err !== null && typeof err === 'object' && 'code' in err
+      ? String(/** @type {{ code: unknown }} */ (err).code)
+      : undefined
+    getLogger('daemon').warn('daemon.status.runtime_unavailable', {
+      hyp_platform: platform,
+      service_label: label,
+      error_kind: code ?? 'service_manager_unavailable',
+      error_message: err instanceof Error ? err.message : String(err),
+      exit_status: 'degraded',
+    })
+    return { loaded: false }
+  }
+}
+
+/**
  * Query installed + runtime status of the service. Emits a
  * `daemon.status` span (the runtime daemon also emits a per-process
  * `daemon.run` span; this one tracks the installer-facing query).
@@ -312,17 +350,17 @@ export async function serviceDaemonStatus(options) {
       status: 'ok',
     },
     async function() {
-      /** @type {boolean} */
-      let installed
-      /** @type {{ loaded: boolean, pid?: number }} */
-      let runtime
-      if (platform === 'darwin') {
-        installed = macos.isLaunchAgentInstalled(options)
-        runtime = await macos.launchAgentStatus(options)
-      } else {
-        installed = linux.isSystemdUnitInstalled(options)
-        runtime = await linux.systemdUnitStatus(options)
-      }
+      const installed = platform === 'darwin'
+        ? macos.isLaunchAgentInstalled(options)
+        : linux.isSystemdUnitInstalled(options)
+      // No plist / unit file on disk means the service manager has nothing to
+      // report on, so skip the probe entirely. Probing regardless is what made
+      // this query *throw* on a host with no service manager at all (a
+      // container with no `systemctl`): the spawn rejects `ENOENT`, and the
+      // throw escapes callers that only ever branch on `installed`.
+      const runtime = installed
+        ? await serviceRuntimeStatus(platform, options, label)
+        : { loaded: false, pid: undefined }
       log.info('daemon.status', {
         hyp_platform: platform,
         service_label: label,

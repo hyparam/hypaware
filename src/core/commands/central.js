@@ -397,24 +397,30 @@ export async function runLeave(argv, ctx) {
       // 2. Restart the service so the running daemon reboots without the
       // central sink: forwarding and the config-pull loop stop here. Restart,
       // never uninstall: local-only capture keeps working.
+      //
+      // The status probe sits INSIDE the try with the restart: every step of
+      // leave is best-effort, so a daemon step that cannot even work out what
+      // is installed has to be a counted, reported failure - never an abort
+      // that strands the attach reversal in step 3 and leaves the user with
+      // a half-torn-down machine and no advice.
       const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
-      const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
-      if (svc.installed) {
-        try {
+      try {
+        const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
+        if (svc.installed) {
           await restartServiceDaemon({ homeDir: ctx.env.HOME })
           // Close the small race in which the old daemon's pull loop applied
           // a config slot between step 1 and the restart.
           await fs.rm(centralSeedPath(stateRoot), { force: true })
           resetCentralLayerToSeed(stateRoot)
           ctx.stdout.write('✓ restarted the daemon - forwarding and config pull are stopped\n')
-        } catch (err) {
-          failures += 1
-          const message = err instanceof Error ? err.message : String(err)
-          ctx.stderr.write(`hyp leave: daemon restart failed: ${message}\n`)
-          ctx.stderr.write("  run 'hyp daemon restart' to stop the central sink\n")
+        } else {
+          ctx.stdout.write('  no daemon service installed - nothing to restart\n')
         }
-      } else {
-        ctx.stdout.write('  no daemon service installed - nothing to restart\n')
+      } catch (err) {
+        failures += 1
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`hyp leave: daemon restart failed: ${message}\n`)
+        ctx.stderr.write("  run 'hyp daemon restart' to stop the central sink\n")
       }
 
       // 3. Reverse the org-driven attaches. Only reconciler-applied attaches

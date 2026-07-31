@@ -665,9 +665,17 @@ export function scopeGoverns(cwd, dir, deps = {}) {
  * govern `cwd` (`governs`), is `cwd` unrelated to it (`outside`), or is `cwd`
  * spelled as if it were inside `dir` on a volume that folds spellings, without
  * *this* filesystem confirming the two spellings are one directory (`aliased`)?
- * `aliased` is the absence of a proof, not a proof of difference: it covers
- * both a live pair with two inodes and a spelling that could not be `stat`ed at
- * all, so a caller rendering it must not report a verdict the second never gave.
+ * `aliased` is the absence of a proof, not a proof of difference. It covers
+ * three distinct situations and only the first is the filesystem adjudicating:
+ * a live pair with two inodes; a spelling that is no longer on disk, so the
+ * `stat` landed on nothing; and a spelling that could not be `stat`ed at all,
+ * because {@link sameDirectoryOnDisk} answers `false` for *every* error and not
+ * only for `ENOENT`, so an `EACCES` on an ancestor, an `ELOOP` or an `ENOTDIR`
+ * arrive here too. A caller rendering this verdict must therefore claim neither
+ * that the filesystem adjudicated (only the first gave a verdict) nor that the
+ * spelling is gone (only the second says so); `src/core/commands/purge.js` names
+ * all three, and LLP 0104 #spellings records why an enumeration that stops at
+ * two is making the same unearned claim the report exists to avoid.
  *
  * The third answer is the point, and it exists because `hyp purge` deletes. At
  * the gate, folding two spellings together is free: the resolved class is
