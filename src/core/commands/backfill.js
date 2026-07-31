@@ -23,7 +23,7 @@ const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
  * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
- * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
+ * @import { BackfillProviderResult, BackfillRunnerContext } from '../../../src/core/commands/types.js'
  * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
 
@@ -299,7 +299,7 @@ export async function runBackfillPlan(argv, ctx) {
  * status line without a try/catch.
  *
  * @param {{
- *   ctx: CommandRunContext,
+ *   ctx: BackfillRunnerContext,
  *   provider: string,
  *   dryRun: boolean,
  *   retentionDays?: number,
@@ -361,7 +361,7 @@ function markProviderFailed(result, error) {
  *
  * @param {{
  *   provider: BackfillContribution,
- *   ctx: CommandRunContext,
+ *   ctx: BackfillRunnerContext,
  *   devRunId: string,
  *   retentionDays: number | undefined,
  *   since: string | undefined,
@@ -476,7 +476,17 @@ async function runProvider(args) {
           const rows = await materializeItem({
             materializer,
             item: yielded,
-            ctx,
+            // materializeItem/writeRows/flushDataset are outside T7's
+            // narrowing (they read ctx.query, which BackfillRunnerContext
+            // does not carry); today's only real callers (hyp backfill's
+            // CLI path, the onboarding finale) still hand runProvider a
+            // full CommandRunContext, so this is a type-level widening
+            // back to the shape those three helpers already require, not
+            // a behavior change.
+            // @ref LLP 0172#lane-b-sweep [constrained-by]: runProvider's
+            // own ctx param narrows to BackfillRunnerContext; its
+            // still-CommandRunContext-typed callees need this back-cast
+            ctx: /** @type {CommandRunContext} */ (ctx),
             devRunId,
             provider: provider.name,
             log,
@@ -491,7 +501,7 @@ async function runProvider(args) {
             dataset: yielded.dataset,
             provider: provider.name,
             devRunId,
-            ctx,
+            ctx: /** @type {CommandRunContext} */ (ctx),
             log,
           })
           result.rows_written += written.rowsWritten
@@ -502,7 +512,13 @@ async function runProvider(args) {
 
         if (!dryRun) {
           for (const dataset of datasetsTouched) {
-            await flushDataset({ dataset, provider: provider.name, devRunId, ctx, log })
+            await flushDataset({
+              dataset,
+              provider: provider.name,
+              devRunId,
+              ctx: /** @type {CommandRunContext} */ (ctx),
+              log,
+            })
           }
         }
       } catch (err) {
@@ -761,7 +777,7 @@ function buildRunContext(args) {
  * container was scanned at all. Degrading never captures MORE than
  * intended.
  *
- * @param {CommandRunContext} ctx
+ * @param {BackfillRunnerContext} ctx
  * @param {PluginLogger} log
  * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean }>}
  */
@@ -814,7 +830,13 @@ async function resolveOwnersForRun(ctx, log) {
  * state for it, not the `config.load_failed` error row that helper emits.
  *
  * @ref LLP 0140#manifest-declares-ownership [implements]: "configured" is membership of the effective config, read fresh, not of the boot profile's activation set
- * @param {CommandRunContext} ctx
+ * @ref LLP 0172#lane-b-sweep [constrained-by]: `ctx.plugins` stays optional
+ * here (rather than `CommandRunContext`'s required array) so this helper
+ * keeps working unchanged under `resolveOwnersForRun`'s narrowed
+ * `BackfillRunnerContext`, which carries no activation set; the union
+ * already treats an absent source as "answers nothing," so a caller with
+ * no `plugins` field degrades to the other two sources, not a type error.
+ * @param {Pick<CommandRunContext, 'config' | 'env'> & { plugins?: CommandRunContext['plugins'] }} ctx
  * @param {string} hypHome
  * @returns {Promise<Set<string>>}
  */

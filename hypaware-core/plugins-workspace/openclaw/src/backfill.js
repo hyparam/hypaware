@@ -67,6 +67,15 @@ const CONVERSATION_SOURCE = 'openclaw'
 const COMPONENT = 'plugin.openclaw.backfill'
 
 /**
+ * Default Lane B sweep cadence (every 5 minutes), used when the plugin's
+ * `backfill.sweep_cron` config key is absent. Mirrors R7: "tunable in the
+ * plugin's `backfill` config section," default otherwise.
+ *
+ * @ref LLP 0172#lane-b-sweep [implements]: the sweep cadence default
+ */
+const DEFAULT_SWEEP_CRON = '*/5 * * * *'
+
+/**
  * The CLI-backend exclusion (R10), as an explicit ALLOWLIST rather than a
  * denylist: a record projects only when the backend that served its turn is
  * one of the two HypAware actually steers and captures live.
@@ -130,6 +139,7 @@ const SIBLING_ADAPTER_COVERAGE = [
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   config?: { backfill?: { sweep_cron?: string } },
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -153,6 +163,10 @@ export function createOpenclawBackfillProvider(opts) {
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local OpenClaw session transcripts into ai_gateway_messages',
+    // @ref LLP 0172#lane-b-sweep [implements]: opt-in Lane B scheduling
+    // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
+    // every 5 minutes when the config key is absent.
+    sweep: { cron: opts.config?.backfill?.sweep_cron ?? DEFAULT_SWEEP_CRON },
     /**
      * @param {BackfillPlanContext} _ctx
      * @returns {Promise<BackfillPlan | undefined>}

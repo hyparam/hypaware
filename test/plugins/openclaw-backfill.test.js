@@ -634,3 +634,40 @@ test('reruns are deterministic: the same session yields byte-identical row ident
     await env.cleanup()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Lane B: sweep scheduling metadata (LLP 0172#lane-b-sweep, LLP 0173 T7)
+// ---------------------------------------------------------------------------
+
+test('sweep.cron reads the configured backfill.sweep_cron value', async () => {
+  const env = await stageEnv()
+  try {
+    const contribution = createOpenclawBackfillProvider({
+      homeDir: env.homeDir,
+      config: { backfill: { sweep_cron: '*/10 * * * *' } },
+    })
+    assert.deepEqual(contribution.sweep, { cron: '*/10 * * * *' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('sweep.cron falls back to the every-5-minutes default when config is absent', async () => {
+  const env = await stageEnv()
+  try {
+    assert.deepEqual(createOpenclawBackfillProvider({ homeDir: env.homeDir }).sweep, {
+      cron: '*/5 * * * *',
+    })
+    // Also absent when `config` is present but carries no `backfill` section,
+    // and when `backfill` is present but carries no `sweep_cron` key.
+    assert.deepEqual(createOpenclawBackfillProvider({ homeDir: env.homeDir, config: {} }).sweep, {
+      cron: '*/5 * * * *',
+    })
+    assert.deepEqual(
+      createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: {} } }).sweep,
+      { cron: '*/5 * * * *' }
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
