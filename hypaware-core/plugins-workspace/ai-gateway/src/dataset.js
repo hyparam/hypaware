@@ -12,6 +12,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from '
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  * @import { AsyncDataSource } from 'squirreling'
+ * @import { ScanColumnOptions, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -160,18 +161,77 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * itself is unchanged: a row object that lacks the key simply reads as null,
  * which is the correct value for "this partition predates the column".
  *
+ * `scanColumn` (the streaming column fast path, LLP 0055) is forwarded under the
+ * same rule: a requested column present on the wrapped source streams through
+ * unchanged; a column absent from the wrapped source's physical schema (the same
+ * drift `scan` already tolerates) null-fills instead of throwing, honoring
+ * `limit`/`offset`/`signal` the same as a real column scan would. `scanColumn` is
+ * only exposed when the wrapped source itself exposes one: a source that cannot
+ * stream any column at all still falls back to the buffering scan path.
+ *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
+ * @ref LLP 0055 [implements]: scanColumn forwards down the ai-gateway schema wrapper so the streaming aggregate fast path can light up
  * @param {AsyncDataSource} source
  * @returns {AsyncDataSource}
  */
-function withSchemaColumns(source) {
+export function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  return {
+  const physicalColumns = new Set(source.columns)
+
+  /** @type {AsyncDataSource} */
+  const wrapped = {
     columns,
     numRows: source.numRows,
     scan(options) {
       return source.scan(options)
     },
+  }
+
+  const scanColumn = source.scanColumn
+  if (typeof scanColumn === 'function') {
+    wrapped.scanColumn = (options) => {
+      if (physicalColumns.has(options.column)) return scanColumn(options)
+      return nullColumnChunks(nullFillCount(source.numRows ?? 0, options), options.signal)
+    }
+  }
+
+  return wrapped
+}
+
+/** Chunk size for a null-fill `scanColumn` stream, so a large partition's
+ * null-fill stays O(chunk) per allocation rather than O(rows). */
+const NULL_FILL_CHUNK_SIZE = 10000
+
+/**
+ * How many null values a null-filled `scanColumn` should yield: `limit`/`offset`
+ * apply the same as they would to a real column scan, just over an all-null
+ * column of `total` values.
+ *
+ * @param {number} total
+ * @param {ScanColumnOptions} options
+ * @returns {number}
+ */
+function nullFillCount(total, options) {
+  const remaining = Math.max(0, total - (options.offset ?? 0))
+  return options.limit !== undefined ? Math.min(options.limit, remaining) : remaining
+}
+
+/**
+ * Stream `count` null values in bounded chunks, checking `signal` between
+ * chunks so an aborted query tears down promptly instead of running the
+ * null-fill to completion.
+ *
+ * @param {number} count
+ * @param {AbortSignal} [signal]
+ * @returns {AsyncIterable<ArrayLike<SqlPrimitive>>}
+ */
+async function* nullColumnChunks(count, signal) {
+  let remaining = count
+  while (remaining > 0) {
+    signal?.throwIfAborted()
+    const size = Math.min(NULL_FILL_CHUNK_SIZE, remaining)
+    yield new Array(size).fill(null)
+    remaining -= size
   }
 }
 
