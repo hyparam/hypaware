@@ -465,3 +465,48 @@ test('json_path undo surfaces CONCURRENT_EDIT when the file changes between read
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+/* ------------------------- hand-edited record paths ------------------------ */
+
+test('a record path that leaves the document cannot delete an Object.prototype member', async () => {
+  // `managed.added` and `managed.created_parents` are replayed with no equality
+  // gate at all - unlike `managed.set`, whose "is it still ours?" test happens
+  // to block a prototype path because such a path always reads back undefined.
+  // The record lives in the user's own settings file, so an `added` entry of
+  // `__proto__.toString` used to run `delete Object.prototype.toString` and
+  // break every object in the process. Refuse the path instead.
+  const home = await stageHome()
+  try {
+    const record = undoRecord()
+    record.managed.added = ['models.providers.hypaware', '__proto__.toString']
+    record.managed.created_parents = ['models', 'models.providers', '__proto__']
+    await writeOpenclawSettings(home, attachedSettings(record))
+
+    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+
+    assert.equal(typeof ({}).toString, 'function')
+    assert.equal(typeof ({}).hasOwnProperty, 'function')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a record set path that leaves the document cannot write onto Object.prototype', async () => {
+  // Defence in depth on the sibling writer: the equality gate already refuses
+  // (a prototype path reads back undefined and a recorded `value` comes from
+  // JSON, so it never is), but the guard is on the helper so a future caller
+  // without that gate cannot reopen the hole.
+  const home = await stageHome()
+  try {
+    const record = undoRecord()
+    record.managed.set = [{ path: '__proto__.hyp_polluted_set', value: undefined, prev: 'PWNED' }]
+    await writeOpenclawSettings(home, attachedSettings(record))
+
+    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+
+    assert.equal(/** @type {any} */ ({}).hyp_polluted_set, undefined)
+  } finally {
+    delete (/** @type {any} */ (Object.prototype).hyp_polluted_set)
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

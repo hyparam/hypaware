@@ -121,7 +121,9 @@ export interface ProxyOptions {
    * proxy short-circuits control requests BEFORE upstream matching (they
    * are never proxied and start no exchange) and delegates the full
    * request lifecycle — body read and response — to this callback. Absent,
-   * the proxy 404s the control request locally. @ref LLP 0066#control-path
+   * the proxy 404s the control request locally.
+   * @ref LLP 0066#control-path: the control prefix is reserved and answered
+   * locally, so an opt-out can never be forwarded upstream as a real request.
    */
   onControlRequest?(req: IncomingMessage, res: ServerResponse, url: URL): void
 }
@@ -155,7 +157,8 @@ export interface GatewayState {
    * activation, NOT per listener) so a config `reload()` — which tears down
    * and relaunches the listener — does not silently re-enable recording
    * mid-session. No file, no cache column: dies with the daemon process.
-   * @ref LLP 0066#ephemeral
+   * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
+   * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.
    */
   ignoredSessions: Set<string>
 }
@@ -176,7 +179,8 @@ export interface GatewayState {
  * carried separately, for provenance and display, where the container was read
  * out of a rollout (`codex_rollout`, `codex_env_rollout`) - the user needs to
  * see both the id they are in and the wider id being acted on.
- * @ref LLP 0067#cli-session-id
+ * @ref LLP 0067#cli-session-id: `source` is the provenance the reader prints, so
+ * an inferred id can never be rendered as one the client stated.
  */
 export type SessionIdResolution =
   | {
@@ -192,7 +196,8 @@ export type SessionIdResolution =
  * Outcome of resolving the local gateway's control endpoint for
  * `hyp session <verb>`: the daemon's proven bound port, else a pinned
  * `listen`, else an error. Never a guessed default port.
- * @ref LLP 0086#endpoint-discovery
+ * @ref LLP 0086#endpoint-discovery [constrained-by]: the live port is read from
+ * `status.json`, so `daemon_status` is the only `source` anything proved bound.
  */
 export type SessionEndpointResolution =
   | { ok: true; endpoint: string; source: 'daemon_status' | 'config_listen' }
@@ -206,7 +211,8 @@ export type SessionEndpointResolution =
  * gateway" - and only some of the ways of establishing them are authoritative.
  * Hiding which one was used is how a confident answer about the wrong session
  * reads as a confident answer about yours.
- * @ref LLP 0066#readable
+ * @ref LLP 0066#readable [implements]: R10 and R12 shape this record - `ignored`
+ * is nullable so an unconfirmable read cannot render as `false`.
  */
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'

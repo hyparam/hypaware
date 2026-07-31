@@ -68,18 +68,23 @@ export interface CodexRolloutItem {
 }
 
 /**
- * Resolves a Codex session's `cwd` from its rollout `session_meta` line, the
+ * Resolves a Codex **thread's** `cwd` from its rollout `session_meta` line, the
  * live projector's fallback when the request carries no in-band cwd (the
  * ChatGPT-subscription route). Injectable so the projector can be tested
  * without a real sessions tree.
  */
 export interface RolloutCwdResolver {
-  /** The rollout-recorded cwd for `sessionId`, or `undefined` when unknown. */
-  resolve(sessionId: string): string | undefined
+  /**
+   * The rollout-recorded cwd for the THREAD `threadId`
+   * (`session_meta.payload.id`, the id a rollout file name embeds), or
+   * `undefined` when unknown. Passing the session CONTAINER instead resolves the
+   * root thread's cwd for every subagent thread in it. @ref LLP 0083#decision
+   */
+  resolve(threadId: string): string | undefined
 }
 
 /**
- * A directory entry as far as the rollout scan needs it — the structural subset
+ * A directory entry as far as the rollout scan needs it: the structural subset
  * of `node:fs`'s `Dirent` the walk touches. Declared so the reader can be
  * injected (and its calls counted) in tests without pulling the whole fs type.
  */
@@ -103,6 +108,14 @@ export interface RolloutCwdResolverOptions {
   ttlMs?: number
   /** Injectable `withFileTypes` directory reader; defaults to `node:fs.readdirSync`. */
   readdirSync?: (dirPath: string, options: { withFileTypes: true }) => RolloutDirent[]
+  /**
+   * Optional logger for the identity guard's refusal (a located rollout whose
+   * `session_meta.payload.id` is not the thread that was asked for). Optional
+   * because the resolver is otherwise dependency-free and unit-testable; the
+   * plugin wires `ctx.log` in `index.js`. Structurally a `PluginLogger` subset
+   * so either can be passed.
+   */
+  log?: { warn?: (message: string, fields?: Record<string, unknown>) => void }
 }
 
 export interface CodexAttachOptions {

@@ -14,7 +14,7 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { PurgeTarget } from '../../../src/core/cache/types.js'
+ * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
@@ -68,7 +68,7 @@ export async function runPurge(argv, ctx) {
     }
   }
 
-  /** @type {import('../../../src/core/cache/types.js').PurgeSummary} */
+  /** @type {PurgeSummary} */
   let summary
   try {
     summary = await withSpan(
@@ -97,6 +97,10 @@ export async function runPurge(argv, ctx) {
     target_kind: target.kind,
     rows_deleted: summary.rowsDeleted,
     partitions_affected: summary.partitionsAffected,
+    // A count, never a path. The near-miss decision is otherwise visible only
+    // on stderr, so a smoke could assert the user-visible result without any
+    // internal signal that the spelling predicate actually ran the branch.
+    retained_alias_rows: summary.retainedAliasRows,
     status: 'ok',
   })
 
@@ -109,17 +113,49 @@ export async function runPurge(argv, ctx) {
     .filter((cwd) => resolver.resolve(cwd).class === 'full')
     .sort()
 
+  const retainedAliases = [...summary.retainedAliasCwds].sort()
+
   if (parsed.json) {
     ctx.stdout.write(JSON.stringify({
       rowsDeleted: summary.rowsDeleted,
       partitionsAffected: summary.partitionsAffected,
       resurrectable,
+      retainedAliasRows: summary.retainedAliasRows,
+      retainedAliasCwds: retainedAliases,
     }) + '\n')
   } else {
     ctx.stdout.write(
       `purged ${summary.rowsDeleted} row${summary.rowsDeleted === 1 ? '' : 's'} ` +
       `from ${summary.partitionsAffected} partition${summary.partitionsAffected === 1 ? '' : 's'}\n`
     )
+  }
+
+  // The near-miss report (LLP 0104 #spellings). Purge reaches a row recorded
+  // under a respelling of the target only when the filesystem proves the two
+  // spellings are one directory; where it does not, those rows are genuinely
+  // someone else's and stay. Saying so is the point: unreported, that outcome
+  // is byte-identical to "that directory had nothing cached", which is exactly
+  // how the pre-fix silent retention read.
+  //
+  // The wording claims only what was established. `aliased` covers two
+  // outcomes, and only one of them is the filesystem adjudicating: two live
+  // directories with two inodes, *or* a `stat` that never landed because the
+  // spelling is no longer on disk (routine, and the common case when the user
+  // purges a project directory they already deleted). Saying "this filesystem
+  // reports it is a different directory" would assert a verdict that an
+  // `ENOENT` did not produce, so the note states the retention and the two
+  // reasons instead. LLP 0104 #spellings names both.
+  if (retainedAliases.length > 0) {
+    const rows = summary.retainedAliasRows
+    const dirs = retainedAliases.length
+    ctx.stderr.write(
+      `note: ${rows} cached row${rows === 1 ? '' : 's'} under a similarly spelled ` +
+      `director${dirs === 1 ? 'y' : 'ies'} ${rows === 1 ? 'was' : 'were'} left in place - ` +
+      `this filesystem does not report ${dirs === 1 ? 'it' : 'them'} as the directory you named ` +
+      `(genuinely different, or no longer on disk):\n`
+    )
+    for (const dir of retainedAliases) ctx.stderr.write(`  ${dir}\n`)
+    ctx.stderr.write('tip: purge that exact spelling too if you meant it as well\n')
   }
 
   if (resurrectable.length > 0) {

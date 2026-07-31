@@ -32,6 +32,17 @@ Decisions already taken (this session):
 3. **Fidelity:** follow the LLP spec as written (metadata headers,
    `NNNN-slug.type.md`, `tombstones/`, relation types, heading-slug anchors).
 
+   *Amended in execution:* heading slugs turned out to be too coarse. A decision
+   section routinely settles several separately-referenced propositions, and one
+   heading yields one slug, so the corpus also uses explicit `{#slug}` markers
+   and inline `<a id="slug"></a>` anchors, both placed where the proposition
+   actually is: a `{#slug}` usually sits on the **list item** naming the rule
+   (`- **Deadline rule** {#deadline}: ...`) rather than on a heading, and an
+   `<a id>` sits mid-section. All three are anchors a `@ref` may target and all
+   three must be indexed, `{#slug}` on any line and not only on headings;
+   treating a doc with no heading-level `{#...}` as a doc with no anchors is how
+   a resolvable ref gets reported broken (issue #452).
+
 ## Current state
 
 | Artifact | Size | LLP fate |

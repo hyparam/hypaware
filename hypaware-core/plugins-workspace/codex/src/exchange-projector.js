@@ -130,10 +130,10 @@ export function createCodexExchangeProjector(opts = {}) {
       // session_meta.cwd so `.hypignore` coverage is client-independent and live
       // rows carry the same cwd the codex backfill reads. The `??` keeps the
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
-      // the codex session id — only a real Codex session has a rollout — so
+      // a Codex thread id (only a real Codex thread has a rollout), so
       // non-codex traffic never scans.
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
-        ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
+        ?? resolveRolloutCwd(rolloutCwd, codexContext)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
       // observable, not silent - it means the key named a tree the session did
       // not run in, so the location inference behind it is in doubt.
@@ -240,6 +240,72 @@ export function createCodexExchangeProjector(opts = {}) {
       return stripUndefined(projection)
     },
   }
+}
+
+/**
+ * The rollout cwd fallback's lookup key.
+ *
+ * A Codex rollout is one **thread's** file and its name embeds that thread's id
+ * (`session_meta.payload.id`), NOT the session container (`payload.session_id`)
+ * the row partitions and the session opt-out drops on
+ * (@ref LLP 0030#decision). The two are the same uuid on a root thread, so
+ * handing over the container looked correct: a **subagent** thread inherits its
+ * root's container but mints its own thread id, so the container resolved the
+ * ROOT thread's rollout and the subagent turn was judged against a directory it
+ * never ran in. `.hypignore` is directory-scoped, so that recorded turns that
+ * should have been dropped.
+ * @ref LLP 0083#decision [implements]: the thread is what selects the rollout
+ *
+ * When the client states no thread id the container is still the right key for a
+ * ROOT thread (there the two are one uuid). That was once the common
+ * subscription-route shape, a bare `session-id` header; it is not any more, and
+ * that header name is not one Codex emits or this file reads
+ * (@ref LLP 0151#real-header-names). Since the adapter began reading the body's
+ * flat `client_metadata` map, which Codex fills with BOTH ids on every request
+ * (@ref LLP 0151#body-is-authority), an ordinary Codex turn states its thread and
+ * is answered by the branch above. What is left for the two lines below is a turn
+ * that names a container on a Codex-owned surface while naming no `thread_id` on
+ * any of them, which no `codex-rs` surface is known to produce.
+ *
+ * **Which lineage counts, and why it cannot be `thread_source` alone.**
+ * `thread_source` and `parent_thread_id` are read out of `x-codex-turn-metadata`,
+ * and that blob states `session_id` and `thread_id` as a pair or not at all (both
+ * gated on the same `has_turn_identity`), so it can never supply the container
+ * this fallback needs while withholding the thread that pre-empts it. Note the
+ * blob is NOT what answers such a turn: for the one kind with no turn identity
+ * (memory consolidation) the blob states the lineage and neither id, and the turn
+ * is answered by the body map, which carries both ids ungated. A refusal keyed
+ * only on those blob fields therefore cannot fire for a real Codex turn, but the
+ * reason is the map, not the blob. The lineage that
+ * would survive a turn stating no thread id is the lineage Codex sends as a
+ * DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
+ * `x-openai-subagent` (see `subagent_signal` in `resolveCodexContext`). Those are
+ * what make this refusal reachable at all, so both are consulted here.
+ *
+ * A turn stating a container, no thread id, and no lineage of any kind is then
+ * taken as the root thread it claims to be. That is a bounded residual: it can
+ * only mis-resolve for a client that both withholds its thread id and withholds
+ * every lineage signal on a subagent turn, and Codex withholds neither together.
+ * The mirror residual is the refusal itself: `subagent_signal` is value-blind, so
+ * `review`, `compact` and `memory_consolidation` (same-workspace sub-threads,
+ * where the root's cwd is the correct answer) refuse a container the root would
+ * have resolved, and LLP 0049 then fails OPEN and records the turn. Both residuals
+ * need the same unobserved shape (a container with no thread id anywhere), so
+ * neither is reachable from Codex traffic as `codex-rs` is documented to emit it.
+ * Dropping the fallback is not the safer half of that trade: it returns every turn
+ * that states only a container, root threads included, to `cwd = NULL`, which
+ * fails `.hypignore` open for that whole traffic class and is the regression
+ * LLP 0083 exists to prevent. @ref LLP 0083#container-fallback-gap [constrained-by]
+ *
+ * @param {RolloutCwdResolver | undefined} rolloutCwd
+ * @param {ReturnType<typeof resolveCodexContext>} codexContext
+ * @returns {string | undefined}
+ */
+function resolveRolloutCwd(rolloutCwd, codexContext) {
+  if (!rolloutCwd || !codexContext) return undefined
+  if (codexContext.thread_id) return rolloutCwd.resolve(codexContext.thread_id)
+  if (codexContext.thread_source === 'subagent' || codexContext.subagent_signal) return undefined
+  return codexContext.session_id ? rolloutCwd.resolve(codexContext.session_id) : undefined
 }
 
 // ---------------------------------------------------------------------
@@ -733,6 +799,26 @@ function resolveCodexContext(input, provider, path, reqBody) {
     readStringKey(metadata, 'parent_thread_id'),
     readHeader(input.request_headers, X_CODEX_PARENT_THREAD_ID),
   )
+  // Any evidence at all that this turn is a subagent's, in the names Codex's own
+  // source defines rather than only the ones read above. `codex-rs`
+  // `CodexResponsesMetadata::compatibility_headers` emits
+  // `x-codex-parent-thread-id` and `x-openai-subagent` (`review`, `compact`,
+  // `collab_spawn`, `memory_consolidation`) as DIRECT headers, gated only on
+  // their own value and NOT on the turn-metadata blob, so they are the one
+  // lineage signal that survives a turn stating no `thread_id`. That makes them
+  // the only usable guard on the container fallback below: every field read
+  // above travels inside `x-codex-turn-metadata`, which also carries `thread_id`,
+  // so a refusal keyed on those alone can never fire before the thread-id path
+  // has already returned. Deliberately NOT mirrored into `attributes` or the
+  // `parent_thread_id` column: widening what a row records is a separate change
+  // with its own migration story, and this value only has to gate a fallback.
+  // @ref LLP 0083#container-fallback-gap [implements]: the container fallback is
+  // refused on lineage Codex states as a header, not only in the metadata blob
+  const subagent_signal = firstString(
+    parent_thread_id,
+    readHeader(input.request_headers, 'x-codex-parent-thread-id'),
+    readHeader(input.request_headers, 'x-openai-subagent'),
+  )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),
     client.entrypoint,
@@ -783,6 +869,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
     thread_id,
     session_id,
     parent_thread_id,
+    subagent_signal,
     turn_id,
     thread_source,
     // @ref LLP 0083#decision [implements]: an explicit in-band cwd outranks the
@@ -1061,7 +1148,7 @@ function resolveConversationSource(provider) {
  * @param {Record<string, unknown>} reqBody
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  * @param {string | undefined} cwd The cwd the caller already resolved (in-band
- *   fast path, else the rollout fallback). Passed in — not recomputed — so the
+ *   fast path, else the rollout fallback). Passed in (not recomputed) so the
  *   row's stamped cwd is exactly the value the `.hypignore` check used, and so
  *   the subscription route records the rollout cwd instead of NULL.
  *   @ref LLP 0083 [implements]

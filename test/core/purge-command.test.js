@@ -12,6 +12,7 @@ import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/pa
 import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { readRowsFromTable, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { runPurge } from '../../src/core/commands/purge.js'
+import { scopeGovernance, scopeGoverns } from '../../src/core/usage-policy/matcher.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -411,5 +412,357 @@ test('runPurge --json emits machine-readable counts and resurrectable dirs', asy
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+/* ------------------ aliased spellings of the purge target (#485) ------------------ */
+
+// `hyp purge <path>` used to report success and exit 0 while retaining every
+// row recorded under a different *spelling* of the target directory: the
+// subtree predicate folded symlinks (LLP 0050 #canonicalization) but compared
+// Unicode normalization and case byte-for-byte, so rows recorded NFD survived a
+// purge argument typed NFC, and vice versa, and stderr was empty.
+//
+// The fix cannot be "fold the predicate". Purge deletes, so a fold that merges
+// two genuinely different directories destroys data the user never named, and
+// on ext4 `caf` + U+00E9 and `cafe` + U+0301 *are* two directories. So the fold
+// only proposes an alias spelling and `dev`/`ino` identity decides. That splits
+// these tests in two, and the split is not incidental:
+//
+//   - Whether a *volume* folds two spellings into one directory is a property
+//     of the filesystem, and no ext4 host has one, so the deleting direction is
+//     driven through an **injected** `statSync` standing in for a default APFS
+//     volume. That is the same concession `usage-policy-fold.test.js` makes for
+//     the case probe.
+//   - The **retaining** direction needs no injection and is the one that must
+//     never regress, because its failure mode is unrecoverable data loss. It
+//     runs against the real filesystem and asserts that purge agrees with
+//     whatever this host actually reports.
+//
+// @ref LLP 0104#spellings [tests]: purge deletes an aliased spelling the filesystem proves, retains and reports one it cannot
+
+// The same four characters, composed and decomposed, as `\u` escapes so the
+// source stays pure ASCII: a raw pair could be silently re-normalized by an
+// editor, a merge tool, or a `git` filter, which would collapse the two
+// constants into one string and make every test below pass vacuously.
+const NFC = 'caf\u00e9'
+const NFD = 'cafe\u0301'
+
+test('#485 premise: the two fixture spellings are different strings that NFC folds together', () => {
+  assert.notEqual(NFC, NFD)
+  assert.equal(NFD.normalize('NFC'), NFC)
+  assert.equal(NFC.normalize('NFC'), NFC)
+})
+
+/**
+ * A `statSync` over a fake volume that treats every spelling of a name the
+ * fold merges (Unicode normalization *and* case) as one directory, which is
+ * what a default APFS volume does and what no ext4 test host can provide.
+ * Anything not listed does not exist.
+ *
+ * @param {string[]} dirs
+ * @returns {(p: string) => { dev: number, ino: number }}
+ */
+function spellingInsensitiveVolume(dirs) {
+  /** @type {Map<string, number>} */
+  const inodes = new Map()
+  for (const dir of dirs) {
+    const key = dir.normalize('NFC').toLowerCase()
+    if (!inodes.has(key)) inodes.set(key, inodes.size + 1)
+  }
+  return (p) => {
+    const ino = inodes.get(p.normalize('NFC').toLowerCase())
+    if (ino === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' })
+    return { dev: 42, ino }
+  }
+}
+
+// `realpath` on paths that only exist inside the fake volume above would fall
+// back to the host's filesystem and add noise; the fake volume has no symlinks,
+// so identity is the honest canonicalizer for it.
+const NO_SYMLINKS = /** @param {string} p */ (p) => p
+
+test('purge subtree deletes a row recorded NFD when the target is typed NFC, on a volume that folds them', async () => {
+  const cacheRoot = await makeTmpDir('alias-nfd')
+  const nfcDir = `/vol/${NFC}`
+  const nfdDir = `/vol/${NFD}`
+  try {
+    await seed(cacheRoot, [
+      // The capture seam recorded what the client reported: the NFD spelling.
+      { session_id: 's1', cwd: `${nfdDir}/sub`, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      // A sibling that merely shares the folded prefix, and an unrelated dir.
+      { session_id: 's2', cwd: `/vol/${NFC}-other`, part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+      { session_id: 's3', cwd: '/vol/elsewhere', part_id: 'm3#0', timestamp: '2026-07-01T00:00:02Z' },
+    ])
+    const summary = await purgeCache({
+      cacheRoot,
+      target: { kind: 'subtree', path: nfcDir },
+      deps: {
+        realpathSync: NO_SYMLINKS,
+        statSync: spellingInsensitiveVolume([nfcDir, `/vol/${NFC}-other`, '/vol/elsewhere']),
+      },
+    })
+    assert.equal(summary.rowsDeleted, 1, 'the NFD-spelled row is inside the directory the user named')
+    assert.equal(summary.retainedAliasRows, 0, 'nothing was left behind, so nothing to report')
+    assert.deepEqual(summary.purgedCwds, [`${nfdDir}/sub`], 'the deleted cwd drives the resurrection warning')
+    const rows = await remainingRows(cacheRoot)
+    assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m2#0', 'm3#0'])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('purge subtree deletes a row recorded NFC when the target is typed NFD, on a volume that folds them', async () => {
+  const cacheRoot = await makeTmpDir('alias-nfc')
+  const nfcDir = `/vol/${NFC}`
+  const nfdDir = `/vol/${NFD}`
+  try {
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: nfcDir, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: '/vol/elsewhere', part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const summary = await purgeCache({
+      cacheRoot,
+      target: { kind: 'subtree', path: nfdDir },
+      deps: {
+        realpathSync: NO_SYMLINKS,
+        statSync: spellingInsensitiveVolume([nfcDir, '/vol/elsewhere']),
+      },
+    })
+    assert.equal(summary.rowsDeleted, 1)
+    const rows = await remainingRows(cacheRoot)
+    assert.deepEqual(rows.map((r) => r.part_id), ['m2#0'])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('purge subtree deletes a row recorded under a case variant, on a case-insensitive volume', async () => {
+  const cacheRoot = await makeTmpDir('alias-case')
+  try {
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: '/vol/proj/sub', part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: '/vol/projx', part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const summary = await purgeCache({
+      cacheRoot,
+      target: { kind: 'subtree', path: '/vol/Proj' },
+      deps: {
+        realpathSync: NO_SYMLINKS,
+        statSync: spellingInsensitiveVolume(['/vol/Proj', '/vol/projx']),
+      },
+    })
+    assert.equal(summary.rowsDeleted, 1)
+    const rows = await remainingRows(cacheRoot)
+    assert.deepEqual(rows.map((r) => r.part_id), ['m2#0'], 'a sibling prefix is still not a descendant')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('purge subtree never widens onto a spelling the volume says is a different directory', async () => {
+  const cacheRoot = await makeTmpDir('alias-unproven')
+  const nfcDir = `/vol/${NFC}`
+  const nfdDir = `/vol/${NFD}`
+  try {
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: `${nfdDir}/sub`, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: nfcDir, part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    // Both spellings exist and are *different* inodes: an ext4-style volume,
+    // modelled explicitly so the assertion does not depend on the test host.
+    const summary = await purgeCache({
+      cacheRoot,
+      target: { kind: 'subtree', path: nfcDir },
+      deps: {
+        realpathSync: NO_SYMLINKS,
+        statSync: (p) => {
+          if (p === nfcDir) return { dev: 42, ino: 1 }
+          if (p === nfdDir) return { dev: 42, ino: 2 }
+          throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' })
+        },
+      },
+    })
+    assert.equal(summary.rowsDeleted, 1, 'only the directory the user actually named')
+    assert.equal(summary.retainedAliasRows, 1, 'the lookalike row was retained')
+    assert.deepEqual(summary.retainedAliasCwds, [`${nfdDir}/sub`], 'and is named, so the retention is not silent')
+    const rows = await remainingRows(cacheRoot)
+    assert.deepEqual(rows.map((r) => r.part_id), ['m1#0'])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Create two spellings of one name under `root` on the **real** filesystem and
+ * report whether this host treats them as one directory. ext4 says two, a
+ * default APFS volume says one; both are correct answers about that host, and
+ * the point of the tests that use this is that purge agrees with whichever it
+ * gets rather than with a platform assumption baked into the test.
+ *
+ * @param {string} root
+ * @param {string} a
+ * @param {string} b
+ * @returns {Promise<boolean>}
+ */
+async function oneDirectoryHere(root, a, b) {
+  await fs.mkdir(path.join(root, a), { recursive: true })
+  await fs.mkdir(path.join(root, b), { recursive: true })
+  const [statA, statB] = await Promise.all([fs.stat(path.join(root, a)), fs.stat(path.join(root, b))])
+  return statA.dev === statB.dev && statA.ino === statB.ino
+}
+
+test('purge subtree agrees with the real filesystem about an NFC/NFD pair, and never over-deletes', async () => {
+  const cacheRoot = await makeTmpDir('real-nfd')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-real-'))
+  try {
+    const root = await fs.realpath(projects)
+    const folded = await oneDirectoryHere(root, NFC, NFD)
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: path.join(root, `${NFC}-other`), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const summary = await purgeCache({ cacheRoot, target: { kind: 'subtree', path: path.join(root, NFC) } })
+    const rows = await remainingRows(cacheRoot)
+    if (folded) {
+      assert.equal(summary.rowsDeleted, 1, 'this volume folds the two spellings, so the row is inside the target')
+      assert.deepEqual(rows.map((r) => r.part_id), ['m2#0'])
+    } else {
+      assert.equal(summary.rowsDeleted, 0, 'two inodes here: purging one must not destroy the other')
+      assert.equal(summary.retainedAliasRows, 1, 'and the near-miss is reported rather than silent')
+      assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m1#0', 'm2#0'])
+    }
+    assert.ok(
+      rows.some((r) => r.part_id === 'm2#0'),
+      'a sibling sharing the folded prefix is never a descendant, on any volume'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+test('purge subtree agrees with the real filesystem about a case variant, and never over-deletes', async () => {
+  const cacheRoot = await makeTmpDir('real-case')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-case-'))
+  try {
+    const root = await fs.realpath(projects)
+    const folded = await oneDirectoryHere(root, 'Proj', 'proj')
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, 'proj', 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: path.join(root, 'projx'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const summary = await purgeCache({ cacheRoot, target: { kind: 'subtree', path: path.join(root, 'Proj') } })
+    const rows = await remainingRows(cacheRoot)
+    if (folded) {
+      assert.equal(summary.rowsDeleted, 1)
+      assert.deepEqual(rows.map((r) => r.part_id), ['m2#0'])
+    } else {
+      assert.equal(summary.rowsDeleted, 0, 'on a case-sensitive volume these are a stranger\'s rows')
+      assert.equal(summary.retainedAliasRows, 1)
+      assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m1#0', 'm2#0'])
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+test('runPurge says so when it leaves a lookalike spelling in place, instead of exiting 0 in silence', async () => {
+  const cacheRoot = await makeTmpDir('cli-alias')
+  const hypHome = await makeTmpDir('cli-alias-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-cli-alias-'))
+  try {
+    const root = await fs.realpath(projects)
+    const folded = await oneDirectoryHere(root, NFC, NFD)
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+    ])
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge([path.join(root, NFC), '--yes'], ctx)
+    assert.equal(code, 0)
+    if (folded) {
+      assert.match(stdout.text, /purged 1 row /)
+      assert.doesNotMatch(stderr.text, /left in place/)
+    } else {
+      // The bug this replaces: `purged 0 rows`, empty stderr, exit 0, which is
+      // byte-identical to "that directory had nothing cached".
+      assert.match(stdout.text, /purged 0 rows /)
+      assert.match(stderr.text, /1 cached row under a similarly spelled directory was left in place/)
+      assert.match(stderr.text, /purge that exact spelling too/)
+      assert.notEqual(stderr.text, '')
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+test('scopeGovernance stays unwidened for callers that do not opt in', () => {
+  // The CLI membership sites (`policy show`, `policy unset`) share this
+  // predicate and must keep their pre-fix answers: their wrong direction is the
+  // harmless one (an opt-out stays on), and widening them is a separate
+  // decision from widening a deletion.
+  assert.equal(scopeGovernance(`/vol/${NFD}/sub`, `/vol/${NFC}`), 'outside')
+  assert.equal(scopeGoverns(`/vol/${NFD}/sub`, `/vol/${NFC}`), false)
+  assert.equal(scopeGovernance(`/vol/${NFC}/sub`, `/vol/${NFC}`), 'governs')
+})
+
+// The near-miss note has to be true of *this* run, not only of the run the
+// report was designed around. `aliased` has two causes and only one of them is
+// the filesystem adjudicating; the other is an `ENOENT`, which is the ordinary
+// case when the user purges a project directory they already deleted. Both
+// tests below use spellings that exist on no host, so neither depends on
+// whether the test volume folds.
+// @ref LLP 0104#spellings [tests]: the retention note claims only what the run established
+
+test('the near-miss note does not claim a verdict an ENOENT never gave', async () => {
+  const cacheRoot = await makeTmpDir('cli-alias-gone')
+  const hypHome = await makeTmpDir('cli-alias-gone-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-gone-'))
+  try {
+    const root = await fs.realpath(projects)
+    // Neither spelling is on disk, so no volume can prove or disprove them.
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+    ])
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge([path.join(root, NFC), '--yes'], ctx)
+    assert.equal(code, 0)
+    assert.match(stdout.text, /purged 0 rows /)
+    assert.match(stderr.text, /1 cached row under a similarly spelled directory was left in place/)
+    assert.match(stderr.text, /does not report it as the directory you named/)
+    assert.doesNotMatch(
+      stderr.text,
+      /filesystem reports it is a different directory/,
+      'nothing was stat-able here, so the filesystem reported no such thing'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+test('the near-miss note agrees in number with the rows it is counting', async () => {
+  const cacheRoot = await makeTmpDir('cli-alias-plural')
+  const hypHome = await makeTmpDir('cli-alias-plural-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-plural-'))
+  try {
+    const root = await fs.realpath(projects)
+    // Two rows, one retained directory: the verb agrees with the row count, the
+    // noun with the directory count.
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: path.join(root, NFD, 'sub'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const { ctx, stderr } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([path.join(root, NFC), '--yes'], ctx), 0)
+    assert.match(stderr.text, /2 cached rows under a similarly spelled directory were left in place/)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
   }
 })

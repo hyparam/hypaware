@@ -266,13 +266,21 @@ is `src/core/usage-policy/fold.js`:
    with a real, deliberately-distinct sibling (`Makefile` vs `makefile`) than a
    normalization difference is, not because NFC folding is universally sound.
 
-   **Do not reuse `foldPath` in a predicate where widening is not free.** In a
-   *deletion* predicate (`hyp purge`) or a *disclosure* predicate, widening
-   removes or reveals rows for a directory the user did not name, and the
-   `max()` argument above does not apply. Closing the purge seam below needs
-   either a per-volume normalization-insensitivity probe (no such probe exists;
-   the current one answers only the case question) or a darwin-only guard.
-   See "Not covered".
+   **Do not reuse `foldPath` as a *verdict* in a predicate where widening is not
+   free.** In a *deletion* predicate (`hyp purge`) or a *disclosure* predicate,
+   widening removes or reveals rows for a directory the user did not name, and
+   the `max()` argument above does not apply.
+
+   `hyp purge` closes that gap without weakening the rule, by demoting the fold
+   from verdict to **candidate generator**: it proposes the spelling, and
+   `sameDirectoryOnDisk` (`dev`/`ino` identity, the same test the case probe
+   uses) decides. A caller that widens only on that proof cannot widen onto a
+   directory the user did not name, whatever the volume's rules are, which is
+   why no per-volume normalization-insensitivity probe was needed after all.
+   The full argument is
+   [LLP 0104 §spellings](./0104-hyp-purge.decision.md#spellings); the
+   disclosure sites still have no such proof and are unchanged. See "Not
+   covered".
 2. **Case only behind a per-volume probe.** Case-sensitivity is a property of
    the mounted volume: an APFS volume can be formatted case-sensitive and every
    ext4 volume is. Folding it unconditionally would merge two genuinely
@@ -360,20 +368,22 @@ nothing; running it once over the composed set is what makes
 
 ### Not covered
 
-The fold is applied at the **gate** (`resolve` / list membership) and nowhere
-else. The one-shot CLI membership sites (`hyp ignore --check`, `policy show`,
-`policy unset`) and `hyp purge --subtree` now route through the shared
-spelling-aware predicates [§canonicalization](#canonicalization) introduced
-(`scopeGoverns`, `sameDirectory`, `governingListEntry`), so they fold **symlinks**
-with the gate, but those predicates deliberately stop short of `foldPath`
-(`canonicalScope` in `matcher.js`, as against `listScope`). On a case-insensitive
-or NFD-carrying volume they can therefore still disagree with the gate about
-normalization and case.
+The fold is applied unconditionally at the **gate** (`resolve` / list
+membership) and nowhere else. The one-shot CLI membership sites (`hyp ignore
+--check`, `policy show`, `policy unset`) and `hyp purge --subtree` route through
+the shared spelling-aware predicates [§canonicalization](#canonicalization)
+introduced (`scopeGoverns`, `sameDirectory`, `governingListEntry`), so they fold
+**symlinks** with the gate, but those predicates deliberately stop short of
+taking `foldPath`'s word for anything (`canonicalScope` in `matcher.js`, as
+against `listScope`). On a case-insensitive or NFD-carrying volume they can
+therefore still disagree with the gate about normalization and case.
 
-That is the "widening is not free" rule above, not an oversight: the single
-shared predicate is now the right *place* to add the fold, and adding it is still
-gated on a per-volume normalization-insensitivity probe (or a darwin-only guard)
-that does not exist yet. The gap below is stated in terms of that.
+That is the "widening is not free" rule above, not an oversight. `hyp purge` is
+the one site that has since bought the widening rather than declining it: it
+passes `proveAliases`, which folds only to *propose* a spelling and then
+requires `dev`/`ino` identity before deleting through it
+([LLP 0104 §spellings](./0104-hyp-purge.decision.md#spellings)). The remaining
+sites below are unchanged, and their gap is stated as it was.
 
 The disagreement is bounded in one direction and not in the other, and the
 difference matters enough to name each site:
@@ -394,46 +404,36 @@ difference matters enough to name each site:
 - **`policy unset` / `unignore --local-only` can refuse to remove an entry the
   gate is enforcing**, when the user spells the path the other way. It reports
   "not governed" and exits 0. That fails toward privacy: the opt-out stays on.
-- **`hyp purge <path>` (the subtree target) silently retains rows it was asked
-  to delete**, when the rows were recorded under a different spelling of the
-  target. This is the one site that fails **away** from privacy: the user asked
-  for data to be deleted, the command reports success, and the rows remain.
-  Observed end to end (rows recorded NFD, purge argument NFC, and the reverse;
-  also a case alias):
-
-  ```
-  # the argument is typed NFC; the rows were recorded under the NFD spelling.
-  # the two render identically, which is the whole problem.
-  $ hyp purge ~/café/proj --yes
-  purged 0 rows from 0 partitions
-  $ echo $?
-  0
-  ```
-
-  Nothing is written to stderr and the exit status is 0, so the outcome is
-  indistinguishable from "that directory had nothing cached". Note the
-  inversion: a purge that *succeeds* prints the resurrection warning on stderr,
-  so the failing case is the **quieter** of the two. It is unchanged from the
-  pre-fold behaviour rather than introduced here, and it is tracked separately;
-  it is the reason this seam should not stay open for long.
+- **`hyp purge <path>` (the subtree target) is now covered**, and was the one
+  site that failed **away** from privacy: it used to silently retain rows
+  recorded under a different spelling of the target, printing
+  `purged 0 rows from 0 partitions` on stdout, nothing on stderr, and exiting 0
+  - an outcome indistinguishable from "that directory had nothing cached", and
+  the *quieter* of its two paths, since a purge that deletes prints the
+  resurrection warning. It closed by
+  [LLP 0104 §spellings](./0104-hyp-purge.decision.md#spellings) rather than by
+  the fold, on the argument that a deletion may widen onto a spelling the
+  filesystem identifies with the target and onto no other; where it cannot
+  prove that, it still retains the rows, but now names them.
 
 - **`hyp purge --ignored` is already covered by this change**, because that
   target classifies each row through `resolver.resolve(row.cwd)` rather than
   through a lexical prefix test, so it inherits the fold. Verified against
   `master`: with an `ignore` entry declared NFC and rows recorded NFD, `master`
-  purges 0 rows and leaves the row, and this branch purges it. So marking the
-  directory and running `hyp purge --ignored` is the durable workaround for the
-  subtree gap above until that gap is closed.
+  purges 0 rows and leaves the row, and this branch purges it. It was the
+  durable workaround for the subtree gap above while that gap was open.
 
-Whoever closes the subtree gap should note that it is **not** a matter of
-dropping `foldPath` into the predicate. Purge deletes, so widening the match is
-not free the way it is at the gate (see "NFC unconditionally, and only because
-this is the gate"): on a Linux volume, folding would delete cached rows for a
-genuinely different sibling directory that differs only by normalization. The
-fix needs the fold gated on the volume actually being normalization-insensitive.
-`scopeGoverns` - which already reroutes this purge call site for the symlink
-class - is the right place to put it, and `canonicalScope` is the one line that
-has to change once such a probe exists.
+The subtree gap was **not** closed by dropping `foldPath` into the predicate,
+and whoever revisits the remaining sites should keep the reason in view. Purge
+deletes, so widening the match is not free the way it is at the gate (see "NFC
+unconditionally, and only because this is the gate"): on a Linux volume, folding
+would delete cached rows for a genuinely different sibling directory that
+differs only by normalization. What it took instead was making the fold
+non-authoritative there - a candidate generator whose proposal `dev`/`ino`
+identity has to confirm - so that no volume-level assumption is load-bearing in
+a destructive predicate. The disclosure sites (`--check` / `policy show`'s
+residual row count) have no equivalent proof available, since they answer about
+a directory rather than about a pair of spellings, so they stay unfolded.
 
 ## Consequences
 
