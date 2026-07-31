@@ -271,7 +271,7 @@ hyp remote login: this machine is connected to <A>
   disconnect first ('hyp leave'), then log in to the new server
 ```
 
-Switching servers is two deliberate acts, disconnect, then login, never one
+Switching servers is two deliberate acts (disconnect, then login), never one
 command; there is no `--switch` escape hatch. This extends LLP 0061's
 origin-scoping ("a login against server A cannot disturb the forwarder for server
 B") from *don't touch the other forwarder* to *don't create a second one*: the
@@ -474,7 +474,7 @@ cascade claim needed the opposite correction.
   auto-attach fallback (removes the operator from the consent loop),
   config-bound-at-mint (static; strands early enrollees).
 - **Interim client behavior (this doc, binding).** Until the server follow-up
-  ships, and permanently, for orgs that never publish a default config, an
+  ships (and permanently, for orgs that never publish a default config), an
   enrolling login that leaves the machine with no attached client prints one
   hint: `nothing is captured yet, run 'hyp attach <client>' to start`. Never
   silent (LLP 0061 D4), and `hyp status` shows "enrolled; no org config

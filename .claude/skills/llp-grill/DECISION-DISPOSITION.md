@@ -37,7 +37,7 @@ Does this decision change how the system is or should be built/understood?
 
 ## The capture bar (lower than ADRs, but not zero)
 
-LLP documents are *living*, editable, supersede-able, deletable, so you are
+LLP documents are *living* (editable, supersede-able, deletable), so you are
 not making a permanent commitment the way an append-only ADR is. That lowers the
 cost of capturing, but the **value** test is the same one from LLP 0000:
 

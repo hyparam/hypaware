@@ -3,7 +3,7 @@
 /**
  * Config validation for the `@hypaware/claude` plugin's own `config`
  * block. v1 validates the optional `backfill` sub-object that drives
- * backfill-on-join, `{ on_join, window_days }`, and the optional
+ * backfill-on-join (`{ on_join, window_days }`), and the optional
  * `attach` sub-object that drives attach-on-join, `{ on_join }`. Every
  * other key (e.g. `proxy`) passes through untouched so existing configs
  * keep working; there is no top-level `backfill`/`attach` section and

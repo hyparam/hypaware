@@ -35,7 +35,7 @@ Two moving parts:
 **The look is carried entirely by `assets/style.css` plus a small raw-HTML component
 vocabulary the report Markdown opts into.** `build.sh` copies the repo-root
 `assets/style.css` into every built page, so upgrading that one file restyles the whole
-site, type, tables, code, callouts, and the auto-styled hero thesis line, with no
+site (type, tables, code, callouts, and the auto-styled hero thesis line) with no
 Markdown changes. The metric cards, charts, and callouts are raw `<div>` blocks that
 pandoc's `gfm` reader passes through untouched; authors add them in the source `.md`.
 Both are specified under **Visual system** below.

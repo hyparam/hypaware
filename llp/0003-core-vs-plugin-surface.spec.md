@@ -57,9 +57,9 @@ when scoping `@hypaware/vector-search`
 ([LLP 0024](./0024-vector-search-plugin.decision.md#plugin-not-kernel)).
 
 **Partition-spec derivation is core surface.** The helpers that turn a dataset's
-partitioning declaration into an Iceberg `PartitionSpec` and guard its stability,
-`partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the
-declaration type, began life under `src/core/cache/iceberg/` but are pure
+partitioning declaration into an Iceberg `PartitionSpec` and guard its stability
+(`partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the
+declaration type) began life under `src/core/cache/iceberg/` but are pure
 functions of `(declaration, schema)` consumed across the boundary: the dataset
 registry validates declarations, the public plugin surface types them
 (`DatasetRegistration.cachePartitioning`), the intrinsic cache derives its spec,

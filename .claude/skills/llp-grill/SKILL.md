@@ -32,7 +32,7 @@ If there is no `llp/` tree yet, this is the wrong skill: point the user at `/llp
 
 ### Challenge against existing decisions
 
-When the plan contradicts an Active LLP, a Spec's "must", a Decision's chosen option, a Principle's "always/never", call it out immediately and force the choice:
+When the plan contradicts an Active LLP (a Spec's "must", a Decision's chosen option, a Principle's "always/never"), call it out immediately and force the choice:
 
 > "LLP 0014#queryable-sinks says queryability is a property of the writer/destination pair, but your plan assumes any S3 sink is queryable. Either the plan changes, or LLP 0014 does, which?"
 
@@ -54,7 +54,7 @@ When the user states how something works, check whether the code agrees. If the 
 
 ### Capture decisions inline: into the LLP corpus
 
-When a decision crystallises, dispose of it **right there**. Don't batch. Unlike ADRs, LLP documents are *living*, you edit, supersede, and delete freely, so the bar to capture is lower, but the discipline is to put each decision in the right place. Use the disposition tree in [DECISION-DISPOSITION.md](./DECISION-DISPOSITION.md):
+When a decision crystallises, dispose of it **right there**. Don't batch. Unlike ADRs, LLP documents are *living* (you edit, supersede, and delete freely), so the bar to capture is lower, but the discipline is to put each decision in the right place. Use the disposition tree in [DECISION-DISPOSITION.md](./DECISION-DISPOSITION.md):
 
 - **Refines an existing Active LLP** → edit that LLP in place.
 - **A new non-obvious decision** → create a new LLP. Use the next available number and the `NNNN-slug.type.md` convention with a full metadata header (follow `/llp-create`). Pick the `Type` deliberately (Decision vs Spec vs Principle).

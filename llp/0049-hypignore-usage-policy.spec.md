@@ -35,7 +35,7 @@ The mechanism is a single function: resolve a **scope** to a **usage class**.
 
 - A **scope** is a directory subtree.
 - A **class** says how exchanges originating in that subtree are used.
-- Everything else, the file format, the CLI, the matcher, is authored once;
+- Everything else (the file format, the CLI, the matcher) is authored once;
   only *enforcement* differs per class.
 
 This unifies "a `.hypignore`" and "a local-only flag" into one feature with one

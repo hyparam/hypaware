@@ -16,8 +16,8 @@
 ## Summary
 
 The intrinsic query surface ([LLP 0015](./0015-query-and-datasets.spec.md)) runs
-SQL over a streaming `AsyncDataSource` per dataset, but three blocking operators,
-`ORDER BY`, `GROUP BY`, and `COUNT(DISTINCT …)`, buffer the **whole scanned
+SQL over a streaming `AsyncDataSource` per dataset, but three blocking operators
+(`ORDER BY`, `GROUP BY`, and `COUNT(DISTINCT …)`) buffer the **whole scanned
 input** before producing a row, and `collect()` then re-materializes the result.
 Peak memory therefore scales with the **scanned/intermediate row volume**, not
 the (already-capped) result size. Over the ~495k-row `ai_gateway_messages`

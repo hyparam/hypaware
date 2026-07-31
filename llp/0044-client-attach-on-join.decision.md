@@ -21,7 +21,7 @@
 > the local gateway) and **reverses it on leave/detach**. It resolves the
 > attach-specific open questions [LLP 0036](./0036-central-config-driven-client-actions.decision.md#open-questions)
 > and [LLP 0041](./0041-central-config-client-actions.design.md#risks--open-questions)
-> deferred, consent, conflict, opt-out, and is the sibling of
+> deferred (consent, conflict, opt-out) and is the sibling of
 > [LLP 0037](./0037-backfill-on-join.decision.md) (backfill on join, the
 > run-once instance).
 

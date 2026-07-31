@@ -44,7 +44,7 @@ else parallelizes. The seam is:
    (forward sink, local-fs/s3, format-iceberg, ai-gateway projector & dataset,
    vector-search, backfill, query) is untouched until it opts in. This task also
    owns the **null-seq migration contract** (design risk #1): a row whose seq is
-   null (pre-upgrade) is treated as **new**, emitted, never skipped, so the
+   null (pre-upgrade) is treated as **new** (emitted, never skipped), so the
    upgrade is at worst a one-time full re-export, never silent data loss.
 
 3. **Persistence (T3).** A small per-`(sink instance, partition)` watermark store

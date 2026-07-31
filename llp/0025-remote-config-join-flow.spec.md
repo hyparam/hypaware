@@ -15,7 +15,7 @@
 ## Summary
 
 A gateway can be configured entirely from the central server. MDM deploys a
-**seed**, server URL + policy token, nothing else, and the gateway joins the
+**seed** (server URL + policy token, nothing else) and the gateway joins the
 fleet, pulls its full config, installs any plugins that config names, and
 becomes operational without the user ever touching a config file. Later edits
 to the central config reconfigure the fleet on the poll cadence. This document

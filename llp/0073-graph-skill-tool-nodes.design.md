@@ -256,7 +256,7 @@ graph **node key** only if it is
    guarantee, since a hashed or generated basename (`foo.test`,
    `tool-4f8e2a1b9c0d`) still passes the gate and mints its own node.
 
-Anything unbounded, raw command strings, arbitrary path fragments, stays
+Anything unbounded (raw command strings, arbitrary path fragments) stays
 queryable in `ai_gateway_messages`, or at most rides as an **edge prop** for
 drill-in. Never a node.
 

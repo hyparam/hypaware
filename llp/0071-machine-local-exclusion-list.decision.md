@@ -114,7 +114,7 @@ that point the same way:
 
 This does not contradict [LLP 0049 non-goal 3](./0049-hypignore-usage-policy.spec.md#non-goals)
 ("no central/config interaction"); it *extends* the same stance to the new
-source. Usage policy, `ignore` or `local-only`, dotfile or list, is honored
+source. Usage policy (`ignore` or `local-only`, dotfile or list) is honored
 locally and is never merged with or pushed by central config.
 
 ### The org-forces-forwarding question is deferred, not decided here {#org-policy}

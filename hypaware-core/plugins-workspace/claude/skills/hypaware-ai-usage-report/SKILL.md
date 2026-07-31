@@ -270,7 +270,7 @@ numbers", "What this shows", or "Where the leverage is".
   4. **`## Key findings`** - 3-5 ranked findings as the same bold-topic + sub-bullets
      shape: each names the finding, the pattern and its driver, and the size, with the
      topic line linking its detail section like Key metrics. At least one finding is
-     good news, a habit or pattern that's working and worth spreading, credited, so
+     good news (a habit or pattern that's working and worth spreading, credited), so
      the report reads as a team retro, not an audit. A finding whose remedy is a
      proposed change states the fact and names the change number on the
      proposed-changes page: the fix itself is never written twice. This is data reporting, not consulting: sized facts, never
