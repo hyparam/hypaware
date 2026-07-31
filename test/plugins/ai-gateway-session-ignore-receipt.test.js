@@ -150,7 +150,20 @@ const SKILLS = [
   'claude/skills/hypaware-privacy/SKILL.md',
   'claude/skills/hypaware-ignore/SKILL.md',
   'codex/skills/hypaware-privacy/SKILL.md',
+  // The removal verb calls the same route directly, so R14's last bullet binds
+  // it identically: it used to discard the body (`> /dev/null`) and print off
+  // the exit code alone, which is the echo check missing entirely rather than
+  // merely weak.
+  'claude/skills/hypaware-unignore/SKILL.md',
 ]
+
+/** @param {string} rel */
+function skillText(rel) {
+  return fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../hypaware-core/plugins-workspace', rel),
+    'utf8'
+  )
+}
 
 for (const rel of SKILLS) {
   test(`${rel} checks the control reply is about the session it posted`, () => {
@@ -160,10 +173,7 @@ for (const rel of SKILLS) {
     // another session - or from whatever else now owns that port - read as
     // this session's success. That does not prove the drop (nothing here
     // does), but without it a second overclaim stacks on the first.
-    const text = fs.readFileSync(
-      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../hypaware-core/plugins-workspace', rel),
-      'utf8'
-    )
+    const text = skillText(rel)
 
     // The verifier compares the echoed id against the one that was posted,
     // rather than printing the value the responder chose to send back.
@@ -191,6 +201,27 @@ for (const rel of SKILLS) {
     assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
   })
 }
+
+test('the unignore skill reports the removal it verified, not a resumption', () => {
+  // The CLI receipt was held to R14 mirrored; the skill that DELETEs the same
+  // route was printing "Recording re-enabled" off `--fail-with-body` alone,
+  // with the response body sent to /dev/null. Same overclaim, and the one
+  // surface in the family with no response validation at all.
+  const text = skillText('claude/skills/hypaware-unignore/SKILL.md')
+
+  assert.doesNotMatch(text, /> \/dev\/null/, 'the reply must be read, not discarded')
+  assert.doesNotMatch(
+    text,
+    /Recording re-enabled for session/,
+    'the gateway cannot know recording resumed - `.hypignore` alone can keep it suppressed'
+  )
+  assert.match(
+    text,
+    /r\.get\("ignored"\) is not False/,
+    'the removal must be asserted as a real boolean false, as the CLI does'
+  )
+  assert.match(text, /out of the gateway drop set/, 'report the membership that IS established')
+})
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */

@@ -281,6 +281,15 @@ either: a token no exchange carried was suppressing nothing to resume, and
 unrecorded whatever this verb just removed. It now reports the removal - "this
 id is out of the gateway drop set, so this opt-out suppresses nothing now".
 
+The `hypaware-unignore` skill is bound by the same two rules, being the one
+surface in the family that calls the route directly for the removal. It printed
+`Recording re-enabled for session <id>` off `--fail-with-body` alone, with the
+response body sent to `/dev/null`: the mirrored overclaim, and R14's last bullet
+unapplied entirely rather than merely weakly
+([§cli-response-check](#cli-response-check)). It now reads the reply, asserts
+`ignored` is a real boolean `false` with the `session_id` echoed byte-exactly,
+and reports the removal in the CLI's words.
+
 `--json` carries `guarantee: "set_membership"` beside its `status: "ok"`, since
 an agent parsing the receipt reads a bare `ok` as "done" (the skills are the
 consumer here). The reader prints the same qualifier next to a confirmed
