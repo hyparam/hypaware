@@ -1,8 +1,14 @@
 // @ts-check
 
-import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
+import {
+  collect,
+  executeSql as squirrelExecuteSql,
+  extractTables,
+  parseSql,
+  QueryBudgetExceededError,
+} from 'squirreling'
 
-import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
+import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 
 /**
@@ -21,9 +27,15 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
  * deliberately conservative placeholders until that measurement lands, not a
  * tuned value. Callers may pass an explicit `budget` to raise it.
  *
+ * Exported (not re-exported through `index.js`, so it stays an internal
+ * detail of the kernel's `hypaware/core/query` implementation rather than
+ * part of its public contract) so tests at every calling layer (this
+ * module, the CLI verb, the MCP tool) can build a fixture sized to the same
+ * real ceiling an un-configured caller actually runs under.
+ *
  * @type {ExecutionBudget}
  */
-const DEFAULT_EXECUTION_BUDGET = {
+export const DEFAULT_EXECUTION_BUDGET = {
   maxBufferedRows: 100_000,
   maxBufferedBytes: 32 * 1024 * 1024,
 }
@@ -149,8 +161,32 @@ export async function executeQuerySql(args) {
         return { columns, rows, datasets: datasetsUsed, freshnessMessages }
       } catch (err) {
         span.setAttribute('status', 'failed')
-        instruments.queryRunsTotal.add(1, { status: 'failed' })
-        instruments.queryDurationMs.record(Date.now() - start, { status: 'failed' })
+        /** @type {Record<string, string|number>} */
+        const failureAttrs = { status: 'failed' }
+        if (err instanceof QueryBudgetExceededError) {
+          // A refusal, not a crash: log/span the refusing operator and its
+          // buffered-row/byte high-water mark so `error_kind: budget_exceeded`
+          // is greppable off either the trace or the logs JSONL, on every
+          // surface that shares this one `executeQuerySql` implementation
+          // (CLI, MCP tool, and the future server caller).
+          // @ref LLP 0054#uniform-surface [implements]: budget/refusal telemetry lives once, here, so every caller inherits it
+          span.setAttribute('operator', err.operator)
+          span.setAttribute('limit_kind', err.limitKind)
+          span.setAttribute('limit', err.limit)
+          span.setAttribute('observed', err.observed)
+          failureAttrs.error_kind = 'budget_exceeded'
+          getLogger('query').error('query.budget_exceeded', {
+            [Attr.COMPONENT]: 'query',
+            [Attr.OPERATION]: 'query.execute_sql',
+            [Attr.ERROR_KIND]: 'budget_exceeded',
+            operator: err.operator,
+            limit_kind: err.limitKind,
+            limit: err.limit,
+            observed: err.observed,
+          })
+        }
+        instruments.queryRunsTotal.add(1, failureAttrs)
+        instruments.queryDurationMs.record(Date.now() - start, failureAttrs)
         throw err
       }
     },

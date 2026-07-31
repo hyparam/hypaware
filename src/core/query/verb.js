@@ -35,6 +35,16 @@ export const querySqlVerb = {
     required: ['sql'],
     positional: ['sql'],
   },
+  // The verb passes no `budget`, so `executeQuerySql` applies its own
+  // conservative host-default ceiling (`DEFAULT_EXECUTION_BUDGET`, sql.js):
+  // an un-configured `hyp query sql` and the `query_sql` MCP tool are both
+  // bounded out of the box from this one call site. A refusal surfaces as
+  // a normal thrown `QueryBudgetExceededError`: the CLI's generic verb
+  // dispatcher (`runVerbCommand`) already turns any thrown `operation`
+  // error into a stderr line plus a non-zero exit, and the MCP host's
+  // generic `tools/call` handler already turns it into an `isError` tool
+  // result, so neither surface needs special-case handling here.
+  // @ref LLP 0054#uniform-surface [implements]: one budget/refusal, inherited by both the CLI and MCP projections of this verb
   async operation(params, ctx) {
     return executeQuerySql({
       query: String(params.sql),
