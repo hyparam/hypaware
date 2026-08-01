@@ -31,20 +31,24 @@ import path from 'node:path'
  *
  * `id`, `parentId`, and `timestamp` stay on the record line; everything
  * else the caller passes is the message envelope. `timestamp` is written at
- * both levels, which is what a real session file does and what makes the
- * envelope-first read of it observable.
+ * both levels by default, which is what a real session file does. Pass
+ * `messageTimestamp` to override the nested `message.timestamp` only, so a
+ * caller can make the two levels state different values and observe which
+ * one an envelope-first read actually picks; the record line's `timestamp`
+ * is untouched either way.
  *
  * @param {Record<string, unknown>} fields
  * @returns {Record<string, unknown>}
  */
 export function openclawMessageLine(fields) {
-  const { id, timestamp, parentId, ...message } = fields
+  const { id, timestamp, parentId, messageTimestamp, ...message } = fields
+  const envelopeTimestamp = messageTimestamp !== undefined ? messageTimestamp : timestamp
   return {
     type: 'message',
     ...(id !== undefined ? { id } : {}),
     ...(timestamp !== undefined ? { timestamp } : {}),
     parentId: parentId ?? null,
-    message: { ...message, ...(timestamp !== undefined ? { timestamp } : {}) },
+    message: { ...message, ...(envelopeTimestamp !== undefined ? { timestamp: envelopeTimestamp } : {}) },
   }
 }
 

@@ -104,6 +104,12 @@ export async function run({ harness, expect }) {
         id: assistantMessageId,
         parentId: userMessageId,
         timestamp: '2026-05-20T10:00:02.000Z',
+        // Distinct from the record line's `timestamp` on purpose: this is
+        // the one field this fixture makes differ at the two levels, so the
+        // projected row's `message_created_at` (below) can pin the reader's
+        // envelope-first precedence instead of the two levels being
+        // byte-identical and unable to tell one read order from the other.
+        messageTimestamp: '2026-05-20T10:00:09.000Z',
         role: 'assistant',
         content: [{ type: 'text', text: 'here they are' }],
         model: 'claude-sonnet-4-5',
@@ -130,6 +136,17 @@ export async function run({ harness, expect }) {
     'fixture: role/content/provider/usage are nested under the message key',
     assistantLine?.message,
     (v) => v !== undefined && v.role === 'assistant' && v.provider === 'anthropic' && v.usage !== undefined,
+  )
+  // The record line and the nested envelope state DIFFERENT timestamps here
+  // on purpose, so the query assertion below can tell an envelope-first
+  // read from a line-first one instead of the two levels being
+  // byte-identical and unable to prove precedence either way.
+  expect.that(
+    'fixture: the assistant record states a different envelope timestamp than the line',
+    assistantLine,
+    (v) => v !== undefined
+      && v.timestamp === '2026-05-20T10:00:02.000Z'
+      && v.message?.timestamp === '2026-05-20T10:00:09.000Z',
   )
 
   const previousHome = process.env.HOME
@@ -207,7 +224,7 @@ export async function run({ harness, expect }) {
 
     // ----- 2. Query the projected rows -----
     const sql = `
-      select role, content_text, message_id, model, provider, conversation_source, client_name
+      select role, content_text, message_id, model, provider, conversation_source, client_name, message_created_at
       from ai_gateway_messages
       where session_id = '${sessionId}'
       order by message_index, part_index
@@ -236,6 +253,15 @@ export async function run({ harness, expect }) {
         && v.content_text === 'here they are'
         && v.model === 'claude-sonnet-4-5',
     )
+    // The fixture states 10:00:02 on the record line and 10:00:09 on the
+    // nested envelope (LLP 0158#decision). A line-first read, or the
+    // pre-#552 flat read of `openclawMessageEnvelope`, would land on
+    // 10:00:02; only an envelope-first read lands here.
+    expect.that(
+      'query: assistant row carries the envelope timestamp, not the record line one (envelope-first precedence)',
+      assistant,
+      (v) => v !== undefined && v.message_created_at === '2026-05-20T10:00:09.000Z',
+    )
     // `provider` is the field the two-level read actually gates on: read off
     // the line it is absent, the allowlist resolves the record to `unknown`,
     // and the session is excluded fail-closed.
@@ -256,10 +282,21 @@ export async function run({ harness, expect }) {
     expect.that('dispatch: backfill openclaw (run 2) exited 0', bf2code, (v) => v === 0)
     const run2 = JSON.parse(bf2out.text())
     const openclaw2 = run2.providers.find((/** @type {any} */ p) => p.provider === 'openclaw')
+    // `rows_written === 0` alone does not pin that the session was actually
+    // re-read: a run that skipped the file entirely (e.g. an mtime-based
+    // quiesce-window skip, LLP 0173 T12) would report the same zero and pass
+    // just as well. Requiring `items_seen` and `rows_skipped` pins the
+    // mechanism the comment claims: the file WAS seen and its rows WERE
+    // recognized and skipped by part_id dedupe, not merely absent from the
+    // scan.
     expect.that(
-      'backfill run 2: rerun wrote ZERO new rows (all part_ids already present)',
+      'backfill run 2: rerun re-read the session and skipped its rows via dedupe (all part_ids already present)',
       openclaw2,
-      (v) => v !== undefined && v.status === 'ok' && v.rows_written === 0,
+      (v) => v !== undefined
+        && v.status === 'ok'
+        && v.rows_written === 0
+        && v.items_seen >= 1
+        && v.rows_skipped >= 1,
     )
 
     const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
