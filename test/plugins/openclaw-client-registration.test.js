@@ -269,8 +269,16 @@ test('hyp clients: the descriptor map behind client listing/status resolves open
     assert.ok(descriptors.has('openclaw'), 'openclaw client descriptor resolves')
     const descriptor = descriptors.get('openclaw')
     assert.equal(descriptor?.plugin, '@hypaware/openclaw')
-    // R7: the manifest declares no attach_probe any more.
-    assert.equal(descriptor?.attachProbe, undefined)
+    // LLP 0173 T5: R7 is reversed (LLP 0167#deletion-inventory), and the
+    // manifest again declares a json_path attach_probe (design 1.4).
+    assert.deepEqual(descriptor?.attachProbe, {
+      format: 'json_path',
+      settings_file: '.openclaw/openclaw.json',
+      container_path: 'models.providers',
+      provider_keys: ['anthropic', 'openai'],
+      marker_header: 'x-hypaware-upstream',
+      cache_glob: 'agents/*/agent/models.json',
+    })
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
