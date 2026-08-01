@@ -189,7 +189,7 @@ export function createOpenclawBackfillProvider(opts) {
     // @ref LLP 0172#lane-b-sweep [implements]: opt-in Lane B scheduling
     // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
     // every 5 minutes when the config key is absent.
-    sweep: { cron: opts.config?.backfill?.sweep_cron ?? DEFAULT_SWEEP_CRON },
+    sweep: { cron: resolveSweepCron(config) },
     /**
      * @param {BackfillPlanContext} _ctx
      * @returns {Promise<BackfillPlan | undefined>}
@@ -722,6 +722,25 @@ function resolveQuiesceMs(config) {
   const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
   const quiesceMs = backfill?.quiesce_ms
   return typeof quiesceMs === 'number' ? quiesceMs : DEFAULT_QUIESCE_MS
+}
+
+/**
+ * The contribution's `sweep.cron`, resolved from the plugin's own validated
+ * `config` slice, or {@link DEFAULT_SWEEP_CRON} when `config.backfill.sweep_cron`
+ * is absent. Read through the same `isPlainObject` narrowing `resolveQuiesceMs`
+ * uses rather than an optional-property chain: the slice is a `JsonObject`, so
+ * every step below its root is a `JsonValue` to the checker and a bare
+ * `config?.backfill?.sweep_cron` does not typecheck. `config.js`'s
+ * `validateBackfillSection` already rejects a malformed cron string before it
+ * reaches here.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {string}
+ */
+function resolveSweepCron(config) {
+  const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
+  const sweepCron = backfill?.sweep_cron
+  return typeof sweepCron === 'string' ? sweepCron : DEFAULT_SWEEP_CRON
 }
 
 /**

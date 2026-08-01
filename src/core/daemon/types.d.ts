@@ -1,7 +1,12 @@
 import type {
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
   CapabilityRegistry,
+  HypAwareV2Config,
   QueryRegistry,
+  QueryStorageService,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { BackfillRunnerContext } from '../commands/types.d.ts'
 import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic } from '../config/types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -560,4 +565,51 @@ export interface PidFileEntry {
   runId: string
   /** `foreground` (Phase 3) or `detached` (Phase 4 installers). */
   mode: string
+}
+
+/**
+ * The runner the sweep driver fires per due contribution: exactly
+ * `runBackfillProvider`'s (`src/core/commands/backfill.js`) shape, narrowed to
+ * the arguments a sweep passes. Declared as a type rather than taken from the
+ * import so the driver can accept an injected fake in a unit test without the
+ * test having to stand up a real cache, storage service, and materializer set.
+ */
+export interface BackfillSweepRunner {
+  (args: {
+    ctx: BackfillRunnerContext
+    provider: string
+    dryRun: boolean
+    devRunId?: string
+  }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
+}
+
+export interface BackfillSweepDriverOptions {
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
+  env: NodeJS.ProcessEnv
+  storage: QueryStorageService
+  /** The daemon's effective config; absent on a host with no readable document. */
+  config?: HypAwareV2Config
+  /** Test seam: defaults to `runBackfillProvider`. */
+  runBackfill?: BackfillSweepRunner
+}
+
+export interface BackfillSweepTickOptions {
+  /** Tick instant the cron due-check evaluates against. Defaults to `new Date()`. */
+  now?: Date
+  /** Ignore the cron due-check and fire every sweep-bearing provider (test use). */
+  force?: boolean
+}
+
+/**
+ * What one `tick()` decided, for the caller's telemetry and for tests. Runs are
+ * fired unblocked, so `fired` names the providers a run was *started* for, never
+ * the ones that finished.
+ */
+export interface BackfillSweepTickReport {
+  fired: string[]
+}
+
+export interface BackfillSweepDriver {
+  tick(opts?: BackfillSweepTickOptions): Promise<BackfillSweepTickReport>
 }
