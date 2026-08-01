@@ -7,6 +7,10 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { activate } from '../../hypaware-core/plugins-workspace/openclaw/src/index.js'
+// Fixture setup only for the real-attach detach case below: the write this
+// stages is the exact real-world undo record detachClientFromDisk reverses,
+// mirroring client-detach-json-path.test.js's own use of the real effect.
+import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
 import { buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
 
 /**
@@ -232,9 +236,11 @@ test('hyp attach openclaw resolves the client and does not error unknown client'
 })
 
 test('hyp detach openclaw resolves the client from the real manifest as an honest no-op', async () => {
-  // No attach_probe (R7) means detachClientFromDisk's no-probe guard fires:
-  // { changed: false }. The point here is resolution, not restoration - the
-  // command must not error `unknown client 'openclaw'`.
+  // The manifest declares an attach_probe again (LLP 0173 T5 reversed R7), so
+  // the no-op observed here on a fresh temp HOME is detachClientFromDisk's
+  // absent-settings-file guard ({ changed: false }, no .openclaw/openclaw.json
+  // to reverse), not a no-probe guard. The point here is resolution, not
+  // restoration - the command must not error `unknown client 'openclaw'`.
   const home = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-detach-'))
   try {
     const stdout = makeBuf()
@@ -251,6 +257,57 @@ test('hyp detach openclaw resolves the client from the real manifest as an hones
     assert.equal(code, 0, stderr.text())
     assert.doesNotMatch(stderr.text(), /unknown client/)
     assert.match(stdout.text(), /nothing to do/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('hyp detach openclaw reverses a real attach: the ownership-based json_path undo fires end to end', async () => {
+  // Companion to the honest-no-op case above: stage a real openclaw.json
+  // written by the actual attach() effect, then drive the same CLI entry
+  // point (buildClientDescriptorMap's real manifest descriptor ->
+  // detachClientFromDisk's json_path branch) and prove it is not a no-op
+  // once there is something on disk to reverse.
+  // @ref LLP 0172#lane-a-detach [tests]: the ownership-based json_path undo,
+  // exercised through the real manifest descriptor rather than a hand-built
+  // one, so the wiring this file is about (not just the core undo, which
+  // client-detach-json-path.test.js already covers directly) is proven too.
+  const home = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-detach-real-'))
+  try {
+    const settingsPath = path.join(home, '.openclaw', 'openclaw.json')
+    mkdirSync(path.dirname(settingsPath), { recursive: true })
+    writeFileSync(settingsPath, JSON.stringify({ theme: 'dark', models: { providers: {} } }, null, 2))
+
+    const endpoint = 'http://127.0.0.1:18521'
+    const attachOutcome = await createOpenclawAttach({ homeDir: home, env: {} }).attach(
+      /** @type {any} */ ({ endpoint, stdout: makeBuf(), stderr: makeBuf(), dryRun: false, json: true })
+    )
+    assert.equal(attachOutcome.status, 'done')
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+      stdout,
+      stderr,
+      env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+      config: { version: 2, plugins: [{ name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:18521' } }] },
+    }))
+
+    const code = await runDetach(['openclaw', '--json'], ctx)
+
+    assert.equal(code, 0, stderr.text())
+    assert.doesNotMatch(stderr.text(), /unknown client/)
+    const payload = JSON.parse(stdout.text().trim())
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.changed, true)
+    assert.equal(payload.settings_path, settingsPath)
+    assert.equal(payload.removed, endpoint)
+
+    // The two entries attach wrote are gone; everything else in the file
+    // (the theme, the container itself) is untouched.
+    const written = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    assert.deepEqual(written.models.providers, {})
+    assert.equal(written.theme, 'dark')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
