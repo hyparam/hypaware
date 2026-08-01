@@ -341,16 +341,25 @@ export async function run({ harness, expect }) {
       (v) => v !== undefined && Number(v.total_rows_written) >= 2,
     )
 
-    // The provider's own projection log, which names the identity source the
-    // native-id path is supposed to take. A record read at the wrong level
-    // never reaches it at all.
+    // The provider's own projection log: a record read at the wrong level is
+    // excluded fail-closed before projection and never reaches this log at
+    // all, so reaching it for both messages is the claim. The log's
+    // `identity_source` is a hardcoded literal at the single emission site
+    // and so proves nothing; the native id it resolved is what varies, and
+    // that is `session_id` here (and the record lines' `message_id`s on the
+    // rows above). Pin the run too: the rerun emits a second record under
+    // `<dev_run_id>-rerun`, so matching on the body alone would let run 2
+    // satisfy a run-1 claim on emission order.
     const projected = logs.filter(
-      (/** @type {any} */ l) => l.body === 'openclaw.backfill.session_projected',
+      (/** @type {any} */ l) =>
+        l.body === 'openclaw.backfill.session_projected' &&
+        l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId &&
+        l.attributes?.session_id === sessionId,
     )
     expect.that(
-      'logs: openclaw.backfill.session_projected with native identity and both messages',
+      'logs: openclaw.backfill.session_projected for the session under the run dev_run_id with both messages',
       projected[0]?.attributes,
-      (v) => v !== undefined && v.identity_source === 'native' && Number(v.message_count) >= 2,
+      (v) => v !== undefined && Number(v.message_count) >= 2,
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
