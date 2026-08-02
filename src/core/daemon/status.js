@@ -588,29 +588,45 @@ export async function collectHypAwareStatus(opts = {}) {
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
-    const probe = descriptor.attachProbe
+    // Attach state is only a real state for a client that declares an
+    // `attach_probe`. Without one there is no settings-file write to read back,
+    // `action_attach.desired()` skips the descriptor for exactly that reason
+    // (attach must be reversible), so no attach is ever performed and no marker
+    // is ever written. Deriving `attached: false` from that silence is the wrong
+    // negative indistinguishable from a right one (#544): the honest answer is
+    // "not applicable", and every attach surface below reads this flag rather
+    // than a probe result that was never taken.
+    // @ref LLP 0143#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
+    const attachable = !!descriptor.attachProbe
+    const probe = attachable
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,
       configured,
+      attachable,
       attached: probe.attached,
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
-    if (configured && !probe.attached) {
-      // The repair is `hyp attach` only for a client whose plugin registers a
-      // runtime adapter the generic reconciler can drive. A client that
-      // declares `contributes.client` for probe/status plumbing but no
-      // adapter (claude-desktop: its plist is placed by an attended command
-      // with its own sudo prompt and consent gate, never by attach-on-join)
-      // has to name its own setup command instead, or the repair we print is
-      // one that answers `unknown client`. The command comes from the same
-      // plugin's picker row, which already declares it as `configure_command`.
-      // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
+    if (configured && attachable && !probe.attached) {
+      // The repair has to be a command that runs: `hyp attach` only answers for
+      // a client whose plugin registers a runtime adapter the generic
+      // reconciler can drive, so a client that needs its own setup command
+      // names it here instead, from the same plugin's picker row that already
+      // declares it as `configure_command`.
+      // The `attachable` guard above excludes every probe-less client
+      // (claude-desktop, openclaw) whose repair could never clear the warning
+      // it was printed under, so what reaches here is a probed client whose
+      // marker is genuinely absent. That is also why no plugin shipping today
+      // takes the `configureCommand` branch: claude-desktop was the only picker
+      // row declaring one and it is probe-less. The lookup stays as the
+      // contract for a probed client that still owns its own setup command -
+      // dropping it would reinstate the `unknown client` repair for that case.
+      // @ref LLP 0139#repair-must-be-runnable [implements]: the repair is the client's own picker `configure_command` when it declares one, never a generic attach that would answer `unknown client`
       const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
       const repair = configureCommand ? `hyp ${configureCommand}` : `hyp attach --client ${clientName}`
       diagnostics.push({
@@ -885,25 +901,33 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     if (entry.enabled === false) continue
     enabledByPlugin.set(entry.name, entry)
   }
-  /** @type {Map<string, { onJoin: boolean }>} */
+  /** @type {Map<string, { onJoin: boolean, inert?: boolean }>} */
   const declaredAttach = new Map()
   for (const [clientName, descriptor] of clientDescriptors ?? new Map()) {
     const entry = enabledByPlugin.get(descriptor.plugin)
     if (!entry) continue
+    // A probe-less descriptor is the third way the reconciler is a no-op, next
+    // to `on_join: false` and a non-joined host. `desired()` skips it because
+    // attach must be reversible and only the probe can reverse it, so no marker
+    // will ever appear and `pending` would be permanent (#544). Same shape as
+    // the `readAttachPolicy` sharing above: status must not derive a target the
+    // reconciler would never name.
+    // @ref LLP 0143#status-derives-by-the-same-gate [implements]: a probe-less attach target is n/a, never pending
+    const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
     if (hasBlock) {
       const onJoin = readAttachPolicy(entry).onJoin !== false
-      declaredAttach.set(clientName, { onJoin })
+      declaredAttach.set(clientName, { onJoin, inert })
     } else if (hasCentral) {
-      declaredAttach.set(clientName, { onJoin: true })
+      declaredAttach.set(clientName, { onJoin: true, inert })
     }
   }
 
   // Kinds to render: every kind the markers record, plus a kind for each
   // handler that declared a target (so a configured-but-unrun target shows even
   // with no marker yet). `backfill` keys by plugin, `attach` by client name.
-  /** @type {Record<string, Map<string, { onJoin: boolean }>>} */
+  /** @type {Record<string, Map<string, { onJoin: boolean, inert?: boolean }>>} */
   const declaredByKind = { backfill: declared, attach: declaredAttach }
   /** @type {Set<string>} */
   const kinds = new Set(Object.keys(byKind))
@@ -940,10 +964,11 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
         })
       } else {
         // No marker: a declared backfill or attach target. Suppressed
-        // (on_join:false) or inert (host never joined → the reconciler is a
-        // no-op) → n/a; otherwise desired and simply not run yet → pending.
+        // (on_join:false), inert (host never joined, or the handler's own
+        // `desired()` would skip this target) → the reconciler is a no-op →
+        // n/a; otherwise desired and simply not run yet → pending.
         const decl = declaredForKind?.get(requestKey)
-        const suppressed = decl ? !decl.onJoin : false
+        const suppressed = decl ? !decl.onJoin || decl.inert === true : false
         const state = suppressed || !hasCentral ? 'n/a' : 'pending'
         actions.push({ kind, requestKey, state })
       }

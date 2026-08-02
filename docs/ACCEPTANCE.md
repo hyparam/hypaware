@@ -299,11 +299,17 @@ requirements this procedure checks), [LLP 0161](../llp/0161-openclaw-full-captur
    row there is only reachable through both shadow providers and a hook
    that steered, so it proves at once what this step checks separately.
 
-   Expect `hyp status` to also carry a `client_attach_missing` warning for
-   `openclaw`, telling you to run `hyp attach openclaw`. It is inert here
-   and running it changes nothing: the generic attach probe has no marker
-   to find by design (R7). Note it and move on; it says nothing about
-   capture either way.
+   Expect `hyp status` to carry **no** `client_attach_missing` warning for
+   `openclaw`, and its clients row to read `[configured, attach n/a]`
+   rather than `not attached`. That absence is the pass condition, not a
+   regression: with no `attach_probe` (R7) there is no marker to miss,
+   `hyp attach openclaw` is a documented no-op, and status derives attach
+   state by the same gate the attach reconciler does
+   ([LLP 0143 #status-derives-by-the-same-gate](../llp/0143-openclaw-registers-no-attach-probe.decision.md#status-derives-by-the-same-gate),
+   #544). On a joined host the `client actions:` section shows `attach
+   openclaw [n/a]` for the same reason; a `backfill @hypaware/openclaw
+   [pending]` row beside it is a real, unrelated target. None of these
+   lines says anything about capture either way.
 
 2. Note the current row count and pin the window, so steps 4 and 6 measure
    only new traffic:

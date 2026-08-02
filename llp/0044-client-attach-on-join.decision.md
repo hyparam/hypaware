@@ -176,8 +176,14 @@ central config or flip `overall` to `degraded`
 [LLP 0041](./0041-central-config-client-actions.design.md#idempotency-and-completion-state)
 `client_action` section, **per client**: `done` (attached, with when) / `failed`
 (reason + last attempt) / `pending` (named, not yet attached) / `n/a`
-(`on_join: false` or non-joined). A failed or pending attach does **not** make
-`overall` `degraded`.
+(`on_join: false`, non-joined, or a client `desired()` would never name: see
+[LLP 0143 #status-derives-by-the-same-gate](./0143-openclaw-registers-no-attach-probe.decision.md#status-derives-by-the-same-gate)).
+A failed or pending attach does **not** make `overall` `degraded`.
+
+`pending` is a claim that the reconciler *will* act, so status must derive it
+by `desired()`'s own rule, not a looser one. Where the two can drift, they
+share a reader: `readAttachPolicy` for the `on_join` tri-state, and the
+`attachProbe` presence check for attach-eligibility.
 
 ## Relationship to manual attach
 
