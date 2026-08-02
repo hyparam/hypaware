@@ -34,12 +34,13 @@ import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
  * neither consumer may hold its own parse).
  *
  * The session file is the authoritative record of a turn: it already carries
- * one flattened per-message record with the message's own native id, its
- * timestamp, and for an assistant message the model, provider, api, stop
- * reason, and usage. So this module builds an `AiGatewayProjectedExchange`
- * straight off those fields. It deliberately does NOT route through
- * `anthropicMessages()` (projector.js): those parse a wire request/response
- * pair, and there is no wire pair here to reconstruct.
+ * one per-message record with the message's own native id and timestamp on
+ * the record line, and its role, content and (for an assistant message) the
+ * model, provider, api, stop reason and usage in the nested `message`
+ * envelope the LLP 0158 reader normalizes. So this module builds an
+ * `AiGatewayProjectedExchange` straight off those fields. It deliberately
+ * does NOT route through `anthropicMessages()` (projector.js): those parse a
+ * wire request/response pair, and there is no wire pair here to reconstruct.
  *
  * That directness is what makes R11 true by construction rather than by
  * coincidence. A backfilled row carries the record's own `message_id`, so it
@@ -492,10 +493,13 @@ function projectedExchangeFromSession(args) {
  * @returns {AiGatewayProjectedMessage | undefined}
  */
 function projectedMessageFromRecord(message) {
-  const record = message.record
-  const rawRole = stringValue(record.role)
+  // Through the LLP 0158 reader's normalized fields, never `message.record`:
+  // OpenClaw nests `role`/`content` under the record line's `message`
+  // envelope, so the top-level read this used to do found neither and dropped
+  // every record of every real session (#543).
+  const rawRole = stringValue(message.role)
   if (!rawRole) return undefined
-  const content = record.content
+  const content = message.content
   // The gateway drops a message whose content normalizes to no blocks; doing it
   // here keeps `messages_projected` honest about what was actually emitted.
   if (typeof content === 'string' ? content.length === 0 : !Array.isArray(content) || content.length === 0) {
@@ -563,11 +567,12 @@ function messageAttributes(message) {
  *
  * Each name is read through a small alias list rather than one spelling: the
  * session file's `usage` block is OpenClaw's own normalization of whatever its
- * provider returned, and which spelling it settles on could not be verified at
- * implementation time (no live OpenClaw install was reachable). Accepting the
- * Anthropic wire spelling, the OpenAI wire spelling, and the camelCase
- * normalized spelling costs a lookup and means an unverified guess cannot
- * silently zero out a session's tokens.
+ * provider returned. A live install has since confirmed the camelCase
+ * spelling (`input`/`output`/`cacheRead`/`cacheWrite`, LLP 0158 Context), so
+ * the alias list is no longer a hedge against an unverified guess; it is kept
+ * because the block is still the client's normalization of a provider payload
+ * and a version that passed a wire spelling through would otherwise silently
+ * zero out a session's tokens.
  *
  * @ref LLP 0035#one-carrier [implements]: usage rides the assistant record
  * only, so it lands once per response
