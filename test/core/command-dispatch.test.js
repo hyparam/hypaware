@@ -699,6 +699,68 @@ test('attach accepts a positional client name', async () => {
   ])
 })
 
+test('bare attach expands to every registered client', async () => {
+  const { registry, kernel, calls } = fakeClientKernel()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['attach', '--dry-run'], {
+    stdout,
+    stderr,
+    registry,
+    kernel,
+    env: { ...process.env, HYP_HOME: await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-all-')) },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  assert.deepEqual(calls, [
+    { action: 'attach', client: 'claude', dryRun: true, json: false },
+    { action: 'attach', client: 'codex', dryRun: true, json: false },
+  ])
+})
+
+test('bare detach expands to every known client descriptor', async () => {
+  const { registry, kernel, calls } = fakeClientKernel()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-detach-all-'))
+
+  const code = await dispatch(['detach', '--json'], {
+    stdout,
+    stderr,
+    registry,
+    kernel,
+    env: { ...process.env, HOME: home, CODEX_HOME: home, HYP_HOME: home },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  assert.deepEqual(calls, [])
+  const clients = stdout.text()
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line).client)
+  assert.ok(clients.includes('claude'))
+  assert.ok(clients.includes('codex'))
+})
+
+test('attach and detach help document the all-client default', async () => {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+
+  for (const command of ['attach', 'detach']) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch([command, '--help'], { stdout, stderr, registry })
+
+    assert.equal(code, 0)
+    assert.equal(stderr.text(), '')
+    assert.match(stdout.text(), new RegExp(`hyp ${command} \\[client\\|all\\]`))
+    assert.match(stdout.text(), /With no client name/)
+  }
+})
+
 test('unattach alias routes a positional client through the core disk undo', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()
