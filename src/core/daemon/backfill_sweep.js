@@ -42,7 +42,12 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * `backfill.sweep_failed` record rather than an unhandled rejection that takes
  * the daemon process down.
  *
- * @ref LLP 0172#lane-b-sweep [implements]: the sweep rides the existing sink-tick cadence with `cronMatches` as its due-check, and fires each due provider without blocking the tick
+ * Not blocking is what makes the re-entrancy guard necessary: a provider whose
+ * run outlives its own cron interval is due again while the first pass is still
+ * running, so the driver tracks which providers are in flight and skips a due
+ * one that already is.
+ *
+ * @ref LLP 0172#lane-b-sweep [implements]: the sweep rides the existing sink-tick cadence with `cronMatches` as its due-check, fires each due provider without blocking the tick, and never overlaps two runs of the same provider
  * @ref LLP 0170#decision [implements]: scheduling an existing job (the backfill provider) on the daemon's existing cron-matched loop, not building a new scheduling primitive
  * @param {BackfillSweepDriverOptions} opts
  * @returns {BackfillSweepDriver}
@@ -57,6 +62,21 @@ export function createBackfillSweepDriver(opts) {
   const log = getLogger('backfill-sweep')
 
   /**
+   * The providers whose fired run has not settled yet. Because `tick()` does
+   * not block on the run it fires, a provider whose pass outlives its own cron
+   * interval is due again while the previous one is still walking the
+   * transcript tree, and firing again would put two runs on the same datasets
+   * and the same mid-flush spool. Neither `runBackfillProvider` nor
+   * `runProvider` carries a lock of its own, so the guard belongs here, in the
+   * only place that knows a run was started. Same shape as the daemon's
+   * `maintenanceInFlight` (`src/core/daemon/runtime.js`), a set rather than a
+   * single handle because this driver fires one run per provider.
+   *
+   * @type {Set<string>}
+   */
+  const inFlight = new Set()
+
+  /**
    * @param {BackfillSweepTickOptions} [tickOpts]
    * @returns {Promise<BackfillSweepTickReport>}
    */
@@ -67,8 +87,24 @@ export function createBackfillSweepDriver(opts) {
     for (const provider of backfills.list()) {
       if (!provider.sweep) continue
       if (!isDue(provider, now, tickOpts.force === true)) continue
+      // A due provider whose previous run is still going is skipped, not
+      // queued: the sweep is level-triggered, so the next tick that finds it
+      // due and idle picks up whatever this one would have.
+      if (inFlight.has(provider.name)) {
+        log.warn('backfill.sweep_skipped', {
+          [Attr.COMPONENT]: SWEEP_COMPONENT,
+          [Attr.OPERATION]: SWEEP_OPERATION,
+          [Attr.ERROR_KIND]: 'already_running',
+          [Attr.PLUGIN]: provider.plugin,
+          provider: provider.name,
+          hyp_sweep_schedule: provider.sweep.cron,
+          status: 'ok',
+        })
+        continue
+      }
       const devRunId = `sweep-${provider.name}-${now.getTime()}`
       fired.push(provider.name)
+      inFlight.add(provider.name)
       log.info('backfill.sweep_due', {
         [Attr.COMPONENT]: SWEEP_COMPONENT,
         [Attr.OPERATION]: SWEEP_OPERATION,
@@ -86,8 +122,8 @@ export function createBackfillSweepDriver(opts) {
         dryRun: false,
         devRunId,
       }).then(
-        (result) => { logSettled(provider, devRunId, result) },
-        (err) => { logFailed(provider, devRunId, err) }
+        (result) => { inFlight.delete(provider.name); logSettled(provider, devRunId, result) },
+        (err) => { inFlight.delete(provider.name); logFailed(provider, devRunId, err) }
       )
     }
     return { fired }

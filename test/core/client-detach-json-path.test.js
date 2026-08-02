@@ -256,3 +256,47 @@ test('json_path undo purges the derived caches, skipping one that will not parse
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// `$OPENCLAW_HOME` may sit NESTED inside `$HOME`, which is the case that broke:
+// deriving the config home from the first segment of the settings path's
+// home-relative form answered `$HOME/.config` here, the `agents/*/...` glob
+// matched nothing, and an unmatched glob is not an error - so the settings half
+// reported success while the caches kept routing at the dead gateway. Two
+// segments is what makes it a regression test; a one-segment relocation
+// (`OPENCLAW_HOME=$HOME/elsewhere`) passed either way.
+// @ref LLP 0169#decision [tests]: the cache purge follows the relocated config
+// home, since the caches are what do not self-heal
+test('json_path undo purges the caches under a nested $OPENCLAW_HOME', async () => {
+  const home = await stageHome()
+  try {
+    const openclawHome = path.join(home, '.config', 'openclaw')
+    const settingsPath = path.join(openclawHome, 'openclaw.json')
+    await fs.mkdir(openclawHome, { recursive: true })
+    await fs.writeFile(settingsPath, JSON.stringify({
+      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT) } },
+    }, null, 2) + '\n')
+
+    const cachePath = path.join(openclawHome, 'agents', 'main', 'agent', 'models.json')
+    await fs.mkdir(path.dirname(cachePath), { recursive: true })
+    await fs.writeFile(cachePath, JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: { OPENCLAW_HOME: openclawHome },
+      expectedBaseUrl: ENDPOINT,
+    })
+
+    assert.equal(result.changed, true)
+    assert.equal(result.settingsPath, settingsPath)
+    assert.equal(result.removed, ENDPOINT)
+    assert.deepEqual((await readJsonFile(settingsPath)).models.providers, {})
+    // The half that silently no-opped before.
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

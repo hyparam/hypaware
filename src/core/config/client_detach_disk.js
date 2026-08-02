@@ -138,11 +138,11 @@ export async function detachClientFromDisk({
   if (probe.format === 'json_path') {
     return await detachJsonPathProviders({
       settingsPath,
+      settingsFile: probe.settings_file,
       containerPath: probe.container_path,
       providerKeys: probe.provider_keys,
       markerHeader: probe.marker_header,
       cacheGlob: probe.cache_glob,
-      homeDir,
       expectedBaseUrl,
       fs,
     })
@@ -730,11 +730,11 @@ const JSON_PATH_BACKUP_KEY = '_hypaware_detach_backup'
  *
  * @param {{
  *   settingsPath: string,
+ *   settingsFile: string,
  *   containerPath: string | undefined,
  *   providerKeys: string[] | undefined,
  *   markerHeader: string | undefined,
  *   cacheGlob: string | undefined,
- *   homeDir: string,
  *   expectedBaseUrl: string | undefined,
  *   fs: typeof fsp,
  * }} args
@@ -743,11 +743,11 @@ const JSON_PATH_BACKUP_KEY = '_hypaware_detach_backup'
  */
 async function detachJsonPathProviders({
   settingsPath,
+  settingsFile,
   containerPath,
   providerKeys,
   markerHeader,
   cacheGlob,
-  homeDir,
   expectedBaseUrl,
   fs,
 }) {
@@ -839,7 +839,7 @@ async function detachJsonPathProviders({
 
   warnings.push(...await purgeProviderCaches({
     cacheGlob,
-    configHome: clientConfigHome(settingsPath, homeDir),
+    configHome: clientConfigHome(settingsPath, settingsFile),
     containerPath: container,
     providerKeys: keys,
     fs,
@@ -900,24 +900,32 @@ function providerBaseUrl(entry) {
 }
 
 /**
- * The client's config home: the first segment of its home-relative
- * `settings_file`, which is what `cache_glob` is declared relative to. Derived
- * back out of the already-resolved settings path rather than re-resolved, so
- * the purge and the settings write can never disagree about which home they
- * are working in, including under a `$<CLIENT>_HOME` relocation (which takes
- * the path out of `homeDir` entirely, and is detected here by exactly that).
+ * The client's config home: the already-resolved `settingsPath` with the
+ * manifest's own `settings_file` tail stripped back off, which is what
+ * `cache_glob` is declared relative to. It is the exact inverse of what
+ * `resolveClientSettingsPath` joined on, whose two branches both append
+ * `settings_file`'s segments *after the first* to a base (`$HOME/<first>`
+ * normally, `$<CLIENT>_HOME` under the relocation), so stripping that many
+ * segments recovers the base either way. Derived from the resolved path rather
+ * than re-resolved, so the purge and the settings write can never disagree
+ * about which home they are working in.
+ *
+ * Measuring against `homeDir` instead is what this does *not* do, and the bug
+ * it fixes: taking the first segment of `path.relative(homeDir, settingsPath)`
+ * is only the config home when `$<CLIENT>_HOME` is outside `$HOME` or one level
+ * inside it. A nested relocation (`OPENCLAW_HOME=$HOME/.config/openclaw`) stays
+ * relative to `homeDir`, so the fallback never fires and the first segment is
+ * `.config`: the glob then matches nothing, an unmatched glob is not an error,
+ * and the cache purge silently no-ops while the settings half reports success.
  *
  * @param {string} settingsPath
- * @param {string} homeDir
+ * @param {string} settingsFile  the manifest value, home-relative
  * @returns {string}
  */
-function clientConfigHome(settingsPath, homeDir) {
-  const rel = path.relative(path.resolve(homeDir), settingsPath)
-  if (rel.length === 0 || rel.startsWith('..') || path.isAbsolute(rel)) {
-    return path.dirname(settingsPath)
-  }
-  const [first] = rel.split(path.sep)
-  return path.join(path.resolve(homeDir), first)
+function clientConfigHome(settingsPath, settingsFile) {
+  const tail = settingsFile.split('/').slice(1)
+  const depth = tail.length === 0 ? 0 : path.join(...tail).split(path.sep).filter((s) => s !== '.').length
+  return path.resolve(settingsPath, ...new Array(depth).fill('..'))
 }
 
 /**

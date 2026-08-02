@@ -12,6 +12,7 @@ import { activate } from '../../hypaware-core/plugins-workspace/openclaw/src/ind
 // mirroring client-detach-json-path.test.js's own use of the real effect.
 import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
 import { buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
+import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
 /**
  * `gateway.registerClient({ name: 'openclaw', ... })` is what makes the
@@ -132,7 +133,13 @@ test('activate() attach() reports the same write under --json', async () => {
   }
 })
 
-test('activate() attach() swallows a refusal instead of throwing it at the join', async () => {
+// @ref LLP 0172#lane-a-attach [tests]: a refusal reaches the reconciler as a
+// retryable failure. The kernel types the registered `attach()` as
+// `Promise<void>`, so the effect's returned outcome reaches no caller and the
+// wrapper has to rethrow it. Returning quietly recorded a `done` marker that
+// `isCurrent()` then matched forever, so the join never re-attached after the
+// user cleared the conflicting entry, and `hyp attach` exited 0 on a refusal.
+test('activate() attach() rethrows a refusal so the join records a retryable failure', async () => {
   const staged = stageActivation({
     models: { providers: { anthropic: { baseUrl: 'https://mine.example', models: [] } } },
   })
@@ -141,14 +148,63 @@ test('activate() attach() swallows a refusal instead of throwing it at the join'
 
     const stdout = makeBuf()
     const stderr = makeBuf()
-    // The kernel's registered `attach()` returns Promise<void>, so the
-    // refusal reaches the caller as reported output, never as a throw: that
-    // is what keeps a refuse during attach-on-join a warning (LLP 0169).
-    await staged.client().attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, json: true })
+    await assert.rejects(
+      () => staged.client().attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, json: true }),
+      /already exists/
+    )
 
+    // The reported line is still written before the throw: the throw is what
+    // the void-typed callers can see, the payload is what a `--json` reader
+    // parses.
     const payload = JSON.parse(stdout.text().trim())
     assert.equal(payload.status, 'failed')
     assert.match(payload.reason, /already exists/)
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+// The other half of the same clause: the throw must reach the reconciler as a
+// recorded `failed` outcome and must NOT abort the join's other actions.
+// `perform()`'s catch is the seam that converts it, so drive the real handler
+// rather than asserting on the wrapper alone.
+// @ref LLP 0172#lane-a-attach [tests]: refusal is recorded and retried, and the
+// sibling client attached in the same pass still lands
+test('a refused openclaw attach is a failed reconciler outcome, not a done marker, and the join continues', async () => {
+  const staged = stageActivation({
+    models: { providers: { openai: { baseUrl: 'https://mine.example', models: [] } } },
+  })
+  try {
+    await activate(staged.ctx)
+    const openclaw = staged.client()
+
+    /** @type {string[]} */
+    const attached = []
+    const handler = createAttachHandler()
+    const ctx = /** @type {any} */ ({
+      env: { HOME: staged.homeDir },
+      endpoint: 'http://127.0.0.1:4317',
+      log: { info() {}, warn() {}, error() {} },
+      clients: {
+        getClient(name) {
+          if (name === 'openclaw') return openclaw
+          if (name === 'sibling') return { name, async attach() { attached.push(name) } }
+          return undefined
+        },
+      },
+    })
+
+    const refused = await handler.perform({ requestKey: 'openclaw', params: { client: 'openclaw' } }, ctx)
+    assert.equal(refused.status, 'failed')
+    assert.match(String(refused.reason), /already exists/)
+
+    // A `failed` outcome carries no marker detail to go `done` on, so the next
+    // pass re-performs rather than short-circuiting on `isCurrent`.
+    assert.equal(refused.detail, undefined)
+
+    const sibling = await handler.perform({ requestKey: 'sibling', params: { client: 'sibling' } }, ctx)
+    assert.equal(sibling.status, 'done')
+    assert.deepEqual(attached, ['sibling'])
   } finally {
     rmSync(staged.homeDir, { recursive: true, force: true })
   }
@@ -233,6 +289,42 @@ test('hyp attach openclaw resolves the client and does not error unknown client'
   assert.equal(code, 0, stderr.text())
   assert.deepEqual(attachCalls, ['openclaw'])
   assert.doesNotMatch(stderr.text(), /unknown client/)
+})
+
+// The user-facing half of the same clause: a refusal must be distinguishable
+// from a success by a script, which under exit 0 it was not.
+// @ref LLP 0172#lane-a-attach [tests]: `hyp attach --client openclaw` exits
+// nonzero when attach refuses
+test('hyp attach openclaw exits nonzero when the attach refuses', async () => {
+  const staged = stageActivation({
+    models: { providers: { anthropic: { baseUrl: 'https://mine.example', models: [] } } },
+  })
+  try {
+    await activate(staged.ctx)
+    const openclaw = staged.client()
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const gateway = /** @type {any} */ ({
+      localEndpoint: () => 'http://127.0.0.1:4388',
+      getClient: (name) => (name === 'openclaw' ? openclaw : null),
+      listClients: () => [{ name: 'openclaw' }],
+    })
+    const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+      stdout,
+      stderr,
+      env: { HOME: staged.homeDir, HYP_HOME: path.join(staged.homeDir, '.hyp') },
+      config: { version: 2 },
+      capabilities: { has: () => true, require: () => gateway },
+    }))
+
+    const code = await runAttach(['openclaw'], ctx)
+
+    assert.equal(code, 1, stdout.text())
+    assert.match(stderr.text(), /already exists/)
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
 })
 
 test('hyp detach openclaw resolves the client from the real manifest as an honest no-op', async () => {

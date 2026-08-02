@@ -667,9 +667,15 @@ function setNumber(target, key, source, aliases) {
  * when given, excludes any file whose `mtimeMs` is more recent than it: a
  * session still inside the quiesce window is skipped for THIS run, not
  * permanently, so a later run (once the file's mtime has aged past the
- * cutoff, or the daemon sweep's next tick) picks it back up. Absent, every
- * listed file is included, the pre-Lane-B behavior every non-sweep caller
- * (`plan()`, the CLI path's default) still gets.
+ * cutoff, or the daemon sweep's next tick) picks it back up.
+ *
+ * The parameter is optional for exactly one caller: `plan()`, which counts and
+ * names what is there rather than importing it, so a window that hides files
+ * from an estimate would only misreport. Every `run()` applies the window,
+ * whichever surface drives it - `hyp backfill --client openclaw`, the
+ * onboarding finale, and the daemon sweep all enter through the same `run()`,
+ * and `runOpenclawBackfill` computes the cutoff once per run before this is
+ * ever called. There is no "non-sweep, unfiltered" import path.
  *
  * @param {string} agentsDir
  * @param {number} [quiesceBeforeMs] Exclusive upper bound on `mtimeMs`.

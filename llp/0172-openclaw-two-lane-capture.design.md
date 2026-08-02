@@ -119,13 +119,33 @@ R2's join-safety clause needs no new mechanism. `src/core/config/action_backfill
 `perform()` already establishes the contract every `ActionHandler` in this
 reconciler follows: a `{status: 'failed', reason}` outcome is recorded and
 retried next pass, it does not throw, and it does not abort the reconciler's
-other actions for the same client. OpenClaw's `attach()` returns exactly that
-shape on refusal (step 2 above), so attach-on-join already downgrades a
-refusal to a warning by the pre-existing generic contract, not by anything
-this design adds. The design obligation is narrower than it first looks:
-make sure `attach()` never throws on the refuse path (it returns a status
-object) and never partially writes before deciding to refuse (step 2 runs
-before step 4). Both are satisfied by the ordering above.
+other actions for the same client. The effect in `attach.js` returns exactly
+that shape on refusal (step 2 above), so attach-on-join downgrades a refusal
+to a warning by the pre-existing generic contract, not by anything this
+design adds. The design obligation is narrower than it first looks: make sure
+the effect never throws on the refuse path (it returns a status object) and
+never partially writes before deciding to refuse (step 2 runs before step 4).
+Both are satisfied by the ordering above.
+
+One translation step is load-bearing and easy to miss. The kernel types the
+**registered** `attach()` as `Promise<void>`, so the effect's returned outcome
+reaches no caller: `action_attach.js`'s `perform()` and `hyp attach`'s
+`runClientLifecycle` both infer success from "did it throw". The registered
+wrapper in `index.js` therefore rethrows a `failed` outcome
+(`if (outcome.status === 'failed') throw new Error(outcome.reason)`), which is
+what actually produces the `{status: 'failed', reason}` outcome above:
+`perform()`'s catch converts it, and the reconciler records, warns, and
+retries it without touching the join's other actions. Swallowing the outcome
+instead is not the join-safety clause but its opposite: `perform()` would
+record `done`, `isCurrent()` would match on both the endpoint and the
+`assets_key` forever, and the refusal would never be retried even once the
+user cleared the conflicting `models.providers` entry (while the `json_path`
+attach probe kept reporting `not attached`). The same swallow made
+`hyp attach --client openclaw` print a refusal and exit 0, so no script could
+tell a refusal from a success. Rethrowing at the wrapper, rather than teaching
+`perform()` to parse the adapter's `--json` payload, is what fixes both
+callers: `runClientLifecycle` hands the adapter `ctx.stdout` directly and
+never captures it, so it has no payload to inspect.
 
 ```
 @ref LLP 0169#decision [implements]: a refuse during join warns and never
@@ -493,6 +513,21 @@ matches the "must never wedge the daemon tick loop" discipline
 `action_backfill.js` already documents for the subprocess case; here there
 is no subprocess, but a slow provider `run()` still shouldn't stall
 `refreshSourceDetails()`/`persist()` later in the same `runTick()`).
+
+Not blocking has a consequence the sketch above leaves out: nothing stops a
+provider being due again while its previous run is still going. A pass over a
+large transcript tree can outlive the default `*/5 * * * *` interval, and
+neither `runBackfillProvider` nor `runProvider` carries a lock, so a second
+concurrent run would land on the same datasets and the same mid-flush spool.
+The driver therefore keeps a `Set` of in-flight provider names in its closure:
+a due provider already in the set is **skipped, not queued** (the sweep is
+level-triggered, so the next tick that finds it due and idle picks up whatever
+this one would have), logged as `backfill.sweep_skipped` with
+`error_kind: 'already_running'` under the same `component`/`operation` pair as
+every other sweep record, and the entry is cleared in both settlement handlers.
+This is the `maintenanceInFlight` guard `src/core/daemon/runtime.js` already
+applies to the sibling periodic job, widened to a set because this driver
+fires one run per provider rather than one job.
 
 ```
 @ref LLP 0170#decision [implements]: the daemon runs the OpenClaw backfill

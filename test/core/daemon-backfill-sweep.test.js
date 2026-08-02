@@ -188,6 +188,68 @@ test('tick does not block on a run that never settles', async () => {
   await pending
 })
 
+// The companion to the test above: not blocking on a run is exactly what lets a
+// pass that outruns its own cron interval be due again while it is still going,
+// and a second concurrent run would land on the same datasets and the same
+// mid-flush spool. Neither `runBackfillProvider` nor `runProvider` locks, so the
+// driver has to.
+// @ref LLP 0172#lane-b-sweep [tests]: two runs of one provider never overlap;
+// a due-but-running provider is skipped, and the next idle tick picks it up
+test('a second tick fires nothing while the first run is still in flight', async () => {
+  /** @type {string[]} */
+  const started = []
+  let settle = () => {}
+  const pending = new Promise((resolve) => { settle = () => resolve(OK) })
+  const driver = driverFor({
+    contributions: [contribution({ sweep: { cron: '* * * * *' } })],
+    runBackfill: (args) => {
+      started.push(args.provider)
+      return /** @type {any} */ (pending)
+    },
+  })
+
+  const first = await driver.tick({ now: at('2026-08-01T10:00:00.000Z') })
+  assert.deepEqual(first.fired, ['openclaw'])
+
+  const second = await driver.tick({ now: at('2026-08-01T10:01:00.000Z') })
+  assert.deepEqual(second.fired, [])
+  assert.deepEqual(started, ['openclaw'])
+
+  // Skipped for that tick only: once the run settles, the next due tick fires.
+  settle()
+  await pending
+  const third = await driver.tick({ now: at('2026-08-01T10:02:00.000Z') })
+  assert.deepEqual(third.fired, ['openclaw'])
+  assert.deepEqual(started, ['openclaw', 'openclaw'])
+})
+
+// A run that rejects has to clear the guard too, or one failure wedges the
+// provider's sweep for the life of the daemon.
+// @ref LLP 0172#lane-b-sweep [tests]: the in-flight entry clears on both
+// settlements, not just the resolving one
+test('a rejected run clears the in-flight guard so the next due tick still fires', async () => {
+  /** @type {string[]} */
+  const started = []
+  let reject = () => {}
+  const pending = new Promise((_resolve, rej) => { reject = () => rej(new Error('boom')) })
+  const driver = driverFor({
+    contributions: [contribution({ sweep: { cron: '* * * * *' } })],
+    runBackfill: (args) => {
+      started.push(args.provider)
+      return /** @type {any} */ (pending)
+    },
+  })
+
+  assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:00:00.000Z') })).fired, ['openclaw'])
+  reject()
+  await pending.catch(() => {})
+  // One turn for the driver's own rejection handler to run before the retick.
+  await new Promise((resolve) => { setImmediate(resolve) })
+
+  assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:01:00.000Z') })).fired, ['openclaw'])
+  assert.deepEqual(started, ['openclaw', 'openclaw'])
+})
+
 test('a malformed sweep cron is skipped, not thrown, and later providers still fire', async () => {
   /** @type {string[]} */
   const fired = []

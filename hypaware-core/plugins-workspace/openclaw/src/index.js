@@ -145,14 +145,6 @@ export async function activate(ctx) {
     })
   )
 
-  // The registered `attach()` returns `Promise<void>` by the kernel contract,
-  // so the effect's `{status}` outcome is dropped here on purpose. Nothing
-  // upstream reads it: both callers (`hyp attach`'s router and the
-  // reconciler's `perform()`) derive success from "did it throw" plus the
-  // one-line JSON the effect writes to `attachCtx.stdout`. Swallowing the
-  // value is therefore exactly LLP 0169's join-safety clause in practice - a
-  // refusal reaches the user as its own reported failure line and leaves the
-  // join standing, instead of throwing through the reconciler.
   const openclawAttach = createOpenclawAttach({
     homeDir: ctx.env.HOME ?? os.homedir(),
     env: ctx.env,
@@ -161,8 +153,25 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    // The kernel types the registered `attach()` as `Promise<void>`, so both
+    // callers infer success from "did it throw" and a returned outcome reaches
+    // neither of them. Translating a `failed` outcome into a throw is the only
+    // way a refusal is observable at all: in the reconciler it lands in
+    // `perform()`'s existing catch and becomes the `{status:'failed', reason}`
+    // marker that is recorded, warned, and retried next pass, while the
+    // reconciler's other actions for the same join carry on (a failed action is
+    // surfaced, not fatal); on `hyp attach --client openclaw` it becomes exit 1
+    // instead of a refusal printed under exit 0. Returning quietly instead wrote
+    // a `done` marker whose endpoint and assets_key both matched, so
+    // `isCurrent()` called it current forever and the join never re-attached
+    // even after the user removed the conflicting `models.providers` entry.
+    // The effect has already reported the reason on `attachCtx.stdout`; the
+    // throw carries the same text to the caller's error path.
+    // @ref LLP 0172#lane-a-attach [implements]: a refusal is recorded as a
+    //   retryable failure and never aborts the join
     async attach(attachCtx) {
-      await openclawAttach.attach(attachCtx)
+      const outcome = await openclawAttach.attach(attachCtx)
+      if (outcome.status === 'failed') throw new Error(outcome.reason)
     },
   })
 }

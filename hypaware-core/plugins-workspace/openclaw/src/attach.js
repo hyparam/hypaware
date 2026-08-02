@@ -324,11 +324,14 @@ function normalizeEndpoint(endpoint) {
  * Record a refusal or hard failure on the span, the log, and the caller's
  * chosen output mode, and hand back the `{status:'failed', reason}` shape.
  *
- * Returning rather than throwing is the whole of LLP 0169's join-safety
- * clause: the generic `ActionOutcome` contract already downgrades a `failed`
+ * Returning rather than throwing is what makes LLP 0169's join-safety clause
+ * reachable: the generic `ActionOutcome` contract downgrades a `failed`
  * outcome to a recorded, retried warning that does not abort the join's other
  * actions, so the only obligation here is to never throw out of this path (and
- * to have written nothing before reaching it).
+ * to have written nothing before reaching it). Reaching that contract still
+ * takes one translation: the kernel types the *registered* `attach()` as
+ * `Promise<void>`, so `index.js`'s wrapper rethrows this outcome and
+ * `perform()`'s catch turns it back into the same shape (LLP 0172 §1.3).
  *
  * @param {{ setAttribute(key: string, value: unknown): void }} span
  * @param {AiGatewayClientAttachContext} attachCtx
