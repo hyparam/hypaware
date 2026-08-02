@@ -3,6 +3,7 @@ import type {
   BackfillMaterializerRegistry,
   BackfillRegistry,
   HypAwareV2Config,
+  QueryRegistry,
   QueryStorageService,
 } from '../../../hypaware-plugin-kernel-types.js'
 
@@ -33,18 +34,23 @@ export interface PolicyHumanVocabulary {
 }
 
 // A structural subset of `CommandRunContext`: exactly the fields
-// `runBackfillProvider`, `runProvider`, and `resolveOwnersForRun`
+// `runBackfillProvider`, `runProvider`, `resolveOwnersForRun`, and the
+// materialize/write/flush helpers they call
 // (`src/core/commands/backfill.js`) read off `ctx`. Every existing
 // `CommandRunContext` already satisfies it, so `hyp backfill`'s CLI path
 // and the onboarding finale's call keep typechecking unchanged; the
 // daemon sweep driver (LLP 0173 T9) can build one directly out of
 // `boot.runtime` fields without assembling a full, mostly-unused
-// `CommandRunContext`.
-// @ref LLP 0172#lane-b-sweep [implements]: the narrowed context type `runBackfillProvider`, `runProvider`, and `resolveOwnersForRun` declare, so the daemon sweep driver can build one without a full `CommandRunContext`
+// `CommandRunContext`. `query` was missing from this list until LLP 0173
+// T12's smoke (the first caller to drive a real, non-mocked write through
+// the sweep driver) found `writeRows`/`flushDataset` crash on
+// `ctx.query.getDataset` when a sweep-built `ctx` reached them.
+// @ref LLP 0172#lane-b-sweep [implements]: the narrowed context type `runBackfillProvider`, `runProvider`, `resolveOwnersForRun`, and the materialize/write/flush helpers declare, so the daemon sweep driver can build one without a full `CommandRunContext`
 export interface BackfillRunnerContext {
   env: NodeJS.ProcessEnv
   config: HypAwareV2Config
   storage: QueryStorageService
+  query: QueryRegistry
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry
 }

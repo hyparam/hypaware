@@ -48,10 +48,11 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * @returns {BackfillSweepDriver}
  */
 export function createBackfillSweepDriver(opts) {
-  const { backfills, backfillMaterializers, env, config, storage } = opts
+  const { backfills, backfillMaterializers, env, config, storage, query } = opts
   if (!backfills) throw new Error('createBackfillSweepDriver: backfills required')
   if (!backfillMaterializers) throw new Error('createBackfillSweepDriver: backfillMaterializers required')
   if (!storage) throw new Error('createBackfillSweepDriver: storage required')
+  if (!query) throw new Error('createBackfillSweepDriver: query required')
   const runBackfill = opts.runBackfill ?? runBackfillProvider
   const log = getLogger('backfill-sweep')
 
@@ -80,7 +81,7 @@ export function createBackfillSweepDriver(opts) {
       // Fire-and-forget, with both settlements handled: `void` here means "not
       // awaited", never "not observed".
       void runBackfill({
-        ctx: { env, config: config ?? { version: 2 }, storage, backfills, backfillMaterializers },
+        ctx: { env, config: config ?? { version: 2 }, storage, query, backfills, backfillMaterializers },
         provider: provider.name,
         dryRun: false,
         devRunId,

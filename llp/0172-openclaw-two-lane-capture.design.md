@@ -402,16 +402,19 @@ already enforces.
 
 ### 4.3 Narrowing `runProvider`'s context type, not widening the daemon's
 
-`runProvider()` and `resolveOwnersForRun()` (both in
-`src/core/commands/backfill.js`) only ever read `ctx.backfills`,
-`ctx.backfillMaterializers`, `ctx.env`, `ctx.storage`, and (via
-`resolveOwnersForRun`) `ctx.config` for plugin-configured resolution. None
-of `CommandRunContext`'s other fields (`stdout`, `commands`, `verbs`,
-`skills`, `agents`, `sources`, `sinks`, `initPresets`, `capabilities`,
-`plugins`, `cwd`) are touched anywhere in this call path. Rather than force
-the daemon to assemble a full, mostly-unused `CommandRunContext` just to
-call `runBackfillProvider`, this design narrows the type both functions
-declare their `ctx` parameter as, to a new, smaller type:
+`runProvider()`, `resolveOwnersForRun()`, and the materialize/write/flush
+helpers they call (all in `src/core/commands/backfill.js`) only ever read
+`ctx.backfills`, `ctx.backfillMaterializers`, `ctx.env`, `ctx.storage`,
+`ctx.query` (`writeRows`/`flushDataset` resolve a dataset's registered
+table path through it before a row can be committed or a partition
+flushed), and (via `resolveOwnersForRun`) `ctx.config` for
+plugin-configured resolution. None of `CommandRunContext`'s other fields
+(`stdout`, `commands`, `verbs`, `skills`, `agents`, `sources`, `sinks`,
+`initPresets`, `capabilities`, `plugins`, `cwd`) are touched anywhere in
+this call path. Rather than force the daemon to assemble a full,
+mostly-unused `CommandRunContext` just to call `runBackfillProvider`, this
+design narrows the type both functions declare their `ctx` parameter as,
+to a new, smaller type:
 
 ```ts
 // A structural subset of CommandRunContext; every existing
@@ -422,26 +425,39 @@ interface BackfillRunnerContext {
   env: NodeJS.ProcessEnv
   config: HypAwareV2Config
   storage: QueryStorageService
+  query: QueryRegistry
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry
 }
 ```
 
-`runBackfillProvider`, `runProvider`, and `resolveOwnersForRun`'s `ctx`
-parameters change from `CommandRunContext` to `BackfillRunnerContext`. This
-is a pure narrowing: `CommandRunContext` is structurally a superset, so no
-existing caller's argument stops satisfying the (now smaller) parameter
-type. The daemon can now build a `BackfillRunnerContext` object out of
-fields `boot.runtime` already carries (`env`, `config`, `storage`,
-`backfills`, `backfillMaterializers`, the latter two already referenced at
-`src/core/runtime/activation.js` lines 96 and 152) without touching
-`CommandRunContext` or constructing stub versions of fields it doesn't need.
+`runBackfillProvider`, `runProvider`, `resolveOwnersForRun`, and the
+materialize/write/flush helpers' `ctx` parameters change from
+`CommandRunContext` to `BackfillRunnerContext`. This is a pure narrowing:
+`CommandRunContext` is structurally a superset, so no existing caller's
+argument stops satisfying the (now smaller) parameter type. The daemon can
+now build a `BackfillRunnerContext` object out of fields `boot.runtime`
+already carries (`env`, `config`, `storage`, `query`, `backfills`,
+`backfillMaterializers`, all already referenced at
+`src/core/runtime/activation.js`) without touching `CommandRunContext` or
+constructing stub versions of fields it doesn't need.
+
+`query` was not part of this list until LLP 0173 T12's hermetic smoke (the
+first caller to drive a real, non-dry-run write through the sweep
+driver rather than a mocked `runBackfill` seam) found `writeRows` and
+`flushDataset` crash on `ctx.query.getDataset` when the daemon-built
+`BackfillRunnerContext` reached them: the field really is on this call
+path, this design's original field enumeration just missed it because
+T9's own tests never exercised a real write. `BackfillSweepDriverOptions`
+(Section 4.4) and the daemon's `createBackfillSweepDriver(...)` call
+(`src/core/daemon/runtime.js`) both require `query` now for the same
+reason.
 
 ### 4.4 Wiring the tick
 
 New file: `src/core/daemon/backfill_sweep.js`, exporting
 `createBackfillSweepDriver({backfills, backfillMaterializers, env, config,
-storage})` with one method, `tick({now})`:
+storage, query})` with one method, `tick({now})`:
 
 ```js
 function tick({ now }) {
@@ -449,7 +465,7 @@ function tick({ now }) {
     if (!provider.sweep) continue
     if (!cronMatches(provider.sweep.cron, now)) continue
     void runBackfillProvider({
-      ctx: { env, config, storage, backfills, backfillMaterializers },
+      ctx: { env, config, storage, query, backfills, backfillMaterializers },
       provider: provider.name,
       dryRun: false,
       devRunId: `sweep-${provider.name}-${now.getTime()}`,

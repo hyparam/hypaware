@@ -452,6 +452,7 @@ export async function runDaemon(opts = {}) {
     backfillMaterializers: boot.runtime.backfillMaterializers,
     env,
     storage: boot.runtime.storage,
+    query: boot.runtime.query,
     config: boot.config ?? undefined,
   })
 

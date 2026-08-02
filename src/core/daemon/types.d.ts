@@ -588,6 +588,14 @@ export interface BackfillSweepDriverOptions {
   backfillMaterializers: BackfillMaterializerRegistry
   env: NodeJS.ProcessEnv
   storage: QueryStorageService
+  /**
+   * Dataset registry. `runBackfillProvider`'s write/flush path
+   * (`writeRows`/`flushDataset` in `src/core/commands/backfill.js`) resolves
+   * a dataset's registered table path through this before it can commit a
+   * row, so a fired sweep run needs it on `BackfillRunnerContext` exactly
+   * like `hyp backfill`'s CLI path already gets it from `CommandRunContext`.
+   */
+  query: QueryRegistry
   /** The daemon's effective config; absent on a host with no readable document. */
   config?: HypAwareV2Config
   /** Test seam: defaults to `runBackfillProvider`. */
