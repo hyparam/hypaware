@@ -22,9 +22,17 @@ The OpenClaw session file's first line is a header record:
 `{"type":"session","version":3,"id":"<uuid>","timestamp":"...","cwd":"..."}`
 (verified against live files on this machine, 2026-07-30). Subsequent lines
 carry `model_change`, `thinking_level_change`, `custom`, and `message`
-records; each `message` envelope has its own short id, a timestamp, and for
-assistant messages the `model`, `provider`, `api`, `stopReason`, and full
-`usage` (tokens and cost).
+records.
+
+A `message` record is **two levels deep** (verified against a live
+`~/.openclaw/agents/main/sessions/<id>.jsonl`, 2026-07-31, issue #543). The
+record line states only what identifies and positions the message,
+`['id', 'message', 'parentId', 'timestamp', 'type']`; the message itself is
+the nested `message` object, whose assistant-turn keys are
+`['api', 'content', 'idempotencyKey', 'model', 'provider', 'role',
+'stopReason', 'timestamp', 'usage']`. `usage` is OpenClaw's own
+normalization: `input`, `output`, `cacheRead`, `cacheWrite`, `totalTokens`,
+`cost`.
 
 Two HypAware consumers need this file:
 
@@ -51,6 +59,42 @@ answers wrong:
 4. The header read is a bounded prefix read of line 1, so the hot settle
    path never pays for a large transcript (LLP 0049 R6's affordability
    argument, applied as LLP 0150#bounded applies it).
+5. A message's fields are read from the nested `message` envelope, with the
+   record line as the fallback, never the other way round. This is the rule
+   that reads wrong most quietly: read one level too high, every field is
+   simply absent, and absence is a legal answer everywhere downstream.
+   `provider: undefined` resolves to `unknown`, the backfill allowlist
+   excludes it fail-closed, and the run reports a clean `0 rows` for a
+   session it never managed to read (#543). A parse miss and an intended
+   exclusion are indistinguishable at that seam, so the address has to be
+   right in the reader.
+6. The fallback is per FIELD, not per record, and rule 3's present-value
+   test runs at BOTH levels before it decides. A record does not have to
+   nest nothing to read something off the line; it only has to state that
+   one field nowhere else. And a nested value that reads as absent (blank,
+   wrong-typed, `null`) cannot also be the value that suppresses the line:
+   that would make one value absent and load-bearing at once. A nested
+   `provider: "  "` beside a line-level `provider: "anthropic"` would
+   otherwise resolve the record to `unknown` and lose it fail-closed, and a
+   nested `timestamp` that does not parse would drop `message_created_at`,
+   which re-dates the row to session start, defeats the `--since` window
+   (a timestamp-less item is kept unconditionally), and puts the settlement
+   ordinal match outside every window so the turn never dedupes. Same
+   silent-drop family as #543, one level down. "Reads as absent" is each
+   field's own answer, not one predicate for all of them: the string fields
+   refuse blank and non-string alike, while `content` has no single shape to
+   check (a string on some turns, a block array on others) and so refuses
+   only an explicit `null`.
+7. `id` is the one field read line-first, envelope-fallback, because it is
+   identity rather than content: the record line is where this document
+   verified message identity lives, and the nested envelope is OpenClaw's
+   normalization of a provider response. A version that started copying the
+   provider's own `msg_...` id into the envelope would, under rule 5,
+   silently repoint every `message_id` and therefore every `part_id` that
+   backfill and settlement agree on (LLP 0157 R11); already-committed rows
+   would stop deduping against new ones and the history would double with
+   nothing raised. The envelope stays the fallback, so a record that states
+   identity only there still resolves one.
 
 LLP 0150 documented two shipped bugs (#453, #459) caused by exactly this
 shape: two modules holding copies of the same session-header rules for the
@@ -95,12 +139,25 @@ slice two plugins needed was promoted to `src/core/codex/`.
 - The `cwd` predicate is shared with (or identical in behavior to) the
   Codex one, so "no usable cwd" means the same thing at every site that
   feeds the `.hypignore` gate.
+- The reader normalizes every field whose *address* is non-obvious, `role`
+  and `content` included, rather than leaving them to callers to pick out of
+  the raw record. The raw record line stays exposed for genuinely
+  caller-specific fields, but "reach into `record` for a message field" is
+  not a supported read: both callers did exactly that for `role`/`content`,
+  both reached one level too high, and both dropped every real session
+  (#543). A field two callers must locate identically is the reader's.
 - The settlement enricher and the backfill provider both consume this
   reader. A future consumer that re-derived the fields for itself would be
   the same defect LLP 0150 removed, in a new place.
 - The invariant is tested once in core, with each caller keeping a short
   test pinning the rules at its own seam, following the LLP 0150
   Consequences test shape.
+- **Fixtures are path-faithful or they prove nothing.** Every test that
+  writes a session file writes the real two-level record shape, through one
+  helper per suite, so no fixture can quietly re-invent a flat envelope.
+  The suite that shipped #543 was green throughout: it asserted a reader
+  that read flat against a fixture that wrote flat, and neither was a
+  session file OpenClaw ever produced.
 
 ## Consequences
 

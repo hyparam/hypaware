@@ -385,7 +385,7 @@ function buildOpenclawSessionIndex(candidate, header, messages) {
     // there is no identity to upgrade a row to, so it never enters the
     // content index.
     if (!message.id) continue
-    const key = sessionMatchKey(roles[i], message.record.content)
+    const key = sessionMatchKey(roles[i], message.content)
     if (ambiguous.has(key)) continue
     if (byContentKey.has(key)) {
       byContentKey.delete(key)
@@ -540,13 +540,16 @@ function readMatchKey(attributes) {
 /**
  * A session message record's own role, as written in the file (the raw
  * value `sessionMatchKey` needs, since it owns the `toolResult`
- * reconciliation itself).
+ * reconciliation itself). Read through the LLP 0158 reader's normalized
+ * field, never `message.record`: OpenClaw nests `role` under the record
+ * line's `message` envelope, and reading it a level too high made every
+ * record of every real session settle as `unknown` (#543).
  *
  * @param {OpenclawSessionMessage} message
  * @returns {string}
  */
 function rawRole(message) {
-  return stringValue(message.record.role) ?? 'unknown'
+  return stringValue(message.role) ?? 'unknown'
 }
 
 /**
