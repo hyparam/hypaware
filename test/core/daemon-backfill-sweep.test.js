@@ -52,6 +52,7 @@ function driverFor(args) {
     backfillMaterializers: /** @type {any} */ ({ register() {}, get: () => undefined, list: () => [] }),
     env: /** @type {any} */ ({ HYP_HOME: '/nonexistent-home' }),
     storage: /** @type {any} */ ({ cacheRoot: '/nonexistent-cache' }),
+    query: /** @type {any} */ ({ getDataset: () => undefined }),
     config: args.config,
     runBackfill: args.runBackfill,
   })
@@ -117,11 +118,13 @@ test('the fired run gets the narrowed runner context, built from the daemon runt
   const backfillMaterializers = /** @type {any} */ ({ register() {}, get: () => undefined, list: () => [] })
   const env = /** @type {any} */ ({ HYP_HOME: '/nonexistent-home' })
   const storage = /** @type {any} */ ({ cacheRoot: '/nonexistent-cache' })
+  const query = /** @type {any} */ ({ getDataset: () => undefined })
   const driver = createBackfillSweepDriver({
     backfills,
     backfillMaterializers,
     env,
     storage,
+    query,
     config: /** @type {any} */ (config),
     runBackfill: async (args) => { seen = args.ctx; return OK },
   })
@@ -130,6 +133,7 @@ test('the fired run gets the narrowed runner context, built from the daemon runt
 
   assert.equal(seen.env, env)
   assert.equal(seen.storage, storage)
+  assert.equal(seen.query, query)
   assert.equal(seen.config, config)
   assert.equal(seen.backfills, backfills)
   assert.equal(seen.backfillMaterializers, backfillMaterializers)
@@ -206,6 +210,7 @@ test('createBackfillSweepDriver refuses to build without the registries it fires
     backfillMaterializers: /** @type {any} */ ({ register() {}, get: () => undefined, list: () => [] }),
     env: /** @type {any} */ ({}),
     storage: /** @type {any} */ ({ cacheRoot: '/nonexistent-cache' }),
+    query: /** @type {any} */ ({ getDataset: () => undefined }),
   }
   assert.throws(
     () => createBackfillSweepDriver(/** @type {any} */ ({ ...ok, backfills: undefined })),
@@ -218,5 +223,9 @@ test('createBackfillSweepDriver refuses to build without the registries it fires
   assert.throws(
     () => createBackfillSweepDriver(/** @type {any} */ ({ ...ok, storage: undefined })),
     /storage required/
+  )
+  assert.throws(
+    () => createBackfillSweepDriver(/** @type {any} */ ({ ...ok, query: undefined })),
+    /query required/
   )
 })

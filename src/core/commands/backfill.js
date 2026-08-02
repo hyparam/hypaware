@@ -476,17 +476,7 @@ async function runProvider(args) {
           const rows = await materializeItem({
             materializer,
             item: yielded,
-            // materializeItem/writeRows/flushDataset are outside T7's
-            // narrowing (they read ctx.query, which BackfillRunnerContext
-            // does not carry); today's only real callers (hyp backfill's
-            // CLI path, the onboarding finale) still hand runProvider a
-            // full CommandRunContext, so this is a type-level widening
-            // back to the shape those three helpers already require, not
-            // a behavior change.
-            // @ref LLP 0172#lane-b-sweep [constrained-by]: runProvider's
-            // own ctx param narrows to BackfillRunnerContext; its
-            // still-CommandRunContext-typed callees need this back-cast
-            ctx: /** @type {CommandRunContext} */ (ctx),
+            ctx,
             devRunId,
             provider: provider.name,
             log,
@@ -501,7 +491,7 @@ async function runProvider(args) {
             dataset: yielded.dataset,
             provider: provider.name,
             devRunId,
-            ctx: /** @type {CommandRunContext} */ (ctx),
+            ctx,
             log,
           })
           result.rows_written += written.rowsWritten
@@ -516,7 +506,7 @@ async function runProvider(args) {
               dataset,
               provider: provider.name,
               devRunId,
-              ctx: /** @type {CommandRunContext} */ (ctx),
+              ctx,
               log,
             })
           }
@@ -562,7 +552,7 @@ async function runProvider(args) {
  * @param {{
  *   materializer: BackfillMaterializerContribution,
  *   item: BackfillItem,
- *   ctx: CommandRunContext,
+ *   ctx: BackfillRunnerContext,
  *   devRunId: string,
  *   provider: string,
  *   log: PluginLogger,
@@ -607,7 +597,7 @@ async function materializeItem(args) {
  *   dataset: string,
  *   provider: string,
  *   devRunId: string,
- *   ctx: CommandRunContext,
+ *   ctx: BackfillRunnerContext,
  *   log: PluginLogger,
  * }} args
  * @returns {Promise<{ rowsWritten: number, status: 'ok' | 'failed', error?: string }>}
@@ -662,7 +652,7 @@ async function writeRows(args) {
  *   dataset: string,
  *   provider: string,
  *   devRunId: string,
- *   ctx: CommandRunContext,
+ *   ctx: BackfillRunnerContext,
  *   log: PluginLogger,
  * }} args
  */
