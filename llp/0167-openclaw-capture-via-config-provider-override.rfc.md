@@ -108,17 +108,35 @@ proposal.**
 
 ### Attach, detach, undo {#attach-detach}
 
-- **Attach is refuse + create-only.** If the user already declares
-  `models.providers.anthropic` or `.openai`, attach refuses with an
-  explanation: those keys are purely user-authored (verified: no OpenClaw
-  code writes them; a default install has none), so their presence means
-  the user deliberately routed that provider somewhere, and silently
-  rerouting a deliberate override is the surprise this design family
-  refuses to allow. Otherwise attach creates the two entries whole.
+- **Attach refuses over a user's entry, and rewrites its own.** If the
+  user already declares `models.providers.anthropic` or `.openai`,
+  attach refuses with an explanation: those keys are user-authored
+  (verified: no OpenClaw code writes them; a default install has none),
+  so their presence means the user deliberately routed that provider
+  somewhere, and silently rerouting a deliberate override is the
+  surprise this design family refuses to allow. Otherwise attach writes
+  the two entries whole.
+
+  The one entry that is *not* a user's is the one attach itself wrote,
+  and it must be overwritable, because attach re-runs. `isCurrent()`
+  makes a `done` attach stale whenever the gateway rebound to a new
+  ephemeral port (LLP 0086) or the contributed asset set changed
+  (LLP 0107), and the reconciler then re-performs; a presence-only
+  refusal would fail every one of those passes forever, leaving
+  `openclaw.json` pinned to a dead port while the marker-header probe
+  still reported `attached`. So the refusal is **ownership-aware**, on
+  the same self-identifying triple detach already tests before deleting
+  (`baseUrl`, `headers['x-hypaware-upstream']` naming the key, empty
+  `models`), out of one shared predicate
+  (`src/core/config/provider_entry_ownership.js`) so the two halves
+  cannot drift. Attach's call passes no expected base URL, deliberately:
+  on a drift re-attach its own entry carries the *old* origin.
+
   Detach deletes an entry only when its `baseUrl` is the gateway's; a
   present-but-not-ours or mangled entry is backed up, never discarded
-  (LLP 0163 precedent). Create-only means there is no prior state to
-  restore, so no undo record exists anywhere: deletion is the whole undo.
+  (LLP 0163 precedent). Nothing a user authored is ever displaced, so no
+  prior state is stored and no undo record exists anywhere: deletion is
+  the whole undo.
 - **The marker is the entry itself.** The `x-hypaware-upstream` header
   inside the created entry is the probeable marker. The manifest regains
   `contributes.client.attach_probe` in the `json_path` format, and core

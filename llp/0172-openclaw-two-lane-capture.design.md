@@ -61,12 +61,46 @@ through `attachCtx.stdout`/`attachCtx.json`). It exports
    failure (`{status: 'failed', reason}`), not a refusal: attach can't
    reason about a config it can't read.
 2. Checks `config.models?.providers?.anthropic` and
-   `config.models?.providers?.openai`. If **either** key already exists,
-   refuse: return `{status: 'failed', reason: 'models.providers.<name>
-   already exists in openclaw.json; attach refuses to merge (LLP 0167
-   #attach-detach). Remove it by hand or run hyp detach --client openclaw
-   first.'}` (R2). Nothing is written; this is a pure read-then-decide, no
-   partial write to roll back.
+   `config.models?.providers?.openai`. If **either** key holds an entry
+   HypAware did not write, refuse: return `{status: 'failed', reason:
+   'models.providers.<name> already exists in openclaw.json and was not
+   written by HypAware; attach refuses to merge (LLP 0167#attach-detach).
+   Remove it by hand or run hyp detach --client openclaw first.'}` (R2).
+   Nothing is written; this is a pure read-then-decide, no partial write
+   to roll back.
+
+   The test is **ownership, not bare presence**, and the difference is
+   load-bearing rather than cosmetic. 1.4 gives OpenClaw an
+   `attach_probe`, which is what makes it eligible for attach-on-join
+   (`action_attach.js`'s `desired()`), and `isCurrent()` returns false
+   whenever `marker.endpoint !== ctx.endpoint` (an ephemeral-port
+   rebind, LLP 0086) or the recorded `assets_key` drifts (LLP 0107). The
+   reconciler then re-`perform()`s, and a presence-only refusal fails
+   every one of those passes: the marker churns to `failed` with
+   `attempts` climbing, `hyp attach openclaw` exits 1 (1.3's rethrow),
+   and `openclaw.json` stays pinned to the dead port while
+   `probeClientAttachFromDescriptor`'s `json_path` branch, which matches
+   the marker header and never the base URL, keeps reporting
+   `attached: true`. `isCurrent`'s own contract says the opposite
+   ("`perform()` is idempotent in both halves"), so the write has to be
+   idempotent over its own previous output.
+
+   The entry attach writes is self-identifying: `baseUrl`,
+   `headers['x-hypaware-upstream']` naming the key it sits at, and the
+   empty `models` array. That is exactly the triple 2.2's detach already
+   applies before it may delete an entry, so the two live in one shared
+   predicate, `src/core/config/provider_entry_ownership.js`
+   (`isOwnedProviderEntry` + `ownedBaseUrls`, moved out of
+   `client_detach_disk.js`), rather than being restated on each side
+   where they could drift into disagreeing about the same file. The
+   predicate's base-URL set is optional and attach passes none: on a
+   drift re-attach its own entry carries the *old* origin by
+   construction, so pinning the check to the live endpoint would
+   reintroduce the refusal it exists to avoid. Detach always passes the
+   set, because there the wrong answer deletes a value HypAware never
+   wrote. Anything failing the test still refuses, including a bare
+   `"anthropic": null`, a user entry that happens to sit at the key, and
+   a hand-edited one that merely kept the header.
 3. Otherwise, computes the two entries from `attachCtx.endpoint` (the
    proven-bound local gateway base URL the daemon resolves in
    `src/core/daemon/runtime.js`'s `resolveClientSeam` today, or the
@@ -303,6 +337,19 @@ marker (which is the #212-safe outcome, not the orphaning one), and
 `hyp detach` prints the reason and exits nonzero. An absent settings file
 and a file with neither key present are unaffected: they reverse nothing,
 so they need no base URL and stay `{changed:false}`.
+
+**The ownership predicate is shared with attach (added in review round 2).**
+Step 3's test is the same question 1.2's refusal asks, from the other side,
+about the same two keys in the same file, so it lives in one module both
+import: `src/core/config/provider_entry_ownership.js`, exporting
+`isOwnedProviderEntry(entry, key, markerHeader, ours)` and
+`ownedBaseUrls(expectedBaseUrl)`. Only the base-URL half differs, and the
+parameter carries that difference explicitly: detach passes the set (see the
+refusal above), attach passes `undefined` because a drift re-attach meets its
+own entry at the *previous* origin. Two copies would have been free to drift
+into disagreeing about whether a given entry is HypAware's, which is how the
+presence-only refusal survived review round 1 while detach was already
+ownership-aware.
 
 **Where the backup key sits.** "Sibling" is meant literally: the backup
 lands at `<containerPath>._hypaware_detach_backup.<key>`, inside the same

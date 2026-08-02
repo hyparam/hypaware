@@ -172,6 +172,85 @@ test('attach refuses without writing when a provider key already exists (R2)', a
   }
 })
 
+// The other half of R2, and the one the presence-only refusal got wrong: the
+// entry HypAware itself wrote is not a user override, so re-attaching over it
+// must succeed. `action_attach.js`'s `isCurrent()` re-performs attach whenever
+// the daemon rebound to a new ephemeral port (LLP 0086) or the contributed
+// asset set changed (LLP 0107), and its own contract says `perform()` is
+// idempotent. Refusing there churned the marker to `failed` and left
+// `openclaw.json` pointing at the dead port while the marker-header probe still
+// reported `attached: true`.
+// @ref LLP 0086#re-attach-on-drift [tests]: a second attach at a moved endpoint
+// rewrites the entries the first one wrote rather than refusing over them
+test('a second attach at a moved endpoint rewrites both baseUrls (re-attach on drift)', async () => {
+  const staged = await stage({ theme: 'dark', models: { providers: {} } })
+  try {
+    const first = await runAttach(staged)
+    assert.deepEqual(first.outcome, { status: 'done' })
+
+    // The ephemeral-port rebind `isCurrent()` exists to catch.
+    const moved = 'http://127.0.0.1:4111'
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const outcome = await createOpenclawAttach({ homeDir: staged.homeDir, env: {} }).attach(
+      /** @type {any} */ ({ endpoint: moved, config: {}, stdout, stderr, json: false })
+    )
+    assert.deepEqual(outcome, { status: 'done' })
+
+    const written = await readConfig(staged.settingsPath)
+    assert.equal(written.models.providers.anthropic.baseUrl, moved)
+    assert.equal(written.models.providers.openai.baseUrl, `${moved}/v1`)
+    // Still exactly the two entries, still the marker headers, still the rest
+    // of the file: a rewrite is not a merge.
+    assert.deepEqual(written.models.providers.anthropic.headers, { 'x-hypaware-upstream': 'anthropic' })
+    assert.deepEqual(written.models.providers.openai.models, [])
+    assert.equal(written.theme, 'dark')
+  } finally {
+    await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+// R2 must survive the ownership rule: everything that is not *exactly* the
+// entry attach writes is still somebody else's, and still refuses. These are
+// the near misses, not the obvious cases the test above covers.
+test('an entry that is not ours still refuses, however close it looks (R2)', async () => {
+  /** @type {Array<[string, unknown]>} */
+  const notOurs = [
+    // A deliberate "route nothing here" override: bare presence, no shape.
+    ['null', null],
+    // The marker header, but a hand-edited model list: not the shape attach
+    // produces, so not an entry attach may silently replace.
+    ['marker header but a hand-edited models list', {
+      baseUrl: 'http://127.0.0.1:4000',
+      headers: { 'x-hypaware-upstream': 'anthropic' },
+      models: ['claude-opus-4'],
+    }],
+    // The marker header naming a *different* upstream: whatever wrote this, it
+    // is not the anthropic entry attach writes at this key.
+    ['marker header naming another key', {
+      baseUrl: 'http://127.0.0.1:4000',
+      headers: { 'x-hypaware-upstream': 'openai' },
+      models: [],
+    }],
+    // Our exact shape minus the marker: the marker is the whole ownership
+    // claim, so without it this is a user pointing at a local proxy of theirs.
+    ['no marker header', { baseUrl: 'http://127.0.0.1:4000', models: [] }],
+  ]
+  for (const [label, entry] of notOurs) {
+    const before = { models: { providers: { anthropic: entry } } }
+    const staged = await stage(before)
+    try {
+      const { outcome } = await runAttach(staged)
+      assert.equal(outcome.status, 'failed', label)
+      assert.match(outcome.status === 'failed' ? outcome.reason : '', /models\.providers\.anthropic already exists/)
+      // Pure read-then-decide still: nothing partially written over a refusal.
+      assert.deepEqual(await readConfig(staged.settingsPath), before, label)
+    } finally {
+      await fs.rm(staged.homeDir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('attach never throws on refusal, so attach-on-join warns instead of failing', async () => {
   const staged = await stage({
     models: { providers: { openai: { baseUrl: 'https://mine.example', models: [] } } },

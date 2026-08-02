@@ -35,7 +35,12 @@ reversed by R5 below, R12 is replaced by R11 below, and R13 is retired
   `openclaw.json`.
 - **R2.** Attach MUST refuse, with an explanation, when
   `models.providers.anthropic` or `models.providers.openai` already
-  exists. A refusal during attach-on-join MUST surface as a warning and
+  holds an entry HypAware did not write. It MUST overwrite one it did
+  (the self-identifying `baseUrl` + marker-header + empty-`models`
+  triple detach tests before deleting), because `isCurrent()`
+  re-performs attach on endpoint or asset-set drift (LLP 0086,
+  LLP 0107) and a refusal there would strand `openclaw.json` at a dead
+  port. A refusal during attach-on-join MUST surface as a warning and
   MUST NOT fail the join (LLP 0169).
 - **R3.** Detach MUST delete an entry only when its `baseUrl` is the
   gateway's, MUST back up rather than discard a present-but-unexpected

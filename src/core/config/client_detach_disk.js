@@ -8,6 +8,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
+import { isOwnedProviderEntry, ownedBaseUrls } from './provider_entry_ownership.js'
 
 /**
  * @import { Dirent } from 'node:fs'
@@ -801,7 +802,11 @@ async function detachJsonPathProviders({
 
   for (const key of present) {
     const entry = containerObj[key]
-    if (isOwnedProviderEntry(entry, key, markerHeader, /** @type {Set<string>} */ (ours))) {
+    // `ours` is always a set here, never the shared predicate's
+    // accept-any-baseUrl `undefined`: the guard above already threw if the
+    // gateway origin was unknown while an entry was present. Deleting is
+    // destructive, so this side never relaxes the origin check.
+    if (isOwnedProviderEntry(entry, key, markerHeader, ours)) {
       if (removed === undefined) removed = providerBaseUrl(entry)
       delete containerObj[key]
       changed = true
@@ -852,45 +857,6 @@ async function detachJsonPathProviders({
   if (removed !== undefined) result.removed = removed
   if (warning !== undefined) result.warning = warning
   return result
-}
-
-/**
- * The two `baseUrl` spellings a `json_path` attach writes for one gateway
- * origin, or `undefined` when the origin is unknown. Trailing slashes are
- * trimmed on the way in for the same reason attach trims them: `+ '/v1'` on a
- * slash-terminated origin is a different string that names the same URL, and
- * the comparison here is textual.
- *
- * @param {string | undefined} expectedBaseUrl
- * @returns {Set<string> | undefined}
- */
-function ownedBaseUrls(expectedBaseUrl) {
-  if (typeof expectedBaseUrl !== 'string') return undefined
-  const origin = expectedBaseUrl.trim().replace(/\/+$/, '')
-  if (origin.length === 0) return undefined
-  return new Set([origin, `${origin}/v1`])
-}
-
-/**
- * Whether a provider entry is one this gateway wrote: it points at the
- * gateway's own origin, its marker header names its own key, and its shape is
- * the one attach produces (an empty `models` array). Every other outcome -
- * a foreign `baseUrl`, a missing or renamed marker header, a hand-edited
- * `models` list - is somebody else's entry that merely sits at our key, and
- * the caller backs it up instead of deleting it.
- *
- * @param {unknown} entry
- * @param {string} key
- * @param {string} markerHeader
- * @param {Set<string>} ours
- * @returns {boolean}
- */
-function isOwnedProviderEntry(entry, key, markerHeader, ours) {
-  if (!isPlainObject(entry)) return false
-  if (typeof entry.baseUrl !== 'string' || !ours.has(entry.baseUrl)) return false
-  const headers = entry.headers
-  if (!isPlainObject(headers) || headers[markerHeader] !== key) return false
-  return Array.isArray(entry.models) && entry.models.length === 0
 }
 
 /** @param {unknown} entry @returns {string | undefined} */

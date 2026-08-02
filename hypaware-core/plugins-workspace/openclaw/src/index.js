@@ -53,9 +53,10 @@ export const configSection = { section: OPENCLAW_CONFIG_SECTION, validate: valid
  * `json_path` attach probe that drives it.
  *
  * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
- * `client_name`, `status`, and `restored=false` (create-only, so there is
- * never anything to restore). No skills ship in v1 (`skill_dir` is declared
- * in the manifest for the follow-up).
+ * `client_name`, `status`, and `restored=false` (it never displaces a user's
+ * entry, only rewrites its own, so there is never anything to restore). No
+ * skills ship in v1 (`skill_dir` is declared in the manifest for the
+ * follow-up).
  *
  * @param {PluginActivationContext} ctx
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: adapter requires the ai-gateway capability; registers client + upstream preset
@@ -135,12 +136,24 @@ export async function activate(ctx) {
   //   never re-importing sessions live capture already dropped. The list lives
   //   at the SHARED state root, not the per-plugin `ctx.paths.stateDir` where
   //   the file never exists.
+  //
+  // `config: ctx.config` is what makes `backfill.sweep_cron` and
+  // `backfill.quiesce_ms` mean anything at runtime. `ctx.config` is this
+  // plugin's own already-validated slice, the exact shape `config.js`'s
+  // `validateBackfillSection` checks. Omitting it left both keys validated on
+  // the way in and then silently discarded: the contribution registered the
+  // hardcoded `*/5 * * * *` and 180000ms defaults no matter what the operator
+  // configured, with no diagnostic anywhere.
+  // @ref LLP 0172#lane-b-sweep [implements]: the registered contribution's
+  //   `sweep` is populated from this plugin's own validated config, so a
+  //   configured cadence (and quiesce window) is the one that runs
   ctx.backfills.register(
     createOpenclawBackfillProvider({
       homeDir: ctx.env.HOME ?? os.homedir(),
       env: ctx.env,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      config: ctx.config,
       localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
     })
   )

@@ -3,6 +3,7 @@
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 
+import { isOwnedProviderEntry } from '../../../../src/core/config/provider_entry_ownership.js'
 import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
@@ -47,10 +48,17 @@ const RESTART_INSTRUCTION =
  * Create the `openclaw` client's `attach()` effect.
  *
  * Writes the two `models.providers` entries of LLP 0167#override-entries into
- * `openclaw.json` and nothing else (R1). Attach is refuse + create-only: those
- * two keys are purely user-authored, so their presence means the user
- * deliberately routed that provider somewhere and a merge would silently
- * reroute it (R2). Create-only also means there is no undo record to write:
+ * `openclaw.json` and nothing else (R1). Attach never merges into a *user's*
+ * entry: a value at either key that HypAware did not write means the user
+ * deliberately routed that provider somewhere, and rerouting it silently is
+ * the surprise R2 exists to prevent, so attach refuses and writes nothing.
+ * An entry HypAware wrote is not that (it is self-identifying, and the same
+ * ownership test core's detach applies before deleting one), so attach
+ * overwrites its own: that is what makes re-attach-on-drift work, which
+ * `action_attach.js`'s `isCurrent()` requires after an ephemeral-port rebind
+ * (LLP 0086) or an asset-set change (LLP 0107).
+ *
+ * Never displacing a user value also means there is no undo record to write:
  * the entries themselves are the marker the manifest's `json_path`
  * `attach_probe` reads and core's detach reverses, and deletion is the whole
  * undo (LLP 0169).
@@ -63,9 +71,9 @@ const RESTART_INSTRUCTION =
  * @param {OpenclawAttachOptions} opts
  * @returns {{ attach(attachCtx: AiGatewayClientAttachContext): Promise<OpenclawAttachOutcome> }}
  * @ref LLP 0167#attach-detach [implements]: attach writes exactly the two
- *   models.providers entries, refuses instead of merging when either already
- *   exists, and prints the restart instruction; no undo record beyond the
- *   entries themselves.
+ *   models.providers entries, refuses instead of merging when either key holds
+ *   an entry HypAware did not write, and prints the restart instruction; no
+ *   undo record beyond the entries themselves.
  */
 export function createOpenclawAttach(opts) {
   const homeDir = opts.homeDir ?? os.homedir()
@@ -126,11 +134,12 @@ export function createOpenclawAttach(opts) {
             return fail(span, attachCtx, logger, settingsPath, errMessage(err), 'read')
           }
 
-          const existing = existingProviderKeys(read.value)
+          const existing = conflictingProviderKeys(read.value)
           if (existing.length > 0) {
             const reason =
               `models.providers.${existing.join(' and models.providers.')} already ` +
-              `exists in ${settingsPath}; attach refuses to merge (LLP 0167#attach-detach). ` +
+              `exists in ${settingsPath} and was not written by HypAware; attach ` +
+              `refuses to merge (LLP 0167#attach-detach). ` +
               `Remove it by hand or run 'hyp detach --client ${CLIENT_NAME}' first.`
             return fail(span, attachCtx, logger, settingsPath, reason, 'refused')
           }
@@ -186,18 +195,46 @@ export function createOpenclawAttach(opts) {
 }
 
 /**
- * The provider keys of {@link PROVIDER_KEYS} already present under
- * `models.providers`. Presence, not type: these keys come off disk, and a
- * user's `"anthropic": null` is every bit as deliberate an override as a full
- * entry. Anything at the key is the user's.
+ * The provider keys of {@link PROVIDER_KEYS} that are occupied by something
+ * attach must not overwrite: present under `models.providers` and **not** an
+ * entry HypAware itself wrote.
+ *
+ * Ownership, not bare presence. What R2 protects is a *user's* deliberate
+ * routing decision, and HypAware's own entry is not one: it is self-identifying
+ * (`baseUrl`, `headers['x-hypaware-upstream']` naming the key it sits at, the
+ * empty `models` array), which is the same triple `detachJsonPathProviders`
+ * already uses to decide what it may delete, imported rather than restated so
+ * the two halves cannot drift.
+ *
+ * Refusing on bare presence made `attach()` non-idempotent, which
+ * re-attach-on-drift needs it to be: `action_attach.js`'s `isCurrent()` returns
+ * false whenever the daemon rebound to a new ephemeral port (LLP 0086) or the
+ * contributed asset set changed (LLP 0107), and the reconciler then re-performs.
+ * Every such re-perform refused over the entry the *previous* attach wrote, so
+ * the marker churned to `failed` with `attempts` climbing, `hyp attach openclaw`
+ * exited 1, and `openclaw.json` kept pointing at the dead port while the
+ * `json_path` probe (which matches the marker header, not the base URL) still
+ * reported `attached: true`. Anything that fails the ownership test still
+ * refuses, including a bare `"anthropic": null`, a user entry that happens to
+ * sit at the key, and a hand-edited one that merely kept the header.
  *
  * @param {Record<string, unknown>} config
  * @returns {string[]}
+ * @ref LLP 0086#re-attach-on-drift [constrained-by]: a done attach at a stale
+ *   endpoint is re-performed, so the write it re-performs has to be idempotent
+ *   over its own previous output
  */
-function existingProviderKeys(config) {
+function conflictingProviderKeys(config) {
   const container = readPath(config, CONTAINER_KEYS)
   if (!isPlainObject(container)) return []
-  return PROVIDER_KEYS.filter((key) => Object.hasOwn(container, key))
+  return PROVIDER_KEYS.filter(
+    (key) =>
+      Object.hasOwn(container, key) &&
+      // No base-URL set: the endpoint has moved by the time a drift re-attach
+      // runs, so our own entry carries the *old* origin. See the shared
+      // predicate's note on why detach passes one and attach does not.
+      !isOwnedProviderEntry(container[key], key, MARKER_HEADER, undefined)
+  )
 }
 
 /**

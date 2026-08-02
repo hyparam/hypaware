@@ -47,9 +47,11 @@ function makeBuf() {
  * rather than the developer's own `~/.openclaw`.
  *
  * @param {Record<string, unknown>} config
+ * @param {Record<string, unknown>} [pluginConfig]  the plugin's own validated
+ *   `config` slice, i.e. `ctx.config`
  * @returns {{ homeDir: string, settingsPath: string, ctx: any, client(): any }}
  */
-function stageActivation(config) {
+function stageActivation(config, pluginConfig) {
   const homeDir = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-activate-'))
   const settingsPath = path.join(homeDir, '.openclaw', 'openclaw.json')
   mkdirSync(path.dirname(settingsPath), { recursive: true })
@@ -68,6 +70,9 @@ function stageActivation(config) {
   const ctx = /** @type {any} */ ({
     env: { HOME: homeDir },
     plugin: { version: '0.0.0-test' },
+    // `ctx.config` is the kernel's already-validated slice of this plugin's own
+    // `config` block (LLP 0037), the same shape `config.js` checks.
+    config: pluginConfig ?? {},
     configRegistry: { registerSection() {} },
     backfills: { register() {} },
     requireCapability: () => gateway,
@@ -107,6 +112,56 @@ test('activate() registers the openclaw client and wires attach() to the real wr
     const written = JSON.parse(readFileSync(staged.settingsPath, 'utf8'))
     assert.deepEqual(Object.keys(written.models.providers).sort(), ['anthropic', 'openai'])
     assert.match(stdout.text(), /openclaw gateway restart/)
+  } finally {
+    rmSync(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+// The wiring, not the resolver. `backfill.js` has always read `sweep_cron` and
+// `quiesce_ms` off the `config` it is handed, and its own unit tests hand that
+// config straight to the factory, so they could not see that `activate()` never
+// passed one: both keys were validated by `config.js` on the way in and then
+// silently discarded, and every install got the hardcoded defaults no matter
+// what the operator configured. `ctx.config` is the seam, so the assertion has
+// to start from an activation.
+// @ref LLP 0172#lane-b-sweep [tests]: the registered contribution's `sweep` is
+// populated from the plugin's own validated config, not from the default
+test('activate() threads ctx.config into the backfill provider (sweep_cron and quiesce_ms)', async () => {
+  /** @type {any} */
+  let registeredBackfill
+  const staged = stageActivation(
+    { models: { providers: {} } },
+    { backfill: { sweep_cron: '*/30 * * * *', quiesce_ms: 777 } }
+  )
+  staged.ctx.backfills = { register(/** @type {any} */ contribution) { registeredBackfill = contribution } }
+  try {
+    await activate(staged.ctx)
+
+    assert.ok(registeredBackfill, 'activate() registered a backfill provider')
+    // The configured cadence is the one the daemon's sweep driver will match
+    // against, not `*/5 * * * *`.
+    assert.deepEqual(registeredBackfill.sweep, { cron: '*/30 * * * *' })
+
+    // `quiesce_ms` has no contribution-level surface, so read it off the run's
+    // own `scan_started` record (the same field openclaw-backfill.test.js
+    // asserts the 180000ms default on). An empty HOME is enough: the record is
+    // emitted before any file is read.
+    /** @type {Array<{ message: string, fields: any }>} */
+    const entries = []
+    /** @param {string} message @param {any} fields */
+    const record = (message, fields) => { entries.push({ message, fields }) }
+    const runCtx = /** @type {any} */ ({
+      env: {},
+      cacheRoot: path.join(staged.homeDir, 'cache-unused'),
+      dryRun: true,
+      storage: {},
+      log: { debug: record, info: record, warn: record, error: record },
+    })
+    for await (const _yielded of registeredBackfill.run(runCtx)) { /* drain */ }
+
+    const started = entries.find((entry) => entry.message === 'openclaw.backfill.scan_started')
+    assert.ok(started, 'the run logs scan_started')
+    assert.equal(started.fields.quiesce_ms, 777)
   } finally {
     rmSync(staged.homeDir, { recursive: true, force: true })
   }

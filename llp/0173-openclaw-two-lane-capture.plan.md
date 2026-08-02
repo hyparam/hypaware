@@ -355,9 +355,13 @@ rung's job:
   proceed fully in parallel in the second wave despite both gating T5.
 - T9's `void runBackfillProvider(...)` fire-and-forget call means a slow or
   failing sweep run must not throw unhandled into the daemon's event loop;
-  wrap it so a rejected promise is logged (`component: 'openclaw'`,
+  wrap it so a rejected promise is logged (`component: 'backfill-sweep'`,
   `operation: 'backfill.sweep'`, `error_kind`) rather than becoming an
   unhandled rejection, per CLAUDE.md's Log-Driven Development section.
+  `component` names the emitting module, not the plugin: the driver is
+  plugin-agnostic (it fires any contribution carrying a `sweep` field, and
+  OpenClaw is only the first opt-in), and per-plugin attribution already
+  rides `hyp_plugin`/`provider` on the same records.
 - T12, once unblocked, should confirm against issue #555's own tracked scope
   before starting, in case #555 has since grown requirements beyond what
   design Section 9 describes.

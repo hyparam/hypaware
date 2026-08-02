@@ -4,12 +4,15 @@ import { Attr, getLogger } from '../observability/index.js'
 import { runBackfillProvider } from '../commands/backfill.js'
 import { cronMatches } from '../sinks/driver.js'
 
-// The sweep's telemetry identity, fixed by LLP 0173's implementer note so a
-// failing run is greppable by the same pair everywhere it is logged. OpenClaw
-// owns the only contribution that opts into a sweep today; every record also
-// carries `hyp_plugin` and `provider`, so a second opt-in stays attributable
-// without changing what an operator greps for.
-const SWEEP_COMPONENT = 'openclaw'
+// The sweep's telemetry identity: one pair on every record this driver emits,
+// so a failing run is greppable by the same `component`/`operation` everywhere
+// it is logged. `component` names the emitting module (matching the
+// `getLogger('backfill-sweep')` below), never the plugin that happens to have
+// opted in: this driver fires any contribution carrying a `sweep` field, and
+// OpenClaw is only the first. Plugin identity is already on every record as
+// `hyp_plugin` and `provider`, which is where an operator filtering by client
+// should look.
+const SWEEP_COMPONENT = 'backfill-sweep'
 const SWEEP_OPERATION = 'backfill.sweep'
 
 /**
