@@ -65,6 +65,24 @@ function messageLine(fields) {
 }
 
 /**
+ * How far `writeSession` backdates a fixture's mtime below "now" (LLP
+ * 0170#decision, LLP 0172#45-the-quiesce-window). Most tests below disable
+ * the quiesce gate with `config.backfill.quiesce_ms: 0` (the `provider()`
+ * default), which only means "no margin required," not "no comparison at
+ * all": `listSessionFiles` still checks `stat.mtimeMs <= Date.now()`, and a
+ * file written moments earlier can race that later `Date.now()` call across
+ * two different clocks (the filesystem's mtime clock and V8's), occasionally
+ * losing (#570: several of these tests flaked to 0 projected items on a CI
+ * runner where that race went the wrong way, though never locally). A small
+ * backdate removes the race with a wide margin while staying far below the
+ * real 180000ms default quiesce window, so the "fresh vs. three-minutes-old"
+ * tests below (which never call `provider()`, and rely on genuine freshness
+ * against that default) are unaffected, and any test that wants a specific
+ * age still gets the last word by calling `ageFile` itself afterward.
+ */
+const FIXTURE_MTIME_MARGIN_MS = 2_000
+
+/**
  * Write one `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`.
  *
  * @param {{ homeDir: string }} env
@@ -95,6 +113,7 @@ async function writeSession(env, doc) {
   }
   for (const record of doc.records ?? []) lines.push(JSON.stringify(messageLine(record)))
   await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  await ageFile(filePath, FIXTURE_MTIME_MARGIN_MS)
   return filePath
 }
 
@@ -701,14 +720,19 @@ test('a relocated install is found through OPENCLAW_HOME, the same way settlemen
     const openclawHome = path.join(env.homeDir, 'elsewhere')
     const dir = path.join(openclawHome, 'agents', 'main', 'sessions')
     await fs.mkdir(dir, { recursive: true })
+    const filePath = path.join(dir, 'sess-relocated.jsonl')
     await fs.writeFile(
-      path.join(dir, 'sess-relocated.jsonl'),
+      filePath,
       [
         JSON.stringify({ type: 'session', id: 'sess-relocated', cwd: '/work/repo', timestamp: '2026-07-30T10:00:00.000Z' }),
         JSON.stringify(messageLine(ASSISTANT_RECORD)),
       ].join('\n') + '\n',
       'utf8'
     )
+    // Written outside `writeSession`, so it needs its own backdate to clear
+    // the same mtime-vs-`Date.now()` race `FIXTURE_MTIME_MARGIN_MS` guards
+    // against there (#570).
+    await ageFile(filePath, FIXTURE_MTIME_MARGIN_MS)
     // Nothing at $HOME/.openclaw: only the override names a real install.
     const { items } = await collect(
       provider(env, { env: { OPENCLAW_HOME: openclawHome } }).run(runContext().ctx)
