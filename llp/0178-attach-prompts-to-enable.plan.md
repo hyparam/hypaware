@@ -1,4 +1,4 @@
-# LLP 0175: Manual attach prompts to enable the client adapter, implementation plan
+# LLP 0178: Manual attach prompts to enable the client adapter, implementation plan
 
 **Type:** plan
 **Status:** Active

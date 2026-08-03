@@ -13,7 +13,7 @@ import { runAttach } from '../../src/core/commands/clients.js'
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// T10 (LLP 0174/0175): after T9's accept path enables and attaches a client
+// T10 (LLP 0174/0178): after T9's accept path enables and attaches a client
 // in the same invocation, offer the finale's own backfill consent question
 // for that client's provider (if one is registered in `ctx.backfills`), and
 // run it on yes. This never fires for a client whose adapter was already

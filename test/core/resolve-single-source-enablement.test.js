@@ -13,7 +13,7 @@ import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 
 // Reads the real bundled manifests via buildPluginCatalog (not a hand-rolled
 // fixture) so a manifest edit that changes a client adapter's dependency set
-// fails this test instead of drifting silently (LLP 0175 T6).
+// fails this test instead of drifting silently (LLP 0178 T6).
 
 /** @returns {Promise<Map<string, PickerDescriptor>>} */
 async function realPickerDescriptors() {

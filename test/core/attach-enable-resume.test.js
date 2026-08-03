@@ -14,7 +14,7 @@ import { defaultUnitDir, SYSTEMD_UNIT_BASE, defaultPlistDir, LAUNCH_LABEL } from
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// T11 (LLP 0174/0175): hardens T9's accept path with per-step failure
+// T11 (LLP 0174/0178): hardens T9's accept path with per-step failure
 // reporting and resumability. Two things must hold:
 //
 // - a partial failure (config write landed, restart or wait step did not)

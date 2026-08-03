@@ -13,7 +13,7 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { waitForGatewayBind } from '../../src/core/cli/remote_commands.js'
 
 /**
- * T8 (LLP 0174/0175): the enable half of the manual-attach prompt. The write is
+ * T8 (LLP 0174/0178): the enable half of the manual-attach prompt. The write is
  * *additive* (the local layer is user-owned, so enabling one adapter must not
  * rewrite the rest of it), duplicate-aware against the **effective** merge (an
  * entry the central layer already names is never re-added locally), and every

@@ -13,7 +13,7 @@ import { runAttach } from '../../src/core/commands/clients.js'
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// T9 (LLP 0174/0175): on `not_enabled` with a TTY and no `--json`, the attach
+// T9 (LLP 0174/0178): on `not_enabled` with a TTY and no `--json`, the attach
 // dispatch offers to enable the adapter instead of failing outright. These
 // fixtures drive both the decline and accept paths through a real (bundled)
 // plugin catalog, plus the OpenClaw-specific disclosure copy and the
