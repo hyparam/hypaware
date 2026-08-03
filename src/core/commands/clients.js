@@ -183,6 +183,31 @@ async function runClientLifecycle(action, argv, ctx) {
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
   const clientNames = expandClientName(parsed.client, gateway)
+  if (parsed.client === 'all' && !parsed.json) {
+    // `hyp attach all` never prompts mid-run (a gauntlet of enable questions
+    // inside a bulk command is the picker's job, badly reinvented); instead it
+    // names every catalog-known client the live registry silently dropped, so
+    // the fix is one `hyp attach <name>` away instead of a quiet no-op. The
+    // diff is catalog keys minus live keys, so every name here is
+    // catalog-known by construction: no `unknown` id can appear, so this
+    // needs none of resolveAttachEnablementState's central-vs-local split.
+    // Skipped under --json: every other attach path keeps stdout to the
+    // single-line machine payload per client, and a bare `note:` line is not
+    // that shape (see materializeAttachAssets's own --json stdout suppression
+    // for the same convention).
+    // @ref LLP 0174#detection [implements]: `hyp attach all` reports known-
+    //   but-not-enabled clients as notes instead of dispatching only the
+    //   live subset with no explanation
+    const catalog = await buildAttachPluginCatalog(ctx)
+    const liveNames = new Set(clientNames)
+    for (const name of catalog.clientDescriptors.keys()) {
+      if (!liveNames.has(name)) {
+        ctx.stdout.write(
+          `note: ${name} is a known client but its adapter is not enabled; run 'hyp attach ${name}' to enable it\n`
+        )
+      }
+    }
+  }
   if (clientNames.length === 0) {
     const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
     if (enablement.state !== 'unknown') {
