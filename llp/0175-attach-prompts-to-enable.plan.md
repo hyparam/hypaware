@@ -100,7 +100,7 @@ design's prose):
   fold in here.
 - Do not edit `llp/0174-attach-prompts-to-enable.design.md` itself
   (Accepted) beyond what its own "Annotations to add when code lands"-style
-  bookkeeping requires in the *code* via `@ref LLP 0174#anchor`
+  bookkeeping requires in the *code* via `@ref LLP 0174#<anchor>`
   annotations; if an implementer finds the design wrong rather than merely
   under-specified, that is a new request against it, not a plan edit here.
 - **Remove the drifted `[--yes]` token** from the JSDoc usage line above

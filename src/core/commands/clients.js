@@ -20,6 +20,8 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
+import { defaultConfigPath } from '../config/schema.js'
+import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import {
@@ -135,6 +137,14 @@ async function runClientLifecycle(action, argv, ctx) {
   // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
   // capability.
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
+    // The capability is absent exactly when no *enabled* plugin pulls the
+    // gateway in, which for a catalog-known client means its adapter is not
+    // enabled - not that the capability is missing from the install. Ask the
+    // static catalog which of the two it is before choosing the wording.
+    // @ref LLP 0174#detection [implements]: the capability gate is one of the
+    // two failure sites that must report the enablement layer
+    const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
+    const errorKind = enablement.state === 'unknown' ? 'cap_missing' : enablement.errorKind
     await withSpan(
       `client.${action}`,
       {
@@ -144,11 +154,12 @@ async function runClientLifecycle(action, argv, ctx) {
         hyp_client: parsed.client,
         dry_run: parsed.dryRun === true,
         status: 'failed',
-        error_kind: 'cap_missing',
+        error_kind: errorKind,
       },
       async () => {
-        const message =
-          `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
+        const message = enablement.state === 'unknown'
+          ? `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
+          : enablement.message
         if (parsed.json) {
           ctx.stdout.write(
             JSON.stringify({
@@ -156,7 +167,7 @@ async function runClientLifecycle(action, argv, ctx) {
               action,
               client: parsed.client,
               dry_run: parsed.dryRun === true,
-              error_kind: 'cap_missing',
+              error_kind: errorKind,
               error: message,
             }) + '\n'
           )
@@ -173,6 +184,11 @@ async function runClientLifecycle(action, argv, ctx) {
 
   const clientNames = expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
+    const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
+    if (enablement.state !== 'unknown') {
+      reportAttachEnablement({ name: parsed.client, enablement, parsed, ctx })
+      return 1
+    }
     const known = gateway.listClients().map((c) => c.name)
     ctx.stderr.write(
       `error: unknown client '${parsed.client}'. Registered clients: ${known.join(', ') || '(none)'}\n`
@@ -187,6 +203,18 @@ async function runClientLifecycle(action, argv, ctx) {
     try {
       const client = gateway.getClient(name)
       if (!client) {
+        // The gateway is live but this client never registered. That is the
+        // second failure site the design names: some other gateway-using
+        // plugin is enabled, this client's adapter is not, and reporting it as
+        // "unknown" hides the enablement layer that actually explains it.
+        // @ref LLP 0174#detection [implements]: a catalog-known but
+        // unregistered client reports not_enabled / disabled_central, not unknown
+        const enablement = await resolveAttachEnablementState({ name, ctx })
+        if (enablement.state !== 'unknown') {
+          reportAttachEnablement({ name, enablement, parsed, ctx })
+          exitCode = 1
+          continue
+        }
         ctx.stderr.write(`error: unknown client '${name}'\n`)
         exitCode = 1
         continue
@@ -356,6 +384,127 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Resolve *why* `name` cannot be attached right now, so the failure names the
+ * enablement layer instead of dead-ending on "unknown client".
+ *
+ * Three states, per design LLP 0174 #detection:
+ * `unknown` (no bundled or installed plugin contributes this client at all -
+ * keep whichever "unknown client" wording the calling gate already prints),
+ * `not_enabled` (the static catalog knows the client but the effective config
+ * never enabled its owning plugin, or disabled it in the *local* layer, which
+ * the user can fix), and `disabled_central` (a fleet-managed central entry
+ * names the plugin disabled, and LLP 0031's additive merge drops any local
+ * entry with that name, so telling the user to edit their config would be a
+ * lie).
+ *
+ * Reads the static bundled+installed catalog, never the live gateway registry:
+ * this runs precisely when the registry cannot answer, either because the
+ * `hypaware.ai-gateway` capability is absent or because the adapter that would
+ * have registered the client never activated.
+ *
+ * `../cli/dispatch.js` is imported dynamically because it re-enters this module
+ * through `./core_commands.js`; a static edge here would close that cycle for
+ * every `hyp` invocation to serve one cold error path.
+ *
+ * @ref LLP 0174#detection [implements]: attach's failure paths distinguish
+ * unknown client / known-but-not-enabled / registered, instead of reporting
+ * every non-registered name as unknown
+ * @param {{ name: string, ctx: CommandRunContext }} args
+ * @returns {Promise<
+ *   { state: 'unknown' } |
+ *   { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string }
+ * >}
+ */
+async function resolveAttachEnablementState({ name, ctx }) {
+  /** @type {PluginCatalog} */
+  let catalog
+  try {
+    catalog = await buildAttachPluginCatalog(ctx)
+  } catch {
+    return { state: 'unknown' }
+  }
+  const descriptor = catalog.clientDescriptors.get(name)
+  if (!descriptor) return { state: 'unknown' }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  /** @type {'absent' | 'disabled-local' | 'disabled-central'} */
+  let inactive = 'absent'
+  try {
+    const { classifyInactiveState } = await import('../cli/dispatch.js')
+    const layered = await resolveLayeredConfigFromDisk({
+      stateRoot: obsEnv.stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+    inactive = classifyInactiveState(layered, descriptor.plugin)
+  } catch {
+    // An unreadable/invalid config layer cannot prove the central layer
+    // disabled anything, and the adapter is demonstrably not live: report the
+    // fixable state, whose remedy ('hyp init') repairs a broken config too.
+  }
+
+  if (inactive === 'disabled-central') {
+    return {
+      state: 'disabled_central',
+      errorKind: 'adapter_disabled_central',
+      message:
+        `the ${name} adapter is disabled by your fleet config; ` +
+        `a local config cannot override the central-managed setting`,
+    }
+  }
+  return {
+    state: 'not_enabled',
+    errorKind: 'adapter_not_enabled',
+    message:
+      `the ${name} adapter is not enabled on this install; enable it with 'hyp init', ` +
+      `or add ${descriptor.plugin} to ${configPath} and run 'hyp daemon restart', ` +
+      `then re-run attach`,
+  }
+}
+
+/**
+ * Report a resolved `not_enabled` / `disabled_central` attach refusal on the
+ * two registry-miss sites, in the same `--json` payload shape every other
+ * attach failure in this file uses (the capability gate renders its own
+ * because it also owns the failure span).
+ *
+ * @param {{
+ *   name: string,
+ *   enablement: { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
+ *   parsed: { dryRun: boolean, json: boolean },
+ *   ctx: CommandRunContext,
+ * }} args
+ * @returns {void}
+ */
+function reportAttachEnablement({ name, enablement, parsed, ctx }) {
+  getLogger('cmd-attach').warn('client.attach.adapter_inactive', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'failed',
+    [Attr.ERROR_KIND]: enablement.errorKind,
+  })
+  if (parsed.json) {
+    ctx.stdout.write(
+      JSON.stringify({
+        status: 'failed',
+        action: 'attach',
+        client: name,
+        dry_run: parsed.dryRun === true,
+        error_kind: enablement.errorKind,
+        error: enablement.message,
+      }) + '\n'
+    )
+    return
+  }
+  ctx.stderr.write(`error: ${enablement.message}\n`)
 }
 
 /**
