@@ -615,6 +615,13 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   // with no way to say "no" to the rest.
   if (parsed.client === 'all') return { activated: false }
   if (parsed.json || !isTty(ctx.stdin)) return { activated: false }
+  // `--dry-run` is this command's "tell me, change nothing" mode (the same
+  // promise `detachClientViaCore`'s own dry-run branch keeps), and the accept
+  // path is the least dry thing in the file: a config write, a daemon
+  // restart, and a real backfill import. Refuse the question rather than
+  // offer one whose yes would break the flag - a dry run reports the guided
+  // error, and the user re-runs without the flag to act on it.
+  if (parsed.dryRun) return { activated: false }
 
   const obsEnv = readObservabilityEnv(ctx.env)
   const configPath = ctx.env.HYP_CONFIG
@@ -628,6 +635,18 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
 
   const { pluginNames, entries } = resolveSingleSourceEnablement(descriptor)
   if (entries.length === 0) return { activated: false }
+  // The same "never prompt when there is nothing to add" floor the missing
+  // config file establishes, applied to the other shape it takes: an entry
+  // that is *present but `enabled: false`*. `enableClientAdapter`'s write is
+  // additive by contract, so it appends nothing for a name already in the
+  // file and the adapter stays inactive - the question would promise an
+  // enable the write cannot deliver, and land a no-op rewrite plus a stray
+  // backup on the way to the same refusal. Fall through to the caller's
+  // guided error instead, which names `hyp init` (the flow that does rewrite
+  // a disabled entry).
+  // @ref LLP 0174#bootstrap-floor [constrained-by]: the prompt is only ever
+  // offered where the additive write can actually change the outcome
+  if (await hasDisabledEntry({ ctx, configPath, catalog, pluginNames })) return { activated: false }
   const primary = descriptor.compose?.plugin?.name ?? descriptor.plugin
   const rest = pluginNames.filter((pluginName) => pluginName !== primary)
   const depSuffix = rest.length > 0 ? ` (and ${rest.join(', ')})` : ''
@@ -789,6 +808,47 @@ async function configFileExists(configPath) {
   try {
     await fs.access(configPath)
     return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether any plugin the enable write would contribute is already in the
+ * effective config with `enabled: false`.
+ *
+ * That is the one shape of "known but not enabled" an additive write cannot
+ * repair: the entry exists, so nothing is appended, and the flag that keeps
+ * the plugin out of the boot selection is left exactly as it was. Covers
+ * both layers deliberately - a locally disabled entry and a
+ * centrally-disabled one both survive the append untouched, and the adapter
+ * plugin is not the only name that matters here (a disabled
+ * `@hypaware/ai-gateway` starves the adapter just as effectively).
+ *
+ * An unresolvable config layer answers `false`: it cannot prove anything is
+ * disabled, and `enableClientAdapter`'s own read is what refuses a write it
+ * cannot make safely.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   configPath: string,
+ *   catalog: PluginCatalog,
+ *   pluginNames: string[],
+ * }} args
+ * @returns {Promise<boolean>}
+ */
+async function hasDisabledEntry({ ctx, configPath, catalog, pluginNames }) {
+  try {
+    const layered = await resolveLayeredConfigFromDisk({
+      stateRoot: readObservabilityEnv(ctx.env).stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+    const wanted = new Set(pluginNames)
+    return (layered.effective?.plugins ?? []).some(
+      (entry) => wanted.has(entry.name) && entry.enabled === false
+    )
   } catch {
     return false
   }
