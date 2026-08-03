@@ -329,6 +329,26 @@ export async function dispatch(argv, opts = {}) {
         return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
       },
     },
+    // Narrow in-process activation seam for a command body that cannot reach
+    // `kernel`/`activePlugins` through `CommandRunContext` otherwise: given
+    // plugin names a *fresh disk read* of the effective config already
+    // selects, make them (and their dependency closure) live in THIS
+    // process's kernel if a config write mid-process just enabled them.
+    // Backs the manual-attach enable prompt's accept path, which needs
+    // `ctx.capabilities`/`gateway.getClient(name)` to see an adapter this
+    // same invocation just wrote to config.
+    // @ref LLP 0174#prompt [implements]: resolves the "CommandRunContext has
+    // no kernel handle" crux by generalizing the LLP 0139 dispatch-miss seam
+    // instead of adding a second activation mechanism
+    activatePluginClosure: (names) =>
+      activatePluginDependencyClosure({
+        seedNames: names,
+        kernel,
+        discovery: helpDiscovery,
+        stateRoot: obsEnv.stateDir,
+        runId: devRunId ?? `cli-${process.pid}`,
+        activePlugins,
+      }),
     verbs: kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
@@ -808,11 +828,114 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     )
     if (!owner) return
 
-    // Dependency closure of the owner among the config-selected inactive
+    // The dependency-closure activation itself is shared with the manual-
+    // attach enable prompt (LLP 0174 design doc, #prompt section), which
+    // seeds it with the just-written config's plugin names instead of a
+    // command owner. See that function's own @ref annotation below.
+    const { activated, failed } = await activatePluginDependencyClosure({
+      seedNames: [owner.manifest.name],
+      selection,
+      kernel,
+      stateRoot,
+      runId,
+      activePlugins,
+    })
+    // Parity with the pre-generalization guard: if the owner itself never
+    // made it into `activated` (unresolvable, or resolvable but its own
+    // activation failed), there is nothing dispatchable and nothing to log -
+    // the miss path reports unavailable-plus-repair as before.
+    if (!activated.includes(owner.manifest.name)) return
+
+    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      owner_plugin: owner.manifest.name,
+      plugins_activated: activated.length,
+      plugins_failed: failed.length,
+    })
+  } catch (err) {
+    // Best-effort: the dispatch miss path reports unavailable + repair. But
+    // say the attempt happened: without this line a throwing activation
+    // leaves the user at "unknown command" with no record that the seam ran.
+    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      [Attr.ERROR_KIND]: 'seam_activation_failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
+ * Activate `seedNames` (each already known, or expected, to be selected by a
+ * `config`-profile boot of the fresh-read effective config) and their
+ * manifest-declared dependency closure into the running `kernel`, for
+ * whichever of them are not active in this process yet. Never activates a
+ * plugin the fresh config read does not itself select - that boundary is
+ * what makes this safe to expose narrowly outside the dispatcher (see the
+ * LLP 0174 #prompt annotation below).
+ *
+ * Extracted from {@link activateSeamCommandPlugins}, whose one seed is the
+ * plugin owning a dispatch-missed command name (LLP 0139
+ * #seam-fresh-activation): that caller already has a `selection` from
+ * resolving its owner, so it is threaded through here to avoid a second
+ * `computeBootSelection` read. The manual-attach enable prompt
+ * (`runAttach`, via the `CommandRunContext.activatePluginClosure` seam this
+ * function backs) has no owner lookup to do first and lets this compute its
+ * own fresh `selection` instead.
+ *
+ * Best-effort and non-throwing: any internal failure reports every seed as
+ * `failed` rather than propagating, so a caller mid-command can fall back to
+ * its own guided error instead of crashing the command.
+ *
+ * @param {{
+ *   seedNames: string[],
+ *   kernel: ReturnType<typeof createKernelRuntime>,
+ *   discovery?: { workspaceDir?: string, stateRoot: string, configPath: string },
+ *   stateRoot: string,
+ *   runId: string,
+ *   activePlugins: ActivePlugin[],
+ *   selection?: Awaited<ReturnType<typeof computeBootSelection>>,
+ * }} args
+ * @returns {Promise<{ activated: string[], failed: string[] }>}
+ * @ref LLP 0174#prompt [implements]: the manual-attach accept path's
+ * in-process activation seam, generalized from the dispatch-miss seam
+ * (LLP 0139#seam-fresh-activation) rather than a second mechanism
+ */
+export async function activatePluginDependencyClosure({
+  seedNames,
+  kernel,
+  discovery,
+  stateRoot,
+  runId,
+  activePlugins,
+  selection,
+}) {
+  const activeNames = new Set(activePlugins.map((p) => p.name))
+  const seeds = seedNames.filter((n) => typeof n === 'string' && n.length > 0 && !activeNames.has(n))
+  if (seeds.length === 0) return { activated: [], failed: [] }
+
+  try {
+    const resolvedSelection =
+      selection ??
+      (await computeBootSelection(
+        /** @type {{ workspaceDir?: string, stateRoot: string, configPath: string }} */ (discovery)
+      ))
+    // A shadow collision makes real boot throw; there is no coherent plugin
+    // set to activate from, so report every seed unresolved.
+    if (resolvedSelection.shadowing.length > 0) return { activated: [], failed: seeds }
+
+    const inactive = resolvedSelection.selectedManifests.filter(
+      (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
+    )
+    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
+
+    // Dependency closure of the seeds among the config-selected inactive
     // plugins: requires.plugins by name, requires.capabilities through the
     // manifest-declared provider. Providers that are already active need no
     // activation (their capabilities are in the runtime registry).
-    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
     /** @type {Map<string, string>} */
     const providerByCap = new Map()
     // First declaration wins, with active manifests listed first: three
@@ -826,7 +949,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     }
     /** @type {Set<string>} */
     const closure = new Set()
-    const queue = [owner.manifest.name]
+    const queue = seeds.filter((n) => byName.has(n))
     while (queue.length > 0) {
       const current = /** @type {string} */ (queue.shift())
       if (closure.has(current) || activeNames.has(current)) continue
@@ -843,15 +966,14 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     // Order the closure the same way boot would: dependency resolution over
     // the union of active and closure manifests, so capabilities provided by
     // already-active plugins count as satisfied. A closure plugin the
-    // resolution eliminates stays inactive; the miss path reports it.
+    // resolution eliminates stays inactive; the caller's `failed` list names it.
     const resolution = await resolveDependencies([
       ...activePlugins.map((p) => p.manifest),
       ...[...closure].map((n) => /** @type {LoadedManifest} */ (byName.get(n)).manifest),
     ])
     const orderIndex = new Map(resolution.order.map((n, i) => [n, i]))
-    if (!orderIndex.has(owner.manifest.name)) return
     const configByName = new Map(
-      (selection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
+      (resolvedSelection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
     )
     const entries = [...closure]
       .filter((n) => orderIndex.has(n))
@@ -862,31 +984,27 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
         rootDir: entry.rootDir,
         config: /** @type {JsonObject} */ (configByName.get(entry.manifest.name) ?? {}),
       }))
-    if (entries.length === 0) return
+    if (entries.length === 0) return { activated: [], failed: seeds }
 
     const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    /** @type {string[]} */
+    const activated = []
     for (const r of result.results) {
-      if (r.ok) activePlugins.push(r.plugin)
+      if (r.ok) {
+        activePlugins.push(r.plugin)
+        activated.push(r.plugin.name)
+      }
     }
-    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      [Attr.OPERATION]: 'dispatch.seam_activate',
-      command_name: name,
-      owner_plugin: owner.manifest.name,
-      plugins_activated: result.results.filter((r) => r.ok).length,
-      plugins_failed: result.results.filter((r) => !r.ok).length,
-    })
-  } catch (err) {
-    // Best-effort: the dispatch miss path reports unavailable + repair. But
-    // say the attempt happened: without this line a throwing activation
-    // leaves the user at "unknown command" with no record that the seam ran.
-    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      [Attr.OPERATION]: 'dispatch.seam_activate',
-      command_name: name,
-      [Attr.ERROR_KIND]: 'seam_activation_failed',
-      error: err instanceof Error ? err.message : String(err),
-    })
+    // `failed` covers every name this call attempted on the seeds' behalf,
+    // not just the seeds themselves: a seed whose own manifest activates but
+    // whose dependency closure does not is still an incomplete activation,
+    // and the pre-generalization seam counted exactly that in its
+    // `plugins_failed` telemetry (any closure member `activatePlugins`
+    // rejected, not only the one owner it seeded).
+    const attempted = new Set([...seeds, ...entries.map((e) => e.manifest.name)])
+    return { activated, failed: [...attempted].filter((n) => !activated.includes(n)) }
+  } catch {
+    return { activated: [], failed: seeds }
   }
 }
 

@@ -21,9 +21,13 @@ import {
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { defaultConfigPath } from '../config/schema.js'
+import { enableClientAdapter } from '../config/client_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { askYesNo } from '../cli/confirm.js'
+import { isTty } from '../cli/stdio.js'
+import { resolveSingleSourceEnablement } from '../cli/walkthrough.js'
 import {
   CLASS_RANK,
   createUsagePolicyResolver,
@@ -44,6 +48,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
+ * @import { ClientEnableResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -144,40 +149,46 @@ async function runClientLifecycle(action, argv, ctx) {
     // @ref LLP 0174#detection [implements]: the capability gate is one of the
     // two failure sites that must report the enablement layer
     const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
-    const errorKind = enablement.state === 'unknown' ? 'cap_missing' : enablement.errorKind
-    await withSpan(
-      `client.${action}`,
-      {
-        [Attr.COMPONENT]: `cmd-${action}`,
-        [Attr.OPERATION]: `client.${action}`,
-        client_name: parsed.client,
-        hyp_client: parsed.client,
-        dry_run: parsed.dryRun === true,
-        status: 'failed',
-        error_kind: errorKind,
-      },
-      async () => {
-        const message = enablement.state === 'unknown'
-          ? `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
-          : enablement.message
-        if (parsed.json) {
-          ctx.stdout.write(
-            JSON.stringify({
-              status: 'failed',
-              action,
-              client: parsed.client,
-              dry_run: parsed.dryRun === true,
-              error_kind: errorKind,
-              error: message,
-            }) + '\n'
-          )
-        } else {
-          ctx.stderr.write(`error: ${message}\n`)
-        }
-      },
-      { component: `cmd-${action}` }
-    )
-    return 1
+    // @ref LLP 0174#prompt [implements]: on `not_enabled` with a TTY and no
+    // `--json`, offer to enable the adapter instead of failing outright; on
+    // acceptance this falls through to the capability now being live
+    const promptResult = await maybeInteractiveEnableAttach({ name: parsed.client, ctx, parsed, enablement })
+    if (!promptResult.activated) {
+      const errorKind = enablement.state === 'unknown' ? 'cap_missing' : enablement.errorKind
+      await withSpan(
+        `client.${action}`,
+        {
+          [Attr.COMPONENT]: `cmd-${action}`,
+          [Attr.OPERATION]: `client.${action}`,
+          client_name: parsed.client,
+          hyp_client: parsed.client,
+          dry_run: parsed.dryRun === true,
+          status: 'failed',
+          error_kind: errorKind,
+        },
+        async () => {
+          const message = enablement.state === 'unknown'
+            ? `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
+            : enablement.message
+          if (parsed.json) {
+            ctx.stdout.write(
+              JSON.stringify({
+                status: 'failed',
+                action,
+                client: parsed.client,
+                dry_run: parsed.dryRun === true,
+                error_kind: errorKind,
+                error: message,
+              }) + '\n'
+            )
+          } else {
+            ctx.stderr.write(`error: ${message}\n`)
+          }
+        },
+        { component: `cmd-${action}` }
+      )
+      return 1
+    }
   }
   /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
@@ -226,7 +237,7 @@ async function runClientLifecycle(action, argv, ctx) {
   let descriptorMap
   for (const name of clientNames) {
     try {
-      const client = gateway.getClient(name)
+      let client = gateway.getClient(name)
       if (!client) {
         // The gateway is live but this client never registered. That is the
         // second failure site the design names: some other gateway-using
@@ -235,14 +246,26 @@ async function runClientLifecycle(action, argv, ctx) {
         // @ref LLP 0174#detection [implements]: a catalog-known but
         // unregistered client reports not_enabled / disabled_central, not unknown
         const enablement = await resolveAttachEnablementState({ name, ctx })
-        if (enablement.state !== 'unknown') {
-          reportAttachEnablement({ name, enablement, parsed, ctx })
+        // @ref LLP 0174#prompt [implements]: the same enable prompt as the
+        // capability gate above, reached from the registry-miss site instead
+        const promptResult = await maybeInteractiveEnableAttach({ name, ctx, parsed, enablement })
+        if (promptResult.activated) {
+          // The adapter's own activate() registers it with the SAME `gateway`
+          // api object this closure already holds (it is `ctx.capabilities`'
+          // live registration, not a snapshot), so re-reading it here sees
+          // the just-activated client with no extra capability lookup.
+          client = gateway.getClient(name)
+        }
+        if (!client) {
+          if (enablement.state !== 'unknown') {
+            reportAttachEnablement({ name, enablement, parsed, ctx })
+            exitCode = 1
+            continue
+          }
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
           exitCode = 1
           continue
         }
-        ctx.stderr.write(`error: unknown client '${name}'\n`)
-        exitCode = 1
-        continue
       }
       // In dry-run mode the gateway source may not be started yet,
       // so `localEndpoint()` could throw. Fall back to a placeholder
@@ -530,6 +553,179 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
     return
   }
   ctx.stderr.write(`error: ${enablement.message}\n`)
+}
+
+/**
+ * The `not_enabled` accept/decline gate, reached from both registry-miss
+ * sites in `runClientLifecycle`'s attach branch. Interactive-only: every
+ * other caller (scripts, `--json`, `hyp attach all`'s bulk loop, a
+ * `disabled_central` refusal) must see the SAME failure it saw before this
+ * task existed, so this returns `{ activated: false }` immediately for
+ * anything that is not a bare, interactive, single-client `not_enabled` ask.
+ *
+ * Decline and every early return are zero-side-effect by construction: none
+ * of them reach {@link enableClientAdapter}, so there is no write, no backup,
+ * and no restart to undo.
+ *
+ * @ref LLP 0174#bootstrap-floor [implements]: no local config file at all
+ * skips the prompt outright and falls through to the caller's existing
+ * `not_enabled` refusal (which already names `hyp init`) rather than asking
+ * a question with nothing on disk to add an entry to
+ * @ref LLP 0174#prompt [implements]: the enable/attach accept path - guarded
+ * write (T8), then this same process's own kernel picks up the newly written
+ * plugin(s) through the activation seam so `attach()` still runs in one
+ * invocation
+ * @param {{
+ *   name: string,
+ *   ctx: CommandRunContext,
+ *   parsed: { client: string, json: boolean, dryRun: boolean },
+ *   enablement: { state: 'unknown' } | { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
+ * }} args
+ * @returns {Promise<{ activated: boolean }>}
+ */
+async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
+  // `disabled_central` never reaches this prompt (LLP 0174 #detection): a
+  // fleet-managed disable has no local remedy, so asking would offer a fix
+  // that cannot work. `unknown` means the catalog does not know this client
+  // at all, which this prompt has nothing to enable either.
+  if (enablement.state !== 'not_enabled') return { activated: false }
+  // `hyp attach all` never prompts mid-run (see the call site's own comment);
+  // a bare `--client all` reaching here would ask once per missing client
+  // with no way to say "no" to the rest.
+  if (parsed.client === 'all') return { activated: false }
+  if (parsed.json || !isTty(ctx.stdin)) return { activated: false }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  if (!(await configFileExists(configPath))) return { activated: false }
+
+  const catalog = await buildAttachPluginCatalog(ctx)
+  const descriptor = catalog.pickerDescriptors.get(name)
+  if (!descriptor) return { activated: false }
+
+  const { pluginNames, entries } = resolveSingleSourceEnablement(descriptor)
+  if (entries.length === 0) return { activated: false }
+  const primary = descriptor.compose?.plugin?.name ?? descriptor.plugin
+  const rest = pluginNames.filter((pluginName) => pluginName !== primary)
+  const depSuffix = rest.length > 0 ? ` (and ${rest.join(', ')})` : ''
+
+  // @ref LLP 0174#openclaw [implements]: OpenClaw's enable question names the
+  // periodic sweep import up front instead of reusing the generic wording,
+  // because enabling it is not attach-shaped like every other adapter here -
+  // it also starts a background backfill the user has not consented to yet
+  const question =
+    name === 'openclaw'
+      ? `The OpenClaw adapter is not enabled on this install. Enabling it starts a periodic sweep ` +
+        `that will import existing OpenClaw session history within about 5 minutes. ` +
+        `Enable ${primary}${depSuffix} now? [y/N] `
+      : `The ${capitalizeClientLabel(name)} adapter is not enabled on this install. Attaching requires ` +
+        `it. Enable ${primary}${depSuffix} now? [y/N] `
+
+  const accepted = await askYesNo(ctx, question)
+  if (!accepted) {
+    getLogger('cmd-attach').info('client.attach.enable_prompt', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'ok',
+      accepted: false,
+    })
+    return { activated: false }
+  }
+
+  const result = await enableClientAdapter({
+    name,
+    entries,
+    ctx,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
+  if (!result.ok) {
+    reportEnableFailure({ name, result, ctx })
+    return { activated: false }
+  }
+
+  // The write and (if a daemon is installed) the restart already landed; what
+  // remains is making THIS process's own kernel see the plugin(s) the config
+  // now names, so `client.attach()` below runs in the same invocation instead
+  // of asking the user to re-run the command.
+  // @ref LLP 0139#seam-fresh-activation [constrained-by]: reuses the
+  // dispatch-miss seam's activation primitive rather than adding a second one
+  await ctx.activatePluginClosure(pluginNames)
+  const allLive = pluginNames.every((pluginName) => ctx.plugins.some((p) => p.name === pluginName))
+  if (!allLive) {
+    ctx.stderr.write(
+      `error: enabled the ${name} adapter (config updated${result.daemonInstalled ? ' and daemon restarted' : ''}), ` +
+      `but could not activate it in this process; re-run 'hyp attach ${name}' to finish\n`
+    )
+    getLogger('cmd-attach').warn('client.attach.enable_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'failed',
+      [Attr.ERROR_KIND]: 'activation_incomplete',
+    })
+    return { activated: false }
+  }
+
+  getLogger('cmd-attach').info('client.attach.enable_prompt', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'ok',
+    accepted: true,
+    added_plugins: result.addedPlugins.join(','),
+  })
+  return { activated: true }
+}
+
+/**
+ * Same existence probe {@link prepareLocalConfigWrite} uses internally, so
+ * the bootstrap floor (LLP 0174 #bootstrap-floor) and the guarded write agree
+ * on what "no local config file" means.
+ *
+ * @param {string} configPath
+ * @returns {Promise<boolean>}
+ */
+async function configFileExists(configPath) {
+  try {
+    await fs.access(configPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {string} name
+ * @returns {string}
+ */
+function capitalizeClientLabel(name) {
+  return name.length > 0 ? name.charAt(0).toUpperCase() + name.slice(1) : name
+}
+
+/**
+ * Report `enableClientAdapter`'s failure in the same `--json` / stderr shape
+ * as the rest of this file's attach failures. A write that landed before a
+ * later step failed still names its `backupPath`, since T11's resumability
+ * work depends on the user seeing that the config already changed.
+ *
+ * @param {{ name: string, result: ClientEnableResult, ctx: CommandRunContext }} args
+ * @returns {void}
+ */
+function reportEnableFailure({ name, result, ctx }) {
+  getLogger('cmd-attach').warn('client.attach.enable_failed', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'failed',
+    [Attr.ERROR_KIND]: `enable_${result.failedStep ?? 'unknown'}_failed`,
+  })
+  const message = `could not enable the ${name} adapter: ${result.message ?? 'unknown error'}` +
+    (result.backupPath ? ` (config backed up to ${result.backupPath})` : '')
+  ctx.stderr.write(`error: ${message}\n`)
 }
 
 /**

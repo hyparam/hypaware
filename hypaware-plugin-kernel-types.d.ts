@@ -849,6 +849,35 @@ export interface CommandRunContext {
    */
   commands: { run(name: string, argv: string[]): Promise<number> }
   /**
+   * In-process plugin activation seam (kernel-owned). Populated by the
+   * dispatcher, so it is present for every command body, like `commands`.
+   *
+   * Given plugin names, activates them (and their manifest-declared
+   * dependency closure) into THIS process's already-booted kernel, but only
+   * the subset a *fresh disk read* of the effective config would itself
+   * select for a `config`-profile boot - it can never activate a plugin the
+   * on-disk config does not name. Exists for a command body that writes
+   * config mid-invocation (LLP 0031's guarded local-layer writers) and then
+   * needs this same process's own `capabilities`/gateway registries to see
+   * what it just enabled, which a raw kernel handle would allow but this
+   * narrower seam does not: activation only, never a second config writer
+   * and never a network listener bind (a source's own `start()` still owns
+   * that).
+   *
+   * Generalizes the LLP 0139 dispatch-miss seam
+   * (`ctx.commands.run`'s owner-lookup activation) so the manual-attach
+   * enable prompt has the same in-process activation path instead of a
+   * second mechanism. Returns which of `names` are live in this process
+   * afterward (already-active names count as no-ops, never `failed`); never
+   * throws.
+   *
+   * @ref LLP 0174#prompt [implements]: the manual-attach accept path's need
+   * for this same process's kernel to see a plugin a mid-invocation config
+   * write just enabled, resolved by generalizing LLP 0139's seam instead of
+   * adding a second activation mechanism
+   */
+  activatePluginClosure(names: string[]): Promise<{ activated: string[], failed: string[] }>
+  /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
    * commands are already in the command registry (LLP 0034 §verbs).
