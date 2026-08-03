@@ -27,7 +27,8 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
 import { isTty } from '../cli/stdio.js'
-import { resolveSingleSourceEnablement } from '../cli/walkthrough.js'
+import { defaultBackfillConsentPromptFactory, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
+import { resolveRetentionDays, runBackfillProvider } from './backfill.js'
 import {
   CLASS_RANK,
   createUsagePolicyResolver,
@@ -141,6 +142,12 @@ async function runClientLifecycle(action, argv, ctx) {
   // Attach dispatches to the per-adapter attach() hook and threads the
   // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
   // capability.
+  // Tracks which single client name (if any) this invocation just enabled
+  // through T9's accept path at THIS gate, so the loop below knows to offer
+  // T10's backfill consent for it once its attach() actually succeeds.
+  // `maybeInteractiveEnableAttach` already refuses `--client all`, so at
+  // most one name can ever be set here.
+  let capMissingActivatedName
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
     // The capability is absent exactly when no *enabled* plugin pulls the
     // gateway in, which for a catalog-known client means its adapter is not
@@ -189,6 +196,7 @@ async function runClientLifecycle(action, argv, ctx) {
       )
       return 1
     }
+    capMissingActivatedName = parsed.client
   }
   /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
@@ -236,6 +244,11 @@ async function runClientLifecycle(action, argv, ctx) {
   /** @type {Map<string, ClientDescriptor> | undefined} */
   let descriptorMap
   for (const name of clientNames) {
+    // Set true only when THIS name was activated via T9's accept path in
+    // THIS invocation (either gate below), never for a client whose adapter
+    // was already enabled coming into this command - that is what confines
+    // T10's backfill offer to the accept branch, per its own scope.
+    let activatedViaPrompt = name === capMissingActivatedName
     try {
       let client = gateway.getClient(name)
       if (!client) {
@@ -255,6 +268,7 @@ async function runClientLifecycle(action, argv, ctx) {
           // live registration, not a snapshot), so re-reading it here sees
           // the just-activated client with no extra capability lookup.
           client = gateway.getClient(name)
+          activatedViaPrompt = true
         }
         if (!client) {
           if (enablement.state !== 'unknown') {
@@ -425,6 +439,13 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun === true,
         json: parsed.json,
       })
+      // @ref LLP 0174#prompt [implements]: step 4, backfill consent, only for
+      // a client T9's accept branch just enabled in this same invocation -
+      // the registered-state attach path above (activatedViaPrompt false)
+      // is completely unchanged
+      if (activatedViaPrompt) {
+        await maybeBackfillAfterEnable({ name, ctx })
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
@@ -679,6 +700,81 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
     added_plugins: result.addedPlugins.join(','),
   })
   return { activated: true }
+}
+
+/**
+ * Step 4 of design LLP 0174 #prompt: after T9's accept path enables and
+ * attaches a client in this same invocation, offer to import its local
+ * history too, with the identical question the init finale asks (T5's
+ * exported `defaultBackfillConsentPromptFactory`), so accepting "enable"
+ * does not also silently skip "backfill". Only ever called for a client
+ * `activatedViaPrompt` marked true - a client whose adapter was already
+ * enabled coming into this command takes the unchanged registered-state
+ * attach path and never reaches this function at all.
+ *
+ * No question is asked at all when there is nothing to run: OpenClaw is
+ * excluded outright (its own enable question, LLP 0174 #openclaw, already
+ * disclosed and started the periodic sweep that imports its history within
+ * about 5 minutes - asking again here would contradict that disclosure
+ * rather than reuse it), and any other client with no provider registered
+ * in `ctx.backfills` has nothing this step could import. Declining, like
+ * the finale's own decline, leaves history unimported with no further
+ * action; a prompt failure (including a TUI cancel) degrades to the same
+ * "leave it unimported" outcome rather than turning an attach that already
+ * succeeded into a failed exit code. A run failure is reported to stderr
+ * and swallowed for the same reason.
+ *
+ * @ref LLP 0174#prompt [implements]: step 4, "backfill consent", reusing
+ * the finale's own question and `runBackfillProvider` path instead of a
+ * second bespoke one
+ * @ref LLP 0174#openclaw [constrained-by]: OpenClaw's step 4 is a
+ * disclosure, not a question, so it never reaches this prompt
+ * @param {{ name: string, ctx: CommandRunContext }} args
+ * @returns {Promise<void>}
+ */
+async function maybeBackfillAfterEnable({ name, ctx }) {
+  if (name === 'openclaw') return
+  const provider = ctx.backfills?.get?.(name)
+  if (!provider) return
+
+  const retentionDays = resolveRetentionDays({ flag: undefined, config: ctx.config })
+  const until = new Date().toISOString()
+  const ask = defaultBackfillConsentPromptFactory({
+    ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    stdout: ctx.stdout,
+    env: ctx.env,
+  })
+
+  let consent = false
+  try {
+    consent = await ask({ providers: [name], retentionDays })
+  } catch {
+    consent = false
+  }
+
+  getLogger('cmd-attach').info('client.attach.backfill_prompt', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'ok',
+    accepted: consent,
+  })
+  if (!consent) {
+    ctx.stdout.write(`backfill ${name}: skipped (declined)\n`)
+    return
+  }
+
+  try {
+    ctx.stdout.write(`backfill ${name}: importing local history…\n`)
+    const result = await runBackfillProvider({ ctx, provider: name, dryRun: false, retentionDays, until })
+    ctx.stdout.write(
+      `backfill ${name}: ${result.ok ? 'ok' : 'failed'} ` +
+      `(scanned ${result.scanned}, wrote ${result.rowsWritten}, skipped ${result.skipped})\n`
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`backfill ${name} failed: ${message}\n`)
+  }
 }
 
 /**
