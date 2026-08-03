@@ -39,7 +39,7 @@ import { pluginStateDir } from './plugin.js'
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
@@ -1340,21 +1340,27 @@ export async function runSkillsInstall(argv, ctx) {
 }
 
 /**
- * Build a map from client name to client descriptor by reading plugin
- * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
- * / `.claude/agents` in core.
+ * Build the full bundled+installed plugin catalog (`plugins`,
+ * `pluginMetadata`, `knownDatasets`, `clientDescriptors`,
+ * `pickerDescriptors`) by reading plugin manifests. This avoids
+ * hardcoding `.claude/skills` / `.codex/skills` / `.claude/agents` in
+ * core.
  *
  * Built from the same **bundled + installed** catalog that `boot.js` and
  * `status.js` use, so an installed (non-bundled) client adapter that can
  * attach-on-join is also resolvable here: its `hyp detach` / skill / agent
  * install must not silently miss the descriptor.
  *
+ * @ref LLP 0174#detection [implements]: generalized from a
+ * clientDescriptors-only map so the attach enablement-detection and
+ * prompt flow can also read `pickerDescriptors` (dependency resolution)
+ * and `pluginMetadata`/`knownDatasets` (layered config resolution) from
+ * one catalog build instead of two.
+ *
  * @param {CommandRunContext} ctx
- * @returns {Promise<Map<string, ClientDescriptor>>}
+ * @returns {Promise<PluginCatalog>}
  */
-export async function buildClientDescriptorMap(ctx) {
-  /** @type {Map<string, ClientDescriptor>} */
-  const map = new Map()
+export async function buildAttachPluginCatalog(ctx) {
   /** @type {LoadedManifest[]} */
   let bundledLoaded = []
   /** @type {LoadedManifest[]} */
@@ -1369,12 +1375,29 @@ export async function buildClientDescriptorMap(ctx) {
     installedLoaded = installed.loaded
   } catch { /* installed discovery failure is non-fatal */ }
   try {
-    const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
-    for (const [clientName, descriptor] of catalog.clientDescriptors) {
-      map.set(clientName, descriptor)
+    return buildPluginCatalog(bundledLoaded, installedLoaded)
+  } catch {
+    /* catalog build failure → empty catalog → warnings per contribution */
+    return {
+      plugins: new Map(),
+      pluginMetadata: new Map(),
+      knownDatasets: new Set(),
+      clientDescriptors: new Map(),
+      pickerDescriptors: new Map(),
     }
-  } catch { /* catalog build failure → empty map → warnings per contribution */ }
-  return map
+  }
+}
+
+/**
+ * Build a map from client name to client descriptor. Reimplemented as a
+ * thin projection of {@link buildAttachPluginCatalog}'s `clientDescriptors`
+ * so callers that only need client lookup do not carry the full catalog.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<Map<string, ClientDescriptor>>}
+ */
+export async function buildClientDescriptorMap(ctx) {
+  return (await buildAttachPluginCatalog(ctx)).clientDescriptors
 }
 
 /** @param {string[]} argv */
