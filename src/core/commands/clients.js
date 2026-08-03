@@ -45,7 +45,7 @@ import { pluginStateDir } from './plugin.js'
  */
 
 /**
- * `hyp attach [client] [--client <name>] [--yes]`
+ * `hyp attach [client] [--client <name>] [--dry-run] [--json]`
  *
  * Resolves the `hypaware.ai-gateway` capability, looks up the named
  * client adapter, and dispatches to the adapter's `attach()`. Each
