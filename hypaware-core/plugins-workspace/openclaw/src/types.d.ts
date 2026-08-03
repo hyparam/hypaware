@@ -1,3 +1,38 @@
+import type fsp from 'node:fs/promises'
+
+/**
+ * Construction options for `createOpenclawAttach`. Every field has a
+ * process-wide default so a production caller passes only what it has:
+ * `index.js` threads the kernel's `ctx.env`/`HOME`, while a test injects a
+ * temp `homeDir` (or an `OPENCLAW_HOME` in `env`) and reads the file back.
+ */
+export interface OpenclawAttachOptions {
+  /** `$HOME` the `.openclaw/openclaw.json` path is resolved against. */
+  homeDir?: string
+  /** Env the `$OPENCLAW_HOME` relocation is read from. */
+  env?: NodeJS.ProcessEnv
+  /** Injectable `node:fs/promises`, for the read and the atomic write. */
+  fs?: typeof fsp
+  /** Injectable logger; defaults to the `plugin.openclaw` logger. */
+  logger?: { info(event: string, fields: Record<string, unknown>): void, warn(event: string, fields: Record<string, unknown>): void }
+}
+
+/**
+ * What the effect reports back. Deliberately the `ActionOutcome` shape the
+ * generic client-action reconciler already understands (LLP 0169): a refusal
+ * is a returned `failed`, never a throw, so nothing is half-written and the
+ * caller decides what to do with it.
+ *
+ * The kernel types the *registered* `attach()` as `Promise<void>`, so
+ * `index.js`'s wrapper rethrows a `failed` outcome to make it visible at all;
+ * `perform()`'s catch turns it back into this same shape, which the
+ * reconciler records, warns about, and retries next pass without failing the
+ * join (LLP 0172 §1.3).
+ */
+export type OpenclawAttachOutcome =
+  | { status: 'done' }
+  | { status: 'failed', reason: string }
+
 /**
  * The `type: "session"` header line of an OpenClaw session JSONL file
  * (`~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`). Each field is

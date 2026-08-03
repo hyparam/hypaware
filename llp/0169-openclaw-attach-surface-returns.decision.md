@@ -9,9 +9,9 @@
 
 > With LLP 0168 writing real config entries, there is again a
 > reversible settings-file write for the LLP 0044/0045 loop to own.
-> Attach is refuse + create-only, the marker is the entry itself, core
-> revives the `json_path` probe format, and detach also rewrites the
-> per-agent model caches, which do not self-heal.
+> Attach refuses over a user's entry and rewrites its own, the marker is
+> the entry itself, core revives the `json_path` probe format, and detach
+> also rewrites the per-agent model caches, which do not self-heal.
 
 ## Context
 
@@ -25,11 +25,18 @@ indefinitely, live for routing.
 
 ## Decision
 
-- **Refuse + create-only.** `models.providers.anthropic` and `.openai`
-  are purely user-authored keys; if either exists, attach refuses with
-  an explanation instead of merging. Otherwise attach creates the two
-  LLP 0168 entries whole. There is no undo record anywhere: deletion
-  is the whole undo.
+- **Refuse over a user's entry, rewrite our own.**
+  `models.providers.anthropic` and `.openai` are user-authored keys; if
+  either holds a value HypAware did not write, attach refuses with an
+  explanation instead of merging. Otherwise attach writes the two
+  LLP 0168 entries whole, *including* over an entry a previous attach
+  wrote: `isCurrent()` re-performs attach on an ephemeral-port rebind
+  (LLP 0086) or an asset-set change (LLP 0107), so the write has to be
+  idempotent over its own output or every drift pass refuses forever.
+  Ownership is the self-identifying triple detach already tests
+  (`baseUrl`, marker header naming the key, empty `models`), shared with
+  it as one predicate. No user value is ever displaced, so there is no
+  undo record anywhere: deletion is the whole undo.
 - **The marker is the entry.** The `x-hypaware-upstream` header inside
   the created entry is the probeable marker. The manifest registers
   `attach_probe` in the `json_path` format, and core restores the

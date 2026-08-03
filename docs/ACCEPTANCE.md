@@ -173,21 +173,23 @@ installed from the package under test, and a working `~/.codex`.
 ## `openclaw_capture`
 
 **What it proves:** that a conversation held in **OpenClaw** reaches
-`ai_gateway_messages` on this machine, by both routes the OpenClaw adapter
-offers (live proxy capture through the steering plugin's shadow providers,
-and session-transcript backfill), that the rows name the real upstream
-rather than the `hypaware-*` shadow the turn resolved to, and that a turn
-the plugin refuses to steer passes through and is warned about instead of
-vanishing silently.
+`ai_gateway_messages` on this machine, by both lanes the OpenClaw adapter
+offers: live capture through the local gateway once attached (this adapter
+writes the `anthropic`/`openai` provider overrides into `openclaw.json`
+itself, no separate package to install or link), and a periodic sweep of
+local session transcripts that backfills every OpenClaw provider within the
+sweep interval. It proves the rows name the real upstream, that a turn both
+lanes observe settles to exactly one row rather than two, and that live
+capture is reversible via `hyp detach`.
 
 **What it does not prove:** anything about OpenClaw's CLI backends (a
 Claude Code or Codex turn run through OpenClaw belongs to the sibling
 adapters, [LLP 0147](../llp/0147-cli-backends-are-transcript-captured.decision.md)),
-anything about whether a deferred provider family *would* work if it were
-steered ([LLP 0146](../llp/0146-host-signed-providers-out-of-shadow-steering.decision.md)
-defers those untested, and step 5 only proves the deferral is reported),
 anything about fleet forwarding, or anything on a machine other than the
-one you ran it on.
+one you ran it on. There is no longer a deferred-provider-family ledger to
+exercise here: LLP 0171 retires that requirement (R13) outright, since the
+sweep gives every provider at least transcript-fidelity coverage, so this
+procedure has nothing to assert about a "deferred" turn.
 
 **Requires:**
 
@@ -195,118 +197,92 @@ one you ran it on.
   configured for **both** `anthropic` and `openai`. Both shapes are
   needed: the `openai` turn is the only observation that proves
   `x-hypaware-upstream` actually arrives (step 4).
-- **OpenClaw 2026.4.24 or newer** (`openclaw --version`). The
-  `before_model_resolve` hook this plugin steers from arrived in 2026.4.21,
-  and the `hooks.allowConversationAccess` gate below arrived with the
-  2026.4.23 plugin-config schema. On an older build the config key is
-  rejected outright (`Unrecognized key: "allowConversationAccess"`, and
-  OpenClaw rolls the file back to last-known-good), which leaves the plugin
-  loading and registering both providers while steering nothing. Check the
-  version first: every later step reads as a HypAware failure when the real
-  cause is the host.
+- **OpenClaw 2026.4.24 or newer** (`openclaw --version`), the same floor
+  the prior procedure required. Lane A no longer depends on any OpenClaw
+  hook API (no `before_model_resolve`, no `hooks.allowConversationAccess`):
+  attach only needs `models.providers` to be a schema-valid config key,
+  which [LLP 0167#verify-results](../llp/0167-openclaw-capture-via-config-provider-override.rfc.md#verify-results)
+  confirms is stable back to 2026.3.13. The floor is kept here, not
+  re-derived, so this run re-confirms items 1, 3, and 4 of that
+  verification (step 7) on a current binary: those facts were established
+  on 2026.3.13 and this procedure has never re-checked them since.
 - HypAware installed from the package under test, `@hypaware/openclaw`
-  enabled, daemon running.
-- The steering plugin installed into OpenClaw *from the tree under test*.
-  It is not on npm at the point this procedure must first run (R12 wants a
-  human run **before** the adapter ships), so link it from the checkout:
+  enabled, daemon running. Nothing to link from the checkout and nothing
+  else to install: attach writes the two provider overrides itself
+  (step 1).
+- **Steps 5 and 6 (the sweep and zero-duplicate steps) need PR #552
+  (fix/issue-543) merged** into the binary under test. Until it lands, the
+  LLP 0158 session-file reader still parses OpenClaw v3 records with the
+  old flat shape, so the sweep and the transcript backfill both project
+  zero rows from a real transcript, not because Lane B is miswired but
+  because the reader upstream of it has nothing to hand it. A red step 5
+  or 6 against an unmerged #552 is not evidence of a Lane B regression;
+  confirm the merge before filing anything.
+- **The `client_attach` status-row re-confirmation in steps 1 and 7 needs
+  PR #553 (fix/issue-544) merged.** Without it, a now-probed `openclaw`
+  (its `attach_probe` is real again as of this change set, for the first
+  time since [LLP 0143](../llp/0143-openclaw-registers-no-attach-probe.decision.md))
+  falls back to whatever pre-#553 `hyp status` did for a client that used
+  to be probe-less, which this procedure was not written to describe.
 
-  ```sh
-  openclaw plugins install --link ./openclaw-steering-plugin --force
-  openclaw plugins enable hypaware-openclaw-steering
-  ```
-
-- Two entries in `~/.openclaw/openclaw.json`. Both are mandatory and
-  neither is self-announcing when missing:
-
-  ```json5
-  {
-    env: { HYP_GATEWAY_ENDPOINT: "http://127.0.0.1:18521" },
-    plugins: {
-      entries: {
-        "hypaware-openclaw-steering": {
-          hooks: { allowConversationAccess: true },
-        },
-      },
-    },
-  }
-  ```
-
-  `before_model_resolve` is one of OpenClaw's raw conversation hooks, and
-  OpenClaw will not run it for a non-bundled plugin without
-  `allowConversationAccess`: the gate applies only to plugins loaded from
-  `plugins.load.paths` (which is exactly where `--link` puts this one), and
-  when it blocks, `api.on(...)` returns without throwing. The providers
-  still register, the plugin still reports as loaded, no turn is ever
-  steered, and the only trace is a `pluginDiagnostics` warning in the
-  gateway log. `HYP_GATEWAY_ENDPOINT` is read
-  once at plugin load; absent it the plugin assumes the fixed default port
-  ([LLP 0114](../llp/0114-gateway-default-listen-port-fixed.decision.md)),
-  which is wrong whenever the daemon fell back to an ephemeral bind. Put
-  the real value there (step 1 reads it) and restart the OpenClaw gateway
-  (`openclaw gateway restart`) so plugin code and config both reload.
-
-**Related:** [LLP 0157](../llp/0157-openclaw-full-capture.spec.md) (the
-requirements this procedure checks), [LLP 0161](../llp/0161-openclaw-full-capture.design.md)
-(the design), [LLP 0159](../llp/0159-openclaw-route-agreement-by-settlement.decision.md)
-(why step 6 passes on zero writes).
+**Related:** [LLP 0167](../llp/0167-openclaw-capture-via-config-provider-override.rfc.md)
+(the override design and the verify-results this procedure re-confirms),
+[LLP 0169](../llp/0169-openclaw-attach-surface-returns.decision.md) (attach/detach),
+[LLP 0170](../llp/0170-openclaw-scheduled-transcript-sweep.decision.md) (the sweep),
+[LLP 0171](../llp/0171-openclaw-two-lane-capture.spec.md) (the requirements this
+procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-capture.design.md#acceptance-onboarding)
+(section 8.1, this rewrite's own design), [LLP 0159](../llp/0159-openclaw-route-agreement-by-settlement.decision.md)
+(why step 5 passes on zero *new* writes from the sweep).
 
 ### Steps
 
-1. Confirm the shadow providers registered and the steering hook is live.
-   There is no settings marker to grep here: the adapter writes nothing to
-   `openclaw.json` and declares no `attach_probe` (R7), so `hyp attach
-   openclaw` has nothing to leave behind. The assertion moves to OpenClaw's
-   own runtime introspection:
+1. Attach OpenClaw and confirm the write, then restart the gateway. Before
+   restarting, re-confirm LLP 0167#verify-results item 4 (no pickup without
+   a restart): run one turn first, so there is something to contrast once
+   the restart step below actually takes effect.
+
+   ```sh
+   hyp query sql "select count(*) from ai_gateway_messages where conversation_source = 'openclaw'"
+   hyp attach --client openclaw
+   openclaw agent --agent <agent-id> --model anthropic/<a-claude-model> \
+     --message "pre-restart probe, should not route through the gateway"
+   hyp query sql "select count(*) from ai_gateway_messages where conversation_source = 'openclaw'"
+   ```
+
+   Pass condition for item 4: the two counts are equal. `hyp attach` wrote
+   the config, but a running OpenClaw gateway does not pick up
+   `models.providers` changes until restarted, so the probe turn above
+   still went out at OpenClaw's original `baseUrl`, not the gateway's.
+
+   Now run the restart instruction `hyp attach` printed:
+
+   ```sh
+   openclaw gateway restart
+   ```
+
+   Then confirm the write itself and the daemon's view of it:
 
    ```sh
    hyp status
-   jq -r '.sources[] | select(.plugin == "@hypaware/ai-gateway")
-          | "http://\(.details.host):\(.details.port)"' \
-     "${HYP_HOME:-$HOME/.hyp}/hypaware/run/status.json"
-   INSPECT=$(openclaw plugins inspect hypaware-openclaw-steering --runtime --json)
-   printf '%s\n' "$INSPECT"
-   for token in hypaware-anthropic hypaware-openai before_model_resolve; do
-     printf '%-24s %s\n' "$token" "$(printf '%s' "$INSPECT" | grep -c -- "$token")"
-   done
+   jq '.models.providers | {anthropic, openai}' "${OPENCLAW_HOME:-$HOME/.openclaw}/openclaw.json"
    ```
 
-   Pass condition: `hyp status` shows a running daemon and `openclaw` among
-   the clients; the printed gateway URL equals the `HYP_GATEWAY_ENDPOINT`
-   you configured; the report says the plugin is loaded (not errored, not
-   disabled); and all three tokens are present in it. `openclaw plugins
-   list` will not do instead: it is a cold registry read, while `inspect
-   --runtime` imports the module and reports the tools, hooks, services,
-   gateway methods and commands a live gateway actually registered.
+   Pass condition: `hyp status` shows a running daemon and
+   `openclaw  [configured, attached]` among the clients, with no
+   `client_attach_missing` diagnostic (this is the PR #553 re-confirmation:
+   a probe-less `openclaw` used to be stuck reading as `attach n/a`
+   regardless of what was on disk). The `jq` output shows
+   `anthropic.baseUrl` as the bare gateway origin and `openai.baseUrl` as
+   the same origin plus `/v1`, both carrying `headers["x-hypaware-upstream"]`
+   set to their own key, and **both carrying `models: []`**. That empty
+   array is LLP 0167#verify-results item 1's caveat, re-confirmed here: a
+   partial entry without it is schema-invalid and OpenClaw hard-refuses the
+   config outright. Separately confirm the empty array does not empty the
+   real catalog: `openclaw models list --all` must still list the full
+   built-in `anthropic` catalog.
 
-   Read the report, do not assert against a key path. OpenClaw documents
-   `--runtime --json` as the machine-readable form of the same report and
-   describes its *contents* (identity, load status, source, registered
-   capabilities, hooks, diagnostics) without publishing a key schema, so
-   the field names are its to change between releases and a `jq` selector
-   written here would fail as a missing key rather than as a missing
-   registration - a false negative pointing at the wrong system. Grepping
-   the three tokens is version-proof by comparison: two are provider ids
-   this repo owns (`openclaw-steering-plugin/src/index.js`) and the third
-   is OpenClaw's own documented hook name. None of them is a key name
-   OpenClaw invents for the shape of its report.
-   `openclaw plugins inspect hypaware-openclaw-steering --runtime` without
-   `--json` prints the same report for a human to read.
-
-   If your build has no `--runtime` flag (it is absent from some published
-   CLI references, and `inspect` alone is a cold manifest and registry
-   check that cannot prove registration), do not substitute the cold read.
-   Skip to step 3 and let step 4 carry this assertion instead: an `openai`
-   row there is only reachable through both shadow providers and a hook
-   that steered, so it proves at once what this step checks separately.
-
-   Expect `hyp status` to also carry a `client_attach_missing` warning for
-   `openclaw`, telling you to run `hyp attach openclaw`. It is inert here
-   and running it changes nothing: the generic attach probe has no marker
-   to find by design (R7). Note it and move on; it says nothing about
-   capture either way.
-
-2. Note the current row count and pin the window, so steps 4 and 6 measure
-   only new traffic:
+2. Note the current row count and pin the window, so steps 4, 5, and 6
+   measure only new traffic:
 
    ```sh
    SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -350,163 +326,167 @@ requirements this procedure checks), [LLP 0161](../llp/0161-openclaw-full-captur
 
    Pass condition: two rows, `provider` = `anthropic` and `openai`, both
    with `client_name` = `openclaw` and `last_seen` inside the last few
-   minutes, and the count grew against step 2. Neither row may say
-   `hypaware-anthropic` or `hypaware-openai`: a shadow id in this column is
-   an R6 failure, not a cosmetic one.
+   minutes, and the count grew against step 2. Unlike the old
+   steering-plugin design, there is no shadow provider id to leak here:
+   attach overrides the existing `anthropic`/`openai` entries' `baseUrl`
+   rather than registering new provider ids, so any `provider` value other
+   than `anthropic`/`openai` is unexpected on its own terms, not a specific
+   named failure mode to check for.
 
    The `openai` row is the load-bearing one, and it is this procedure's
    proof that `x-hypaware-upstream` arrives at the gateway. The projector
    reads the provider from that header and falls back to `anthropic` when
-   it is absent, so an `anthropic` row alone cannot tell "steered, header
-   arrived" from "header lost, fell back". Only a row that says `openai`
-   proves the header survived the trip from the hook to the projection.
+   it is absent, so an `anthropic` row alone cannot tell "routed through
+   the override, header arrived" from "header lost, fell back". Only a row
+   that says `openai` proves the header survived the trip from the
+   override entry's static `headers` value to the projection.
 
-5. Exercise the warning ledger against a deferred provider family. Pick one
-   whose declared `api` is `anthropic-messages` or `openai-completions`: the
-   `deferred` branch only runs for a candidate that *shares a shape* with a
-   canonical provider, so a Google-family id (also in `DEFERRED_SET`, but
-   declaring `google-generative-ai`) reports `no_preset` and would verify
-   the wrong branch. If a real deferred-family provider is configured on
-   this machine, use it. Otherwise declare one locally, which needs no
-   cloud credentials at all, because the deferral is decided before any
-   credential is resolved:
-
-   ```json5
-   {
-     models: {
-       mode: "merge",
-       providers: {
-         "anthropic-vertex": {
-           baseUrl: "http://127.0.0.1:1/deferred-probe",
-           apiKey: "not-a-real-key",
-           api: "anthropic-messages",
-           models: [{ id: "deferred-probe", name: "Deferred family probe" }],
-         },
-       },
-     },
-   }
-   ```
+5. Zero-duplicate assertion: the two turns from step 3 are exactly the case
+   both lanes observe (live capture already caught them at wire fidelity;
+   their session file entry is also sitting on disk waiting for a sweep).
+   Wait past one sweep interval (default 5 minutes) after the quiesce
+   window (default 3 minutes) has elapsed since step 3, then re-run the
+   same query:
 
    ```sh
-   openclaw gateway restart
-   openclaw agent --agent <agent-id> --model anthropic-vertex/deferred-probe \
-     --message "ping"
-   openclaw logs --limit 200 | grep hypaware-openclaw-steering
    hyp query sql "
      select count(*) from ai_gateway_messages
-     where conversation_source = 'openclaw' and provider = 'anthropic-vertex'
-       and message_created_at >= '$SINCE_SQL'"
-   ```
-
-   Pass condition: the log carries one `uncaptured provider turn` record
-   naming `provider: 'anthropic-vertex'` and `cause: 'deferred'`, and the
-   query returns `0`. The turn itself failing is expected and is part of
-   the pass: a deferred candidate must be left on its original provider,
-   unmodified, and must not be rerouted into the gateway (R5). What is
-   being checked is that the deferral is *reported* rather than
-   indistinguishable from a gap, which is what every coverage number
-   downstream rests on (R13). The ledger is rate limited per
-   provider+cause per OpenClaw gateway process, so if you repeat this step
-   inside five minutes, expect no second record: restart the gateway or
-   wait it out rather than concluding the warning stopped working.
-
-6. Confirm the backfill route agrees with live capture instead of
-   duplicating it. First check that the live rows settled onto the session
-   file's native identity, since that convergence is what the pass
-   condition below measures:
-
-   ```sh
-   hyp query sql "
-     select count(*) total,
-            sum(case when json_extract(attributes, '\$.openclaw.match_key') is null
-                     then 1 else 0 end) settled
-     from ai_gateway_messages
      where conversation_source = 'openclaw'
        and message_created_at >= '$SINCE_SQL'"
+   hyp query sql "
+     select part_id, count(*) n
+     from ai_gateway_messages
+     where conversation_source = 'openclaw'
+       and message_created_at >= '$SINCE_SQL'
+     group by part_id
+     having count(*) > 1"
    ```
 
-   `settled` should equal `total`: a settled row has spent and dropped its
-   match key. Record the ratio in the release notes even when it is 1.0,
-   because it is the live measurement of whether OpenClaw appends its
-   session JSONL in time for the flush, the open question
-   [LLP 0159](../llp/0159-openclaw-route-agreement-by-settlement.decision.md)
-   says would trigger revisiting the route-agreement design. Then import
-   the same window from disk:
+   Pass condition: the first count is unchanged from step 4's total (the
+   scheduled sweep found the same two turns already settled onto their
+   session file's native identity and wrote nothing new), and the second
+   query returns zero rows (no `part_id` in the window appears more than
+   once). This is R11 proven against the daemon's own automatic scheduler
+   rather than a manually-invoked `hyp backfill`, which is the whole point
+   of Lane B being *scheduled*, not just present.
+
+6. Sweep step: prove a turn Lane A never saw still lands, at transcript
+   fidelity, within one sweep interval. Detach first, so the turn below
+   has no live route to travel:
 
    ```sh
-   hyp backfill openclaw --since "$SINCE" --json
-   ```
-
-   Pass condition: `items_seen >= 1` with `rows_written + rows_skipped >= 1`
-   for `openclaw`. **`rows_written: 0` with `rows_skipped >= 1` is a pass,
-   not a failure.** Step 3 already captured these turns live, settlement
-   gave those rows the session file's own message ids, so the
-   materializer's `part_id` dedupe suppresses every duplicate. Zero writes
-   is the expected result and is exactly what proves the two routes agree
-   (R11). Re-running is likewise safe: identity comes from the session
-   file, so a second import never duplicates.
-
-7. Disable the steering plugin and confirm OpenClaw goes back to its own
-   providers, so capture is provably opt-in and reversible:
-
-   ```sh
-   openclaw plugins disable hypaware-openclaw-steering
+   hyp detach --client openclaw
    openclaw gateway restart
+   SINCE2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   SINCE2_SQL=${SINCE2%Z}
    openclaw agent --agent <agent-id> --model anthropic/<a-claude-model> \
      --message "In one sentence, what is a hash collision?"
    hyp query sql "
      select count(*) from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE_SQL'"
+       and message_created_at >= '$SINCE2_SQL'"
    ```
 
-   Pass condition: the count is unchanged from step 4's total. The turn
-   answered normally, and nothing about it reached the gateway.
+   Pass condition immediately after the turn: `0`. Detach means the turn
+   went straight to OpenClaw's own `anthropic` endpoint, not the gateway,
+   so nothing reaches Lane A; only the session file records it.
 
-   Then, if this is your working machine, re-enable so you do not silently
-   leave OpenClaw capture off (and remove the step 5 probe provider if you
-   added one):
+   This is also the LLP 0167#verify-results item 3 re-confirmation
+   ("no self-heal"): confirm the detach actually purged the derived
+   caches rather than leaving a stale entry for OpenClaw to keep routing
+   by, since a cache that self-healed would make this step's absence
+   claim accidentally true for the wrong reason:
 
    ```sh
-   openclaw plugins enable hypaware-openclaw-steering
+   grep -rl 'x-hypaware-upstream' "${OPENCLAW_HOME:-$HOME/.openclaw}"/agents/*/agent/models.json
+   ```
+
+   Pass condition: no matches. `hyp detach` best-effort purges every
+   `agents/<id>/agent/models.json`; a leftover match here means the purge
+   missed a cache, not that self-heal happened on its own.
+
+   Now wait past one sweep interval (default 5 minutes) after the quiesce
+   window (default 3 minutes) has elapsed since the turn above, then
+   re-run the same query:
+
+   ```sh
+   hyp query sql "
+     select count(*), max(message_created_at)
+     from ai_gateway_messages
+     where conversation_source = 'openclaw'
+       and message_created_at >= '$SINCE2_SQL'"
+   ```
+
+   Pass condition: `1`. The scheduled sweep picked the turn up once its
+   session file cleared the quiesce window, at transcript fidelity, with
+   no live route involved at all.
+
+   Re-attach so this machine is not left silently uncaptured on the live
+   lane, and restart once more:
+
+   ```sh
+   hyp attach --client openclaw
    openclaw gateway restart
    ```
 
+7. Re-confirm [LLP 0167#verify-results](../llp/0167-openclaw-capture-via-config-provider-override.rfc.md#verify-results)
+   items 1, 3, and 4 on this OpenClaw version, per **Requires**. This step
+   is a recap, not new commands: each item was already exercised above.
+
+   - **Item 1** ("merges, but only with `models: []`"): confirmed by step
+     1's `jq` check and `openclaw models list --all` still showing the
+     full catalog.
+   - **Item 3** ("no self-heal"): confirmed by step 6's cache-purge grep
+     returning no matches after `hyp detach`.
+   - **Item 4** ("no pickup without restart"): confirmed by step 1's
+     pre-restart probe turn producing no new row.
+
+   Record in the release notes that all three still hold on
+   `openclaw --version` as run, not only that this document says they do.
+
 ### If it fails
 
-- Step 1 finds both provider ids but a zero count for
-  `before_model_resolve`: the hook was registered and silently dropped, so
-  look for a `pluginDiagnostics` warning in `openclaw logs` naming this
-  plugin. The usual cause is an `allowConversationAccess` entry that is
-  missing or filed under a different key: it belongs to the plugin's
-  manifest `id`, `hypaware-openclaw-steering`, not the npm package name
-  (`@hypaware/openclaw-steering-plugin`) and not under `.config`. If the
-  entry is present and correct, check `openclaw --version` against the
-  floor in **Requires** before suspecting the plugin.
-- Step 4 finds no rows at all: check the printed gateway URL against
-  `HYP_GATEWAY_ENDPOINT` first (a daemon that fell back to an ephemeral
-  port leaves the plugin talking to whatever holds the default), then
-  `hyp status` for a stopped daemon, then step 1's inspect output for a
-  plugin that failed to load after the last `openclaw gateway restart`.
-- Step 4 finds `anthropic` rows but no `openai` row: either no OpenAI
-  credential is configured in OpenClaw (the candidate warns
-  `no_credential` and passes through, visible in `openclaw logs` exactly
-  as in step 5), or the `openai` upstream preset is not registered. Check
-  the log before touching code.
-- Step 4 finds a row whose `provider` is `hypaware-anthropic` or
-  `hypaware-openai`: the shadow id leaked into the projection. That is an
-  R6 violation and its own bug; do not work around it by rewriting the
-  value at query time.
-- Step 6 reports `rows_written >= 1`: the live rows did not settle, so
-  backfill imported the same turns a second time under native identity.
-  Re-run the settled/total query. A settled count below total means the
-  session JSONL was not on disk when the flush ran, which is the
-  real-time-append question above, not a backfill bug. Record the observed
-  ratio and file it against LLP 0159 rather than editing either route.
-- Step 5 logs `cause: 'no_preset'` instead of `'deferred'`: the provider
-  you used does not share an API shape with a canonical one, so it never
-  reached the deferred-family check. Pick an `anthropic-messages` or
-  `openai-completions` shaped provider and repeat.
+- Step 1's pre-restart probe finds a *new* row before you restart the
+  gateway: either the gateway was already running with a stale config that
+  happened to match, or your OpenClaw binary's config reloader has changed
+  to pick up `models.providers` hot (LLP 0167#verify-results item 4 notes
+  this as a real possibility on newer chokidar-based reloaders). Either way
+  this is a finding worth recording, not a HypAware bug: attach never
+  relies on hot reload, it only prints the restart instruction.
+- Step 1 finds `client_attach_missing` still firing after a successful
+  attach and restart: check `openclaw --version` against the floor in
+  **Requires** first, then confirm PR #553 is actually in the binary under
+  test (a probe-less-client `attach n/a` state is exactly what an unmerged
+  #553 reproduces here).
+- Step 4 finds no rows at all: check `hyp status` for a stopped daemon,
+  then re-run step 1's `jq` check for a config that did not actually write
+  (a concurrent edit under `openclaw.json` fails the write's mtime guard
+  rather than silently overwriting), then confirm
+  `openclaw gateway restart` actually ran after the last config change.
+- Step 4 finds `anthropic` rows but no `openai` row: no OpenAI credential
+  is configured in OpenClaw for that turn, or the `openai` upstream preset
+  failed to register at plugin activation. Check `hyp status` for a
+  `@hypaware/openclaw` activation error before touching code.
+- Step 5 or 6 finds nothing after waiting past the sweep interval: confirm
+  PR #552 is merged into the binary under test first (see **Requires**); a
+  sweep against the unmerged flat reader silently backfills zero rows from
+  a real OpenClaw v3 transcript, and this is the expected, documented
+  effect of that specific gap, not a new bug to chase.
+- Step 5's second query returns a `part_id` with `count(*) > 1`: the live
+  row did not settle onto the session file's native identity before the
+  sweep imported the same turn, so the two rows never converged. Check
+  whether the live row still carries `attributes.openclaw.match_key` (an
+  unsettled row does); a settlement that has not run yet points at
+  [LLP 0159](../llp/0159-openclaw-route-agreement-by-settlement.decision.md)'s
+  open question about append timing, not a dedupe bug.
+- Step 6 finds a row immediately after the detached turn (should be `0`):
+  `hyp detach` did not actually remove the override entries, most likely
+  because the entry on disk was not one this gateway wrote (a hand-edited
+  `baseUrl`, or `models` non-empty) and the detach backed it up instead of
+  deleting it, per
+  [LLP 0163](../llp/0163-attach-backs-up-a-malformed-block.decision.md)'s
+  backup-not-discard rule. Check the detach command's own warning output
+  before concluding the turn leaked.
 
 ---
 
