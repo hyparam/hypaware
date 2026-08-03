@@ -26,7 +26,7 @@ import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { loadClientDescriptors, probeAttachedClients } from '../daemon/status.js'
+import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -117,6 +117,72 @@ async function buildDefaultAttachProbe(env, homeDir) {
  */
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The default gateway-bind wait budget. A restarted daemon has to re-read the
+ * config, activate the newly-enabled adapter, and bind the gateway listener
+ * before it publishes the port, so the budget matches the attach wait rather
+ * than a single reconcile tick.
+ */
+export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
+
+/**
+ * Wait for the daemon's gateway to publish a bound port after a restart, so
+ * the enable-then-attach flow hands `client.attach()` a port something is
+ * actually listening on instead of racing the reboot.
+ *
+ * The sibling of {@link waitForClientAttach}, and deliberately the same shape:
+ * poll a cross-process disk fact on a bounded budget, swallow a throwing probe
+ * as "not yet" (a status snapshot written mid-poll is not a failure), and
+ * *return* on timeout rather than throwing. A timeout is not an error here for
+ * the same reason it is not one there: the caller has a better answer than an
+ * exception (attach's own endpoint-resolution ladder, which ends in the
+ * `hyp daemon install` / `hyp start` guidance the give-up message names).
+ *
+ * The probed fact is `resolveLiveGatewayEndpointFromStatus`, which is already
+ * liveness-gated on the daemon pid, so a stale `status.json` left by the
+ * pre-restart daemon can never satisfy the wait.
+ *
+ * @param {{
+ *   env: NodeJS.ProcessEnv,
+ *   homeDir?: string,
+ *   timeoutMs?: number,
+ *   intervalMs?: number,
+ *   probe?: () => string | undefined,
+ *   sleep?: (ms: number) => Promise<void>,
+ * }} opts
+ * @returns {Promise<{ bound: boolean, endpoint?: string }>}
+ * @ref LLP 0174#prompt [implements]: step 2's "wait for the gateway to bind" after the enable restart
+ */
+export async function waitForGatewayBind({
+  env,
+  timeoutMs = GATEWAY_BIND_WAIT_DEFAULT_MS,
+  intervalMs = 500,
+  probe,
+  sleep = defaultSleep,
+}) {
+  // `homeDir` is accepted (and ignored) for signature parity with the daemon
+  // lifecycle calls this wait follows: status.json hangs off the state root,
+  // which `readObservabilityEnv` already derives from HYP_HOME.
+  const stateRoot = readObservabilityEnv(env).stateDir
+  const bindProbe = probe ?? (() => resolveLiveGatewayEndpointFromStatus({ stateRoot }))
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    /** @type {string | undefined} */
+    let endpoint
+    try {
+      endpoint = bindProbe()
+    } catch {
+      endpoint = undefined
+    }
+    if (endpoint) return { bound: true, endpoint }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return { bound: false }
+    // Floor at 1ms so a non-positive intervalMs cannot busy-spin; cap at the
+    // remaining budget so we never oversleep it. Same guard as the attach wait.
+    await sleep(Math.max(1, Math.min(intervalMs, remaining)))
+  }
 }
 
 /**
