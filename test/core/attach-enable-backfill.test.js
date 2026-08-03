@@ -25,12 +25,16 @@ import { runAttach } from '../../src/core/commands/clients.js'
 // @ref LLP 0174#openclaw [tests]: the OpenClaw variant never reaches this
 // question (LLP 0174 #openclaw: its own enable disclosure already covers it)
 
-/** @returns {{ write(chunk: unknown): boolean, text(): string }} */
-function makeBuf() {
+/**
+ * @param {{ onWrite?: (chunk: unknown) => void }} [opts]
+ * @returns {{ write(chunk: unknown): boolean, text(): string }}
+ */
+function makeBuf(opts = {}) {
   let value = ''
   return {
     write(chunk) {
       value += String(chunk)
+      opts.onWrite?.(chunk)
       return true
     },
     text() {
@@ -43,31 +47,39 @@ function makeBuf() {
  * A stdin fixture that reports as a TTY and feeds each queued answer line in
  * turn, so both the enable prompt's `askYesNo` and (if reached) the backfill
  * consent's legacy `readline` prompt each consume one line without the test
- * blocking on real input. Each answer after the first is written on a
- * `setTimeout`, not pre-buffered and not merely deferred a tick: a
- * `readline.Interface` that closes after `question()` resolves discards
- * anything left unread in the SAME data chunk, so writing every line up
- * front (or on the same microtask/`setImmediate` turn as the first
- * `readline.Interface` closing) loses every answer after the first one two
- * different `readline.createInterface` calls (one per question, as
- * `askYesNo` and the legacy backfill prompt each open their own) ever read.
- * A short real-time delay lets the async work between the two prompts
- * (config write, plugin activation, asset materialization) actually finish
- * before the next answer lands.
+ * blocking on real input.
+ *
+ * Only the first answer is pre-buffered before anything reads (a `Readable`
+ * with no listener yet stays paused, so unwritten-but-buffered data is never
+ * lost). Every later answer is fed on demand via `feedNext()`, called from a
+ * stdout write hook below the instant that answer's OWN question has
+ * actually been printed - never on a fixed delay. A `readline.Interface`
+ * that closes after `question()` resolves discards anything left unread in
+ * the SAME data chunk (two different `readline.createInterface` calls, one
+ * per question, as `askYesNo` and the legacy backfill prompt each open their
+ * own), so writing an answer before its question's interface exists risks
+ * losing it to whichever interface happens to be listening at that moment.
+ * Tying the write to the question actually appearing removes that risk
+ * outright, regardless of how long the async work between the two prompts
+ * (config write, plugin activation, asset materialization) takes - a fixed
+ * delay would have to out-guess that work instead.
  *
  * @param {string[]} answers
+ * @returns {{ stream: PassThrough, feedNext(): void }}
  */
 function makeAnswerStdin(answers) {
   const stream = new PassThrough()
   Object.defineProperty(stream, 'isTTY', { value: true })
-  const [first, ...rest] = answers
+  const queue = [...answers]
+  const first = queue.shift()
   if (first !== undefined) stream.write(`${first}\n`)
-  let delay = 0
-  for (const answer of rest) {
-    delay += 100
-    setTimeout(() => stream.write(`${answer}\n`), delay)
+  return {
+    stream,
+    feedNext() {
+      const next = queue.shift()
+      if (next !== undefined) stream.write(`${next}\n`)
+    },
   }
-  return stream
 }
 
 /** @param {string} home */
@@ -140,7 +152,23 @@ function makeCtx({ home, answers, backfillProvider }) {
       return registered.map((name) => ({ name }))
     },
   }
-  const stdoutBuf = makeBuf()
+  const stdin = makeAnswerStdin(answers)
+  // The legacy backfill consent prompt (`defaultBackfillConsentPromptFactory`'s
+  // non-TUI path, reached here because `stdoutBuf` fails the TUI router's
+  // `isTty` check) writes its question straight to `ctx.stdout` via
+  // `readline`'s own `output.write(query)`, ending in the literal `[Y/n]: `
+  // suffix `backfillConsentTitle` never produces on its own. That text only
+  // ever appears once its `readline.Interface` is already listening (the
+  // interface is constructed, which attaches the listener, before
+  // `.question()` writes anything), so reacting to it here is safe: the
+  // second queued answer (if any) is fed the instant this fires, never
+  // before, and only once (the queue is exhausted after tests query at most
+  // two answers total).
+  const stdoutBuf = makeBuf({
+    onWrite: (chunk) => {
+      if (String(chunk).includes('[Y/n]: ')) stdin.feedNext()
+    },
+  })
   const stderrBuf = makeBuf()
   const backfills = {
     /** @param {string} name */
@@ -150,7 +178,7 @@ function makeCtx({ home, answers, backfillProvider }) {
   const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
     stdout: stdoutBuf,
     stderr: stderrBuf,
-    stdin: makeAnswerStdin(answers),
+    stdin: stdin.stream,
     cwd: home,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
     config: { version: 2 },
