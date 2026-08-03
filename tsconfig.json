@@ -16,7 +16,6 @@
     "bin",
     "hypaware-plugin-kernel-types.d.ts",
     "hypaware-core",
-    "openclaw-steering-plugin",
     "scripts",
     "src",
     "test"

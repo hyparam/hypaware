@@ -68,6 +68,32 @@ const CONVERSATION_SOURCE = 'openclaw'
 const COMPONENT = 'plugin.openclaw.backfill'
 
 /**
+ * Default Lane B sweep cadence (every 5 minutes), used when the plugin's
+ * `backfill.sweep_cron` config key is absent. Mirrors R7: "tunable in the
+ * plugin's `backfill` config section," default otherwise.
+ *
+ * @ref LLP 0172#lane-b-sweep [implements]: the sweep cadence default
+ */
+const DEFAULT_SWEEP_CRON = '*/5 * * * *'
+
+/**
+ * The quiesce window's default width, in milliseconds: the settlement flush
+ * debounce (`QUERY_FLUSH_DEBOUNCE_MS` in `src/core/cache/spool.js`, 2
+ * minutes) plus a one-minute margin. Not a re-guessed number: a sweep run
+ * that considered a file inside this window could race a session OpenClaw
+ * is still mid-write on, or a settlement pass still mid-flush against the
+ * same turn (LLP 0170: "quiesce window = settlement flush interval +
+ * margin"). `config.backfill.quiesce_ms` overrides it for an operator with a
+ * slower disk or a longer flush debounce.
+ *
+ * @ref LLP 0170#decision [implements]: the sweep skips session files whose
+ * mtime is inside the quiesce window, sized from the existing settlement
+ * flush debounce plus margin, not a new invented constant.
+ * @type {number}
+ */
+const DEFAULT_QUIESCE_MS = 180_000
+
+/**
  * The CLI-backend exclusion (R10), as an explicit ALLOWLIST rather than a
  * denylist: a record projects only when the backend that served its turn is
  * one of the two HypAware actually steers and captures live.
@@ -131,12 +157,19 @@ const SIBLING_ADAPTER_COVERAGE = [
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   config?: JsonObject,
  * }} opts
  * @returns {BackfillContribution}
  */
 export function createOpenclawBackfillProvider(opts) {
   const clientName = opts.clientName ?? DEFAULT_CLIENT_NAME
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
+  // The plugin's own validated `config` slice (LLP 0037), the same shape
+  // `config.js`'s `validateBackfillSection` checks. Absent in every call
+  // site that hasn't threaded it through yet (a pre-quiesce test harness, an
+  // older host), which is exactly "not configured" and resolves to the
+  // default below, not a throw.
+  const config = opts.config
   // Through the LLP 0158 reader's own location helper, never a private
   // `path.join(homeDir, '.openclaw')`: that second opinion silently ignored
   // `OPENCLAW_HOME`, so a relocated install backfilled zero sessions while the
@@ -154,6 +187,10 @@ export function createOpenclawBackfillProvider(opts) {
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local OpenClaw session transcripts into ai_gateway_messages',
+    // @ref LLP 0172#lane-b-sweep [implements]: opt-in Lane B scheduling
+    // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
+    // every 5 minutes when the config key is absent.
+    sweep: { cron: resolveSweepCron(config) },
     /**
      * @param {BackfillPlanContext} _ctx
      * @returns {Promise<BackfillPlan | undefined>}
@@ -166,7 +203,7 @@ export function createOpenclawBackfillProvider(opts) {
       }
     },
     async *run(ctx) {
-      yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver })
+      yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config })
     },
   }
 }
@@ -187,18 +224,28 @@ export function createOpenclawBackfillProvider(opts) {
  *   agentsDir: string,
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
+ *   config?: JsonObject,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
 async function* runOpenclawBackfill(args) {
-  const { ctx, agentsDir, clientName, resolver } = args
+  const { ctx, agentsDir, clientName, resolver, config } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
+  // Lane B's quiesce window (LLP 0172#45-the-quiesce-window): computed once
+  // per run, not once per file, so every file in the same run is judged
+  // against the same instant. This composes with, rather than replaces, the
+  // effectiveProviders/partitionByBackend forward/backward-fill logic below
+  // (R10): it is a pre-filter on which files this run even reads, entirely
+  // orthogonal to which records within a read file project.
+  const quiesceMs = resolveQuiesceMs(config)
+  const quiesceBeforeMs = Date.now() - quiesceMs
 
   log.info('openclaw.backfill.scan_started', {
     component: COMPONENT,
     operation: 'backfill.scan',
     agents_dir: agentsDir,
+    quiesce_ms: quiesceMs,
     ...(window.sinceMs !== undefined ? { since: new Date(window.sinceMs).toISOString() } : {}),
     ...(window.untilMs !== undefined ? { until: new Date(window.untilMs).toISOString() } : {}),
     status: 'ok',
@@ -210,7 +257,7 @@ async function* runOpenclawBackfill(args) {
   let messagesProjected = 0
   let recordsExcluded = 0
 
-  for (const { agentId, filePath } of await listSessionFiles(agentsDir)) {
+  for (const { agentId, filePath } of await listSessionFiles(agentsDir, quiesceBeforeMs)) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
 
@@ -616,21 +663,95 @@ function setNumber(target, key, source, aliases) {
  * result, never a throw: a machine with no OpenClaw install must scan to zero
  * sessions, not fail the whole `hyp backfill` run.
  *
+ * `quiesceBeforeMs` (LLP 0172#45-the-quiesce-window, LLP 0170#decision),
+ * when given, excludes any file whose `mtimeMs` is more recent than it: a
+ * session still inside the quiesce window is skipped for THIS run, not
+ * permanently, so a later run (once the file's mtime has aged past the
+ * cutoff, or the daemon sweep's next tick) picks it back up.
+ *
+ * The parameter is optional for exactly one caller: `plan()`, which counts and
+ * names what is there rather than importing it, so a window that hides files
+ * from an estimate would only misreport. Every `run()` applies the window,
+ * whichever surface drives it - `hyp backfill --client openclaw`, the
+ * onboarding finale, and the daemon sweep all enter through the same `run()`,
+ * and `runOpenclawBackfill` computes the cutoff once per run before this is
+ * ever called. There is no "non-sweep, unfiltered" import path.
+ *
  * @param {string} agentsDir
+ * @param {number} [quiesceBeforeMs] Exclusive upper bound on `mtimeMs`.
  * @returns {Promise<Array<{ agentId: string, filePath: string }>>}
  */
-async function listSessionFiles(agentsDir) {
+async function listSessionFiles(agentsDir, quiesceBeforeMs) {
   /** @type {Array<{ agentId: string, filePath: string }>} */
   const out = []
   for (const agentId of await readDirNames(agentsDir, 'dir')) {
     const sessionsDir = path.join(agentsDir, agentId, 'sessions')
     for (const name of await readDirNames(sessionsDir, 'file')) {
       if (!name.endsWith('.jsonl')) continue
-      out.push({ agentId, filePath: path.join(sessionsDir, name) })
+      const filePath = path.join(sessionsDir, name)
+      if (quiesceBeforeMs !== undefined && !(await isOutsideQuiesceWindow(filePath, quiesceBeforeMs))) continue
+      out.push({ agentId, filePath })
     }
   }
   out.sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0))
   return out
+}
+
+/**
+ * Whether `filePath`'s mtime is old enough to clear the quiesce window: its
+ * `mtimeMs` is at or before `quiesceBeforeMs`. A file that fails to stat
+ * (removed between the directory read and this call) is treated as still
+ * inside the window and excluded, the same fail-closed direction the
+ * usage-policy gate above already takes for an unresolvable input: a
+ * vanished file is not evidence a session has settled.
+ *
+ * @param {string} filePath
+ * @param {number} quiesceBeforeMs
+ * @returns {Promise<boolean>}
+ */
+async function isOutsideQuiesceWindow(filePath, quiesceBeforeMs) {
+  try {
+    const stat = await fs.stat(filePath)
+    return stat.mtimeMs <= quiesceBeforeMs
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `quiesceMs` resolved from the plugin's own validated `config` slice, or
+ * {@link DEFAULT_QUIESCE_MS} when `config.backfill.quiesce_ms` is absent
+ * (no `config` supplied, no `backfill` block, or no `quiesce_ms` key).
+ * `config.js`'s `validateBackfillSection` already rejects a non-integer or
+ * negative value before it ever reaches here, so this reads the field
+ * as-is rather than re-validating it.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {number}
+ */
+function resolveQuiesceMs(config) {
+  const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
+  const quiesceMs = backfill?.quiesce_ms
+  return typeof quiesceMs === 'number' ? quiesceMs : DEFAULT_QUIESCE_MS
+}
+
+/**
+ * The contribution's `sweep.cron`, resolved from the plugin's own validated
+ * `config` slice, or {@link DEFAULT_SWEEP_CRON} when `config.backfill.sweep_cron`
+ * is absent. Read through the same `isPlainObject` narrowing `resolveQuiesceMs`
+ * uses rather than an optional-property chain: the slice is a `JsonObject`, so
+ * every step below its root is a `JsonValue` to the checker and a bare
+ * `config?.backfill?.sweep_cron` does not typecheck. `config.js`'s
+ * `validateBackfillSection` already rejects a malformed cron string before it
+ * reaches here.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {string}
+ */
+function resolveSweepCron(config) {
+  const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
+  const sweepCron = backfill?.sweep_cron
+  return typeof sweepCron === 'string' ? sweepCron : DEFAULT_SWEEP_CRON
 }
 
 /**

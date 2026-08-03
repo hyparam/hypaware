@@ -12,44 +12,57 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
-import { writeOpenclawSessionFixture } from '../lib/openclaw_session_fixture.js'
+import { createBackfillSweepDriver } from '../../../src/core/daemon/backfill_sweep.js'
+import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
 
 /**
- * Hermetic smoke: OpenClaw session backfill → query → idempotent rerun.
- *
- * The sibling of `backfill_codex_fixture.js` and `backfill_claude_fixture.js`,
- * and the tier-2 gate whose absence let #543 ship green. A real OpenClaw v3
- * `type: "message"` record nests `role`/`content`/`provider`/`usage` under a
- * `message` key; the reader took them off the record line, found nothing,
- * excluded every record fail-closed, and reported a clean "0 rows" for every
- * real session. Nothing in the hermetic tier ever wrote an OpenClaw session
- * file, in any shape, so nothing caught it. The fixture here is written in
- * the verified two-level shape through
- * {@link writeOpenclawSessionFixture}, so "the reader read the wrong level"
- * and "the backfill wrote no rows" are the same failure again.
+ * LLP 0173 T12 smoke: OpenClaw Lane B sweep -> quiesce filter -> dedupe.
  *
  * Boots `@hypaware/ai-gateway` + `@hypaware/openclaw` against a tmp
- * HYP_HOME with a staged session file under the fake HOME's
- * `.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`, then drives
- * `hyp backfill openclaw` directly (no daemon: backfill is a local file
- * import) and asserts:
+ * `HYP_HOME` with two staged OpenClaw v3 session fixtures under the fake
+ * HOME's `.openclaw/agents/main/sessions/`, both in the nested-`message`-
+ * envelope shape PR #552's reader (`session_file.js`) projects, and drives
+ * `src/core/daemon/backfill_sweep.js`'s real `createBackfillSweepDriver`
+ * (the same driver `runTick()` wires into the daemon's sink-tick cadence,
+ * LLP 0172#lane-b-sweep) directly against this boot's own
+ * `kernel.backfills` / `kernel.backfillMaterializers` / `kernel.storage`,
+ * so a sweep-written row and a `hyp query`-read row land in and come from
+ * the exact same tables `hyp backfill openclaw` would use.
  *
- *  - **User-visible query result**: `ai_gateway_messages` holds NON-ZERO
- *    rows for the session, carrying the record lines' native `message_id`s,
- *    the envelope's content, and `provider = anthropic` /
- *    `conversation_source = openclaw` / `client_name = openclaw`. The
- *    non-zero assertion is the literal #543 regression.
- *  - **Internal telemetry**: a `backfill.provider_finish` span and a
- *    `backfill.finish` log carrying the run's `dev_run_id`, `provider`, and
- *    matching row counts, plus a `backfill.write` span for
- *    `ai_gateway_messages`.
- *  - **Idempotency**: a second `hyp backfill openclaw` (a fresh run id, so
- *    the materializer re-scans committed partitions) writes ZERO new rows
- *    and the query still returns exactly the same rows.
+ * Asserts the three properties LLP 0173's T12 brief names:
  *
- * @ref LLP 0161#backfill-provider [tests]: the provider's whole path, from
- * the session file's two-level records to native-identity rows that dedupe
- * against themselves on a rerun
+ *  - **(a) quiesce skip**: a session file whose mtime is inside the
+ *    default 180000ms quiesce window (LLP 0172#45-the-quiesce-window) is
+ *    absent from the sweep's first tick.
+ *  - **(b) quiesce capture**: a session file backdated past the window is
+ *    captured by that same tick, with native message identity.
+ *  - **(c) cross-write dedupe**: a second sweep tick (a fresh `now`, so the
+ *    ai-gateway materializer's dedupe gets its own `devRunId` and is
+ *    forced to re-scan committed partitions rather than reuse an
+ *    in-memory seen set) finds the first tick's part_ids already
+ *    committed and writes ZERO new rows. R11's identity-convergence
+ *    argument (`openclaw/src/backfill.js`'s own module doc) is exactly
+ *    that Lane A (live) and Lane B (backfill) land on the same
+ *    `part_id` for the same turn, so the dedupe this proves for two
+ *    sweep ticks is indistinguishable, at the write layer, from "a
+ *    live-lane row already wrote it before the sweep ran."
+ *
+ * The sweep's own `now` is chosen to land on OpenClaw's default
+ * `sweep.cron` (every 5th minute) so this exercises the real `cronMatches`
+ * due-check (`src/core/sinks/driver.js`, imported by the sweep driver),
+ * not a `force: true` bypass: this is the only automated coverage, of any
+ * tier, for the sweep driver's `cronMatches` wiring and the quiesce
+ * filter's composition with it before the human acceptance run
+ * (LLP 0173's "hermetic-smoke decision" section, LLP 0172 Section 9).
+ *
+ * @ref LLP 0172#45-the-quiesce-window [tests]: a file inside the default
+ * quiesce window is skipped, one backdated past it is captured
+ * @ref LLP 0172#lane-b-sweep [tests]: the sweep driver fires the due,
+ * sweep-bearing provider through the real `cronMatches` due-check
+ * @ref LLP 0161#backfill-provider [tests]: native message identity makes a
+ * sweep-then-rerun (standing in for Lane A already having written the same
+ * part_id) net zero new rows
+ *
  * @param {{ harness: any, expect: any }} args
  */
 export async function run({ harness, expect }) {
@@ -71,83 +84,26 @@ export async function run({ harness, expect }) {
     path.join(pluginsRoot, 'openclaw'),
   ]
 
-  // The OpenClaw provider captures its agents root from `ctx.env.HOME`
-  // (→ `<HOME>/.openclaw/agents`) at activation, so stage the session and
-  // point HOME at it BEFORE activating plugins.
+  // The OpenClaw provider captures its `agents/` root from `ctx.env.HOME`
+  // (-> `<HOME>/.openclaw/agents`, `session_file.js`'s
+  // `defaultOpenclawAgentsDir`) at activation, so stage both session
+  // fixtures and point HOME at the fake home BEFORE activating plugins.
   const fakeHome = path.join(harness.tmpDir, 'home')
-  // A real directory with no `.hypignore` above it, so the per-file usage
-  // policy gate resolves and records rather than being skipped for want of
-  // a usable cwd. The header states it, which is where the provider reads
-  // the session's one cwd from.
-  const workspaceDir = path.join(harness.tmpDir, 'workspace')
-  await fs.mkdir(workspaceDir, { recursive: true })
-
+  const agentsDir = path.join(fakeHome, '.openclaw', 'agents')
   const agentId = 'main'
-  const sessionId = `oc-${harness.devRunId}`
-  const userMessageId = `${sessionId}-msg-user-1`
-  const assistantMessageId = `${sessionId}-msg-asst-1`
-  const fixture = await writeOpenclawSessionFixture({
-    homeDir: fakeHome,
-    agentId,
-    sessionId,
-    header: { cwd: workspaceDir },
-    records: [
-      // A user prompt states no `provider` (only an assistant record does),
-      // so it rides the forward fill onto the assistant turn's backend.
-      {
-        id: userMessageId,
-        timestamp: '2026-05-20T10:00:01.000Z',
-        role: 'user',
-        content: 'list the files',
-      },
-      {
-        id: assistantMessageId,
-        parentId: userMessageId,
-        timestamp: '2026-05-20T10:00:02.000Z',
-        // Distinct from the record line's `timestamp` on purpose: this is
-        // the one field this fixture makes differ at the two levels, so the
-        // projected row's `message_created_at` (below) can pin the reader's
-        // envelope-first precedence instead of the two levels being
-        // byte-identical and unable to tell one read order from the other.
-        messageTimestamp: '2026-05-20T10:00:09.000Z',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'here they are' }],
-        model: 'claude-sonnet-4-5',
-        provider: 'anthropic',
-        api: 'anthropic-messages',
-        stopReason: 'end_turn',
-        usage: { input: 12, output: 7, cacheRead: 3, cacheWrite: 0 },
-      },
-    ],
-  })
 
-  // The fixture states the two-level shape; assert that before asserting
-  // anything downstream of it. A flow that quietly wrote a flat record
-  // would pass every assertion below against the pre-#543 reader too, which
-  // is exactly the hole this flow exists to close.
-  const staged = (await fs.readFile(fixture.filePath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
-  const assistantLine = staged.find((/** @type {any} */ r) => r.type === 'message' && r.id === assistantMessageId)
-  expect.that(
-    'fixture: the assistant record line states only id/message/parentId/timestamp/type',
-    assistantLine === undefined ? undefined : Object.keys(assistantLine).sort().join(','),
-    (v) => v === 'id,message,parentId,timestamp,type',
-  )
-  expect.that(
-    'fixture: role/content/provider/usage are nested under the message key',
-    assistantLine?.message,
-    (v) => v !== undefined && v.role === 'assistant' && v.provider === 'anthropic' && v.usage !== undefined,
-  )
-  // The record line and the nested envelope state DIFFERENT timestamps here
-  // on purpose, so the query assertion below can tell an envelope-first
-  // read from a line-first one instead of the two levels being
-  // byte-identical and unable to prove precedence either way.
-  expect.that(
-    'fixture: the assistant record states a different envelope timestamp than the line',
-    assistantLine,
-    (v) => v !== undefined
-      && v.timestamp === '2026-05-20T10:00:02.000Z'
-      && v.message?.timestamp === '2026-05-20T10:00:09.000Z',
-  )
+  const freshSessionId = `oc-fresh-${harness.devRunId}`
+  const oldSessionId = `oc-old-${harness.devRunId}`
+
+  // Inside the quiesce window: a freshly-written file, left untouched, sits
+  // well inside the default 180000ms window for the whole duration of this
+  // smoke.
+  await writeOpenclawSession({ agentsDir, agentId, sessionId: freshSessionId })
+  // Outside the quiesce window: back-dated 4 minutes, mirroring
+  // `test/plugins/openclaw-backfill.test.js`'s own default-quiesce-window
+  // precedent (`ageFile`, 4 * 60 * 1000 against the real 180000ms default).
+  const oldFilePath = await writeOpenclawSession({ agentsDir, agentId, sessionId: oldSessionId })
+  await ageFile(oldFilePath, 4 * 60 * 1000)
 
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
@@ -159,7 +115,7 @@ export async function run({ harness, expect }) {
         [Attr.COMPONENT]: 'kernel',
         [Attr.OPERATION]: 'boot',
         [Attr.SMOKE_NAME]: harness.smokeName,
-        [Attr.SMOKE_STEP]: 'backfill_activate',
+        [Attr.SMOKE_STEP]: 'sweep_activate',
         [Attr.DEV_RUN_ID]: harness.devRunId,
         status: 'ok',
       },
@@ -192,174 +148,181 @@ export async function run({ harness, expect }) {
     )
 
     const env = { ...process.env, HYP_HOME: harness.hypHome }
-    // An explicit open-ended `--since` keeps the import window deterministic
-    // regardless of when the smoke runs, matching the Claude/Codex flows.
-    const since = '2000-01-01T00:00:00.000Z'
 
-    // ----- 1. First backfill run -----
-    const bf1out = makeBuf()
-    const bf1err = makeBuf()
-    const bf1code = await dispatch(
-      ['backfill', 'openclaw', '--since', since, '--json'],
-      { stdout: bf1out, stderr: bf1err, kernel, registry, env }
-    )
-    expect.that('dispatch: backfill openclaw (run 1) exited 0', bf1code, (v) => v === 0)
-    expect.that('stderr: backfill run 1 had no errors', bf1err.text(), (v) => typeof v === 'string' && v.length === 0)
+    // The sweep driver itself, wired exactly the way the daemon wires it
+    // (`src/core/daemon/backfill_sweep.js`'s own doc), reusing this boot's
+    // `kernel.backfills` / `kernel.backfillMaterializers` / `kernel.storage`.
+    /** @type {Array<Promise<any>>} */
+    const pendingRuns = []
+    const sweep = createBackfillSweepDriver({
+      backfills: kernel.backfills,
+      backfillMaterializers: kernel.backfillMaterializers,
+      storage: kernel.storage,
+      query: kernel.query,
+      env,
+      config: { version: 2 },
+      // Test seam (`src/core/daemon/types.d.ts`'s `BackfillSweepRunner`):
+      // `tick()` fires this fire-and-forget internally and resolves once
+      // runs are STARTED, not finished, so the smoke needs its own handle
+      // on the underlying promise to await completion before it queries or
+      // reruns. Still the real `runBackfillProvider`, just with its
+      // promise captured on the way out.
+      runBackfill: (/** @type {any} */ args) => {
+        const p = runBackfillProvider(args)
+        pendingRuns.push(p)
+        return p
+      },
+    })
 
-    const run1 = JSON.parse(bf1out.text())
-    const openclaw1 = run1.providers.find((/** @type {any} */ p) => p.provider === 'openclaw')
-    // #543 reported `status: ok` with `rows_written: 0`. An exit code and a
-    // status token both said "done", so the row count is the only assertion
-    // that could have caught it.
+    /**
+     * Run one sweep tick and await every run it fired.
+     *
+     * @param {Date} now
+     */
+    async function tickAndAwait(now) {
+      pendingRuns.length = 0
+      const report = await sweep.tick({ now })
+      const results = await Promise.all(pendingRuns)
+      return { report, result: results[0] }
+    }
+
+    // A UTC-minute-0 instant is due against OpenClaw's default `sweep.cron`
+    // (every 5th minute): real `cronMatches`, not a `force: true` bypass.
+    const tick1Now = new Date(Date.UTC(2026, 0, 1, 0, 0, 0))
+    // A later due instant, still on the 5-minute grid, so the second tick
+    // gets its own `devRunId` and the ai-gateway materializer's
+    // `createBackfillDedupe` (memoized per `devRunId`) is forced to
+    // re-scan committed partitions rather than reuse tick 1's in-memory
+    // seen set.
+    const tick2Now = new Date(tick1Now.getTime() + 5 * 60 * 1000)
+
+    // ----- 1. First sweep tick: quiesce skip + quiesce capture ((a)/(b)) -----
+    const tick1 = await tickAndAwait(tick1Now)
     expect.that(
-      'backfill run 1: openclaw provider ok and wrote NON-ZERO rows (#543 reported ok with 0)',
-      openclaw1,
-      (v) => v !== undefined && v.status === 'ok' && v.rows_written >= 2,
+      'tick 1: the openclaw provider fired',
+      tick1.report.fired,
+      (v) => Array.isArray(v) && v.includes('openclaw'),
     )
     expect.that(
-      'backfill run 1: at least one session scanned',
-      openclaw1,
-      (v) => v !== undefined && v.sessions_seen >= 1,
+      'tick 1: exactly one session file scanned (only the one outside the quiesce window)',
+      tick1.result,
+      (v) => v !== undefined && v.ok === true && v.scanned === 1,
+    )
+    expect.that(
+      'tick 1: both rows of the outside-window session were written',
+      tick1.result,
+      (v) => v !== undefined && v.rowsWritten === 2,
     )
 
-    // ----- 2. Query the projected rows -----
-    const sql = `
-      select role, content_text, message_id, model, provider, conversation_source, client_name, message_created_at
+    /** @param {string} sessionId */
+    const sqlFor = (sessionId) => `
+      select role, content_text, message_id, part_id, provider, conversation_source, client_name
       from ai_gateway_messages
       where session_id = '${sessionId}'
       order by message_index, part_index
     `.trim().replace(/\s+/g, ' ')
 
-    const rows1 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 1' })
+    const freshRowsAfterTick1 = await queryRows({
+      dispatch, sql: sqlFor(freshSessionId), kernel, registry, env, expect, label: 'fresh session after tick 1',
+    })
     expect.that(
-      'query: NON-ZERO rows for the backfilled session (the literal #543 regression)',
-      rows1,
-      (v) => Array.isArray(v) && v.length > 0,
-    )
-    expect.that('query: exactly two rows for the backfilled session', rows1, (v) => Array.isArray(v) && v.length === 2)
-
-    const user = rows1.find((/** @type {any} */ r) => r.role === 'user')
-    const assistant = rows1.find((/** @type {any} */ r) => r.role === 'assistant')
-    expect.that(
-      'query: user row carries the record line id + the envelope content',
-      user,
-      (v) => v !== undefined && v.message_id === userMessageId && v.content_text === 'list the files',
-    )
-    expect.that(
-      'query: assistant row carries the record line id + the envelope content and model',
-      assistant,
-      (v) => v !== undefined
-        && v.message_id === assistantMessageId
-        && v.content_text === 'here they are'
-        && v.model === 'claude-sonnet-4-5',
-    )
-    // The fixture states 10:00:02 on the record line and 10:00:09 on the
-    // nested envelope (LLP 0158#decision). A line-first read, or the
-    // pre-#552 flat read of `openclawMessageEnvelope`, would land on
-    // 10:00:02; only an envelope-first read lands here.
-    expect.that(
-      'query: assistant row carries the envelope timestamp, not the record line one (envelope-first precedence)',
-      assistant,
-      (v) => v !== undefined && v.message_created_at === '2026-05-20T10:00:09.000Z',
-    )
-    // `provider` is the field the two-level read actually gates on: read off
-    // the line it is absent, the allowlist resolves the record to `unknown`,
-    // and the session is excluded fail-closed.
-    expect.that(
-      'query: every row tagged provider=anthropic, source=client_name=openclaw',
-      rows1,
-      (v) => Array.isArray(v) && v.every((r) => r.provider === 'anthropic' && r.conversation_source === 'openclaw' && r.client_name === 'openclaw'),
+      '(a) a file with mtime inside the quiesce window is skipped by the sweep run',
+      freshRowsAfterTick1,
+      (v) => Array.isArray(v) && v.length === 0,
     )
 
-    // ----- 3. Idempotent rerun: a fresh run id forces a committed-partition
-    //          re-scan, so every re-materialized row is recognized and skipped.
-    const bf2out = makeBuf()
-    const bf2err = makeBuf()
-    const bf2code = await dispatch(
-      ['backfill', 'openclaw', '--since', since, '--json'],
-      { stdout: bf2out, stderr: bf2err, kernel, registry, env: { ...env, DEV_RUN_ID: `${harness.devRunId}-rerun` } }
-    )
-    expect.that('dispatch: backfill openclaw (run 2) exited 0', bf2code, (v) => v === 0)
-    const run2 = JSON.parse(bf2out.text())
-    const openclaw2 = run2.providers.find((/** @type {any} */ p) => p.provider === 'openclaw')
-    // `rows_written === 0` alone does not pin that the session was actually
-    // re-read: a run that skipped the file entirely (e.g. an mtime-based
-    // quiesce-window skip, LLP 0173 T12) would report the same zero and pass
-    // just as well. Requiring `items_seen` and `rows_skipped` pins the
-    // mechanism the comment claims: the file WAS seen and its rows WERE
-    // recognized and skipped by part_id dedupe, not merely absent from the
-    // scan.
+    const oldRowsAfterTick1 = await queryRows({
+      dispatch, sql: sqlFor(oldSessionId), kernel, registry, env, expect, label: 'old session after tick 1',
+    })
     expect.that(
-      'backfill run 2: rerun re-read the session and skipped its rows via dedupe (all part_ids already present)',
-      openclaw2,
-      (v) => v !== undefined
-        && v.status === 'ok'
-        && v.rows_written === 0
-        && v.items_seen >= 1
-        && v.rows_skipped >= 1,
+      '(b) a file with mtime outside the quiesce window is captured by the sweep run',
+      oldRowsAfterTick1,
+      (v) => Array.isArray(v) && v.length === 2,
+    )
+    expect.that(
+      '(b) every captured row carries native identity and the right client/source',
+      oldRowsAfterTick1,
+      (v) => Array.isArray(v) && v.every(
+        (/** @type {any} */ r) => r.conversation_source === 'openclaw' && r.client_name === 'openclaw' &&
+          r.provider === 'anthropic' && typeof r.message_id === 'string' && r.message_id.length > 0,
+      ),
     )
 
-    const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
-    expect.that('query: rerun did not duplicate rows (still exactly two)', rows2, (v) => Array.isArray(v) && v.length === 2)
+    // ----- 2. Second sweep tick: cross-write dedupe (c) -----
+    const tick2 = await tickAndAwait(tick2Now)
+    expect.that(
+      'tick 2: the openclaw provider fired again',
+      tick2.report.fired,
+      (v) => Array.isArray(v) && v.includes('openclaw'),
+    )
+    expect.that(
+      '(c) rerunning the sweep after the part_id was already written nets zero new rows',
+      tick2.result,
+      (v) => v !== undefined && v.ok === true && v.rowsWritten === 0,
+    )
 
-    // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
+    const oldRowsAfterTick2 = await queryRows({
+      dispatch, sql: sqlFor(oldSessionId), kernel, registry, env, expect, label: 'old session after tick 2',
+    })
+    expect.that(
+      '(c) the rerun did not duplicate rows (still exactly two)',
+      oldRowsAfterTick2,
+      (v) => Array.isArray(v) && v.length === 2,
+    )
+    expect.that(
+      '(c) the rerun\'s row set is byte-identical to tick 1\'s (same part_ids, no drift)',
+      oldRowsAfterTick2,
+      (v) => Array.isArray(v) &&
+        JSON.stringify(v.map((/** @type {any} */ r) => r.part_id).sort()) ===
+          JSON.stringify(oldRowsAfterTick1.map((/** @type {any} */ r) => r.part_id).sort()),
+    )
+
+    const freshRowsAfterTick2 = await queryRows({
+      dispatch, sql: sqlFor(freshSessionId), kernel, registry, env, expect, label: 'fresh session after tick 2',
+    })
+    expect.that(
+      '(c) the still-quiesced session remains untouched by the rerun',
+      freshRowsAfterTick2,
+      (v) => Array.isArray(v) && v.length === 0,
+    )
+
+    // ----- 3. Internal telemetry: the sweep driver's own log lines, distinct
+    //          from `hyp backfill`'s CLI-path logs, prove this ran through
+    //          the daemon-facing driver (T9's cronMatches wiring), not just
+    //          the provider underneath it. -----
     await obs.shutdown()
-    const traces = await expect.traces()
-
-    const providerFinish = traces.filter(
-      (/** @type {any} */ t) =>
-        t.name === 'backfill.provider_finish' &&
-        t.attributes?.provider === 'openclaw' &&
-        t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
-    )
-    expect.that(
-      'traces: backfill.provider_finish for openclaw under the run dev_run_id with rows_written>=2',
-      providerFinish[0]?.attributes,
-      (v) => v !== undefined && v.status === 'ok' && Number(v.rows_written) >= 2,
-    )
-
-    const writeSpans = traces.filter(
-      (/** @type {any} */ t) =>
-        t.name === 'backfill.write' &&
-        t.attributes?.[Attr.DATASET] === 'ai_gateway_messages' &&
-        t.attributes?.provider === 'openclaw' &&
-        t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
-    )
-    expect.that(
-      'traces: backfill.write span for ai_gateway_messages with row_count>=2',
-      writeSpans[0]?.attributes,
-      (v) => v !== undefined && Number(v.row_count) >= 2,
-    )
-
     const logs = await expect.logs()
-    const finishLogs = logs.filter(
-      (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
+
+    const dueLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'backfill.sweep_due' && l.attributes?.provider === 'openclaw',
     )
     expect.that(
-      'logs: backfill.finish carries the run dev_run_id and total_rows_written>=2',
-      finishLogs[0]?.attributes,
-      (v) => v !== undefined && Number(v.total_rows_written) >= 2,
+      'logs: backfill.sweep_due fired once per due tick (twice total)',
+      dueLogs,
+      (v) => Array.isArray(v) && v.length === 2,
     )
 
-    // The provider's own projection log: a record read at the wrong level is
-    // excluded fail-closed before projection and never reaches this log at
-    // all, so reaching it for both messages is the claim. The log's
-    // `identity_source` is a hardcoded literal at the single emission site
-    // and so proves nothing; the native id it resolved is what varies, and
-    // that is `session_id` here (and the record lines' `message_id`s on the
-    // rows above). Pin the run too: the rerun emits a second record under
-    // `<dev_run_id>-rerun`, so matching on the body alone would let run 2
-    // satisfy a run-1 claim on emission order.
-    const projected = logs.filter(
-      (/** @type {any} */ l) =>
-        l.body === 'openclaw.backfill.session_projected' &&
-        l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId &&
-        l.attributes?.session_id === sessionId,
+    const finishedLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'openclaw',
     )
     expect.that(
-      'logs: openclaw.backfill.session_projected for the session under the run dev_run_id with both messages',
-      projected[0]?.attributes,
-      (v) => v !== undefined && Number(v.message_count) >= 2,
+      'logs: backfill.sweep_finished (tick 1) reports rows_written=2',
+      finishedLogs.find((/** @type {any} */ l) => l.attributes?.rows_written === 2),
+      (v) => v !== undefined,
+    )
+    expect.that(
+      'logs: backfill.sweep_finished (tick 2) reports rows_written=0',
+      finishedLogs.find((/** @type {any} */ l) => l.attributes?.rows_written === 0),
+      (v) => v !== undefined,
+    )
+
+    const scanCompleteLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'openclaw.backfill.scan_complete',
+    )
+    expect.that(
+      'logs: openclaw.backfill.scan_complete (tick 1) saw one file, past the quiesce filter',
+      scanCompleteLogs[0],
+      (v) => v !== undefined && v.attributes?.files_seen === 1 && v.attributes?.sessions_projected === 1,
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -368,29 +331,110 @@ export async function run({ harness, expect }) {
 }
 
 /**
- * Run a `query sql ... --format json` dispatch and return the parsed
- * rows, asserting a clean exit and parseable output.
+ * Write one minimal OpenClaw v3 session JSONL under
+ * `<agentsDir>/<agentId>/sessions/<sessionId>.jsonl`: a `type: "session"`
+ * header line and one user/assistant turn in the nested-`message`-envelope
+ * shape PR #552's reader (`session_file.js`'s `parseOpenclawSessionMessage`
+ * / `openclawMessageEnvelope`) actually projects - `role`/`content` and,
+ * on the assistant turn, `model`/`provider`/`api`/`stopReason`/`usage`
+ * nested under the record's own `message` object, never flat on the
+ * record line (a flat fixture would test the reader's now-fixed #543 bug,
+ * not its fix). No `cwd` on the header: an absent `cwd` reads as "not
+ * usable" (`openclawSessionCwd`) and the session is simply not
+ * usage-policy gated, which keeps this fixture independent of the host's
+ * real filesystem beyond the temp tree it writes.
+ *
+ * @param {{ agentsDir: string, agentId: string, sessionId: string }} args
+ * @returns {Promise<string>}
+ */
+async function writeOpenclawSession(args) {
+  const { agentsDir, agentId, sessionId } = args
+  const dir = path.join(agentsDir, agentId, 'sessions')
+  await fs.mkdir(dir, { recursive: true })
+  const filePath = path.join(dir, `${sessionId}.jsonl`)
+  const startedAt = new Date().toISOString()
+  const lines = [
+    JSON.stringify({ type: 'session', version: 3, id: sessionId, timestamp: startedAt }),
+    JSON.stringify(messageLine({
+      id: `${sessionId}-user`,
+      timestamp: startedAt,
+      role: 'user',
+      content: [{ type: 'text', text: 'list the files' }],
+    })),
+    JSON.stringify(messageLine({
+      id: `${sessionId}-asst`,
+      timestamp: startedAt,
+      parentId: `${sessionId}-user`,
+      role: 'assistant',
+      content: [{ type: 'text', text: 'here they are' }],
+      model: 'claude-sonnet-4-5',
+      provider: 'anthropic',
+      api: 'anthropic-messages',
+      stopReason: 'end_turn',
+      usage: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2 },
+    })),
+  ]
+  await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  return filePath
+}
+
+/**
+ * One `type: "message"` line in the shape OpenClaw actually appends: `id`,
+ * `parentId`, and `timestamp` on the record line, and every message field
+ * nested under `message`. Mirrors `test/plugins/openclaw-backfill.test.js`'s
+ * own `messageLine` helper, verified there against a live install (record
+ * keys `['id', 'message', 'parentId', 'timestamp', 'type']`).
+ *
+ * @param {Record<string, unknown>} fields
+ * @returns {Record<string, unknown>}
+ */
+function messageLine(fields) {
+  const { id, timestamp, parentId, ...message } = fields
+  return {
+    type: 'message',
+    ...(id !== undefined ? { id } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    parentId: parentId ?? null,
+    message: { ...message, ...(timestamp !== undefined ? { timestamp } : {}) },
+  }
+}
+
+/**
+ * Back-date `filePath`'s mtime by `msAgo` milliseconds, so a quiesce-window
+ * scenario can control file recency without waiting on the wall clock.
+ *
+ * @param {string} filePath
+ * @param {number} msAgo
+ */
+async function ageFile(filePath, msAgo) {
+  const past = new Date(Date.now() - msAgo)
+  await fs.utimes(filePath, past, past)
+}
+
+/**
+ * Run a `query sql ... --format json` dispatch and return the parsed rows,
+ * asserting a clean exit and parseable output.
  *
  * @param {{ dispatch: any, sql: string, kernel: any, registry: any, env: any, expect: any, label: string }} args
  * @returns {Promise<any[]>}
  */
 async function queryRows(args) {
-  const { dispatch, sql, kernel, registry, env, expect, label } = args
+  const { dispatch: doDispatch, sql, kernel, registry, env, expect, label } = args
   const out = makeBuf()
   const err = makeBuf()
-  const code = await dispatch(
+  const code = await doDispatch(
     ['query', 'sql', sql, '--refresh', 'always', '--format', 'json'],
     { stdout: out, stderr: err, kernel, registry, env }
   )
-  expect.that(`dispatch: query (${label}) exited 0`, code, (v) => v === 0)
-  expect.that(`stderr: query (${label}) had no errors`, err.text(), (v) => typeof v === 'string' && v.length === 0)
+  expect.that(`dispatch: query (${label}) exited 0`, code, (/** @type {number} */ v) => v === 0)
+  expect.that(`stderr: query (${label}) had no errors`, err.text(), (/** @type {string} */ v) => typeof v === 'string' && v.length === 0)
   try {
     return JSON.parse(out.text())
   } catch (e) {
     expect.that(
       `stdout: query (${label}) was valid JSON (${e instanceof Error ? e.message : String(e)})`,
       false,
-      (v) => v === true,
+      (/** @type {boolean} */ v) => v === true,
     )
     return []
   }

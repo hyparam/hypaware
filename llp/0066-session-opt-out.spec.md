@@ -189,6 +189,44 @@ being recorded."
 This is observability of an ephemeral control, not durability. Persisting the
 set remains [non-goal 2](#non-goals).
 
+## What `ignored: true` proves, and what it does not {#receipt-is-membership}
+
+**Settled, 2026-07-31 ([issue #460](https://github.com/hyparam/hypaware/issues/460)):
+`ignored: true` means "this token is in the drop set", and nothing more.** It is
+a receipt for a write, not a verified drop.
+
+The route holds opaque tokens ([enforcement](#enforcement)) and the drop happens
+elsewhere, in the client adapter, keyed on the `session_id` that adapter resolves
+and stamps (R5). Nothing in between compares the two. So a `POST` of a Codex
+**thread** id, of a finished session's id, or of a typo is added to the set and
+answered `ignored: true` exactly like a live container id, and the caller learns
+only that the gateway is now holding the string it sent.
+
+**A read-back does not close this.** `GET` performs the same `ignoredSessions.has(raw)`
+over the same set, so calling it after the `POST` confirms the write a second
+time; it is tautological about the grain. Neither verb has ever seen an exchange,
+which is what a drop would have to be checked against.
+
+**Closing it properly would be a different route.** The gateway would have to
+resolve client grain (which key covers which threads) to say whether the id it
+recorded is one live traffic carries, and that is precisely the provider
+awareness [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md) keeps out of
+the gateway ([enforcement](#enforcement)). Rejected on that ground, not on cost.
+
+**So the contract is the narrow one, and the caller owns the key.** Every surface
+that names a session to the route MUST resolve the container first (R13) and
+MUST NOT present the reply as evidence that it did (R14). The two rules are the
+same rule from both ends: the resolution is where correctness lives, and the
+receipt must not read as though it re-checked it. The durable shape is one
+resolver with one caller ([issue #435](https://github.com/hyparam/hypaware/issues/435)),
+at which point the verification question narrows to that resolver; until it
+lands, each surface that resolves independently carries the same obligation.
+
+This is the same class of claim as [readable](#readable) and R12: where a control
+cannot prove something, it says so instead of implying it. There the unprovable
+part was *which* session was answered about; here it is *whether the answer is
+about live traffic at all.*
+
 ## Non-goals {#non-goals}
 
 1. **Per-thread (`conversation_id`) granularity.** Deferred. `conversation_id`
@@ -306,6 +344,26 @@ set remains [non-goal 2](#non-goals).
   - Because the acted-on key is coarser than the thread the user is in, the
     surface MUST disclose that grain alongside the answer (R12): "ignored" means
     the whole session, sibling threads included.
+- **R14.** No surface may present a control-route reply as evidence that the id
+  it sent is the one live traffic carries. `ignored: true` is **set membership**
+  (see [receipt-is-membership](#receipt-is-membership)), so a confirmed opt-out
+  MUST be reported as the write it is - "this id is in the drop set" - and MUST
+  NOT be phrased as a drop the gateway verified ("the gateway will drop this
+  session"). The surface MUST also name where the guarantee actually comes from:
+  the caller resolving the container (R13) before it calls.
+  - A **read-back does not upgrade the claim.** `GET` is the same `Set.has` over
+    the same set, so a surface MUST NOT present a `POST`-then-`GET` sequence as
+    verification of anything beyond the write.
+  - Machine-readable receipts are covered too, since that is what the skills
+    parse: a bare `status: "ok"` reads as "done", so the write verbs' `--json`
+    states the guarantee (`guarantee: "set_membership"`) alongside it.
+  - Any surface that calls the route directly rather than through the CLI MUST
+    apply the same response validation the CLI does
+    ([LLP 0067 §cli-response-check](./0067-session-opt-out.design.md#cli-response-check)),
+    including the byte-exact `session_id` echo. That check does not prove the
+    drop (nothing here does), but without it a reply about a *different* session
+    is read as this session's success, which is a second overclaim stacked on
+    the first.
 
 ## `@ref` annotations code will carry {#refs}
 
@@ -316,3 +374,6 @@ set remains [non-goal 2](#non-goals).
   `@ref LLP 0050` on the same drop site.
 - The read route and the fail-closed CLI reader: `@ref LLP 0066#readable
   [implements]`.
+- The confirmation the write verbs print, and the route JSDoc stating what its
+  reply is a reply about: `@ref LLP 0066#receipt-is-membership` (`[implements]`
+  on the CLI receipt, `[constrained-by]` on the route that cannot say more).

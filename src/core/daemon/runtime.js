@@ -19,6 +19,7 @@ import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
+import { createBackfillSweepDriver } from './backfill_sweep.js'
 import {
   clearPidFile,
   pidFilePath,
@@ -442,6 +443,19 @@ export async function runDaemon(opts = {}) {
     config: boot.config ?? undefined,
   })
 
+  // ----- Backfill sweep driver -----
+  // Rides the sink tick below rather than owning a timer of its own: a
+  // contribution's coarsest useful schedule still only needs a due-check once
+  // a minute, which is exactly this loop's cadence.
+  const sweepDriver = createBackfillSweepDriver({
+    backfills: boot.runtime.backfills,
+    backfillMaterializers: boot.runtime.backfillMaterializers,
+    env,
+    storage: boot.runtime.storage,
+    query: boot.runtime.query,
+    config: boot.config ?? undefined,
+  })
+
   status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
   persist()
   // Derive the boot health event from the SAME aggregate written to
@@ -599,6 +613,13 @@ export async function runDaemon(opts = {}) {
       },
       async () => {
         const report = await driver.tick({ now, source: 'daemon' })
+        // The scheduled backfill sweep (LLP 0170) rides this same tick. The
+        // await covers only the cron due-check and the fire: each due
+        // provider's run is started unblocked inside `tick`, so a slow
+        // transcript scan never stalls the sink snapshots, the source-detail
+        // refresh, or `persist()` below.
+        // @ref LLP 0172#lane-b-sweep [implements]: one sibling call on the existing 60-second loop, not a second timer
+        await sweepDriver.tick({ now })
         for (const sinkReport of report.sinks) {
           const snap = sinkSnapshots.get(sinkReport.instance) ?? {
             instance: sinkReport.instance,

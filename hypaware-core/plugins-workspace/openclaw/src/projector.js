@@ -28,17 +28,17 @@ const CLIENT_NAME = 'openclaw'
 const CLIENT_HEADER = 'x-hypaware-client'
 
 /**
- * Written by the `openclaw-steering-plugin` (the OpenClaw-side npm
- * package, not this adapter) on any request it has decided to steer
- * through a shadow provider. Names the real upstream provider
- * (`'anthropic'` or `'openai'`), never a `hypaware-*` shadow id, so the
- * gateway's upstream presets know which static `base_url` to forward to
- * regardless of which path the shadow provider's own client happened to
- * hit. The header has two independent readers here, the presets'
- * `match()` and this projector's `project()`, and both tolerate its
- * absence.
+ * Written into `openclaw.json`'s `models.providers` entry by this adapter's
+ * own `attach()` (the config-override write, not a shadow-provider steer),
+ * as a static `headers` field on the provider OpenClaw itself calls with no
+ * further plugin involved. Names the real upstream provider (`'anthropic'`
+ * or `'openai'`), never a `hypaware-*` shadow id, so the gateway's upstream
+ * presets know which static `base_url` to forward to regardless of which
+ * path the request happened to hit. The header has two independent readers
+ * here, the presets' `match()` and this projector's `project()`, and both
+ * tolerate its absence.
  *
- * @ref LLP 0161#upstream-header [implements]: the one wire contract the steering plugin and this adapter agree on byte-for-byte
+ * @ref LLP 0167#override-entries [implements]: the one wire contract attach's config write and this adapter agree on byte-for-byte
  */
 const UPSTREAM_HEADER = 'x-hypaware-upstream'
 

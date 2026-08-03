@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/openclaw",
   "version": "1.0.0",
-  "description": "OpenClaw client adapter for HypAware. Projects the Anthropic Messages and OpenAI Chat Completions exchanges the local AI gateway captures into ai_gateway_messages, settles them onto the session file's native identity, and backfills local OpenClaw session transcripts. Routing itself is owned by the @hypaware/openclaw-steering-plugin npm package installed on the OpenClaw side; this adapter writes nothing to openclaw.json.",
+  "description": "OpenClaw client adapter for HypAware. Captures OpenClaw conversations in two tiers: live capture through the local gateway once attached (this adapter writes the anthropic/openai provider overrides into openclaw.json's models.providers itself, no separate package), plus a periodic sweep of local OpenClaw session transcripts that backfills every provider within the sweep interval. Projects the Anthropic Messages and OpenAI Chat Completions exchanges the gateway captures into ai_gateway_messages, and settles them onto the session file's native identity.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -21,13 +21,21 @@
     "client": {
       "name": "openclaw",
       "skill_dir": ".openclaw/skills",
+      "attach_probe": {
+        "format": "json_path",
+        "settings_file": ".openclaw/openclaw.json",
+        "container_path": "models.providers",
+        "provider_keys": ["anthropic", "openai"],
+        "marker_header": "x-hypaware-upstream",
+        "cache_glob": "agents/*/agent/models.json"
+      },
       "required_upstreams": ["anthropic", "openai"]
     },
     "picker": [
       {
         "name": "openclaw",
         "label": "capture OpenClaw conversations",
-        "summary": "Records OpenClaw conversations captured through the local gateway, and backfills local session transcripts. Routing is set up on the OpenClaw side by installing the @hypaware/openclaw-steering-plugin package.",
+        "summary": "Captures OpenClaw conversations in two tiers: live capture through the local gateway once attached, plus a periodic sweep of local session transcripts that backfills every provider within the sweep interval. No separate package to install.",
         "detect": { "settings_file": ".openclaw/openclaw.json" },
         "compose": {
           "plugin": { "name": "@hypaware/openclaw" },
