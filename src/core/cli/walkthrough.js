@@ -185,7 +185,9 @@ export function defaultPromptFactory(opts) {
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncBackfillConsentPrompt}
  */
-function defaultBackfillConsentPromptFactory(opts) {
+// @ref LLP 0174#prompt [implements]: exported so the interactive attach
+// flow can ask the identical backfill question instead of re-implementing it
+export function defaultBackfillConsentPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiBackfillConsentPromptFactory(opts)
   return legacyBackfillConsentPromptFactory(opts)
 }
@@ -241,7 +243,7 @@ function legacyBackfillConsentPromptFactory(opts) {
  * @param {number} retentionDays
  * @returns {string}
  */
-function backfillConsentTitle(providers, retentionDays) {
+export function backfillConsentTitle(providers, retentionDays) {
   return `Import local ${providers.join(', ')} history now (last ${retentionDays} days)?`
 }
 
