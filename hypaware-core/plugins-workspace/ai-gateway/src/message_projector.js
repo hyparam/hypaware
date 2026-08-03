@@ -191,10 +191,22 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
       if (!projection) {
+        // Carry enough to identify WHAT went unrecorded: an operator
+        // reading only this line must be able to tell a foreign wire
+        // dialect (a path no projector decodes) from a failing client.
+        // Observed cost of the leaner event: OpenClaw's /v1/responses
+        // traffic proxied for hours reading as "client never attached"
+        // (LLP 0176).
+        // @ref LLP 0176#fix-direction [implements]: fix 3, an undecoded
+        //   proxied exchange names its upstream, path, and status
         log?.warn?.('aigw.message_projection_skipped', {
           exchange_id: stringValue(input.exchange_id) ?? '',
           upstream: stringValue(input.upstream) ?? '',
           reason: 'no_projector_match',
+          path: stringValue(input.path) ?? '',
+          method: stringValue(input.method) ?? '',
+          status_code: typeof input.status_code === 'number' ? input.status_code : null,
+          is_sse: input.is_sse === true,
         })
         return []
       }
