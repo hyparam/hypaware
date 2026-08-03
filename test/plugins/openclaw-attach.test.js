@@ -99,7 +99,9 @@ test('attach writes exactly the two provider entries, bare origin vs +/v1', asyn
     assert.deepEqual(written.models.providers, {
       anthropic: {
         baseUrl: 'http://127.0.0.1:18521',
-        headers: { 'x-hypaware-upstream': 'anthropic' },
+        // The marker routes (gateway upstream preset); the client header
+        // attributes (openclaw exchange projector match, LLP 0175).
+        headers: { 'x-hypaware-upstream': 'anthropic', 'x-hypaware-client': 'openclaw' },
         models: [],
       },
       openai: {
@@ -107,7 +109,7 @@ test('attach writes exactly the two provider entries, bare origin vs +/v1', asyn
         // itself and wants the bare origin, its OpenAI client appends only
         // `/responses` or `/chat/completions` and needs the `/v1` baked in.
         baseUrl: 'http://127.0.0.1:18521/v1',
-        headers: { 'x-hypaware-upstream': 'openai' },
+        headers: { 'x-hypaware-upstream': 'openai', 'x-hypaware-client': 'openclaw' },
         models: [],
       },
     })
@@ -200,11 +202,46 @@ test('a second attach at a moved endpoint rewrites both baseUrls (re-attach on d
     const written = await readConfig(staged.settingsPath)
     assert.equal(written.models.providers.anthropic.baseUrl, moved)
     assert.equal(written.models.providers.openai.baseUrl, `${moved}/v1`)
-    // Still exactly the two entries, still the marker headers, still the rest
+    // Still exactly the two entries, still both headers, still the rest
     // of the file: a rewrite is not a merge.
-    assert.deepEqual(written.models.providers.anthropic.headers, { 'x-hypaware-upstream': 'anthropic' })
+    assert.deepEqual(written.models.providers.anthropic.headers, { 'x-hypaware-upstream': 'anthropic', 'x-hypaware-client': 'openclaw' })
     assert.deepEqual(written.models.providers.openai.models, [])
     assert.equal(written.theme, 'dark')
+  } finally {
+    await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+// Upgrade path from entries written before the client header existed: the
+// ownership predicate keys on the marker header alone, so a pre-fix entry
+// (marker, empty models, no `x-hypaware-client`) is still ours, and a
+// re-attach over it must succeed and add the client header rather than
+// refuse. Without this, every install attached before the LLP 0175 fix would
+// keep misattributing until a manual detach/attach cycle.
+// @ref LLP 0175#root-cause [tests]: re-attach upgrades a pre-client-header entry in place
+test('re-attach over a pre-client-header entry succeeds and adds the header', async () => {
+  const staged = await stage({
+    models: {
+      providers: {
+        anthropic: {
+          baseUrl: 'http://127.0.0.1:4000',
+          headers: { 'x-hypaware-upstream': 'anthropic' },
+          models: [],
+        },
+        openai: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          headers: { 'x-hypaware-upstream': 'openai' },
+          models: [],
+        },
+      },
+    },
+  })
+  try {
+    const { outcome } = await runAttach(staged)
+    assert.deepEqual(outcome, { status: 'done' })
+    const written = await readConfig(staged.settingsPath)
+    assert.equal(written.models.providers.anthropic.headers['x-hypaware-client'], 'openclaw')
+    assert.equal(written.models.providers.openai.headers['x-hypaware-client'], 'openclaw')
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }

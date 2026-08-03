@@ -47,6 +47,45 @@ test('wireMatchKey: empty string content and empty array content both yield the 
   assert.equal(wireMatchKey('user', ''), wireMatchKey('user', []))
 })
 
+// OpenClaw prepends a timestamp to user messages on the wire but stores the
+// bare text in its session file; without normalization every user turn
+// content-missed at settlement (the LLP 0175 residual, observed live).
+// @ref LLP 0175#root-cause [tests]: a wire-prefixed user text matches its
+// bare session-file counterpart
+test('wireMatchKey: an OpenClaw wire timestamp prefix matches the bare session text', () => {
+  const wire = wireMatchKey('user', '[Mon 2026-08-03 15:33 PDT] What is the distance to Venus?')
+  const session = sessionMatchKey('user', 'What is the distance to Venus?')
+  assert.equal(wire, session)
+})
+
+test('wireMatchKey: the timestamp strip tolerates seconds and short zone names', () => {
+  assert.equal(
+    wireMatchKey('user', '[Tue 2026-12-01 9:05:59 Z] hello'),
+    wireMatchKey('user', 'hello')
+  )
+})
+
+test('wireMatchKey: a stamp on both sides still matches (strip is symmetric)', () => {
+  const wire = wireMatchKey('user', '[Mon 2026-08-03 15:33 PDT] hello')
+  const session = sessionMatchKey('user', '[Mon 2026-08-03 15:33 PDT] hello')
+  assert.equal(wire, session)
+})
+
+test('wireMatchKey: near-miss brackets are not stripped', () => {
+  // Not the OpenClaw stamp shape: lowercase weekday, missing zone, no
+  // trailing space. Each must hash as-is rather than lose its prefix.
+  for (const text of ['[mon 2026-08-03 15:33 PDT] x', '[Mon 2026-08-03 15:33] x', '[NOTE] x', '[Mon 2026-08-03 15:33 PDT]x']) {
+    assert.notEqual(wireMatchKey('user', text), wireMatchKey('user', 'x'), text)
+  }
+})
+
+test('wireMatchKey: only the leading stamp strips, not one mid-text', () => {
+  assert.notEqual(
+    wireMatchKey('user', 'said at [Mon 2026-08-03 15:33 PDT] noon'),
+    wireMatchKey('user', 'said at noon')
+  )
+})
+
 // @ref LLP 0159#open-questions [tests]: the cache_control/caller volatile
 // fields must not change wire match key identity.
 test('wireMatchKey strips volatile block fields before hashing', () => {

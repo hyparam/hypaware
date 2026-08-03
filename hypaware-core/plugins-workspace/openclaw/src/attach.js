@@ -30,6 +30,21 @@ const CONTAINER_KEYS = ['models', 'providers']
 /** The probeable marker header the gateway's upstream precedence rung reads. */
 const MARKER_HEADER = 'x-hypaware-upstream'
 
+/**
+ * The client-identity header the gateway-side exchange projector matches on
+ * (`projector.js` `match()`: `x-hypaware-client: openclaw`, priority above
+ * the Claude projector). Without it every OpenClaw exchange that reaches the
+ * gateway is claimed by whichever lower-priority projector fits the wire
+ * shape - the Claude projector for Anthropic Messages (misattribution, no
+ * settlement, LLP 0175's duplication) - or by none at all (silent
+ * passthrough, LLP 0176). The projector tolerates the header's absence for
+ * matching purposes; attribution does not, so attach must write it.
+ *
+ * @ref LLP 0175#root-cause [implements]: attach writes the client header the
+ *   projector's match() keys on
+ */
+const CLIENT_HEADER = 'x-hypaware-client'
+
 /** The two provider keys attach owns, in write order. */
 const PROVIDER_KEYS = ['anthropic', 'openai']
 
@@ -283,7 +298,13 @@ function withProviderEntries(config, endpoint) {
 function providerEntry(baseUrl, upstream) {
   return {
     baseUrl,
-    headers: { [MARKER_HEADER]: upstream },
+    // Two headers, two readers: the marker names the upstream the gateway
+    // forwards to; the client header is what the openclaw exchange projector
+    // matches on, and it is what makes a captured exchange attribute (and
+    // later settle) as openclaw rather than falling through to the Claude
+    // projector. Ownership (isOwnedProviderEntry) keys on the marker alone,
+    // so entries written before the client header existed still detach.
+    headers: { [MARKER_HEADER]: upstream, [CLIENT_HEADER]: CLIENT_NAME },
     models: [],
   }
 }
