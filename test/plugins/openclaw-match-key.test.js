@@ -50,7 +50,7 @@ test('wireMatchKey: empty string content and empty array content both yield the 
 // OpenClaw prepends a timestamp to user messages on the wire but stores the
 // bare text in its session file; without normalization every user turn
 // content-missed at settlement (the LLP 0175 residual, observed live).
-// @ref LLP 0175#root-cause [tests]: a wire-prefixed user text matches its
+// @ref LLP 0175#fix-direction [tests]: a wire-prefixed user text matches its
 // bare session-file counterpart
 test('wireMatchKey: an OpenClaw wire timestamp prefix matches the bare session text', () => {
   const wire = wireMatchKey('user', '[Mon 2026-08-03 15:33 PDT] What is the distance to Venus?')

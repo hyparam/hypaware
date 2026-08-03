@@ -97,7 +97,7 @@ const WIRE_TIMESTAMP_PREFIX = /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(
 /**
  * @param {string} text
  * @returns {string}
- * @ref LLP 0175#root-cause [implements]: the settle residual - normalize
+ * @ref LLP 0175#fix-direction [implements]: the settle residual - normalize
  *   OpenClaw's wire-only user-message timestamp prefix out of the match key
  */
 function normalizeMatchText(text) {

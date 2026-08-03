@@ -357,7 +357,7 @@ test('a match_key stored as a JSON attributes string settles the same way', asyn
 // while its exchange's assistant rows settled - the exact residual observed
 // live on 2026-08-03 (20 stray prefixed user rows, zero stray assistant
 // rows).
-// @ref LLP 0175#root-cause [tests]: a timestamp-prefixed wire user turn
+// @ref LLP 0175#fix-direction [tests]: a timestamp-prefixed wire user turn
 // settles by content onto the bare session-file record
 test('a timestamp-prefixed wire user turn settles onto its bare session record', async () => {
   const agentsDir = writeSessionFile(realisticSessionRecords())

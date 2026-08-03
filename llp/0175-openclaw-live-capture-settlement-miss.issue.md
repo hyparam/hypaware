@@ -99,7 +99,7 @@ client (a curl probe, a future client) is claimed by the Claude projector and
 attributed as claude. That default corrupts claude analytics independently of
 OpenClaw and deserves its own consideration (see open questions).
 
-## Fix direction
+## Fix direction {#fix-direction}
 
 1. DONE (with this issue): `attach.js` writes
    `x-hypaware-client: openclaw` alongside the upstream marker in both
