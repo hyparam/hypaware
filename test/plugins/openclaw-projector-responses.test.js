@@ -56,6 +56,14 @@ function context() {
 }
 
 /**
+ * @param {Record<string, unknown>} overrides
+ */
+async function project(overrides) {
+  const projector = createOpenclawExchangeProjector()
+  return /** @type {any} */ (await projector.project(exchange(overrides), context()))
+}
+
+/**
  * @param {Array<Record<string, unknown>>} payloads
  */
 function sseEvents(payloads) {
@@ -115,20 +123,17 @@ test('shape detection: path, request body, and response body each suffice', () =
   assert.equal(isOpenaiResponsesExchange(null, { messages: [{ role: 'user', content: 'hi' }] }, undefined), false)
 })
 
-test('a full Responses exchange projects request turns plus the assistant', () => {
-  const projection = createOpenclawExchangeProjector().project(
-    exchange({
-      request_body: JSON.stringify(RESPONSES_REQUEST),
-      response_body: JSON.stringify(RESPONSES_RESPONSE),
-    }),
-    context()
-  )
+test('a full Responses exchange projects request turns plus the assistant', async () => {
+  const projection = await project({
+    request_body: JSON.stringify(RESPONSES_REQUEST),
+    response_body: JSON.stringify(RESPONSES_RESPONSE),
+  })
   assert.ok(projection)
   assert.equal(projection.provider, 'openai')
   assert.equal(projection.client_name, 'openclaw')
   assert.equal(projection.model, 'gpt-5.6-sol')
   assert.equal(projection.system_text, 'You are OpenClaw, a personal AI assistant.')
-  assert.deepEqual(projection.messages.map((m) => m.role), ['user', 'assistant', 'user', 'assistant'])
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant', 'user', 'assistant'])
   const assistant = /** @type {any} */ (projection.messages.at(-1))
   assert.deepEqual(assistant.content.map((/** @type {any} */ b) => b.type), ['thinking', 'text'])
   assert.equal(assistant.content[1].text, '900')
@@ -186,20 +191,17 @@ test('instructions and the leading system items fold into system_text; mid-run o
   assert.deepEqual(messages.map((m) => m.role), ['user', 'developer'])
 })
 
-test('a streamed exchange reconstructs from the terminal response.completed event', () => {
-  const projection = createOpenclawExchangeProjector().project(
-    exchange({
-      request_body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'What is 30 x 30?' }),
-      is_sse: true,
-      stream_events: sseEvents([
-        { type: 'response.created', response: { id: 'resp_002', object: 'response', status: 'in_progress' } },
-        { type: 'response.output_text.delta', delta: '9' },
-        { type: 'response.output_text.delta', delta: '00' },
-        { type: 'response.completed', response: RESPONSES_RESPONSE },
-      ]),
-    }),
-    context()
-  )
+test('a streamed exchange reconstructs from the terminal response.completed event', async () => {
+  const projection = await project({
+    request_body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'What is 30 x 30?' }),
+    is_sse: true,
+    stream_events: sseEvents([
+      { type: 'response.created', response: { id: 'resp_002', object: 'response', status: 'in_progress' } },
+      { type: 'response.output_text.delta', delta: '9' },
+      { type: 'response.output_text.delta', delta: '00' },
+      { type: 'response.completed', response: RESPONSES_RESPONSE },
+    ]),
+  })
   assert.ok(projection)
   const assistant = /** @type {any} */ (projection.messages.at(-1))
   assert.equal(assistant.role, 'assistant')
@@ -207,19 +209,16 @@ test('a streamed exchange reconstructs from the terminal response.completed even
   assert.equal(assistant.attributes.usage.output_tokens, 12)
 })
 
-test('a stream cut before its terminal event degrades to finished items, marked error', () => {
-  const projection = createOpenclawExchangeProjector().project(
-    exchange({
-      request_body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' }),
-      is_sse: true,
-      stream_events: sseEvents([
-        { type: 'response.created', response: { id: 'resp_003', object: 'response', status: 'in_progress' } },
-        { type: 'response.output_item.done', item: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] } },
-        { type: 'response.output_text.delta', delta: ' never finished' },
-      ]),
-    }),
-    context()
-  )
+test('a stream cut before its terminal event degrades to finished items, marked error', async () => {
+  const projection = await project({
+    request_body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' }),
+    is_sse: true,
+    stream_events: sseEvents([
+      { type: 'response.created', response: { id: 'resp_003', object: 'response', status: 'in_progress' } },
+      { type: 'response.output_item.done', item: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] } },
+      { type: 'response.output_text.delta', delta: ' never finished' },
+    ]),
+  })
   assert.ok(projection)
   const assistant = /** @type {any} */ (projection.messages.at(-1))
   assert.equal(assistant.content[0].text, 'partial')
