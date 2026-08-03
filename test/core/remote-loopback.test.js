@@ -79,6 +79,31 @@ test('an error= callback rejects with the error code attached', async () => {
   await assertion
 })
 
+test('an admission refusal names the reason and where to ask for access', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const rejected = assert.rejects(() => recv.waitForCode())
+  const url = new URL(recv.redirectUri)
+  url.searchParams.set('error', 'no_membership')
+  url.searchParams.set('state', 's1')
+  const body = await (await fetch(url, { redirect: 'manual' })).text()
+  // The human is looking at this tab, not the terminal: a bare "Login failed"
+  // hides that authentication worked and only an admin can finish the job.
+  assert.match(body, /not associated with an authorized organization/)
+  assert.match(body, /https:\/\/hyperparam\.app\/contact/)
+  await rejected
+})
+
+test('an unknown error code still gets the generic page', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const rejected = assert.rejects(() => recv.waitForCode())
+  const url = new URL(recv.redirectUri)
+  url.searchParams.set('error', 'server_error')
+  url.searchParams.set('state', 's1')
+  const body = await (await fetch(url, { redirect: 'manual' })).text()
+  assert.match(body, /Login failed/)
+  await rejected
+})
+
 test('an error= callback with no state is ignored, not surfaced (anti-DoS)', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
   const waiting = recv.waitForCode()
