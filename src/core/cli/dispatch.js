@@ -954,7 +954,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * @param {PluginName} name
  * @returns {'absent' | 'disabled-local' | 'disabled-central'}
  */
-function classifyInactiveState(layered, name) {
+export function classifyInactiveState(layered, name) {
   const effectiveEntry = (layered.effective?.plugins ?? []).find((p) => p.name === name)
   if (!effectiveEntry || effectiveEntry.enabled !== false) return 'absent'
   const disabledByCentral = (layered.centralConfig?.plugins ?? []).some((p) => p.name === name)
