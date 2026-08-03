@@ -248,10 +248,16 @@ test('detach works with the @hypaware/ai-gateway capability absent (disk-driven 
   assert.equal(result.changed, false)
 })
 
-test('attach stays gated on the @hypaware/ai-gateway capability (cap_missing)', async () => {
+test('attach stays gated on the @hypaware/ai-gateway capability (adapter_not_enabled)', async () => {
   // The counterpart to the detach-without-gateway test: attach genuinely needs
-  // the live adapter, so with the capability absent it must fail cap_missing
-  // rather than silently no-op.
+  // the live adapter, so with the capability absent it must fail rather than
+  // silently no-op. The refusal is what this test pins; the *reason* it now
+  // reports is the enablement layer, because codex is a client the static
+  // catalog knows and the capability is absent precisely because no enabled
+  // plugin pulls the gateway in.
+  // @ref LLP 0174#detection [tests]: the capability gate names the unenabled
+  // adapter instead of blaming the gateway plugin
+
   const { registry, kernel } = fakeKernelWithoutGateway()
   const home = await freshHome()
   const result = await run(['attach', 'codex', '--json'], {
@@ -265,7 +271,8 @@ test('attach stays gated on the @hypaware/ai-gateway capability (cap_missing)', 
   const json = /** @type {any} */ (result.json)
   assert.equal(json.status, 'failed')
   assert.equal(json.action, 'attach')
-  assert.equal(json.error_kind, 'cap_missing')
+  assert.equal(json.error_kind, 'adapter_not_enabled')
+  assert.match(json.error, /the codex adapter is not enabled on this install/)
 })
 
 test('attach throws HypAwareCommandError for an unknown client', async () => {
