@@ -708,23 +708,43 @@ function capitalizeClientLabel(name) {
 
 /**
  * Report `enableClientAdapter`'s failure in the same `--json` / stderr shape
- * as the rest of this file's attach failures. A write that landed before a
- * later step failed still names its `backupPath`, since T11's resumability
- * work depends on the user seeing that the config already changed.
+ * as the rest of this file's attach failures.
  *
+ * Per design `#prompt`'s "each step reports its own failure" paragraph, the
+ * two shapes are deliberately different:
+ *
+ * - **The write itself failed** (`failedStep === 'write'`, the default when
+ *   `enableClientAdapter` returns no `failedStep` at all): nothing else was
+ *   attempted, so the message says only that the write failed and that
+ *   nothing changed. There is no `backupPath` to name here - a write that
+ *   never landed never had anything worth backing up.
+ * - **The write landed but a later step (`restart` / `wait`) did not**: the
+ *   message names the failed step by name, states that the config change
+ *   already persists, and names the `.bak-<ts>` backup path
+ *   `enableClientAdapter` returned, so a re-run of `hyp attach <name>` knows
+ *   it is resuming from real on-disk state, not repeating a no-op.
+ *
+ * @ref LLP 0174#prompt [implements]: per-step failure reporting and the
+ * resumability instruction on a partial (write-succeeded) failure
  * @param {{ name: string, result: ClientEnableResult, ctx: CommandRunContext }} args
  * @returns {void}
  */
 function reportEnableFailure({ name, result, ctx }) {
+  const failedStep = result.failedStep ?? 'write'
   getLogger('cmd-attach').warn('client.attach.enable_failed', {
     [Attr.COMPONENT]: 'cmd-attach',
     [Attr.OPERATION]: 'client.attach',
     hyp_client: name,
     status: 'failed',
-    [Attr.ERROR_KIND]: `enable_${result.failedStep ?? 'unknown'}_failed`,
+    [Attr.ERROR_KIND]: `enable_${failedStep}_failed`,
   })
-  const message = `could not enable the ${name} adapter: ${result.message ?? 'unknown error'}` +
-    (result.backupPath ? ` (config backed up to ${result.backupPath})` : '')
+  const detail = result.message ?? 'unknown error'
+  const message = failedStep === 'write'
+    ? `could not enable the ${name} adapter: the config write failed (${detail}); nothing changed`
+    : `could not enable the ${name} adapter: the ${failedStep} step failed (${detail}). ` +
+      `The config change already persists` +
+      (result.backupPath ? ` (config backed up to ${result.backupPath})` : '') +
+      `; re-running 'hyp attach ${name}' resumes from the new state.`
   ctx.stderr.write(`error: ${message}\n`)
 }
 
