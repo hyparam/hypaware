@@ -726,4 +726,55 @@ export interface CreateAttachHandlerOptions {
   log?: PluginLogger
 }
 
+// =============================================================================
+// Client adapter enablement (LLP 0174)
+// =============================================================================
+
+/**
+ * Per-step outcome of `enableClientAdapter`. `'n/a'` is not a degraded `'ok'`:
+ * it means the step never applied on this machine (no daemon service is
+ * installed, so there is nothing to restart and no gateway that will bind),
+ * which the caller reports differently from a step that ran and failed.
+ */
+export type ClientEnableStepStatus = 'ok' | 'failed' | 'n/a'
+
+/**
+ * Outcome of the enable half of the LLP 0174 attach prompt, reported per step
+ * so the caller can say exactly which one broke and what survived it: a write
+ * that landed before a failed restart persists, and the `backupPath` it names
+ * is the user's undo.
+ */
+export interface ClientEnableResult {
+  ok: boolean
+  /** The client the enablement was resolved for (`claude`, `openclaw`, ...). */
+  name: string
+  /** The local config layer the write targeted. */
+  configPath: string
+  /** Set when the guard copied an existing config aside before replacing it. */
+  backupPath?: string
+  /**
+   * The plugins actually appended to the local layer. Empty when every entry
+   * was already present in the effective merged config, which is a successful
+   * no-op write, not a failure.
+   */
+  addedPlugins: PluginName[]
+  /** Whether a daemon service exists to restart at all. */
+  daemonInstalled: boolean
+  /** Whether the gateway published a bound port within the wait budget. */
+  bound: boolean
+  /** The endpoint the bind wait observed, when it observed one. */
+  endpoint?: string
+  steps: {
+    write: ClientEnableStepStatus
+    restart: ClientEnableStepStatus
+    wait: ClientEnableStepStatus
+  }
+  /** The furthest step that completed; `'n/a'` when only the write applied. */
+  completed: 'write' | 'restart' | 'wait' | 'n/a'
+  /** The step that broke, when one did. */
+  failedStep?: 'write' | 'restart' | 'wait'
+  /** Human-readable detail for the failed (or timed-out) step. */
+  message?: string
+}
+
 export type { ConfigStageResult, ConfigApplyErrorKind }
