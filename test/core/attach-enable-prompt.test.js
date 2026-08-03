@@ -277,6 +277,56 @@ test('a disabled @hypaware/ai-gateway entry also skips the prompt, not just the 
   })
 })
 
+test('every requested plugin already present and enabled skips the prompt: the write would append nothing', async () => {
+  await withTempHome(async (home) => {
+    // The third shape of the same floor. Nothing here is `enabled: false`, so
+    // the disabled check does not fire, yet the config already names both
+    // plugins: `toAppend` is empty and the write is a byte-identical rewrite.
+    // Whatever is keeping the adapter from activating (a plugin that threw on
+    // activate, an unmet dependency) is not something attach can write its way
+    // out of, so offering to "enable" it would land a no-op rewrite, a stray
+    // backup, and an untrue "enabled the claude adapter (config updated)".
+    mkdirSync(path.dirname(localConfigPath(home)), { recursive: true })
+    const before = JSON.stringify({
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', enabled: true },
+        { name: '@hypaware/claude', enabled: true },
+      ],
+    }, null, 2) + '\n'
+    writeFileSync(localConfigPath(home), before)
+
+    const { ctx, stderr } = makeCtx({ home, answer: 'y' })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 1)
+    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /enabled the claude adapter/)
+    assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
+    assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+    assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
+  })
+})
+
+test('an adapter absent but its gateway present-and-enabled still prompts: the write has something to append', async () => {
+  await withTempHome(async (home) => {
+    // The floor must not over-refuse. Only `@hypaware/ai-gateway` is on disk,
+    // so appending `@hypaware/claude` genuinely changes the outcome and the
+    // prompt is exactly the right thing to offer.
+    mkdirSync(path.dirname(localConfigPath(home)), { recursive: true })
+    writeFileSync(localConfigPath(home), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway', enabled: true }],
+    }, null, 2) + '\n')
+
+    const { ctx, stderr } = makeCtx({ home, answer: 'y' })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    const written = JSON.parse(readFileSync(localConfigPath(home), 'utf8'))
+    const names = written.plugins.map((/** @type {{ name: string }} */ p) => p.name)
+    assert.deepEqual(names.sort(), ['@hypaware/ai-gateway', '@hypaware/claude'])
+  })
+})
+
 test('non-interactive (no stdin/TTY) keeps the unchanged not_enabled refusal', async () => {
   await withTempHome(async (home) => {
     writeLocalConfig(home)

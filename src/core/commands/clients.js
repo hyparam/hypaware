@@ -20,7 +20,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
-import { defaultConfigPath } from '../config/schema.js'
+import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { enableClientAdapter } from '../config/client_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
@@ -636,17 +636,19 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   const { pluginNames, entries } = resolveSingleSourceEnablement(descriptor)
   if (entries.length === 0) return { activated: false }
   // The same "never prompt when there is nothing to add" floor the missing
-  // config file establishes, applied to the other shape it takes: an entry
-  // that is *present but `enabled: false`*. `enableClientAdapter`'s write is
-  // additive by contract, so it appends nothing for a name already in the
-  // file and the adapter stays inactive - the question would promise an
-  // enable the write cannot deliver, and land a no-op rewrite plus a stray
-  // backup on the way to the same refusal. Fall through to the caller's
-  // guided error instead, which names `hyp init` (the flow that does rewrite
-  // a disabled entry).
+  // config file establishes, applied to the two other shapes it takes on a
+  // config that does exist. `enableClientAdapter`'s write is additive by
+  // contract, so it appends nothing for a name already known to the config,
+  // and neither shape below is repairable by an append - the question would
+  // promise an enable the write cannot deliver, and land a no-op rewrite plus
+  // a stray backup and an untrue "enabled the <name> adapter" line on the way
+  // to the same refusal. Fall through to the caller's guided error instead,
+  // which names `hyp init` (the flow that does rewrite an existing entry).
   // @ref LLP 0174#bootstrap-floor [constrained-by]: the prompt is only ever
   // offered where the additive write can actually change the outcome
-  if (await hasDisabledEntry({ ctx, configPath, catalog, pluginNames })) return { activated: false }
+  if (await enableWriteCannotDeliver({ ctx, configPath, catalog, pluginNames })) {
+    return { activated: false }
+  }
   const primary = descriptor.compose?.plugin?.name ?? descriptor.plugin
   const rest = pluginNames.filter((pluginName) => pluginName !== primary)
   const depSuffix = rest.length > 0 ? ` (and ${rest.join(', ')})` : ''
@@ -814,20 +816,28 @@ async function configFileExists(configPath) {
 }
 
 /**
- * Whether any plugin the enable write would contribute is already in the
- * effective config with `enabled: false`.
+ * Whether the additive enable write would leave the config exactly as
+ * inactive as it found it, in which case the prompt has nothing to offer.
  *
- * That is the one shape of "known but not enabled" an additive write cannot
- * repair: the entry exists, so nothing is appended, and the flag that keeps
- * the plugin out of the boot selection is left exactly as it was. Covers
- * both layers deliberately - a locally disabled entry and a
- * centrally-disabled one both survive the append untouched, and the adapter
- * plugin is not the only name that matters here (a disabled
- * `@hypaware/ai-gateway` starves the adapter just as effectively).
+ * Two shapes, both of them "known but not enabled" states an *append* cannot
+ * repair, and both judged against the same name set `enableClientAdapter`
+ * skips on (the **effective** merge union the local file, so an entry the
+ * merge dropped still counts as physically present):
  *
- * An unresolvable config layer answers `false`: it cannot prove anything is
- * disabled, and `enableClientAdapter`'s own read is what refuses a write it
- * cannot make safely.
+ * - **Present but `enabled: false`.** The entry exists, so nothing is
+ *   appended and the flag keeping the plugin out of the boot selection
+ *   survives untouched. Both layers count deliberately: a locally disabled
+ *   entry and a centrally-disabled one alike. So does every requested name,
+ *   not just the adapter - a disabled `@hypaware/ai-gateway` starves the
+ *   adapter just as effectively.
+ * - **Every requested name already present.** `toAppend` is empty, so the
+ *   write is a byte-identical rewrite. The config already says what the
+ *   prompt would make it say, and whatever is keeping the plugin from
+ *   activating is not something attach can write its way out of.
+ *
+ * An unresolvable config layer answers `false`: it cannot prove either shape,
+ * and `enableClientAdapter`'s own read is what refuses a write it cannot make
+ * safely.
  *
  * @param {{
  *   ctx: CommandRunContext,
@@ -837,7 +847,7 @@ async function configFileExists(configPath) {
  * }} args
  * @returns {Promise<boolean>}
  */
-async function hasDisabledEntry({ ctx, configPath, catalog, pluginNames }) {
+async function enableWriteCannotDeliver({ ctx, configPath, catalog, pluginNames }) {
   try {
     const layered = await resolveLayeredConfigFromDisk({
       stateRoot: readObservabilityEnv(ctx.env).stateDir,
@@ -846,9 +856,16 @@ async function hasDisabledEntry({ ctx, configPath, catalog, pluginNames }) {
       knownDatasets: catalog.knownDatasets,
     })
     const wanted = new Set(pluginNames)
-    return (layered.effective?.plugins ?? []).some(
-      (entry) => wanted.has(entry.name) && entry.enabled === false
-    )
+    const effectiveEntries = layered.effective?.plugins ?? []
+    if (effectiveEntries.some((entry) => wanted.has(entry.name) && entry.enabled === false)) {
+      return true
+    }
+    const localLoaded = await loadConfigFile(configPath)
+    const present = new Set([
+      ...effectiveEntries.map((entry) => entry.name),
+      ...(localLoaded.ok ? (localLoaded.config.plugins ?? []).map((entry) => entry.name) : []),
+    ])
+    return pluginNames.every((pluginName) => present.has(pluginName))
   } catch {
     return false
   }
