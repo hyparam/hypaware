@@ -351,6 +351,31 @@ test('a match_key stored as a JSON attributes string settles the same way', asyn
   assert.equal(/** @type {any} */ (out[0]).attributes.openclaw, undefined)
 })
 
+// OpenClaw prepends `[Mon 2026-08-03 15:33 PDT] ` to user messages on the
+// wire while its session file stores the bare text. Before the match-key
+// normalization, this row content-missed and stayed at fallback identity
+// while its exchange's assistant rows settled - the exact residual observed
+// live on 2026-08-03 (20 stray prefixed user rows, zero stray assistant
+// rows).
+// @ref LLP 0175#fix-direction [tests]: a timestamp-prefixed wire user turn
+// settles by content onto the bare session-file record
+test('a timestamp-prefixed wire user turn settles onto its bare session record', async () => {
+  const agentsDir = writeSessionFile(realisticSessionRecords())
+  const logger = recordingLogger()
+  const row = fallbackRow({
+    role: 'user',
+    content: [{ type: 'text', text: '[Mon 2026-08-03 15:33 PDT] list the files' }],
+    messageIndex: 0,
+    ts: T0 + 1_000,
+  })
+  const out = await enricher({ agentsDir, logger }).settle([row], NO_CTX)
+  assert.equal(/** @type {any} */ (out[0]).message_id, 'msg-0001')
+  assert.equal(/** @type {any} */ (out[0]).session_id, NATIVE_SESSION_ID)
+  const summary = logger.events.find((e) => e.event === 'plugin.openclaw.settlement')
+  assert.equal(summary?.fields.content_matches, 1)
+  assert.equal(summary?.fields.ordinal_matches, 0)
+})
+
 // @ref LLP 0157#requirements [tests]: R14, a row whose session cwd resolves
 // to `ignore` is dropped at settlement, before it is committed.
 test('an ignore-classed session cwd drops every row of that session', async () => {

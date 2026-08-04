@@ -77,6 +77,39 @@ function normalizeBlockKind(rawKind) {
 }
 
 /**
+ * The timestamp prefix OpenClaw prepends to user messages ON THE WIRE but
+ * not in its session file: `[Mon 2026-08-03 15:33 PDT] What is ...` goes
+ * upstream while the file stores the bare `What is ...`. Verified live
+ * (LLP 0175 evidence, 2026-08-03): with the prefix hashed into the wire
+ * key, every user turn content-missed and stayed at fallback identity
+ * while the same exchange's assistant turns settled, so the one residual
+ * duplication after the header fix was exactly the prefixed user rows.
+ *
+ * Weekday, ISO date, HH:MM(:SS optional), and a short zone name, then
+ * `] `. The zone is either an uppercase abbreviation (`PDT`, `UTC`, `Z`)
+ * or an abbreviation with an offset tail (`GMT+2`, `GMT+5:30`, `GMT-7`):
+ * JS `timeZoneName: 'short'` formatting, which the observed stamp is
+ * consistent with, emits the alpha form only for a handful of mostly-US
+ * zones and the `GMT+N` form for most of the world, so accepting only the
+ * alpha form would leave the LLP 0175 residual open for non-US users. The
+ * strip is applied symmetrically by {@link reduceBlock} to BOTH match-key
+ * builders, so a text that legitimately starts with such a stamp on both
+ * sides still matches (both get stripped), and a one-sided stamp (the bug)
+ * stops mattering.
+ */
+const WIRE_TIMESTAMP_PREFIX = /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?::\d{2})? [A-Z]{1,6}(?:[+-]\d{1,2}(?::\d{2})?)?\] /
+
+/**
+ * @param {string} text
+ * @returns {string}
+ * @ref LLP 0175#fix-direction [implements]: the settle residual - normalize
+ *   OpenClaw's wire-only user-message timestamp prefix out of the match key
+ */
+function normalizeMatchText(text) {
+  return text.replace(WIRE_TIMESTAMP_PREFIX, '')
+}
+
+/**
  * The canonical role+tuple hash both match-key builders below funnel into.
  *
  * @param {string} role
@@ -138,7 +171,7 @@ function reduceBlock(block) {
     return { kind, identity: sha256Hex(thinking ?? signature ?? '') }
   }
   if (kind === 'text') {
-    return { kind, identity: sha256Hex(stringValue(block.text) ?? '') }
+    return { kind, identity: sha256Hex(normalizeMatchText(stringValue(block.text) ?? '')) }
   }
   // Generic fallback for image blocks and any future/unrecognized kind:
   // hash the whole stripped block minus its own type tag, so an
