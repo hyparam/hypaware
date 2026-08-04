@@ -26,10 +26,13 @@ import { isTty } from '../cli/stdio.js'
  * capture. `available` lists registered provider names so the finale can
  * intersect them with the picked clients.
  *
+ * Exported for the wiring test that pins `available`/`sweeping` against
+ * the real provider contributions; production callers are in this file.
+ *
  * @param {CommandRunContext} ctx
  * @returns {PickerBackfillRunner}
  */
-function buildPickerBackfillRunner(ctx) {
+export function buildPickerBackfillRunner(ctx) {
   const contributions = ctx.backfills.list()
   return {
     available: contributions.map((p) => p.name),

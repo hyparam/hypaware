@@ -230,8 +230,14 @@ export interface FinaleSummary {
     binPath?: string
     packageSpec?: string
   }
-  /** `skipped` marks a client the wizard left alone because `hyp status` already reported it attached (team pathway). */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean }[]
+  /**
+   * `skipped` marks a client the wizard left alone because `hyp status`
+   * already reported it attached (team pathway). `noAdapter` marks a client
+   * contribution with no registered runtime adapter (Claude Desktop's
+   * deliberate no-attach-on-join posture): not applicable to the attach
+   * lane, so `ok: true` and the run summary prints nothing for it.
+   */
+  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }

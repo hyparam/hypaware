@@ -61,6 +61,22 @@ question as-is would promise a control the wizard does not have.
   name. The `('claude'|'codex')` unions widen to `string[]`; client
   names are data from manifests, not a closed type. A future adapter
   joins the finale by declaring `contributes.client`, with no CLI edit.
+- **Not every client contribution is attachable.** `contributes.client`
+  also covers a plugin that owns skill/agent dirs but deliberately
+  registers no runtime adapter (Claude Desktop, whose managed plist is
+  placed only by its attended `configure_command`, never attach-on-join,
+  LLP 0115). Such a client still belongs in `clientsPicked` (its skills
+  and agents install through the asset lane), but the attach lane treats
+  a client with no registered adapter as not applicable, never as
+  failed: the summary records it as `noAdapter` and the run summary
+  prints nothing for it. Its setup path is its picker row's
+  `configure_command`, which the wizard's configure phase already runs.
+- **The derivation fans out row to plugin to all of that plugin's
+  clients.** The invariant this rests on: every client-contributing
+  plugin owns exactly one picker row, so a pick maps only to its own
+  clients. A plugin that adds a second picker row beside
+  `contributes.client` would make either row a pick of all its clients;
+  a plugin in that position needs a finer mapping here first.
 - **Sweep-backed providers get a disclosure, not a question (3b).** The
   finale partitions picked backfill providers by whether their
   contribution declares `sweep` (exposed on the runner as `sweeping`).
@@ -97,9 +113,16 @@ question as-is would promise a control the wizard does not have.
 - The consent prompt's provider list can now be empty while backfill
   still runs (an OpenClaw-only pick): no question is asked, the
   disclosure and import still happen.
+- The derivation widens `clientsPicked` by two clients against the
+  bundled catalog: `openclaw` (the fix) and `claude-desktop` (whose
+  skills and agents now install when its row is picked, and whose
+  adapterless attach is recorded as not applicable per {#decision}).
 - Verification per LLP 0177: unit tests assert a picked OpenClaw
   reaches the attach lane and the sweep-disclosure path, and the
-  `walkthrough_picker_to_first_query` smoke stays green.
+  `walkthrough_picker_to_first_query` smoke stays green. The full
+  derived set is pinned against the bundled catalog, and the backfill
+  runner's `sweeping` wiring is asserted against the real provider
+  contributions, so widening either is a deliberate test edit.
 
 ## References
 

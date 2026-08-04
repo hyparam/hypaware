@@ -581,6 +581,9 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
       stdout.write(`attach: ${a.client} already attached\n`)
       continue
     }
+    // An adapterless client contribution never entered the attach lane, so
+    // there is nothing to report ok or failed about (LLP 0180).
+    if (a.noAdapter) continue
     const tag = a.dryRun ? '(dry-run) ' : ''
     stdout.write(`${tag}attach: ${a.client} ${a.ok ? 'ok' : 'failed'}\n`)
   }
@@ -901,7 +904,13 @@ export async function runPickerFinale(args) {
       }
       const adapter = gateway.getClient(client)
       if (!adapter) {
-        summary.attach.push({ client, dryRun, ok: false })
+        // Not attachable, not failed: `contributes.client` also covers plugins
+        // that own skill/agent dirs but deliberately register no runtime
+        // adapter (Claude Desktop, LLP 0115#no-attach-on-join); their setup
+        // path is their picker row's configure_command, which the wizard's
+        // configure phase runs.
+        // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
+        summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
       }
       // The walkthrough attaches before the finale restarts the daemon, so the
