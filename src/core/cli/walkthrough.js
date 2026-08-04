@@ -1247,6 +1247,8 @@ export function orderPickerDescriptors(descriptors) {
  * @param {Map<string, PickerDescriptor>} pickerDescriptors
  * @param {Map<string, ClientDescriptor>} clientDescriptors
  * @returns {string[]}
+ * @ref LLP 0177 [implements]: the picker enabled OpenClaw and left it unattached, because
+ *   this list was a hardcode the manifest could not reach
  * @ref LLP 0180#decision [implements]: derivation from client contributions, not enumeration
  */
 export function derivePickedClients(sources, pickerDescriptors, clientDescriptors) {
