@@ -807,9 +807,11 @@ function composerManagedPlugins(descriptors) {
  *   derived from the picks, not a preference, so composition owns it
  *   outright and unchecking a row really removes its upstream.
  * - **Sinks** the composition names are merged the same way (a hand-edited
- *   `schedule` or `dir` wins); sinks it does not name are passed through.
- *   A composed sink an existing sink already provides under another id is
- *   dropped rather than added beside it ({@link sinkAlreadyProvided}).
+ *   `schedule` or `dir` wins), but only onto the same sink ({@link sameSink});
+ *   sinks it does not name are passed through. A composed sink an existing
+ *   sink already provides under another id is dropped rather than added
+ *   beside it ({@link sinkAlreadyProvided}), and a different sink sitting on
+ *   a composed id keeps the id rather than being overwritten.
  * - **Retention** is written at `query.cache.retention.default_days` and
  *   nothing else under `query` is touched.
  * - **Unknown top-level keys are passed through** untouched.
@@ -831,21 +833,25 @@ function carryForwardExistingConfig(composed, existing, descriptors) {
   const sinks = {}
   for (const [id, sink] of Object.entries(composedSinks)) {
     const prior = existingSinks[id]
-    // Only same-shape entries merge, and a differently shaped entry is not
-    // evicted either. Folding a blob sink over a request sink of the same id
-    // keeps `plugin` beside `writer`/`destination`, which matches neither
-    // sink shape and which cross-validation rejects outright
-    // (`request_sink_invalid_keys`); replacing it instead would silently
-    // delete a sink the composer never wrote. So the id's occupant stays.
-    if (prior) {
-      if (sameSinkShape(sink, prior)) sinks[id] = mergeSink(sink, prior)
+    // Only the same sink merges: same union member, same plugins. Folding a
+    // blob sink over a request sink of the same id keeps `plugin` beside
+    // `writer`/`destination`, which matches neither sink shape and which
+    // cross-validation rejects outright (`request_sink_invalid_keys`);
+    // folding the parquet export over a jsonl one rewrites where the user's
+    // data goes and in what format. Both are different sinks that happen to
+    // share an id, not two versions of one sink.
+    if (prior && sameSink(sink, prior)) {
+      sinks[id] = mergeSink(sink, prior)
       continue
     }
-    // Composition always names its export sink `local`, but the config may
-    // already run the same writer to the same destination under a name the
-    // user chose. Adding `local` beside it would export every dataset twice
-    // on two schedules, so the sink already on disk wins.
-    if (sinkAlreadyProvided(sink, existingSinks)) continue
+    // A different sink at the id is not evicted either: replacing it would
+    // silently delete a sink the composer never wrote, the same defect as
+    // regenerating the file. And composition always names its export sink
+    // `local`, while the config may already run the same writer to the same
+    // destination under a name the user chose; adding `local` beside it
+    // would export every dataset twice on two schedules. Either way the
+    // sinks already on disk win.
+    if (prior || sinkAlreadyProvided(sink, existingSinks)) continue
     sinks[id] = sink
   }
   /** @type {Set<string>} */
@@ -922,18 +928,36 @@ function sinkPluginNames(sink) {
 }
 
 /**
- * Whether two sink entries are the same union member. `SinkConfigInstance`
- * is a discriminated union (blob: `writer` + `destination`; request:
- * `plugin`), and the two shapes are mutually exclusive by validation, so
- * entries that disagree here are different sinks that happen to share an id
- * rather than two versions of one sink.
+ * A sink entry's identity for carry-forward: which plugins it runs, in the
+ * per-shape canonical order {@link sinkPluginNames} yields (a blob sink's
+ * `writer` then `destination`, a request sink's single `plugin`). Two
+ * entries with the same signature do the same job, whatever id they sit
+ * under.
+ *
+ * @param {SinkConfigInstance} sink
+ * @returns {string}
+ */
+function sinkSignature(sink) {
+  return sinkPluginNames(sink).join(',')
+}
+
+/**
+ * Whether two sink entries are the same sink: the same union member of
+ * `SinkConfigInstance` (blob: `writer` + `destination`; request: `plugin`)
+ * running the same plugins. Entries that disagree are different sinks that
+ * happen to share an id rather than two versions of one sink, so neither
+ * the shape check nor the plugin check may be dropped: merging across
+ * shapes writes a config cross-validation rejects, and merging a parquet
+ * export over a jsonl one silently rewrites the format and destination of
+ * data the composer never chose.
  *
  * @param {SinkConfigInstance} a
  * @param {SinkConfigInstance} b
  * @returns {boolean}
  */
-function sameSinkShape(a, b) {
-  return ('plugin' in a) === ('plugin' in b)
+function sameSink(a, b) {
+  if (('plugin' in a) !== ('plugin' in b)) return false
+  return sinkSignature(a) === sinkSignature(b)
 }
 
 /**
@@ -948,17 +972,15 @@ function sameSinkShape(a, b) {
  * @returns {boolean}
  */
 function sinkAlreadyProvided(composed, existingSinks) {
-  const signature = sinkPluginNames(composed).slice().sort().join(',')
-  return Object.values(existingSinks).some(
-    (sink) => sinkPluginNames(sink).slice().sort().join(',') === signature
-  )
+  const signature = sinkSignature(composed)
+  return Object.values(existingSinks).some((sink) => sinkSignature(sink) === signature)
 }
 
 /**
- * Merge one composed sink with the same-shaped entry of the same id already
- * in the config: the user's `config` keys (a hand-edited `schedule`, a moved
+ * Merge one composed sink with the same sink already at that id in the
+ * config: the user's `config` keys (a hand-edited `schedule`, a moved
  * `dir`) win over the composed defaults. Callers must have checked
- * {@link sameSinkShape} first.
+ * {@link sameSink} first.
  *
  * @param {SinkConfigInstance} composed
  * @param {SinkConfigInstance | undefined} prior

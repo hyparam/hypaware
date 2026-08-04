@@ -690,6 +690,56 @@ test('runWizardPick: a request sink parked on the composer sink id is not folded
   })
 })
 
+test('runWizardPick: a differently written blob sink parked on the composer sink id is not rewritten', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // `local` here is a jsonl export the user built; the parquet export the
+  // composer reads back lives under `archive`. Merging by id alone would
+  // rewrite `local`'s writer to parquet, so a reconfigure would silently
+  // change the format of an export the composer never chose and leave two
+  // parquet sinks writing to two trees.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/format-jsonl' },
+    ],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-jsonl',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/jsonl', schedule: '0 3 * * *' },
+      },
+      archive: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/parquet', schedule: '0 4 * * *' },
+      },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.deepEqual(written.sinks.local, {
+    writer: '@hypaware/format-jsonl',
+    destination: '@hypaware/local-fs',
+    config: { dir: '/srv/jsonl', schedule: '0 3 * * *' },
+  })
+  assert.deepEqual(written.sinks.archive, {
+    writer: '@hypaware/format-parquet',
+    destination: '@hypaware/local-fs',
+    config: { dir: '/srv/parquet', schedule: '0 4 * * *' },
+  })
+  assert.deepEqual(Object.keys(written.sinks).sort(), ['archive', 'local'])
+})
+
 test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated from the picks', async () => {
   const asked = makeBuf()
   const confirm = defaultOverwriteConfirmFactory({

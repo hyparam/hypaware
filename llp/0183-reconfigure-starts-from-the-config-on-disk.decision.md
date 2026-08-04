@@ -97,12 +97,15 @@ because a general merge would resurrect what the user just unchecked:
   ids are the user's to choose, so a composed sink whose plugins some
   existing sink already runs is dropped rather than added beside it: the
   composer's `local` and a hand-renamed `exports` writing the same
-  parquet to the same local-fs tree are one export, not two. Only
-  same-shaped entries merge, and a differently shaped occupant of the
-  same id is left alone rather than evicted: folding a blob sink over a
-  request sink would keep `plugin` beside `writer`/`destination`, which
-  cross-validation rejects as `request_sink_invalid_keys`, and replacing
-  it would delete a sink the composer never wrote.
+  parquet to the same local-fs tree are one export, not two. Merging is
+  narrower still: only the *same* sink merges, meaning the same union
+  member running the same plugins, and any other occupant of a composed
+  id keeps the id rather than being overwritten. Folding a blob sink
+  over a request sink would keep `plugin` beside `writer`/`destination`,
+  which cross-validation rejects as `request_sink_invalid_keys`; folding
+  the parquet export over a jsonl one would rewrite the format and
+  destination of data the composer never chose; and replacing either
+  would delete a sink the composer never wrote.
 - **Export is read back, not re-defaulted.** A config with a
   parquet-to-local-fs sink reconfigures as `local-parquet`; any other
   config reconfigures as `keep-local`, which preserves its own sinks
