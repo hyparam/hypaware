@@ -80,9 +80,21 @@ configured, on solo hosts only.** The diagnostic
 and repairs with `hyp detach --client <name>`. On a joined host the same
 shape is a reconciler pass that has not run yet, not a state the operator
 should undo by hand, so it is gated on the absence of a central layer, the
-same gate the client-action defaults already use. The known gap: a *local
-layer* addition stranded on a managed host is not diagnosed by status. The
-finale still warns about it at the time, which is where the state is created.
+same gate the client-action defaults already use. It is gated a second time
+on the local layer having *parsed*: a config file that is present but
+unreadable empties the active-plugin set for a reason that says nothing about
+what the operator enabled, and answering a parse failure with a detach for
+every attached client would be reading an accident as intent, stacked on top
+of the `config_unreadable` finding that is the real repair. The known gap: a
+*local layer* addition stranded on a managed host is not diagnosed by status.
+The finale still warns about it at the time, which is where the state is
+created.
+
+<a id="not-configured-means-not-active"></a>**"Not configured" means what
+`hyp status` already means by it.** Both surfaces read a plugin entry with
+`enabled: false` as inactive, so a switched-off adapter strands its client
+exactly as an absent one does. The finale and the diagnostic must agree about
+the same config file; a set built two ways would eventually disagree.
 
 ## Consequences {#consequences}
 

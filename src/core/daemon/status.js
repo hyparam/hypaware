@@ -301,6 +301,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
 
+  // A local layer that is present but does not parse: `activePlugins` is then
+  // empty (or central-only) because the file could not be read, not because
+  // the operator disabled anything. Any diagnostic whose repair is "your
+  // config no longer names this" would be reading a parse failure as intent,
+  // so the attached-but-not-configured check below stands down here and lets
+  // `config_unreadable` / `config_local_unreadable` own the run.
+  const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
+
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
   // concern); a local entry that lost the merge shows in `layered.drops`,
@@ -638,7 +646,7 @@ export async function collectHypAwareStatus(opts = {}) {
         message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
         repair: [`hyp attach --client ${clientName}`],
       })
-    } else if (!configured && probe.attached && !hasCentral) {
+    } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
       // The mirror image of `client_attach_missing`: the marker is on disk but
       // nothing enables the adapter, so this client still routes through a
       // gateway that no longer collects it (and, with no gateway configured at
@@ -648,7 +656,10 @@ export async function collectHypAwareStatus(opts = {}) {
       //
       // Solo hosts only. On a joined host a config-named client's attach is the
       // reconciler's to reverse, so the same shape there is a pass it has not
-      // run yet, not a state the operator should undo by hand.
+      // run yet, not a state the operator should undo by hand. And only when
+      // the local layer actually parsed: an unreadable file says nothing about
+      // what the operator enabled, so "not configured" would be a guess, and
+      // detaching on a guess is the one irreversible thing here.
       // @ref LLP 0185#status-backstop [implements]: attached-but-not-configured is a warning on solo hosts, and the reconciler's business on managed ones
       diagnostics.push({
         severity: 'warning',

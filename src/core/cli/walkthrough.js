@@ -1092,7 +1092,14 @@ async function readCentralPluginNames(env) {
 export async function findAttachedNotConfiguredClients({ clientsPicked, config, env, homeDir }) {
   if (!homeDir) return []
   const picked = new Set(clientsPicked)
-  const configured = new Set((config.plugins ?? []).map((entry) => entry.name))
+  // `enabled: false` is what `hyp status` reads as "not active" when it builds
+  // the same set, and an entry left in the file with the switch off collects
+  // exactly as little as an absent one. Reading it as configured here would
+  // make the two surfaces disagree about the same config.
+  // @ref LLP 0185#not-configured-means-not-active [implements]: a disabled plugin entry strands its client exactly as an absent one does
+  const configured = new Set(
+    (config.plugins ?? []).filter((entry) => entry.enabled !== false).map((entry) => entry.name)
+  )
   for (const name of await readCentralPluginNames(env)) configured.add(name)
 
   const descriptors = await buildWalkthroughClientDescriptorMap()

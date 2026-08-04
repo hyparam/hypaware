@@ -13,7 +13,7 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 // The mirror image of `client_attach_missing`: a client whose settings still
 // carry the attach marker while nothing enables its adapter (issue #604). The
 // wizard warns when it creates that state; this is the after-the-fact backstop.
-// @ref LLP 0185#status-backstop [tests]:
+// @ref LLP 0185#status-backstop [tests]: the diagnostic fires on a solo host, stays quiet on a joined one, and never reads an unparseable local layer as intent
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-stranded-'))
@@ -85,4 +85,23 @@ test('a managed host leaves the reverse lane to the reconciler and stays quiet',
 
   assert.equal(report.layered?.hasCentral, true)
   assert.equal(report.diagnostics.some((d) => d.kind === 'client_attached_not_configured'), false)
+})
+
+// A local layer that does not parse leaves the active-plugin set empty for a
+// reason that has nothing to do with what the operator enabled. Reading that
+// as "not configured" would hand back a detach for every attached client, on
+// top of the config error that is the actual repair.
+test('an unreadable local config is not read as an instruction to detach', async () => {
+  const hypHome = await makeHome()
+  const homeDir = await homeWithAttachedCodex()
+  await fs.writeFile(defaultConfigPath(hypHome), '{ not valid json', 'utf8')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome), homeDir })
+
+  assert.equal(report.diagnostics.some((d) => d.kind === 'config_unreadable'), true)
+  assert.equal(
+    report.diagnostics.some((d) => d.kind === 'client_attached_not_configured'),
+    false,
+    JSON.stringify(report.diagnostics, null, 2)
+  )
 })
