@@ -65,6 +65,25 @@ test('drives PKCE -> loopback -> exchange and returns the session', async (t) =>
   assert.equal(wasClosed(), true)
 })
 
+test('the loopback receiver gets a contact URL only for a Hyperparam-run target', async () => {
+  /** @type {(string | undefined)[]} */
+  const contactUrls = []
+  const fetchImpl = /** @type {any} */ (async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
+  }))
+  const startReceiver = /** @type {any} */ (async (/** @type {any} */ args) => {
+    contactUrls.push(args.contactUrl)
+    return { redirectUri: 'http://127.0.0.1:1/callback', port: 1, waitForCode: async () => ({ code: 'c' }), close: () => {} }
+  })
+
+  await loginWithBrowser({ identityBase: 'https://hypaware.hyperparam.app/v1/identity', noBrowser: true, fetchImpl, startReceiver })
+  // Self-hosting is supported, and its admin is not us: no vendor link there.
+  await loginWithBrowser({ identityBase: 'https://hyp.internal/v1/identity', noBrowser: true, fetchImpl, startReceiver })
+
+  assert.deepEqual(contactUrls, ['https://hyperparam.app/contact', undefined])
+})
+
 test('--no-browser prints the URL instead of opening it', async () => {
   const fetchImpl = /** @type {any} */ (async () => ({
     ok: true, status: 200,

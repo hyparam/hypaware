@@ -69,33 +69,68 @@ const LANDING_PAGE = `<!doctype html>
 </body>
 </html>`
 
-const CONTACT_URL = 'https://hyperparam.app/contact'
-
-// The browser side of the D7 refusal taxonomy the terminal already explains
-// (explainLoginError in cli/remote_commands.js). The human is looking at this
-// tab, not the terminal, when the redirect lands, so a bare "Login failed"
-// strands them: authentication worked, admission did not, and only someone
-// else can grant it. Each entry is a literal (never callback input), because
-// respond() interpolates title/detail into the page unescaped.
-// @ref LLP 0058#d7 [implements]: the browser half of the surfaced-error taxonomy explainLoginError covers in the terminal
 const GENERIC_FAILURE_PAGE = {
   title: 'Login failed',
   detail: 'You can close this tab and return to the terminal.',
 }
-/** @type {Record<string, { title: string, detail: string }>} */
-const REFUSAL_PAGES = {
-  no_membership: {
-    title: 'Your account is not authorized',
-    detail: `This account is not associated with an authorized organization on this server. Contact us at <a href="${CONTACT_URL}">${CONTACT_URL}</a> to request access, then run the login again.`,
-  },
-  org_not_permitted: {
-    title: 'Not a member of that organization',
-    detail: `This account is not a member of the organization you asked for. Check the <code>--org</code> name, or contact us at <a href="${CONTACT_URL}">${CONTACT_URL}</a> to request access.`,
-  },
-  org_selection_required: {
-    title: 'More than one organization',
-    detail: 'This account belongs to more than one organization. Return to the terminal and run the login again with <code>--org &lt;name&gt;</code> to choose one.',
-  },
+
+// Only an https URL with no markup-significant characters can reach the page,
+// so respond()'s unescaped interpolation stays safe even if a future caller
+// threads something less trusted than the shipped literal into `contactUrl`.
+const SAFE_CONTACT_URL = /^https:\/\/[\w.-]+(?:\/[\w./-]*)?$/
+
+/**
+ * The browser half of the D7 refusal taxonomy the terminal already explains
+ * (explainLoginError in cli/remote_commands.js). The human is looking at this
+ * tab, not the terminal, when the redirect lands, so a bare "Login failed"
+ * strands them: authentication worked, admission did not, and only someone
+ * else can grant it.
+ *
+ * Who that someone is depends on the deployment, so the remedy is a parameter,
+ * not a constant: on a server we run we are the admin and can be reached, while
+ * on a self-hosted one the admin is the reader's own colleague and a vendor
+ * link would send them to people who cannot grant anything. The caller passes
+ * `contactUrl` only for the former (managedContactUrl in builtin_remotes.js).
+ * Everything that reaches the markup is a literal from this file or that
+ * checked URL, never callback input, because respond() does not escape.
+ *
+ * @param {string} code the sanitized callback `error`
+ * @param {string | undefined} contactUrl vendor contact page, managed targets only
+ * @returns {{ title: string, detail: string }}
+ * @ref LLP 0058#d7 [implements]: the browser half of the surfaced-error taxonomy explainLoginError covers in the terminal
+ */
+function refusalPage(code, contactUrl) {
+  const link = contactUrl && SAFE_CONTACT_URL.test(contactUrl) ? contactUrl : undefined
+  const askForAccess = link
+    ? `contact us at <a href="${link}">${link}</a> to request access`
+    : 'ask your admin for access'
+
+  switch (code) {
+    case 'no_membership':
+      return {
+        title: 'Your account is not authorized',
+        detail: `This account is not associated with an authorized organization on this server. To get access, ${askForAccess}, then run the login again.`,
+      }
+    case 'org_not_permitted':
+      return {
+        title: 'Not a member of that organization',
+        detail: `This account is not a member of the organization you asked for. Check the <code>--org</code> name, or ${askForAccess}.`,
+      }
+    // No remedy to point at: the account is admitted, it simply belongs to
+    // several orgs and the client never sees the list to choose from.
+    case 'org_selection_required':
+      return {
+        title: 'More than one organization',
+        detail: 'This account belongs to more than one organization. Return to the terminal and run the login again with <code>--org &lt;name&gt;</code> to choose one.',
+      }
+    case 'access_denied':
+      return {
+        title: 'Login was denied',
+        detail: 'The identity provider did not complete the sign-in. You can close this tab and try again from the terminal.',
+      }
+    default:
+      return GENERIC_FAILURE_PAGE
+  }
 }
 
 /**
@@ -106,11 +141,14 @@ const REFUSAL_PAGES = {
  * `state` mismatch, or timeout. The listener serves a styled "you can close
  * this tab" page, then closes after one request.
  *
- * @param {{ state: string, timeoutMs?: number }} args
+ * `contactUrl` is where a refused user should ask for access; the caller passes
+ * it only when the target is a server we run (see refusalPage).
+ *
+ * @param {{ state: string, timeoutMs?: number, contactUrl?: string }} args
  * @returns {Promise<{ redirectUri: string, port: number, waitForCode: () => Promise<{ code: string }>, close: () => void }>}
  * @ref LLP 0058#d2 [implements]: ephemeral 127.0.0.1 redirect, single-shot, timed out (RFC 8252)
  */
-export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS, contactUrl }) {
   const log = getLogger('remote')
 
   // One-flow result channel: the request handler (or the timeout) settles it
@@ -198,11 +236,10 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       // it reaches the error message, the log ERROR_KIND, and the terminal, so a
       // crafted value can't inject newlines into logs or terminal output.
       const safeError = sanitizeErrorCode(error ?? '')
-      // `Object.hasOwn`, not a plain index + `??`: the key is attacker-chosen, so
-      // `?error=constructor` (or `toString`, `__proto__`, ...) would otherwise hit
-      // Object.prototype, return a non-nullish value that `??` accepts, and render
-      // a page titled "undefined" instead of falling through to the generic one.
-      const page = Object.hasOwn(REFUSAL_PAGES, safeError) ? REFUSAL_PAGES[safeError] : GENERIC_FAILURE_PAGE
+      // The code is attacker-chosen, so refusalPage() switches on it rather than
+      // indexing a table: a lookup would resolve `constructor`/`toString`/
+      // `__proto__` off Object.prototype and render a page titled "undefined".
+      const page = refusalPage(safeError, contactUrl)
       respond(res, page.title, page.detail)
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return

@@ -79,18 +79,55 @@ test('an error= callback rejects with the error code attached', async () => {
   await assertion
 })
 
-test('an admission refusal names the reason and where to ask for access', async () => {
-  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+/**
+ * Fetch the page a given callback `error` renders, and settle the flow it
+ * rejects so the receiver closes.
+ *
+ * @param {{ code: string, contactUrl?: string }} args
+ * @returns {Promise<string>} the response body
+ */
+async function refusalBody({ code, contactUrl }) {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000, contactUrl })
   const rejected = assert.rejects(() => recv.waitForCode())
   const url = new URL(recv.redirectUri)
-  url.searchParams.set('error', 'no_membership')
+  url.searchParams.set('error', code)
   url.searchParams.set('state', 's1')
   const body = await (await fetch(url, { redirect: 'manual' })).text()
+  await rejected
+  return body
+}
+
+test('an admission refusal names the reason and links contact on a managed target', async () => {
   // The human is looking at this tab, not the terminal: a bare "Login failed"
   // hides that authentication worked and only an admin can finish the job.
+  const body = await refusalBody({ code: 'no_membership', contactUrl: 'https://hyperparam.app/contact' })
   assert.match(body, /not associated with an authorized organization/)
-  assert.match(body, /https:\/\/hyperparam\.app\/contact/)
-  await rejected
+  assert.match(body, /<a href="https:\/\/hyperparam\.app\/contact">/)
+})
+
+test('a self-hosted target sends the reader to their own admin, not to us', async () => {
+  // The admin who can grant access on someone else's deployment is their
+  // colleague; our contact form would send them to people who cannot help.
+  for (const code of ['no_membership', 'org_not_permitted']) {
+    const body = await refusalBody({ code })
+    assert.match(body, /ask your admin for access/)
+    assert.doesNotMatch(body, /hyperparam\.app/)
+  }
+})
+
+test('a contact URL that is not a plain https link is dropped, not rendered', async () => {
+  // respond() interpolates unescaped, so the page falls back to the admin
+  // wording rather than emitting whatever a caller handed it.
+  for (const contactUrl of ['javascript:alert(1)', 'https://x.example/"><script>alert(1)</script>']) {
+    const body = await refusalBody({ code: 'no_membership', contactUrl })
+    assert.match(body, /ask your admin for access/)
+    assert.doesNotMatch(body, /<script>/)
+  }
+})
+
+test('a provider denial says so instead of falling through to the generic page', async () => {
+  const body = await refusalBody({ code: 'access_denied' })
+  assert.match(body, /<h1>Login was denied<\/h1>/)
 })
 
 test('an unknown error code still gets the generic page', async () => {
