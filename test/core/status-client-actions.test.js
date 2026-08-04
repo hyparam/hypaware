@@ -214,6 +214,41 @@ test('a failed backfill does not flip overall to degraded', async () => {
   assert.ok(!report.diagnostics.some((d) => d.message.includes('boom')))
 })
 
+test('a mixed done/failed/refused marker store renders all three; overall stays healthy (LLP 0186)', async () => {
+  const hypHome = await makeHome()
+
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  await writeMarkers(hypHome, {
+    backfill: {
+      '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude', rows: 42, at: '2026-06-25T00:00:00.000Z' },
+      '@hypaware/codex': { status: 'failed', request_key: '@hypaware/codex', reason: 'boom', last_attempt: '2026-06-25T01:00:00.000Z', attempts: 3 },
+      acme: { status: 'refused', request_key: 'acme', reason: 'ownership conflict', at: '2026-06-25T02:00:00.000Z' },
+    },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.overall, 'healthy')
+  assert.ok(report.clientActions)
+  const m = byKey(report.clientActions.actions)
+
+  assert.equal(m.get('@hypaware/claude')?.state, 'done')
+  assert.equal(m.get('@hypaware/codex')?.state, 'failed')
+
+  const refused = m.get('acme')
+  assert.equal(refused?.state, 'refused')
+  assert.equal(refused?.reason, 'ownership conflict')
+  assert.equal(refused?.at, '2026-06-25T02:00:00.000Z')
+  assert.equal(refused?.rows, undefined)
+  assert.equal(refused?.attempts, undefined)
+  assert.equal(refused?.lastAttempt, undefined)
+
+  // The refusal is its own section, never a degrading diagnostic.
+  assert.ok(!report.diagnostics.some((d) => d.message.includes('ownership conflict')))
+})
+
 test('an ordinary host with no markers reports clientActions null (V1 surface unchanged)', async () => {
   const hypHome = await makeHome()
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
@@ -242,6 +277,7 @@ test('JSON renderer emits a stable client_actions block', async () => {
     backfill: {
       '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude', rows: 42, at: '2026-06-25T00:00:00.000Z' },
       '@hypaware/codex': { status: 'failed', request_key: '@hypaware/codex', reason: 'nope', last_attempt: '2026-06-25T02:00:00.000Z', attempts: 1 },
+      acme: { status: 'refused', request_key: 'acme', reason: 'ownership conflict', at: '2026-06-25T03:00:00.000Z' },
     },
   })
 
@@ -252,8 +288,10 @@ test('JSON renderer emits a stable client_actions block', async () => {
   const rows = /** @type {any[]} */ (json.client_actions)
   const claude = rows.find((r) => r.request_key === '@hypaware/claude')
   const codex = rows.find((r) => r.request_key === '@hypaware/codex')
+  const refused = rows.find((r) => r.request_key === 'acme')
   assert.deepEqual(claude, { kind: 'backfill', request_key: '@hypaware/claude', state: 'done', rows: 42, at: '2026-06-25T00:00:00.000Z' })
   assert.deepEqual(codex, { kind: 'backfill', request_key: '@hypaware/codex', state: 'failed', reason: 'nope', last_attempt: '2026-06-25T02:00:00.000Z', attempts: 1 })
+  assert.deepEqual(refused, { kind: 'backfill', request_key: 'acme', state: 'refused', reason: 'ownership conflict', at: '2026-06-25T03:00:00.000Z' })
 })
 
 test('text renderer prints the client actions section with per-state detail', async () => {
@@ -275,6 +313,7 @@ test('text renderer prints the client actions section with per-state detail', as
     backfill: {
       '@acme/done-plugin': { status: 'done', request_key: '@acme/done-plugin', rows: 7, at: '2026-06-25T00:00:00.000Z' },
       '@acme/failed-plugin': { status: 'failed', request_key: '@acme/failed-plugin', reason: 'transcript dir missing', last_attempt: '2026-06-25T01:00:00.000Z', attempts: 2 },
+      '@acme/refused-plugin': { status: 'refused', request_key: '@acme/refused-plugin', reason: 'ownership conflict', at: '2026-06-25T02:00:00.000Z' },
     },
   })
 
@@ -288,6 +327,11 @@ test('text renderer prints the client actions section with per-state detail', as
   assert.match(text, /backfill @acme\/failed-plugin\s+\[failed\]\s+\(transcript dir missing, last attempt 2026-06-25T01:00:00\.000Z, 2 attempts\)/)
   assert.match(text, /backfill @hypaware\/claude\s+\[pending\]/)
   assert.match(text, /backfill @hypaware\/codex\s+\[n\/a\]/)
+  // The repair-hint line's exact text (LLP 0186#hyp-status-attention-needed-surface).
+  assert.match(
+    text,
+    /backfill @acme\/refused-plugin {2}\[refused\] {2}\(ownership conflict\) {2}run 'hyp attach @acme\/refused-plugin' after fixing the cause/
+  )
 })
 
 // T9: the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
