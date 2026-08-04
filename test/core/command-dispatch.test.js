@@ -274,9 +274,9 @@ async function stageBundledPlugin({ workspaceDir, name, commands }) {
  * register it in `plugin-lock.json`, with a manifest declaring the given
  * help commands. Mirrors what `hyp plugin install` lands on disk.
  *
- * @param {{ hypHome: string, name: string, commands: { name: string, summary: string }[] }} args
+ * @param {{ hypHome: string, name: string, commands: { name: string, summary: string }[], requires?: { plugins?: Record<string, string> } }} args
  */
-async function stageInstalledPlugin({ hypHome, name, commands }) {
+async function stageInstalledPlugin({ hypHome, name, commands, requires }) {
   const stateDir = path.join(hypHome, 'hypaware')
   const installDir = path.join(stateDir, 'plugins', name)
   await fs.mkdir(installDir, { recursive: true })
@@ -289,6 +289,7 @@ async function stageInstalledPlugin({ hypHome, name, commands }) {
       hypaware_api: '^1.0.0',
       runtime: 'node',
       entrypoint: './index.js',
+      ...(requires ? { requires } : {}),
       contributes: { commands },
     })
   )
@@ -676,6 +677,133 @@ test('zero-plugin lifecycle commands skip sink materialization warnings; config-
   assert.match(
     ordinary.stderr,
     /warning: sink 'local' not materialized \[sink_plugin_not_active\]/
+  )
+})
+
+test('walkthrough boot skips sink warnings for config-named plugins its profile excludes; unnamed ones still warn', async () => {
+  // Regression for #599: bare `hyp` and `hyp init` boot `all-available`, which
+  // by construction drops every `V1_EXCLUDED_FROM_DEFAULT` plugin even when
+  // the effective config names it (on a fleet-joined host the central layer
+  // pushes both `@hypaware/central` in plugins[] and the `central` sink). The
+  // sink then cannot materialize, and `sink_plugin_not_active` is structurally
+  // guaranteed noise: the plugin was excluded by the boot profile, not missing
+  // from the config, and the "add it to plugins[] or remove the sink" hint
+  // points at an entry that is already there. Materializing it here is not an
+  // option: `@hypaware/central`'s sink `create` acquires an identity from the
+  // server, which a CLI boot must never do.
+  /**
+   * @param {string} label
+   * @param {{ name: string }[]} plugins
+   */
+  async function run(label, plugins) {
+    const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hypaware-excluded-sink-${label}-`))
+    const configPath = path.join(hypHome, 'hypaware-config.json')
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins,
+      sinks: { central: { plugin: '@hypaware/central' } },
+    }))
+    const registry = createCommandRegistry()
+    // `init` → walkthrough boot profile `all-available`.
+    registry.register({ name: 'init', summary: 'Test walkthrough command', usage: 'hyp init', async run() { return 0 } })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['init'], {
+      stdout,
+      stderr,
+      registry,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    })
+    return { code, stderr: stderr.text() }
+  }
+
+  // Fleet-joined shape: the config names the plugin, the boot profile excludes
+  // it. No warning, because there is nothing for the operator to repair.
+  const joined = await run('joined', [{ name: '@hypaware/central' }])
+  assert.equal(joined.code, 0)
+  assert.equal(
+    joined.stderr.includes('sink_plugin_not_active'),
+    false,
+    `walkthrough boot must not warn for a config-named excluded plugin; got stderr: ${JSON.stringify(joined.stderr)}`
+  )
+
+  // Same sink, same boot profile, but the config never names the plugin: a
+  // genuine misconfiguration that must still surface with its repair hint.
+  const unnamed = await run('unnamed', [{ name: '@hypaware/local-fs' }])
+  assert.equal(unnamed.code, 0)
+  assert.match(
+    unnamed.stderr,
+    /warning: sink 'central' not materialized \[sink_plugin_not_active\]/
+  )
+  assert.match(unnamed.stderr, /Add it to plugins\[\] or remove the sink/)
+})
+
+test('walkthrough boot still warns when a config-named sink plugin is uninstalled or unresolvable', async () => {
+  // The #599 suppression must stay pinned to "the boot profile withheld this
+  // plugin". Being named in plugins[] is not the same thing: a config can name
+  // a plugin that no boot profile could ever activate, and those are real
+  // defects the operator has to repair. Both shapes below name their sink's
+  // plugin in plugins[], so a suppression keyed on "named in config" alone
+  // silences them on the very path (`hyp` / `hyp init`) where a bad plugins[]
+  // entry most needs to surface.
+  /**
+   * @param {{
+   *   label: string,
+   *   plugins: { name: string }[],
+   *   sinks: Record<string, { plugin: string }>,
+   *   stage?: (hypHome: string) => Promise<void>,
+   * }} args
+   */
+  async function run({ label, plugins, sinks, stage }) {
+    const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hypaware-warn-sink-${label}-`))
+    if (stage) await stage(hypHome)
+    const configPath = path.join(hypHome, 'hypaware-config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins, sinks }))
+    const registry = createCommandRegistry()
+    // `init` → walkthrough boot profile `all-available`.
+    registry.register({ name: 'init', summary: 'Test walkthrough command', usage: 'hyp init', async run() { return 0 } })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['init'], {
+      stdout,
+      stderr,
+      registry,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    })
+    return { code, stderr: stderr.text() }
+  }
+
+  // Named in plugins[] but never installed (a typo, or an uninstalled plugin):
+  // no manifest exists, so no profile can activate it and the sink is broken.
+  const uninstalled = await run({
+    label: 'uninstalled',
+    plugins: [{ name: '@acme/webhook' }],
+    sinks: { forward: { plugin: '@acme/webhook' } },
+  })
+  assert.equal(uninstalled.code, 0)
+  assert.match(
+    uninstalled.stderr,
+    /warning: sink 'forward' not materialized \[sink_plugin_not_active\]/
+  )
+
+  // Installed and named, so the profile does select it, but dependency
+  // resolution eliminates it (it requires a plugin that is not present) and it
+  // never activates. Also a real defect.
+  const unresolvable = await run({
+    label: 'unresolvable',
+    plugins: [{ name: '@acme/needs-absent' }],
+    sinks: { forward: { plugin: '@acme/needs-absent' } },
+    stage: (hypHome) => stageInstalledPlugin({
+      hypHome,
+      name: '@acme/needs-absent',
+      commands: [],
+      requires: { plugins: { '@acme/absent': '^1.0.0' } },
+    }),
+  })
+  assert.equal(unresolvable.code, 0)
+  assert.match(
+    unresolvable.stderr,
+    /warning: sink 'forward' not materialized \[sink_plugin_not_active\]/
   )
 })
 

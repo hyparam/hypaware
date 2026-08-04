@@ -191,12 +191,23 @@ export async function bootKernel(opts = {}) {
       // bundled skeleton. Excluded plugins are in the pool so they activate
       // when named in config or an init preset, the allowlist only governs
       // default activation, not discoverability.
-      const { installedNames, selected, selectedManifests } = selectBootPlugins({
+      const { installedNames, pool, selected, selectedManifests } = selectBootPlugins({
         discovered,
         installed,
         config,
         bootProfile,
       })
+
+      // Plugins this boot found a manifest for but whose profile did not
+      // select: the profile never gave them a chance to activate. `skipped`
+      // below cannot answer that question for callers, since it only walks
+      // `discovered.loaded` and so omits the V1-excluded bundled plugins
+      // (`@hypaware/central`, …) that `all-bundled`/`all-available` drop even
+      // when the config names them. Dispatch reads this to tell a profile
+      // artifact apart from a config defect when a sink fails to materialize.
+      const withheldByProfile = pool
+        .map((m) => /** @type {PluginName} */ (m.manifest.name))
+        .filter((name) => !selected.has(name))
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -245,6 +256,7 @@ export async function bootKernel(opts = {}) {
           mode,
           runId,
           skipped,
+          withheldByProfile,
           clientDescriptors: catalog.clientDescriptors,
         }
       }
@@ -296,6 +308,7 @@ export async function bootKernel(opts = {}) {
         mode,
         runId,
         skipped,
+        withheldByProfile,
         clientDescriptors: catalog.clientDescriptors,
       }
     },
