@@ -409,8 +409,11 @@ export function openclawSessionId(reqBody, systemText, exchangeId) {
  * {@link cutStreamMessages}, never from the emitted stop reason: a message
  * parsed out of a response body can carry any `stop_reason` string the
  * upstream chose, including `error`, but only a message this projector
- * stitched and cut short is in that set. Request-history messages are
- * excluded twice over, by the set and by the assistant-role test.
+ * stitched and cut short is in that set. That, and not the assistant-role
+ * test, is what excludes a request-history turn: a replayed history row can
+ * carry `role: 'assistant'` and an empty content array too, so the role test
+ * is a cheap first gate over the other roles, never the reason history is
+ * safe.
  *
  * @ref LLP 0161#match-keys [constrained-by]: the ordinal/time fallback makes
  * a live `message_index` on a content-free row an identity hazard, not just
