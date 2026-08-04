@@ -83,6 +83,16 @@ export async function runInitWizard(opts) {
       pathway = 'scoped'
       managed = true
       locked = await computeLockedSafe(catalog, opts)
+    } else if (gate.action === 'first-run' && gate.managed) {
+      // A managed machine whose config is missing or fails to merge lands
+      // on the first-run path (the gate has no config to summarise), but
+      // the central layer on disk still owns its rows. Lock them here too:
+      // an editable org row that the user picks composes into the local
+      // layer, and the next central pull overrides or collides with it.
+      // The pathway stays unset, so the fork still runs.
+      // @ref LLP 0129#join-before-picker [implements]: the first-run path locks the org rows from the on-disk central layer rather than offering them for composition
+      managed = true
+      locked = await computeLockedSafe(catalog, opts)
     }
 
     // 'first-run' and a solo machine's 'reconfigure' both enter here.

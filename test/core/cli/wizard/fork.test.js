@@ -127,6 +127,27 @@ test('evaluateReturningGate: an invalid config is also first-run', async () => {
   assert.equal(gate.action, 'first-run')
 })
 
+// A central layer that stops merging cleanly (a server-side config change,
+// client/server schema drift) must not relabel the machine as unmanaged:
+// the caller reads `managed` to decide whether to lock the org's rows, and
+// an editable org row composes into the local layer.
+// @ref LLP 0129#join-before-picker [tests]:
+test('evaluateReturningGate: a managed machine with an invalid config is still managed on the first-run path', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configValid: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
+test('evaluateReturningGate: a managed machine with no config at all is still managed', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configExists: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
 test('evaluateReturningGate: managed machine, choosing the scoped entry presets a scoped re-entry (no fork)', async () => {
   const { opts, stdout } = ctxWithStdin('1\n')
   opts.collectStatus = async () => fixtureReport({ hasCentral: true })
