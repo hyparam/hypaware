@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { attach } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
+import { isActionRefused } from '../../src/core/config/action_refusal.js'
 
 /**
  * T1 (LLP 0045/0046): the Claude `_hypaware` marker is a self-describing
@@ -359,6 +360,52 @@ test('attach records no prev_base_url when the base URL is absent, whatever else
     assert.equal('prevValue' in result, false)
     const marker = await readMarker(settingsPath)
     assert.equal('prev_base_url' in marker, false)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// LLP 0186/0187 T6: the JSONC throw site is marked as a permanent refusal,
+// so the reconciler short-circuits instead of retrying an edit attach can
+// never safely make (LLP 0184's field bug, under a different label).
+test('attach refuses a JSONC settings.json and marks the error as refused', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(
+      settingsPath,
+      '{\n  // a JSONC comment, which JSON.parse cannot handle\n  "env": {}\n}\n'
+    )
+
+    await assert.rejects(
+      () => attach({ ...ATTACH, settingsPath }),
+      (/** @type {unknown} */ err) => {
+        assert.equal(isActionRefused(err), true)
+        assert.equal(/** @type {any} */ (err).code, 'JSONC')
+        assert.match(/** @type {any} */ (err).message, /appears to be JSONC; refuse to modify/)
+        return true
+      }
+    )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Companion case: a plain malformed (non-JSONC) settings.json still throws
+// ClaudeSettingsError, but is not marked as a permanent refusal, it is an
+// environmental failure the reconciler is allowed to keep retrying.
+test('attach on malformed non-JSONC JSON is not marked as refused', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, '{ "env": ')
+
+    await assert.rejects(
+      () => attach({ ...ATTACH, settingsPath }),
+      (/** @type {unknown} */ err) => {
+        assert.equal(isActionRefused(err), false)
+        assert.equal(/** @type {any} */ (err).code, 'MALFORMED_JSON')
+        return true
+      }
+    )
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
