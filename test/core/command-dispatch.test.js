@@ -679,6 +679,64 @@ test('zero-plugin lifecycle commands skip sink materialization warnings; config-
   )
 })
 
+test('walkthrough boot skips sink warnings for config-named plugins its profile excludes; unnamed ones still warn', async () => {
+  // Regression for #599: bare `hyp` and `hyp init` boot `all-available`, which
+  // by construction drops every `V1_EXCLUDED_FROM_DEFAULT` plugin even when
+  // the effective config names it (on a fleet-joined host the central layer
+  // pushes both `@hypaware/central` in plugins[] and the `central` sink). The
+  // sink then cannot materialize, and `sink_plugin_not_active` is structurally
+  // guaranteed noise: the plugin was excluded by the boot profile, not missing
+  // from the config, and the "add it to plugins[] or remove the sink" hint
+  // points at an entry that is already there. Materializing it here is not an
+  // option: `@hypaware/central`'s sink `create` acquires an identity from the
+  // server, which a CLI boot must never do.
+  /**
+   * @param {string} label
+   * @param {{ name: string }[]} plugins
+   */
+  async function run(label, plugins) {
+    const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hypaware-excluded-sink-${label}-`))
+    const configPath = path.join(hypHome, 'hypaware-config.json')
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins,
+      sinks: { central: { plugin: '@hypaware/central' } },
+    }))
+    const registry = createCommandRegistry()
+    // `init` → walkthrough boot profile `all-available`.
+    registry.register({ name: 'init', summary: 'Test walkthrough command', usage: 'hyp init', async run() { return 0 } })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['init'], {
+      stdout,
+      stderr,
+      registry,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    })
+    return { code, stderr: stderr.text() }
+  }
+
+  // Fleet-joined shape: the config names the plugin, the boot profile excludes
+  // it. No warning, because there is nothing for the operator to repair.
+  const joined = await run('joined', [{ name: '@hypaware/central' }])
+  assert.equal(joined.code, 0)
+  assert.equal(
+    joined.stderr.includes('sink_plugin_not_active'),
+    false,
+    `walkthrough boot must not warn for a config-named excluded plugin; got stderr: ${JSON.stringify(joined.stderr)}`
+  )
+
+  // Same sink, same boot profile, but the config never names the plugin: a
+  // genuine misconfiguration that must still surface with its repair hint.
+  const unnamed = await run('unnamed', [{ name: '@hypaware/local-fs' }])
+  assert.equal(unnamed.code, 0)
+  assert.match(
+    unnamed.stderr,
+    /warning: sink 'central' not materialized \[sink_plugin_not_active\]/
+  )
+  assert.match(unnamed.stderr, /Add it to plugins\[\] or remove the sink/)
+})
+
 test('attach accepts a positional client name', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()

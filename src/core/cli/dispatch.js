@@ -31,9 +31,10 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
+ * @import { MaterializeError } from '../../../src/core/sinks/types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 
@@ -80,6 +81,70 @@ function bootProfileActivatesPlugins(bootProfile) {
     return bootProfile.activate.length > 0
   }
   return true
+}
+
+/**
+ * Plugin names a sink instance needs active to materialize: the single
+ * `plugin` of a request sink, or the `writer` + `destination` pair of a
+ * blob/table-format sink. Mirrors the shape dispatch in `materializeOne`.
+ *
+ * @param {BlobSinkConfigInstance | RequestSinkConfigInstance} raw
+ * @returns {PluginName[]}
+ */
+function sinkPluginNames(raw) {
+  if ('writer' in raw && 'destination' in raw) {
+    return [
+      /** @type {PluginName} */ (raw.writer),
+      /** @type {PluginName} */ (raw.destination),
+    ]
+  }
+  if ('plugin' in raw) return [/** @type {PluginName} */ (raw.plugin)]
+  return []
+}
+
+/**
+ * Whether a `sink_plugin_not_active` failure is an artifact of the boot
+ * profile rather than a config defect the operator can act on.
+ *
+ * Bare `hyp` and `hyp init` boot `all-available`, which selects the default
+ * bundled surface plus installed plugins and drops the opt-in plugins even
+ * when the effective config names them, so the walkthrough picker never
+ * surfaces them. A fleet-joined host's effective config carries both
+ * `@hypaware/central` in `plugins[]` and the central sink pushed by the
+ * fleet layer, so under this profile that sink cannot materialize: the same
+ * structurally guaranteed noise `bootProfileActivatesPlugins` filters for
+ * the zero-plugin profiles, one profile down. The hint is wrong there too,
+ * since it asks for a `plugins[]` entry that already exists.
+ *
+ * Materializing the sink instead is not an option: `@hypaware/central`
+ * acquires a server identity while creating its sink, which a CLI boot must
+ * not do.
+ *
+ * The true positive survives. When the config does not name the plugin, the
+ * sink really is misconfigured and both the warning and its "add it to
+ * plugins[]" repair are actionable.
+ *
+ * @param {MaterializeError} err
+ * @param {{ bootProfile: BootProfile, config: HypAwareV2Config | null, activePlugins: ActivePlugin[] }} args
+ * @returns {boolean}
+ */
+function sinkPluginExcludedByBootProfile(err, { bootProfile, config, activePlugins }) {
+  if (err.errorKind !== 'sink_plugin_not_active') return false
+  // The `config` profile activates exactly what the config names, so a
+  // plugin that is inactive there is genuinely absent, disabled, or
+  // unresolvable: a real defect, not a profile artifact.
+  if (bootProfile === 'config') return false
+  const raw = config?.sinks?.[err.instance]
+  if (!raw) return false
+  const names = sinkPluginNames(raw)
+  if (names.length === 0) return false
+  const active = new Set(activePlugins.map((p) => p.name))
+  const namedByConfig = new Set(
+    (config?.plugins ?? [])
+      .filter((entry) => entry.enabled !== false)
+      .map((entry) => /** @type {PluginName} */ (entry.name))
+  )
+  return names.every((name) => active.has(name) || namedByConfig.has(name))
 }
 
 /**
@@ -201,6 +266,10 @@ export async function dispatch(argv, opts = {}) {
         runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
       })
       for (const err of sinkResult.errors) {
+        // A profile that ignores `plugins[]` (the walkthrough's
+        // `all-available`) cannot activate an opt-in plugin the config does
+        // name, so its sink failure says nothing about the config.
+        if (sinkPluginExcludedByBootProfile(err, { bootProfile, config: boot.config, activePlugins })) continue
         stderr.write(
           `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
         )
