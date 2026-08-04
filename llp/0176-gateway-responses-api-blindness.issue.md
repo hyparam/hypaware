@@ -84,7 +84,14 @@ From the 2026-08-03 investigation:
    `is_error` / status, or at minimum a structured log + `recent errors`
    increment). STILL OPEN, and still unverified whether matched error
    exchanges record today (the round-1 review showed the observed 400
-   silence was the unmatched-drop layer, not error handling).
+   silence was the unmatched-drop layer, not error handling). The gap
+   changed shape when the client header landed (LLP 0175): an error-status
+   exchange in a matched shape no longer falls out at the unmatched-drop
+   layer, it projects its request-side turns and no assistant row, with
+   nothing marking the exchange as failed, so a reader of
+   `ai_gateway_messages` cannot distinguish it from a turn the model never
+   answered. "Records nothing" became "records a prompt with no reply and
+   no error signal".
 3. Log every proxied exchange the recorder cannot decode: upstream, path,
    status, and a wire-shape guess, so an unsupported dialect surfaces as a
    named gap instead of a silent no-op.

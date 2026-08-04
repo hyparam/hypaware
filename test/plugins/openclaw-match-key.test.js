@@ -65,6 +65,18 @@ test('wireMatchKey: the timestamp strip tolerates seconds and short zone names',
   )
 })
 
+test('wireMatchKey: the timestamp strip accepts GMT-offset short zone names', () => {
+  // JS timeZoneName: 'short' emits GMT+N for most non-US zones; the strip
+  // must not be limited to alpha abbreviations like PDT.
+  for (const zone of ['GMT+2', 'GMT+5:30', 'GMT-7', 'UTC+10']) {
+    assert.equal(
+      wireMatchKey('user', `[Mon 2026-08-03 15:33 ${zone}] hello`),
+      wireMatchKey('user', 'hello'),
+      zone
+    )
+  }
+})
+
 test('wireMatchKey: a stamp on both sides still matches (strip is symmetric)', () => {
   const wire = wireMatchKey('user', '[Mon 2026-08-03 15:33 PDT] hello')
   const session = sessionMatchKey('user', '[Mon 2026-08-03 15:33 PDT] hello')
@@ -73,8 +85,9 @@ test('wireMatchKey: a stamp on both sides still matches (strip is symmetric)', (
 
 test('wireMatchKey: near-miss brackets are not stripped', () => {
   // Not the OpenClaw stamp shape: lowercase weekday, missing zone, no
-  // trailing space. Each must hash as-is rather than lose its prefix.
-  for (const text of ['[mon 2026-08-03 15:33 PDT] x', '[Mon 2026-08-03 15:33] x', '[NOTE] x', '[Mon 2026-08-03 15:33 PDT]x']) {
+  // trailing space, malformed offset tails. Each must hash as-is rather
+  // than lose its prefix.
+  for (const text of ['[mon 2026-08-03 15:33 PDT] x', '[Mon 2026-08-03 15:33] x', '[NOTE] x', '[Mon 2026-08-03 15:33 PDT]x', '[Mon 2026-08-03 15:33 GMT+123] x', '[Mon 2026-08-03 15:33 GMT+5:3] x', '[Mon 2026-08-03 15:33 GMT+] x']) {
     assert.notEqual(wireMatchKey('user', text), wireMatchKey('user', 'x'), text)
   }
 })

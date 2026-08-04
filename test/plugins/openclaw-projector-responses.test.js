@@ -225,6 +225,23 @@ test('a stream cut before its terminal event degrades to finished items, marked 
   assert.equal(assistant.stop_reason, 'error')
 })
 
+test('a stream cut with zero finished items emits no assistant row', async () => {
+  // Nothing to degrade to: an empty-content assistant row would still
+  // carry a match key and message_index, making it eligible for the
+  // ordinal settlement fallback with no content behind it.
+  const projection = await project({
+    request_body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' }),
+    is_sse: true,
+    stream_events: sseEvents([
+      { type: 'response.created', response: { id: 'resp_004', object: 'response', status: 'in_progress' } },
+      { type: 'response.output_text.delta', delta: 'partial text' },
+    ]),
+  })
+  assert.ok(projection)
+  const last = /** @type {any} */ (projection.messages.at(-1))
+  assert.equal(last.role, 'user')
+})
+
 test('an incomplete response records its incomplete reason as stop_reason', () => {
   const assistant = openaiResponsesAssistant({
     object: 'response',

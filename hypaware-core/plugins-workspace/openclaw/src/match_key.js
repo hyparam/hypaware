@@ -85,14 +85,19 @@ function normalizeBlockKind(rawKind) {
  * while the same exchange's assistant turns settled, so the one residual
  * duplication after the header fix was exactly the prefixed user rows.
  *
- * Weekday, ISO date, HH:MM(:SS optional), and a 1-6 char uppercase zone
- * abbreviation, then `] ` - the shape observed on real captures. The strip
- * is applied symmetrically by {@link reduceBlock} to BOTH match-key
+ * Weekday, ISO date, HH:MM(:SS optional), and a short zone name, then
+ * `] `. The zone is either an uppercase abbreviation (`PDT`, `UTC`, `Z`)
+ * or an abbreviation with an offset tail (`GMT+2`, `GMT+5:30`, `GMT-7`):
+ * JS `timeZoneName: 'short'` formatting, which the observed stamp is
+ * consistent with, emits the alpha form only for a handful of mostly-US
+ * zones and the `GMT+N` form for most of the world, so accepting only the
+ * alpha form would leave the LLP 0175 residual open for non-US users. The
+ * strip is applied symmetrically by {@link reduceBlock} to BOTH match-key
  * builders, so a text that legitimately starts with such a stamp on both
  * sides still matches (both get stripped), and a one-sided stamp (the bug)
  * stops mattering.
  */
-const WIRE_TIMESTAMP_PREFIX = /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?::\d{2})? [A-Z]{1,6}\] /
+const WIRE_TIMESTAMP_PREFIX = /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?::\d{2})? [A-Z]{1,6}(?:[+-]\d{1,2}(?::\d{2})?)?\] /
 
 /**
  * @param {string} text

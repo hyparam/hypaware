@@ -314,8 +314,12 @@ export function hasAnthropicHeaderSignature(headers) {
 /**
  * Stable session key: the 16-hex-char SHA-256 prefix (the gateway's
  * hash-id convention) of the system-prompt head; without a system
- * prompt, of the first message's content; without messages, of the
- * exchange id, so the partition key is never null.
+ * prompt, of the first message's content (`messages` on the chat wires,
+ * `input` on the Responses wire, which never carries `messages`); without
+ * either, of the exchange id, so the partition key is never null. The
+ * `input` branch exists so an instruction-less Responses request still
+ * groups by conversation instead of fragmenting into a per-exchange
+ * session id.
  *
  * @param {Record<string, unknown>} reqBody
  * @param {string | undefined} systemText
@@ -324,7 +328,9 @@ export function hasAnthropicHeaderSignature(headers) {
  */
 export function openclawSessionId(reqBody, systemText, exchangeId) {
   if (systemText) return hashShort(systemText.slice(0, SESSION_HASH_HEAD_CHARS))
-  const messages = Array.isArray(reqBody.messages) ? reqBody.messages : []
+  const messages = Array.isArray(reqBody.messages) ? reqBody.messages
+    : Array.isArray(reqBody.input) ? reqBody.input
+    : []
   if (messages.length > 0 && isPlainObject(messages[0])) {
     // A message with absent `content` stringifies to undefined, which
     // sha256Hex cannot digest: fall back to the exchange id so a
@@ -1086,7 +1092,8 @@ function responsesUsageAsChatUsage(usage) {
  * `response.output_item.done` items that did finish (each carries its
  * complete item), marked `stop_reason = 'error'` like both sibling
  * reconstructions; per-delta stitching of a half-finished item is
- * deliberately not attempted.
+ * deliberately not attempted, and a cut stream with ZERO finished items
+ * yields no assistant row at all.
  *
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | undefined}
@@ -1111,7 +1118,10 @@ function responsesAssistantFromStream(streamEvents) {
     }
   }
   if (terminal) return openaiResponsesAssistant(terminal)
-  if (!sawResponsesEvent) return undefined
+  // A cut stream with no finished items has nothing to degrade to: emit
+  // no assistant row rather than an empty-content row that would still
+  // carry a match key and be eligible for the ordinal settlement fallback.
+  if (!sawResponsesEvent || doneItems.length === 0) return undefined
   const partial = openaiResponsesAssistant({ object: 'response', output: doneItems })
   if (!partial) return undefined
   partial.stop_reason = 'error'

@@ -203,7 +203,10 @@ export function createAiGatewayMessageProjector(opts) {
           exchange_id: stringValue(input.exchange_id) ?? '',
           upstream: stringValue(input.upstream) ?? '',
           reason: 'no_projector_match',
-          path: stringValue(input.path) ?? '',
+          // Pathname only: the row's `path` is the full request URL, and a
+          // TOML-configured upstream authenticating via a query parameter
+          // would otherwise put that credential into a warn line.
+          path: (stringValue(input.path) ?? '').split('?')[0],
           method: stringValue(input.method) ?? '',
           status_code: typeof input.status_code === 'number' ? input.status_code : null,
           is_sse: input.is_sse === true,
