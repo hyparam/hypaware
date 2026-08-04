@@ -209,6 +209,7 @@ instruction (LLP 0169), and refuse-on-existing still applies unchanged.
   OpenClaw, `src/core/cli/wizard/pick.js` hardcodes the client list).
   Related, but a separate request; this design reduces its sting by making
   the follow-up `hyp attach --client openclaw` self-sufficient.
+  Extended-by: LLP 0177 (issue), LLP 0180 (the fix decision).
 
 ## Open questions {#open-questions}
 
