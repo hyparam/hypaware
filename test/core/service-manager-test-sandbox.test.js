@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { runServiceCommand } from '../../src/core/daemon/service_ops.js'
 
@@ -24,6 +24,11 @@ import { runServiceCommand } from '../../src/core/daemon/service_ops.js'
 // @ref LLP 0181#the-guard [tests]: the refusal sits at the single spawn seam
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+/** The guard's home, as a specifier a script written to a temp dir can import. */
+const SERVICE_OPS_URL = pathToFileURL(
+  path.join(REPO_ROOT, 'src', 'core', 'daemon', 'service_ops.js')
+).href
 
 /**
  * The guard's opt-in, spelled out here rather than imported, so this file still
@@ -78,35 +83,72 @@ function recordingServiceManagers(dir) {
   }
 }
 
-test('the attach fixtures never reach a real service manager, even when one is on PATH', () => {
+/**
+ * Run `argv` with recording `launchctl` / `systemctl` stubs on `PATH`, and
+ * report what it spawned and whether it passed.
+ *
+ * @param {string[]} argv
+ * @returns {{ invocations: string[], status: number | null, output: string }}
+ */
+function runWithRecordedServiceManagers(argv) {
+  /** @type {{ invocations: string[], status: number | null, output: string }} */
+  let outcome = { invocations: [], status: null, output: '' }
   withTempDir((dir) => {
     const recorder = recordingServiceManagers(dir)
     /** @type {NodeJS.ProcessEnv} */
     const env = { ...process.env, PATH: `${recorder.binDir}${path.delimiter}${process.env.PATH ?? ''}` }
     delete env[ALLOW_REAL_SERVICE_MANAGER_ENV]
-    // Inherited from this process, `NODE_TEST_CONTEXT` makes the child's
-    // `--test` decide it is already inside a test file and skip every one it
-    // was handed ("run() is being called recursively"), so it would report a
-    // clean pass having executed nothing. The child sets its own.
+    // Inherited from this process, `NODE_TEST_CONTEXT` would both pre-answer
+    // the question under test and, for a `--test` child, make it decide it is
+    // already inside a test file and skip every one it was handed ("run() is
+    // being called recursively"): a clean pass having executed nothing.
     delete env.NODE_TEST_CONTEXT
 
-    const run = spawnSync(process.execPath, ['--test', ...REAL_LABEL_FIXTURES], {
+    const run = spawnSync(process.execPath, argv, {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       env,
       timeout: 120_000,
     })
-
-    assert.deepEqual(
-      recorder.invocations(),
-      [],
-      'a fixture spawned the host service manager: a temp HOME does not sandbox launchd/systemd, ' +
-      'so this command named the developer\'s own daemon (LLP 0181)'
-    )
-    // And the fixtures still pass with the service manager refused, so the
-    // guard did not buy safety by breaking what they assert.
-    assert.equal(run.status, 0, `${run.stdout ?? ''}${run.stderr ?? ''}`)
+    outcome = {
+      invocations: recorder.invocations(),
+      status: run.status,
+      output: `${run.stdout ?? ''}${run.stderr ?? ''}`,
+    }
   })
+  return outcome
+}
+
+const SPAWNED_THE_HOST =
+  'a fixture spawned the host service manager: a temp HOME does not sandbox launchd/systemd, ' +
+  'so this command named the developer\'s own daemon (LLP 0181)'
+
+test('the attach fixtures never reach a real service manager, even when one is on PATH', () => {
+  const run = runWithRecordedServiceManagers(['--test', ...REAL_LABEL_FIXTURES])
+  assert.deepEqual(run.invocations, [], SPAWNED_THE_HOST)
+  // And the fixtures still pass with the service manager refused, so the
+  // guard did not buy safety by breaking what they assert.
+  assert.equal(run.status, 0, run.output)
+})
+
+// `node --test` sets `NODE_TEST_CONTEXT` only in the children it forks, so the
+// two runs below reach the guard with it unset. Both are ordinary habits: one
+// test file at a time while iterating, and the repo's own `npm test --
+// --experimental-test-isolation=none`, which `scripts/run-tests.js` forwards
+// verbatim. Before the predicate widened, each one ran
+// `systemctl --user restart hypaware.service` for real.
+test('running a fixture directly, with no --test, still reaches no service manager', () => {
+  const run = runWithRecordedServiceManagers([REAL_LABEL_FIXTURES[0]])
+  assert.deepEqual(run.invocations, [], SPAWNED_THE_HOST)
+  assert.equal(run.status, 0, run.output)
+})
+
+test('running the fixtures without test isolation still reaches no service manager', () => {
+  const run = runWithRecordedServiceManagers(
+    ['--test', '--experimental-test-isolation=none', ...REAL_LABEL_FIXTURES]
+  )
+  assert.deepEqual(run.invocations, [], SPAWNED_THE_HOST)
+  assert.equal(run.status, 0, run.output)
 })
 
 test('runServiceCommand refuses to spawn under the test runner', async () => {
@@ -123,15 +165,30 @@ test('runServiceCommand refuses to spawn under the test runner', async () => {
   )
 })
 
-test('the explicit opt-in still spawns', async () => {
-  const previous = process.env[ALLOW_REAL_SERVICE_MANAGER_ENV]
-  process.env[ALLOW_REAL_SERVICE_MANAGER_ENV] = '1'
-  try {
-    const res = await runServiceCommand(process.execPath, ['-e', 'process.stdout.write("spawned")'])
-    assert.equal(res.exitCode, 0)
-    assert.equal(res.stdout, 'spawned')
-  } finally {
-    if (previous === undefined) delete process.env[ALLOW_REAL_SERVICE_MANAGER_ENV]
-    else process.env[ALLOW_REAL_SERVICE_MANAGER_ENV] = previous
-  }
+test('the explicit opt-in still spawns', () => {
+  withTempDir((dir) => {
+    // In a child, not by setting the opt-in on this process's `env`: that
+    // mutation is process-global, so under
+    // `--experimental-test-isolation=none` it would disable the guard for
+    // every other test sharing the process. The child is named `.test.js` and
+    // run with no `--test`, so the guard is live in it (that is the shape the
+    // predicate's last arm catches) and only the opt-in lets the spawn out.
+    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}')
+    const script = path.join(dir, 'opt-in.test.js')
+    writeFileSync(script, [
+      `import { runServiceCommand } from ${JSON.stringify(SERVICE_OPS_URL)}`,
+      "const res = await runServiceCommand(process.execPath, ['-e', 'process.stdout.write(\"spawned\")'])",
+      'process.stdout.write(JSON.stringify(res))',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync(process.execPath, [script], {
+      encoding: 'utf8',
+      env: { ...process.env, [ALLOW_REAL_SERVICE_MANAGER_ENV]: '1' },
+      timeout: 60_000,
+    })
+
+    assert.equal(run.status, 0, `${run.stdout ?? ''}${run.stderr ?? ''}`)
+    assert.deepEqual(JSON.parse(run.stdout), { exitCode: 0, stdout: 'spawned', stderr: '' })
+  })
 })

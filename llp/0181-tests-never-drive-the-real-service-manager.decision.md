@@ -3,7 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Daemon
-**Author:** Phil / Claude
+**Generated-by:** neutral
 **Date:** 2026-08-04
 **Related:** LLP 0017, LLP 0174, LLP 0178
 
@@ -59,9 +59,22 @@ has no service manager installed" is not a sandbox; it is a property of one host
 Fixture-by-fixture discipline is the thing that already failed, so the refusal
 goes where every service-manager command necessarily passes:
 `runServiceCommand` in `src/core/daemon/service_ops.js` rejects with a
-`ServiceManagerSandboxError` when `NODE_TEST_CONTEXT` is set (the Node test
-runner sets it in every test child) and `HYP_ALLOW_REAL_SERVICE_MANAGER` is not
-`1`.
+`ServiceManagerSandboxError` when it is running tests and
+`HYP_ALLOW_REAL_SERVICE_MANAGER` is not `1`.
+
+"Running tests" is three shapes, not one. `node --test` sets
+`NODE_TEST_CONTEXT` only in the children it forks, so two ordinary habits leave
+it unset: `node some.test.js` while iterating on a single file, and
+`npm test -- --experimental-test-isolation=none`, which `scripts/run-tests.js`
+forwards verbatim. Each of those still ran
+`systemctl --user restart hypaware.service` for real against a guard that asked
+about `NODE_TEST_CONTEXT` alone. The predicate therefore also accepts `--test`
+in `process.execArgv` and a `.test.js` entry on the command line. It answers
+"yes" more readily than it strictly must, which is the safe direction: a false
+yes costs a refusal the caller can lift with the opt-in, a false no costs the
+host's daemon. No command that reaches a service op (`hyp daemon ...`,
+`hyp attach`, `hyp init`, `hyp join`) takes a file path, so no real invocation
+carries a `.test.js`.
 
 Three consequences are deliberate:
 
@@ -71,14 +84,18 @@ Three consequences are deliberate:
   `installLaunchAgent`'s best-effort `bootout` attach a `.catch()` to the
   returned promise, which a synchronous throw would sail past.
 - **It binds to the test runner only.** The hermetic smokes
-  (`hyp smoke ...`) and the packaged CLI do not set `NODE_TEST_CONTEXT`, so the
+  (`hyp smoke ...`) and the packaged CLI match none of the three shapes, so the
   acceptance tier that is *supposed* to install and start a real daemon
   (`docs/ACCEPTANCE.md`) is untouched, and needs no opt-in.
 
 The opt-in exists for a hypothetical test that genuinely means to drive this
-machine's service manager. Nothing in the traditional suite may use it: that
-tier is defined as fast, deterministic, and local, and a real `launchctl` call
-is none of the three.
+machine's service manager. No test may use it to reach a real service manager:
+the traditional tier is defined as fast, deterministic, and local, and a real
+`launchctl` call is none of the three. Exercising the opt-in itself (that the
+guard is liftable at all) is fine, and belongs in a child process: the guard
+reads `process.env`, so setting the variable in-process would disable it for
+every other test sharing that process under
+`--experimental-test-isolation=none`.
 
 ## Alternatives considered {#alternatives}
 

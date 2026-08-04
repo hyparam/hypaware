@@ -54,6 +54,33 @@ export class ServiceManagerSandboxError extends ServiceOpError {
 const ALLOW_REAL_SERVICE_MANAGER_ENV = 'HYP_ALLOW_REAL_SERVICE_MANAGER'
 
 /**
+ * Whether this process is running tests.
+ *
+ * `NODE_TEST_CONTEXT` alone answers only one of three shapes: `node --test`
+ * sets it in the children it forks, and only there. `node some.test.js`
+ * (iterating on a single file) and
+ * `node --test --experimental-test-isolation=none some.test.js` (reachable
+ * from the repo's own entrypoint, which forwards extra args verbatim) both
+ * leave it unset, and both used to spawn for real. The other two arms name
+ * what those runs do carry: the flag stays in `execArgv`, and the test file
+ * is on the command line.
+ *
+ * Over-answering here costs a refusal a caller can lift with
+ * `HYP_ALLOW_REAL_SERVICE_MANAGER=1`; under-answering costs the host's
+ * daemon. No command that reaches a service op (`hyp daemon ...`,
+ * `hyp attach`, `hyp init`, `hyp join`) takes a file path, so no real
+ * invocation puts a `.test.js` on the command line.
+ *
+ * @returns {boolean}
+ * @ref LLP 0181#the-guard [implements]: the two extra arms are not defensive padding, both shapes were measured kicking the host's daemon after #602's first fix
+ */
+function underTestRunner() {
+  if (process.env.NODE_TEST_CONTEXT !== undefined) return true
+  if (process.execArgv.includes('--test')) return true
+  return process.argv.slice(1).some((arg) => arg.endsWith('.test.js'))
+}
+
+/**
  * Refuse, under the test runner, to spawn a real service manager.
  *
  * launchd and systemd address a service by label inside a **per-uid**
@@ -72,7 +99,7 @@ const ALLOW_REAL_SERVICE_MANAGER_ENV = 'HYP_ALLOW_REAL_SERVICE_MANAGER'
  * @ref LLP 0181#the-guard [implements]: the seam every service-manager spawn passes through is where the refusal lives, so no future fixture can route around it
  */
 function serviceManagerSpawnRefusal(bin, args) {
-  if (process.env.NODE_TEST_CONTEXT === undefined) return undefined
+  if (!underTestRunner()) return undefined
   if (process.env[ALLOW_REAL_SERVICE_MANAGER_ENV] === '1') return undefined
   return new ServiceManagerSandboxError(
     `refusing to run '${[bin, ...args].join(' ')}' from the test runner: a temp HOME does not ` +
