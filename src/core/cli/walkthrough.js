@@ -25,7 +25,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */
@@ -185,7 +185,9 @@ export function defaultPromptFactory(opts) {
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncBackfillConsentPrompt}
  */
-function defaultBackfillConsentPromptFactory(opts) {
+// @ref LLP 0174#prompt [implements]: exported so the interactive attach
+// flow can ask the identical backfill question instead of re-implementing it
+export function defaultBackfillConsentPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiBackfillConsentPromptFactory(opts)
   return legacyBackfillConsentPromptFactory(opts)
 }
@@ -241,7 +243,7 @@ function legacyBackfillConsentPromptFactory(opts) {
  * @param {number} retentionDays
  * @returns {string}
  */
-function backfillConsentTitle(providers, retentionDays) {
+export function backfillConsentTitle(providers, retentionDays) {
   return `Import local ${providers.join(', ')} history now (last ${retentionDays} days)?`
 }
 
@@ -716,6 +718,41 @@ export function composePickerConfig(args) {
   }
   if (Object.keys(sinks).length > 0) config.sinks = sinks
   return config
+}
+
+/**
+ * Resolve the plugin dependency set a single picker descriptor's `compose`
+ * contribution requires, without the multi-descriptor union / upstream-merge
+ * machinery {@link composePickerConfig}'s fold needs across a whole picked
+ * set. This is the "same composition the picker uses (`requires_gateway`
+ * and friends)" the manual-attach enable prompt reuses to list what
+ * enabling a single client's adapter would add
+ * (`buildAttachPluginCatalog(ctx).pickerDescriptors.get(name)` supplies the
+ * descriptor).
+ *
+ * @param {PickerDescriptor} descriptor
+ * @returns {{ requiresGateway: boolean, pluginNames: string[], entries: PluginConfigInstance[] }}
+ * @ref LLP 0174#prompt [implements]: "the dependency list comes from the
+ * same composition the picker uses (`requires_gateway` and friends)",
+ * as a one-descriptor slice of composePickerConfig's per-descriptor fold
+ * rather than a re-derivation of it.
+ */
+export function resolveSingleSourceEnablement(descriptor) {
+  const compose = descriptor.compose
+  const requiresGateway = compose?.requires_gateway === true
+
+  /** @type {PluginConfigInstance[]} */
+  const entries = [
+    ...(requiresGateway ? [{ name: /** @type {PluginName} */ ('@hypaware/ai-gateway') }] : []),
+    ...(compose?.plugin ? [compose.plugin] : []),
+    ...(Array.isArray(compose?.plugins) ? compose.plugins : []),
+  ]
+
+  return {
+    requiresGateway,
+    pluginNames: entries.map((entry) => entry.name),
+    entries,
+  }
 }
 
 /**

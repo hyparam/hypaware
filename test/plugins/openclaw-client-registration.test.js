@@ -11,7 +11,7 @@ import { activate } from '../../hypaware-core/plugins-workspace/openclaw/src/ind
 // stages is the exact real-world undo record detachClientFromDisk reverses,
 // mirroring client-detach-json-path.test.js's own use of the real effect.
 import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
-import { buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
+import { buildAttachPluginCatalog, buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
 /**
@@ -483,6 +483,38 @@ test('hyp clients: the descriptor map behind client listing/status resolves open
       marker_header: 'x-hypaware-upstream',
       cache_glob: 'agents/*/agent/models.json',
     })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0174#detection [tests]: buildAttachPluginCatalog generalizes
+// buildClientDescriptorMap to return the full catalog build instead of
+// discarding pickerDescriptors/pluginMetadata/knownDatasets; this fixture
+// workspace's real bundled manifests include both claude and ai-gateway
+// (openclaw's own dependency closure), so the non-clientDescriptors slices
+// this task adds must resolve non-empty here too.
+test('buildAttachPluginCatalog returns the full catalog, not just clientDescriptors', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-catalog-'))
+  try {
+    const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+      env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+      config: { version: 2 },
+    }))
+
+    const catalog = await buildAttachPluginCatalog(ctx)
+
+    assert.ok(catalog.clientDescriptors.has('openclaw'), 'clientDescriptors still resolves openclaw')
+    assert.ok(catalog.pickerDescriptors.size > 0, 'pickerDescriptors is non-empty')
+    assert.ok(catalog.pickerDescriptors.has('claude'), 'pickerDescriptors includes the claude picker row')
+    assert.ok(catalog.pluginMetadata.size > 0, 'pluginMetadata is non-empty')
+    assert.ok(catalog.pluginMetadata.has('@hypaware/claude'), 'pluginMetadata includes @hypaware/claude')
+    assert.ok(catalog.pluginMetadata.has('@hypaware/ai-gateway'), 'pluginMetadata includes @hypaware/ai-gateway')
+
+    // buildClientDescriptorMap is now a thin projection of the same catalog
+    // build: same keys, same descriptor identity for the shared client.
+    const descriptorMap = await buildClientDescriptorMap(ctx)
+    assert.deepEqual([...descriptorMap.keys()].sort(), [...catalog.clientDescriptors.keys()].sort())
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
