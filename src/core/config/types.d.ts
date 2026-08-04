@@ -295,11 +295,14 @@ export interface CreateConfigControlOptions {
  *   (the marker is what makes every subsequent boot cheap). See LLP 0036
  *   §Idempotency.
  * - `failed`: not terminal; the next reconcile pass retries it.
+ * - `refused`: terminal, but not the same short-circuit rule as `done` -
+ *   the forward-gap loop skips it unconditionally, with no `markerIsCurrent()`
+ *   consultation. Only an explicit `hyp attach` re-run clears it (LLP 0186).
  * - `applied`: current applied state of a reconciled/reversible handler
  *   (attach, future); `reverse()` runs on leave when the config stops
  *   naming the effect.
  */
-export type ActionMarkerStatus = 'done' | 'failed' | 'applied'
+export type ActionMarkerStatus = 'done' | 'failed' | 'refused' | 'applied'
 
 /**
  * One persisted action marker, namespaced by handler `kind` then keyed by
@@ -308,6 +311,13 @@ export type ActionMarkerStatus = 'done' | 'failed' | 'applied'
  * high-water input without a format break (LLP 0036 §request-key,
  * LLP 0041 §Idempotency-and-completion-state). Handlers may attach extra
  * fields via `ActionOutcome.detail`.
+ *
+ * A `refused` marker (LLP 0186) reuses `at` (the terminal-state time, the
+ * same way `done` uses it) and `reason` (the same way `failed` uses it); it
+ * carries no `attempts`, since a refusal is never re-`perform()`ed. Any
+ * `installed_assets` carried from a prior marker at the same request key is
+ * preserved across the rewrite to `refused`, the same way the `done` and
+ * `failed` branches already preserve it.
  */
 export interface ActionMarker {
   status: ActionMarkerStatus
@@ -376,14 +386,30 @@ export interface DesiredAction {
  * the attempt counter); `detail` is merged onto the marker verbatim.
  */
 export interface ActionOutcome {
-  /** `done` = the effect applied/reversed cleanly; `failed` = retry next pass. */
-  status: 'done' | 'failed'
+  /**
+   * `done` = the effect applied/reversed cleanly; `failed` = retry next
+   * pass; `refused` = a permanent precondition failure only the user can
+   * fix, never retried until an explicit `hyp attach` re-run (LLP 0186).
+   */
+  status: 'done' | 'failed' | 'refused'
   /** Rows written (run-once import); recorded on the `done` marker. */
   rows?: number
   /** Failure reason; recorded on the `failed` marker. */
   reason?: string
   /** Extra handler-specific fields merged into the persisted marker. */
   detail?: JsonObject
+}
+
+/**
+ * A thrown Error marked as a permanent refusal by `markActionRefused`
+ * (`src/core/config/action_refusal.js`), so it survives the kernel's
+ * throw-only `attach(): Promise<void>` seam and `action_attach.js`'s
+ * `perform()` catch can tell it apart from an environmental failure that
+ * might succeed on retry. `isActionRefused` reads the marker back
+ * defensively (LLP 0186).
+ */
+export interface ActionRefusalError extends Error {
+  hypActionRefused: true
 }
 
 /**
@@ -525,9 +551,11 @@ export interface ReconcileActionResult {
    * - `done`: `perform()` succeeded this pass; marker advanced to `done`.
    * - `skipped`: a `done` marker already existed (run-once short-circuit).
    * - `failed`: `perform()`/`reverse()` failed; marker recorded `failed`.
+   * - `refused`: `perform()` reported a permanent refusal; marker recorded
+   *   `refused` (LLP 0186).
    * - `reversed`: `reverse()` succeeded; marker removed.
    */
-  outcome: 'done' | 'skipped' | 'failed' | 'reversed'
+  outcome: 'done' | 'skipped' | 'failed' | 'refused' | 'reversed'
   rows?: number
   reason?: string
   attempts?: number
