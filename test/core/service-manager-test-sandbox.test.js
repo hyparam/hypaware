@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -23,7 +23,9 @@ import { runServiceCommand } from '../../src/core/daemon/service_ops.js'
 // @ref LLP 0181#the-rule [tests]: no test reaches the host's service manager
 // @ref LLP 0181#the-guard [tests]: the refusal sits at the single spawn seam
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const SELF = fileURLToPath(import.meta.url)
+
+const REPO_ROOT = path.resolve(path.dirname(SELF), '..', '..')
 
 /** The guard's home, as a specifier a script written to a temp dir can import. */
 const SERVICE_OPS_URL = pathToFileURL(
@@ -36,14 +38,43 @@ const SERVICE_OPS_URL = pathToFileURL(
  */
 const ALLOW_REAL_SERVICE_MANAGER_ENV = 'HYP_ALLOW_REAL_SERVICE_MANAGER'
 
+/** The helper whose importers are, by definition, the fixtures at risk. */
+const REAL_LABEL_HELPER = 'helpers/daemon_service_fixture.js'
+
 /**
- * The fixtures that put a real service label on disk and then drive daemon
- * code for real. Add to this list, do not remove from it.
+ * Every test that puts a real service label on disk and then drives daemon
+ * code, discovered rather than listed. A hand-maintained list is the same
+ * fixture-by-fixture discipline that failed in #602: the next author to
+ * reach for `installFakeDaemonService` would not think to add themselves,
+ * and this file would go on proving the rule for two files while a third
+ * escaped. Discovery makes the mechanism test cover them by construction.
+ *
+ * @returns {string[]} repo-relative paths, sorted
  */
-const REAL_LABEL_FIXTURES = [
-  'test/core/attach-enable-resume.test.js',
-  'test/core/attach-endpoint-fallback.test.js',
-]
+function realLabelFixtures() {
+  /** @type {string[]} */
+  const found = []
+  /** @param {string} dir */
+  function walk(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.test.js')) continue
+      // This file names the helper too, and running it inside itself would
+      // recurse until something ran out.
+      if (full === SELF) continue
+      if (!readFileSync(full, 'utf8').includes(REAL_LABEL_HELPER)) continue
+      found.push(path.relative(REPO_ROOT, full))
+    }
+  }
+  walk(path.join(REPO_ROOT, 'test'))
+  return found.sort()
+}
+
+const REAL_LABEL_FIXTURES = realLabelFixtures()
 
 /** @param {(dir: string) => void} fn */
 function withTempDir(fn) {
@@ -122,6 +153,20 @@ function runWithRecordedServiceManagers(argv) {
 const SPAWNED_THE_HOST =
   'a fixture spawned the host service manager: a temp HOME does not sandbox launchd/systemd, ' +
   'so this command named the developer\'s own daemon (LLP 0181)'
+
+// Discovery is what makes the three runs below non-vacuous, so it is asserted
+// first: renaming or moving the helper would otherwise leave every one of them
+// running zero files and passing.
+test('discovery finds the fixtures that install a real service label', () => {
+  assert.ok(
+    REAL_LABEL_FIXTURES.length > 0,
+    `no test imports ${REAL_LABEL_HELPER}: discovery is stale, and the runs below prove nothing`,
+  )
+  assert.ok(
+    REAL_LABEL_FIXTURES.includes('test/core/attach-enable-resume.test.js'),
+    `the fixture that caused #602 is not discovered: ${JSON.stringify(REAL_LABEL_FIXTURES)}`,
+  )
+})
 
 test('the attach fixtures never reach a real service manager, even when one is on PATH', () => {
   const run = runWithRecordedServiceManagers(['--test', ...REAL_LABEL_FIXTURES])
