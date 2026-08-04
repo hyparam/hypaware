@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Config
 **Author:** Brendan / Claude
 **Date:** 2026-08-03
-**Related:** LLP 0177 (the issue this resolves), LLP 0169 (OpenClaw attach surface), LLP 0174 (manual-path sibling; its non-goal), LLP 0170 (sweep consent stance), LLP 0130 (manifest-sourced picker), LLP 0011 (init finale), LLP 0135 (wizard orchestration)
+**Related:** LLP 0177 (the issue this resolves), LLP 0169 (OpenClaw attach surface), LLP 0174 (manual-path sibling; its non-goal), LLP 0170 (sweep consent stance), LLP 0130 (manifest-sourced picker), LLP 0011 (init finale), LLP 0135 (wizard orchestration), LLP 0115 (Claude Desktop is not an attach-on-join client)
 
 > Picking OpenClaw in `hyp init` enables the adapter and then drops it
 > from the finale: no attach, no import, a `client_attach_missing` limbo
@@ -127,6 +127,6 @@ question as-is would promise a control the wizard does not have.
 ## References
 
 - LLP 0177 (issue), LLP 0169, LLP 0174, LLP 0170, LLP 0130, LLP 0011,
-  LLP 0135
+  LLP 0135, LLP 0115
 - `src/core/cli/walkthrough.js`, `src/core/cli/wizard/pick.js` (the two
   derivation sites), `src/core/commands/init.js` (the backfill runner)
