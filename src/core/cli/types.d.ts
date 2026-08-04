@@ -195,6 +195,13 @@ export interface BackfillFinaleResult {
  */
 export interface PickerBackfillRunner {
   available: string[]
+  /**
+   * Provider names whose contribution declares a daemon sweep schedule
+   * (LLP 0170). The finale never asks backfill consent for these: the
+   * sweep imports their history regardless of any answer, so they get a
+   * disclosure and an immediate first import instead (LLP 0179).
+   */
+  sweeping?: string[]
   run(args: {
     provider: string
     dryRun: boolean
@@ -224,9 +231,9 @@ export interface FinaleSummary {
     packageSpec?: string
   }
   /** `skipped` marks a client the wizard left alone because `hyp status` already reported it attached (team pathway). */
-  attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean; skipped?: boolean }[]
-  skillsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
-  agentsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
+  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean }[]
+  skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
+  agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
@@ -238,7 +245,7 @@ export interface PickerWalkthroughResult {
   config: HypAwareV2Config
   sourcesPicked: PickerSource[]
   exportPicked: PickerExport
-  clientsPicked: ('claude' | 'codex')[]
+  clientsPicked: string[]
   retentionDays: number
   finale?: FinaleSummary
 }

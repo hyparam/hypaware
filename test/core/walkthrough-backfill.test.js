@@ -18,12 +18,14 @@ import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
  *
  * @param {string[]} available
  * @param {Record<string, BackfillFinaleResult>} [entries]
+ * @param {string[]} [sweeping]
  */
-function makeBackfill(available, entries = {}) {
+function makeBackfill(available, entries = {}, sweeping = []) {
   /** @type {Array<{ provider: string, dryRun: boolean, retentionDays: number, until: string }>} */
   const calls = []
   return {
     available,
+    sweeping,
     calls,
     /** @param {{ provider: string, dryRun: boolean, retentionDays: number, until: string }} args */
     async run(args) {
@@ -472,4 +474,98 @@ test('a failing provider does not abort the other selected providers', async () 
     { provider: 'codex', dryRun: false, ok: true, scanned: 1, rowsWritten: 1, skipped: 0 },
   ])
   assert.match(stderr.text(), /backfill claude failed: claude boom/)
+})
+
+// --- sweep-backed providers (LLP 0179): disclosure instead of a question ---
+// A provider whose contribution declares a daemon sweep imports its history
+// on schedule regardless of any consent answer (LLP 0170), so the finale
+// never asks for it: the question covers only the non-sweep providers, and
+// the sweep-backed one runs its first import with a disclosure line.
+// @ref LLP 0179#decision [tests]:
+
+test('a sweep-backed provider is disclosed and runs even when consent is declined', async () => {
+  const env = await tmpEnv('hypaware-bf-sweep-declined-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
+  /** @type {Array<{ providers: string[], retentionDays: number }>} */
+  const consentCalls = []
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    prompt: async (q) => (q.pickType === 'sources' ? ['claude', 'openclaw'] : ['keep-local']),
+    backfillConsentPrompt: async (args) => {
+      consentCalls.push(args)
+      return false
+    },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.clientsPicked, ['claude', 'openclaw'])
+  // The question named only the provider the answer can control.
+  assert.equal(consentCalls.length, 1)
+  assert.deepEqual(consentCalls[0].providers, ['claude'])
+  // Declining skipped claude but not the sweep-backed openclaw.
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
+  assert.match(stdout.text(), /backfill: skipped \(declined\)/)
+  assert.match(stdout.text(), /backfill openclaw: the enabled periodic sweep imports its history on schedule/)
+})
+
+test('an openclaw-only pick asks no backfill question but still runs the first import', async () => {
+  const env = await tmpEnv('hypaware-bf-sweep-only-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['openclaw'], {}, ['openclaw'])
+  let consentAsked = 0
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    prompt: async (q) => (q.pickType === 'sources' ? ['openclaw'] : ['keep-local']),
+    backfillConsentPrompt: async () => {
+      consentAsked += 1
+      return true
+    },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.clientsPicked, ['openclaw'])
+  assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
+  assert.match(stdout.text(), /backfill openclaw: the enabled periodic sweep imports its history on schedule/)
+})
+
+test('cancelling consent skips sweep-backed providers too', async () => {
+  const env = await tmpEnv('hypaware-bf-sweep-cancel-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    prompt: async (q) => (q.pickType === 'sources' ? ['claude', 'openclaw'] : ['keep-local']),
+    backfillConsentPrompt: async () => {
+      throw new PromptCancelledError()
+    },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  // Cancel means "stop the wizard", not "skip the question": nothing runs,
+  // sweep-backed or not.
+  assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
+  assert.equal(backfill.calls.length, 0)
+  assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
 })

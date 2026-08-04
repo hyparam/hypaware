@@ -363,3 +363,23 @@ test('runWizardPick: a cancelled prompt returns the deterministic cancel result'
   assert.equal(result.configPath, '')
   assert.match(stderr.text(), /hyp init: cancelled/)
 })
+
+// --- clientsPicked derivation (LLP 0179) ---
+
+// @ref LLP 0179#decision [tests]: a picked row is a client pick iff its
+// plugin contributes a client; nothing is enumerated per client name.
+test('runWizardPick: a picked openclaw reaches clientsPicked; a clientless pick does not', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    picks: { sources: /** @type {PickerSource[]} */ (['openclaw', 'otel']), exportChoice: 'local-parquet', retentionDays: 30 },
+  }))
+
+  assert.equal(result.exitCode, 0)
+  // @hypaware/openclaw contributes a client; @hypaware/otel does not.
+  assert.deepEqual(result.clientsPicked, ['openclaw'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/openclaw'))
+})
