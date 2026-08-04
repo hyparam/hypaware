@@ -91,10 +91,15 @@ The finale still warns about it at the time, which is where the state is
 created.
 
 <a id="not-configured-means-not-active"></a>**"Not configured" means what
-`hyp status` already means by it.** Both surfaces read a plugin entry with
-`enabled: false` as inactive, so a switched-off adapter strands its client
-exactly as an absent one does. The finale and the diagnostic must agree about
-the same config file; a set built two ways would eventually disagree.
+`hyp status` already means by it.** Both surfaces read a **local layer** plugin
+entry with `enabled: false` as inactive, so a switched-off adapter strands its
+client exactly as an absent one does. The finale and the diagnostic must agree
+about the same config file; a set built two ways would eventually disagree.
+This is about the local layer only: the org lane is settled by
+[§scope](#scope) above, which is stronger. A client the central layer *names*
+is never counted as stranded whatever its `enabled` flag says, because
+reversing that attach is the reconciler's job either way, and the finale is
+not the surface that gets to second-guess it.
 
 ## Consequences {#consequences}
 

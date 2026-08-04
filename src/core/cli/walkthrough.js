@@ -1056,6 +1056,12 @@ export async function runPickerFinale(args) {
  * the local layer's picks. Any failure to read the layer degrades to "no
  * central plugins", which can only cost an extra warning, never a wrong undo.
  *
+ * Deliberately *not* filtered by `enabled`, unlike the local set the caller
+ * builds: what matters here is that the org named the plugin at all, because a
+ * name is what makes the attach the reconciler's to reverse. Adding the filter
+ * would hand the operator a detach for an org-owned client.
+ *
+ * @ref LLP 0185#scope [constrained-by]: a centrally named adapter is never counted stranded, whatever its enabled flag says
  * @ref LLP 0031#central-layer-is-sacrosanct [constrained-by]: the central layer is read here, never written or interpreted beyond its plugin names
  * @param {NodeJS.ProcessEnv} env
  * @returns {Promise<Set<string>>}

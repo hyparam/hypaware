@@ -105,3 +105,20 @@ test('an unreadable local config is not read as an instruction to detach', async
     JSON.stringify(report.diagnostics, null, 2)
   )
 })
+
+// The other side of that gate, and the reason it is `errorKind !==
+// 'config_missing'` rather than `!ok`: no config at all is not an accident the
+// diagnostic has to read around. Nothing collects, so a marker still on disk
+// really is stranded and the detach really is the repair. Widening the gate to
+// every unreadable load would drop this case silently.
+test('a missing config still names the client its marker strands', async () => {
+  const hypHome = await makeHome()
+  const homeDir = await homeWithAttachedCodex()
+
+  const report = await collectHypAwareStatus({ env: env(hypHome), homeDir })
+
+  assert.equal(report.diagnostics.some((d) => d.kind === 'config_missing'), true)
+  const found = report.diagnostics.find((d) => d.kind === 'client_attached_not_configured')
+  assert.ok(found, JSON.stringify(report.diagnostics, null, 2))
+  assert.deepEqual(found.repair, ['hyp detach --client codex'])
+})
