@@ -1,10 +1,18 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import { sessionMatchKey, wireMatchKey } from '../../hypaware-core/plugins-workspace/openclaw/src/match_key.js'
+
+const PROJECTOR_SOURCE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
+)
 
 /**
  * @param {Record<string, unknown>} [overrides]
@@ -556,6 +564,37 @@ test('project() never drops a request-history assistant turn that replays stop_r
 
   assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), [
     'user', 'assistant', 'user', 'assistant',
+  ])
+})
+
+// The floor's two halves, the recorded `stop_reason` and the set membership
+// that actually decides the drop, are only correct together: a reconstruction
+// that stamps the marker without registering the message emits a content-free
+// row the floor no longer recognizes. No behavior test can see that, because
+// the wire shape that does it is the one nobody has written yet, and the
+// tests above only cover the two that exist. So this is a lint on the source,
+// the same shape as `house-style-em-dash.test.js`: a convention that lives
+// only in a docstring is a convention that drifts back.
+//
+// The case is not hypothetical. PR #586's Responses reconstruction writes the
+// marker as a bare `partial.stop_reason = 'error'` and has to become a
+// `markCutStream(partial)` call when it merges. This is what notices if it
+// does not.
+test('the cut-stream marker is only ever stamped through markCutStream', () => {
+  const source = fs.readFileSync(PROJECTOR_SOURCE, 'utf8')
+  const start = source.indexOf('function markCutStream(')
+  assert.notEqual(start, -1, 'markCutStream is gone: the floor no longer has one stamping point')
+  const end = source.indexOf('\n}\n', start)
+
+  /** @type {Array<{ stamp: string, insideMarkCutStream: boolean }>} */
+  const stamps = []
+  for (const match of source.matchAll(/\.stop_reason\s*=\s*(?:CUT_STREAM_STOP_REASON|'error'|"error")/g)) {
+    const at = match.index ?? -1
+    stamps.push({ stamp: match[0], insideMarkCutStream: at > start && at < end })
+  }
+
+  assert.deepEqual(stamps, [
+    { stamp: '.stop_reason = CUT_STREAM_STOP_REASON', insideMarkCutStream: true },
   ])
 })
 

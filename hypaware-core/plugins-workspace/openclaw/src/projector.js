@@ -100,7 +100,11 @@ const cutStreamMessages = new WeakSet()
  * are halves of one fact: a wire shape that stamped the marker without
  * registering the message would emit a content-free row that
  * {@link isEmptyCutRow} no longer recognizes. Every reconstruction added
- * here should mark its cut branch through this function.
+ * here should mark its cut branch through this function, and a lint in
+ * `test/plugins/openclaw-projector-shape.test.js` fails the build if one
+ * stamps {@link CUT_STREAM_STOP_REASON} some other way: a new wire shape
+ * that got this wrong would emit that row silently, with no behavior test
+ * in a position to see it.
  *
  * @param {Record<string, unknown>} message
  * @returns {Record<string, unknown>}
