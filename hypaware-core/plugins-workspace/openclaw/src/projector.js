@@ -1203,7 +1203,7 @@ function responsesUsageAsChatUsage(usage) {
  * {@link openaiResponsesAssistant} on that payload rather than a delta
  * stitch. A stream that died before its terminal event degrades to the
  * `response.output_item.done` items that did finish (each carries its
- * complete item), marked `stop_reason = 'error'` like both sibling
+ * complete item), marked cut through {@link markCutStream} like both sibling
  * reconstructions; per-delta stitching of a half-finished item is
  * deliberately not attempted, and a cut stream with ZERO finished items
  * yields no assistant row at all.
@@ -1237,7 +1237,7 @@ function responsesAssistantFromStream(streamEvents) {
   if (!sawResponsesEvent || doneItems.length === 0) return undefined
   const partial = openaiResponsesAssistant({ object: 'response', output: doneItems })
   if (!partial) return undefined
-  partial.stop_reason = 'error'
+  markCutStream(partial)
   return partial
 }
 
