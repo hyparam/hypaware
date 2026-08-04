@@ -79,6 +79,104 @@ test('an error= callback rejects with the error code attached', async () => {
   await assertion
 })
 
+/**
+ * Fetch the page a given callback `error` renders, and settle the flow it
+ * rejects so the receiver closes.
+ *
+ * @param {{ code: string, contactUrl?: string }} args
+ * @returns {Promise<string>} the response body
+ */
+async function refusalBody({ code, contactUrl }) {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000, contactUrl })
+  const rejected = assert.rejects(() => recv.waitForCode())
+  const url = new URL(recv.redirectUri)
+  url.searchParams.set('error', code)
+  url.searchParams.set('state', 's1')
+  const body = await (await fetch(url, { redirect: 'manual' })).text()
+  await rejected
+  return body
+}
+
+test('an admission refusal names the reason and links contact on a managed target', async () => {
+  // The human is looking at this tab, not the terminal: a bare "Login failed"
+  // hides that authentication worked and only an admin can finish the job.
+  const body = await refusalBody({ code: 'no_membership', contactUrl: 'https://hyperparam.app/contact' })
+  assert.match(body, /not associated with an authorized organization/)
+  assert.match(body, /<a href="https:\/\/hyperparam\.app\/contact">/)
+})
+
+test('a self-hosted target sends the reader to their own admin, not to us', async () => {
+  // The admin who can grant access on someone else's deployment is their
+  // colleague; our contact form would send them to people who cannot help.
+  for (const code of ['no_membership', 'org_not_permitted']) {
+    const body = await refusalBody({ code })
+    assert.match(body, /ask your admin for access/)
+    assert.doesNotMatch(body, /hyperparam\.app/)
+  }
+})
+
+test('a contact URL that is not a plain https link is dropped, not rendered', async () => {
+  // respond() interpolates unescaped, so the page falls back to the admin
+  // wording rather than emitting whatever a caller handed it.
+  for (const contactUrl of ['javascript:alert(1)', 'https://x.example/"><script>alert(1)</script>']) {
+    const body = await refusalBody({ code: 'no_membership', contactUrl })
+    assert.match(body, /ask your admin for access/)
+    assert.doesNotMatch(body, /<script>/)
+  }
+})
+
+test('a provider denial says so instead of falling through to the generic page', async () => {
+  const body = await refusalBody({ code: 'access_denied' })
+  assert.match(body, /<h1>Login was denied<\/h1>/)
+})
+
+test('an unknown error code still gets the generic page', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const rejected = assert.rejects(() => recv.waitForCode())
+  const url = new URL(recv.redirectUri)
+  url.searchParams.set('error', 'server_error')
+  url.searchParams.set('state', 's1')
+  const body = await (await fetch(url, { redirect: 'manual' })).text()
+  assert.match(body, /Login failed/)
+  await rejected
+})
+
+test('an org refusal points at --org rather than enumerating the account orgs', async () => {
+  for (const [code, expected] of [
+    ['org_not_permitted', /Check the <code>--org<\/code> name/],
+    ['org_selection_required', /run the login again with <code>--org &lt;name&gt;<\/code>/],
+  ]) {
+    const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+    const rejected = assert.rejects(() => recv.waitForCode())
+    const url = new URL(recv.redirectUri)
+    url.searchParams.set('error', /** @type {string} */ (code))
+    url.searchParams.set('state', 's1')
+    const body = await (await fetch(url, { redirect: 'manual' })).text()
+    assert.match(body, /** @type {RegExp} */ (expected))
+    // LLP 0058 D7: the client never sees the user's org list, so the page must
+    // not pretend to name the orgs it could have picked.
+    assert.doesNotMatch(body, /undefined/)
+    await rejected
+  }
+})
+
+test('an error code that names an Object.prototype key still gets the generic page', async () => {
+  // The code is attacker-chosen, so a bare `REFUSAL_PAGES[code] ?? GENERIC` would
+  // resolve `constructor`/`toString`/`__proto__` off the prototype chain and render
+  // "undefined" as both the title and the detail.
+  for (const code of ['constructor', 'toString', '__proto__', 'valueOf']) {
+    const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+    const rejected = assert.rejects(() => recv.waitForCode())
+    const url = new URL(recv.redirectUri)
+    url.searchParams.set('error', code)
+    url.searchParams.set('state', 's1')
+    const body = await (await fetch(url, { redirect: 'manual' })).text()
+    assert.match(body, /<h1>Login failed<\/h1>/)
+    assert.doesNotMatch(body, /undefined/)
+    await rejected
+  }
+})
+
 test('an error= callback with no state is ignored, not surfaced (anti-DoS)', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
   const waiting = recv.waitForCode()
