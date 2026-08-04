@@ -46,10 +46,12 @@ const LANDING_PAGE = `<!doctype html>
   }
   .logo { width: 84px; height: 84px; margin-bottom: 2rem }
   h1 { margin: 0 0 0.75rem; font-size: 2rem; font-weight: 600; letter-spacing: -0.01em }
-  p { margin: 0; font-size: 1.05rem; line-height: 1.5; color: #6b6b7b }
+  p { margin: 0; max-width: 34rem; font-size: 1.05rem; line-height: 1.5; color: #6b6b7b }
+  a { color: #4433aa }
   @media (prefers-color-scheme: dark) {
     body { background: #14141b; color: #f0f0f5 }
     p { color: #a0a0b0 }
+    a { color: #a89cf0 }
   }
 </style>
 </head>
@@ -67,6 +69,70 @@ const LANDING_PAGE = `<!doctype html>
 </body>
 </html>`
 
+const GENERIC_FAILURE_PAGE = {
+  title: 'Login failed',
+  detail: 'You can close this tab and return to the terminal.',
+}
+
+// Only an https URL with no markup-significant characters can reach the page,
+// so respond()'s unescaped interpolation stays safe even if a future caller
+// threads something less trusted than the shipped literal into `contactUrl`.
+const SAFE_CONTACT_URL = /^https:\/\/[\w.-]+(?:\/[\w./-]*)?$/
+
+/**
+ * The browser half of the D7 refusal taxonomy the terminal already explains
+ * (explainLoginError in cli/remote_commands.js). The human is looking at this
+ * tab, not the terminal, when the redirect lands, so a bare "Login failed"
+ * strands them: authentication worked, admission did not, and only someone
+ * else can grant it.
+ *
+ * Who that someone is depends on the deployment, so the remedy is a parameter,
+ * not a constant: on a server we run we are the admin and can be reached, while
+ * on a self-hosted one the admin is the reader's own colleague and a vendor
+ * link would send them to people who cannot grant anything. The caller passes
+ * `contactUrl` only for the former (managedContactUrl in builtin_remotes.js).
+ * Everything that reaches the markup is a literal from this file or that
+ * checked URL, never callback input, because respond() does not escape.
+ *
+ * @param {string} code the sanitized callback `error`
+ * @param {string | undefined} contactUrl vendor contact page, managed targets only
+ * @returns {{ title: string, detail: string }}
+ * @ref LLP 0058#d7 [implements]: the browser half of the surfaced-error taxonomy explainLoginError covers in the terminal
+ */
+function refusalPage(code, contactUrl) {
+  const link = contactUrl && SAFE_CONTACT_URL.test(contactUrl) ? contactUrl : undefined
+  const askForAccess = link
+    ? `contact us at <a href="${link}">${link}</a> to request access`
+    : 'ask your admin for access'
+
+  switch (code) {
+    case 'no_membership':
+      return {
+        title: 'Your account is not authorized',
+        detail: `This account is not associated with an authorized organization on this server. To get access, ${askForAccess}, then run the login again.`,
+      }
+    case 'org_not_permitted':
+      return {
+        title: 'Not a member of that organization',
+        detail: `This account is not a member of the organization you asked for. Check the <code>--org</code> name, or ${askForAccess}.`,
+      }
+    // No remedy to point at: the account is admitted, it simply belongs to
+    // several orgs and the client never sees the list to choose from.
+    case 'org_selection_required':
+      return {
+        title: 'More than one organization',
+        detail: 'This account belongs to more than one organization. Return to the terminal and run the login again with <code>--org &lt;name&gt;</code> to choose one.',
+      }
+    case 'access_denied':
+      return {
+        title: 'Login was denied',
+        detail: 'The identity provider did not complete the sign-in. You can close this tab and try again from the terminal.',
+      }
+    default:
+      return GENERIC_FAILURE_PAGE
+  }
+}
+
 /**
  * Start the single-shot loopback receiver. Binds `127.0.0.1:0`, then resolves
  * `{ redirectUri, port, waitForCode, close }` so the caller can build the start
@@ -75,11 +141,14 @@ const LANDING_PAGE = `<!doctype html>
  * `state` mismatch, or timeout. The listener serves a styled "you can close
  * this tab" page, then closes after one request.
  *
- * @param {{ state: string, timeoutMs?: number }} args
+ * `contactUrl` is where a refused user should ask for access; the caller passes
+ * it only when the target is a server we run (see refusalPage).
+ *
+ * @param {{ state: string, timeoutMs?: number, contactUrl?: string }} args
  * @returns {Promise<{ redirectUri: string, port: number, waitForCode: () => Promise<{ code: string }>, close: () => void }>}
  * @ref LLP 0058#d2 [implements]: ephemeral 127.0.0.1 redirect, single-shot, timed out (RFC 8252)
  */
-export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS, contactUrl }) {
   const log = getLogger('remote')
 
   // One-flow result channel: the request handler (or the timeout) settles it
@@ -167,7 +236,11 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       // it reaches the error message, the log ERROR_KIND, and the terminal, so a
       // crafted value can't inject newlines into logs or terminal output.
       const safeError = sanitizeErrorCode(error ?? '')
-      respond(res, 'Login failed', 'You can close this tab and return to the terminal.')
+      // The code is attacker-chosen, so refusalPage() switches on it rather than
+      // indexing a table: a lookup would resolve `constructor`/`toString`/
+      // `__proto__` off Object.prototype and render a page titled "undefined".
+      const page = refusalPage(safeError, contactUrl)
+      respond(res, page.title, page.detail)
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return
     }
@@ -261,7 +334,8 @@ function sanitizeErrorCode(error) {
 /**
  * Serve the single loopback landing page the human sees after the browser
  * redirect. `title`/`detail` are always our own literals (never callback input),
- * so they go into the markup unescaped; the Hyperparam mark is inlined so the
+ * so they go into the markup unescaped and a refusal detail may carry its own
+ * link or `<code>` markup; the Hyperparam mark is inlined so the
  * page renders with no network fetch on a host that only reached a loopback port.
  *
  * @param {ServerResponse} res

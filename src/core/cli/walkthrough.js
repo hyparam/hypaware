@@ -475,10 +475,13 @@ export async function runPickerWalkthrough(opts) {
     { component: 'walkthrough' }
   )
 
-  /** @type {('claude'|'codex')[]} */
-  const clientsPicked = []
-  if (picks.sources.includes('claude')) clientsPicked.push('claude')
-  if (picks.sources.includes('codex')) clientsPicked.push('codex')
+  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
+  // rows' manifest client contributions, not a name list copied per call site
+  const clientsPicked = derivePickedClients(
+    picks.sources,
+    pickerDescriptors,
+    await buildWalkthroughClientDescriptorMap()
+  )
 
   /** @type {FinaleSummary | undefined} */
   let finaleSummary
@@ -578,6 +581,9 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
       stdout.write(`attach: ${a.client} already attached\n`)
       continue
     }
+    // An adapterless client contribution never entered the attach lane, so
+    // there is nothing to report ok or failed about (LLP 0180).
+    if (a.noAdapter) continue
     const tag = a.dryRun ? '(dry-run) ' : ''
     stdout.write(`${tag}attach: ${a.client} ${a.ok ? 'ok' : 'failed'}\n`)
   }
@@ -769,11 +775,11 @@ export function resolveSingleSourceEnablement(descriptor) {
  *
  * @param {{
  *   finale: PickerFinaleActions,
- *   clientsPicked: ('claude'|'codex')[],
+ *   clientsPicked: string[],
  *   capabilities: CapabilityRegistry,
  *   sources?: { stopAll?: () => Promise<void> },
- *   skills?: { list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] },
- *   agents?: { list(): { name: string, clients: ('claude'|'codex')[], sourceFile: string }[] },
+ *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
+ *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -898,7 +904,13 @@ export async function runPickerFinale(args) {
       }
       const adapter = gateway.getClient(client)
       if (!adapter) {
-        summary.attach.push({ client, dryRun, ok: false })
+        // Not attachable, not failed: `contributes.client` also covers plugins
+        // that own skill/agent dirs but deliberately register no runtime
+        // adapter (Claude Desktop, LLP 0115#no-attach-on-join); their setup
+        // path is their picker row's configure_command, which the wizard's
+        // configure phase runs.
+        // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
+        summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
       }
       // The walkthrough attaches before the finale restarts the daemon, so the
@@ -962,7 +974,7 @@ export async function runPickerFinale(args) {
         for (const item of installed) {
           const entry = {
             name: item.name,
-            client: /** @type {'claude'|'codex'} */ (item.client),
+            client: item.client,
             dest: item.dest,
             dryRun: item.dryRun,
           }
@@ -1035,7 +1047,7 @@ export async function runPickerFinale(args) {
  * @param {{
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
- *   clientsPicked: ('claude'|'codex')[],
+ *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
  *   retentionDays: number,
@@ -1055,16 +1067,24 @@ async function runFinaleBackfill(args) {
   const providers = clientsPicked.filter((c) => available.has(c))
   if (providers.length === 0) return
 
+  // A sweep-backed provider is never asked: the pick already enabled the
+  // daemon sweep that imports its history on schedule (LLP 0170), so a
+  // "skip for now" answer would promise a control the wizard does not
+  // have. It gets a disclosure and its first import runs below instead.
+  // @ref LLP 0180#decision [implements]: only non-sweep providers reach the consent question
+  const sweeping = new Set(backfill.sweeping ?? [])
+  const asked = providers.filter((p) => !sweeping.has(p))
+
   let consent = true
   let cancelled = false
-  if (interactive) {
+  if (interactive && asked.length > 0) {
     const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
       ...(args.stdin ? { stdin: args.stdin } : {}),
       stdout,
       env,
     })
     try {
-      consent = await ask({ providers, retentionDays })
+      consent = await ask({ providers: asked, retentionDays })
     } catch (err) {
       if (!isPromptCancelledError(err)) throw err
       cancelled = true
@@ -1090,14 +1110,24 @@ async function runFinaleBackfill(args) {
       status: cancelled ? 'cancelled' : 'ok',
     },
     async (span) => {
-      if (!consent) {
-        stdout.write(cancelled ? 'backfill: skipped (cancelled)\n' : 'backfill: skipped (declined)\n')
+      // A cancel means "stop the wizard", not "skip the question", so it
+      // takes the sweep-backed providers down with it; a decline skips
+      // only what was actually asked.
+      if (cancelled) {
+        stdout.write('backfill: skipped (cancelled)\n')
         return
       }
+      if (!consent) stdout.write('backfill: skipped (declined)\n')
+      const toRun = providers.filter((p) => consent || sweeping.has(p))
       // Guard each provider so one failure neither aborts sibling
       // providers nor the daemon (re)start that resumes live capture.
       // This matches the attach/restart resilience above.
-      for (const provider of providers) {
+      for (const provider of toRun) {
+        if (sweeping.has(provider)) {
+          stdout.write(
+            `backfill ${provider}: the enabled periodic sweep imports its history on schedule; running the first import now\n`
+          )
+        }
         try {
           // Importing local history reads and writes potentially
           // thousands of rows with no other output. Without this line
@@ -1206,9 +1236,38 @@ export function orderPickerDescriptors(descriptors) {
 }
 
 /**
+ * Derive the finale's client list from the picked rows: a picked source
+ * is a client pick iff its row's owning plugin contributes a client, and
+ * the finale then works in that client's name. Replaces the hardcoded
+ * claude/codex pair whose staleness dropped a picked OpenClaw from the
+ * attach lane (LLP 0177); a future adapter joins the finale by declaring
+ * `contributes.client`, with no edit here.
+ *
+ * @param {string[]} sources  picked picker source ids
+ * @param {Map<string, PickerDescriptor>} pickerDescriptors
+ * @param {Map<string, ClientDescriptor>} clientDescriptors
+ * @returns {string[]}
+ * @ref LLP 0180#decision [implements]: derivation from client contributions, not enumeration
+ */
+export function derivePickedClients(sources, pickerDescriptors, clientDescriptors) {
+  /** @type {Set<string>} */
+  const pickedPlugins = new Set()
+  for (const id of sources) {
+    const row = pickerDescriptors.get(id)
+    if (row) pickedPlugins.add(row.plugin)
+  }
+  /** @type {string[]} */
+  const clients = []
+  for (const descriptor of clientDescriptors.values()) {
+    if (pickedPlugins.has(descriptor.plugin)) clients.push(descriptor.name)
+  }
+  return clients
+}
+
+/**
  * @returns {Promise<Map<string, ClientDescriptor>>}
  */
-async function buildWalkthroughClientDescriptorMap() {
+export async function buildWalkthroughClientDescriptorMap() {
   /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
   try {

@@ -3,6 +3,7 @@
 import crypto from 'node:crypto'
 
 import { Attr, getLogger } from '../observability/index.js'
+import { managedContactUrl } from './builtin_remotes.js'
 import { exchangeCode, trimSlash } from './identity_client.js'
 import { startLoopbackReceiver } from './loopback.js'
 import { openBrowser as defaultOpenBrowser } from './open_browser.js'
@@ -48,7 +49,10 @@ export async function loginWithBrowser({
   const { verifier, challenge } = createPkcePair()
   const state = crypto.randomBytes(16).toString('hex')
 
-  const receiver = await startReceiver({ state, timeoutMs })
+  // A refusal page can only offer our contact form when the target is ours to
+  // grant access on; against a self-hosted server it tells the reader to ask
+  // their own admin instead.
+  const receiver = await startReceiver({ state, timeoutMs, contactUrl: managedContactUrl(identityBase) })
   try {
     const startUrl = buildStartUrl({ identityBase, redirectUri: receiver.redirectUri, challenge, state, org })
 

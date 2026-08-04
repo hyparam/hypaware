@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
+import { derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
@@ -362,4 +363,40 @@ test('runWizardPick: a cancelled prompt returns the deterministic cancel result'
   assert.equal(result.exitCode, 130)
   assert.equal(result.configPath, '')
   assert.match(stderr.text(), /hyp init: cancelled/)
+})
+
+// --- clientsPicked derivation (LLP 0180) ---
+
+// @ref LLP 0180#decision [tests]: a picked row is a client pick iff its
+// plugin contributes a client; nothing is enumerated per client name.
+test('runWizardPick: a picked openclaw reaches clientsPicked; a clientless pick does not', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    picks: { sources: /** @type {PickerSource[]} */ (['openclaw', 'otel']), exportChoice: 'local-parquet', retentionDays: 30 },
+  }))
+
+  assert.equal(result.exitCode, 0)
+  // @hypaware/openclaw contributes a client; @hypaware/otel does not.
+  assert.deepEqual(result.clientsPicked, ['openclaw'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/openclaw'))
+})
+
+// The full derived set, pinned against the bundled catalog. This failing is
+// the feature: a plugin edit that widens or narrows what picking every row
+// attaches must show up here as a deliberate test change, not ride through
+// green CI the way claude-desktop's unintended attach entry once did.
+// @ref LLP 0180#decision [tests]: the row-to-plugin-to-clients fan-out over
+// the whole catalog yields exactly the known client contributions
+test('derivePickedClients: the derived set over every bundled picker row is pinned', async () => {
+  const catalog = await realCatalog()
+  const derived = derivePickedClients(
+    [...catalog.pickerDescriptors.keys()],
+    catalog.pickerDescriptors,
+    catalog.clientDescriptors
+  )
+  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'openclaw'])
 })

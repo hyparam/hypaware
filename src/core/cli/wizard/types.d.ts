@@ -247,7 +247,7 @@ export interface RunWizardPickOptions {
    * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
    * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
    */
-  catalog?: Pick<PluginCatalog, 'pickerDescriptors'>
+  catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors'>
   /**
    * Central-layer-locked source ids from the join phase (LLP 0129
    * #join-before-picker). Each renders checked and disabled with the
@@ -382,7 +382,7 @@ export interface InitWizardResult {
   configPath?: string
   config?: HypAwareV2Config
   sourcesPicked?: PickerSource[]
-  clientsPicked?: ('claude' | 'codex')[]
+  clientsPicked?: string[]
   lockedSources?: string[]
   configureResults?: ConfigurePhaseEntryResult[]
   finale?: FinaleSummary
@@ -403,7 +403,7 @@ export interface WizardPickResult {
   /** Picked source ids, with locked (central-layer) ids removed. */
   sourcesPicked: PickerSource[]
   exportPicked: PickerExport
-  clientsPicked: ('claude' | 'codex')[]
+  clientsPicked: string[]
   retentionDays: number
   /** The picked, locked-filtered descriptors, for the configure phase. */
   descriptors: PickerDescriptor[]

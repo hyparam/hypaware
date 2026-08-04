@@ -166,9 +166,17 @@ export function createOpenclawExchangeProjector() {
 
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
-      const messages = openaiShape
-        ? openaiMessages(reqBody, responseBody, streamEvents)
-        : anthropicMessages(reqBody, responseBody, streamEvents)
+      // The OpenAI provider speaks two wire dialects. OpenClaw's own client
+      // uses the Responses API (`/v1/responses`) for every model that
+      // supports it, and falls back to Chat Completions only when told to;
+      // both route through the same overlay baseUrl, so the shape has to be
+      // detected per exchange, not per provider (LLP 0176).
+      const responsesShape = openaiShape && isOpenaiResponsesExchange(input.path, reqBody, responseBody)
+      const messages = responsesShape
+        ? openaiResponsesMessages(reqBody, responseBody, streamEvents)
+        : openaiShape
+          ? openaiMessages(reqBody, responseBody, streamEvents)
+          : anthropicMessages(reqBody, responseBody, streamEvents)
       if (messages.length === 0) {
         ctx.log.debug?.('plugin.openclaw.projector_skip', {
           reason: 'no_messages_in_exchange',
@@ -177,7 +185,11 @@ export function createOpenclawExchangeProjector() {
         return undefined
       }
 
-      const systemText = openaiShape ? openaiSystemText(reqBody) : extractSystemText(reqBody.system)
+      const systemText = responsesShape
+        ? openaiResponsesSystemText(reqBody)
+        : openaiShape
+          ? openaiSystemText(reqBody)
+          : extractSystemText(reqBody.system)
       /** @type {AiGatewayProjectedMessage[]} */
       const projectedMessages = []
       for (const message of messages) {
@@ -367,8 +379,12 @@ export function hasAnthropicHeaderSignature(headers) {
 /**
  * Stable session key: the 16-hex-char SHA-256 prefix (the gateway's
  * hash-id convention) of the system-prompt head; without a system
- * prompt, of the first message's content; without messages, of the
- * exchange id, so the partition key is never null.
+ * prompt, of the first message's content (`messages` on the chat wires,
+ * `input` on the Responses wire, which never carries `messages`); without
+ * either, of the exchange id, so the partition key is never null. The
+ * `input` branch exists so an instruction-less Responses request still
+ * groups by conversation instead of fragmenting into a per-exchange
+ * session id.
  *
  * @param {Record<string, unknown>} reqBody
  * @param {string | undefined} systemText
@@ -377,7 +393,9 @@ export function hasAnthropicHeaderSignature(headers) {
  */
 export function openclawSessionId(reqBody, systemText, exchangeId) {
   if (systemText) return hashShort(systemText.slice(0, SESSION_HASH_HEAD_CHARS))
-  const messages = Array.isArray(reqBody.messages) ? reqBody.messages : []
+  const messages = Array.isArray(reqBody.messages) ? reqBody.messages
+    : Array.isArray(reqBody.input) ? reqBody.input
+    : []
   if (messages.length > 0 && isPlainObject(messages[0])) {
     // A message with absent `content` stringifies to undefined, which
     // sha256Hex cannot digest: fall back to the exchange id so a
@@ -883,6 +901,344 @@ function accumulateOpenaiToolCallDeltas(byIndex, toolCalls) {
     }
     byIndex.set(index, entry)
   }
+}
+
+/**
+ * Whether an OpenAI-provider exchange spoke the Responses API rather than
+ * Chat Completions. The path is the authoritative signal (OpenClaw's
+ * client appends `/responses` to the overlay baseUrl); the body shapes
+ * are fallbacks for a capture whose path was not recorded: a Responses
+ * request carries `input` where Chat Completions carries `messages`, and
+ * a Responses response self-identifies as `object: "response"`.
+ *
+ * @ref LLP 0176#fix-direction [implements]: fix 1, the Responses decoder,
+ *   dispatched per exchange because both dialects ride one provider
+ * @param {string | null | undefined} path
+ * @param {Record<string, unknown>} reqBody
+ * @param {unknown} responseBody
+ * @returns {boolean}
+ */
+export function isOpenaiResponsesExchange(path, reqBody, responseBody) {
+  if (typeof path === 'string' && /\/responses(\?|$)/.test(path)) return true
+  if (reqBody.input !== undefined && !Array.isArray(reqBody.messages)) return true
+  return isPlainObject(responseBody) && responseBody.object === 'response'
+}
+
+/**
+ * Canonical message list for one OpenAI Responses exchange: the third
+ * sibling of {@link anthropicMessages} / {@link openaiMessages}, same
+ * output contract, third wire format. Emits the shared Anthropic block
+ * vocabulary for the same reason `openaiMessages` does: one block
+ * vocabulary in, one match key out, whichever dialect carried the turn.
+ *
+ * Request-side `input` items map as:
+ *  - a bare string: one user text turn (the API's shorthand);
+ *  - `message` items (or items with a `role` and no `type`): text parts
+ *    (`input_text` / `output_text` / `refusal`) become text blocks,
+ *    other parts pass through; the LEADING `system`/`developer` run is
+ *    lifted into `system_text` (see {@link openaiResponsesSystemText}),
+ *    mirroring the Chat Completions fold;
+ *  - `function_call` items: an assistant turn holding one `tool_use`
+ *    block (the Responses wire splits calls out of the message);
+ *  - `function_call_output` items: a user turn holding one `tool_result`
+ *    block, the same nesting the Anthropic wire uses;
+ *  - `reasoning` items are SKIPPED: on the request side they are opaque
+ *    replay artifacts (often only an encrypted payload) with no stable
+ *    content identity for a match key, and the session file records the
+ *    visible reasoning on the assistant turn that produced it.
+ *
+ * @param {Record<string, unknown>} reqBody
+ * @param {unknown} responseBody
+ * @param {Array<{ data: string, event?: string }>} streamEvents
+ * @returns {Record<string, unknown>[]}
+ */
+export function openaiResponsesMessages(reqBody, responseBody, streamEvents) {
+  /** @type {Record<string, unknown>[]} */
+  const messages = []
+  const input = reqBody.input
+  if (typeof input === 'string') {
+    if (input.length > 0) messages.push({ role: 'user', content: [{ type: 'text', text: input }] })
+  } else if (Array.isArray(input)) {
+    const items = input.filter(isPlainObject)
+    for (const item of items.slice(leadingResponsesSystemCount(items))) {
+      const message = responsesInputItemMessage(item)
+      if (message) messages.push(message)
+    }
+  }
+  const assistant = openaiResponsesAssistant(responseBody) ?? responsesAssistantFromStream(streamEvents)
+  if (assistant) messages.push(assistant)
+  return messages
+}
+
+/**
+ * The system prompt of a Responses request: the top-level `instructions`
+ * string, then the leading `system`/`developer` message items of the
+ * `input` array, joined the same way the Chat Completions fold joins its
+ * leading run. Same rule about position: a mid-conversation
+ * system/developer item is a real turn and stays a row.
+ *
+ * @param {Record<string, unknown>} reqBody
+ * @returns {string | undefined}
+ */
+export function openaiResponsesSystemText(reqBody) {
+  /** @type {string[]} */
+  const texts = []
+  const instructions = stringValue(reqBody.instructions)
+  if (instructions) texts.push(instructions)
+  const input = Array.isArray(reqBody.input) ? reqBody.input.filter(isPlainObject) : []
+  for (const item of input.slice(0, leadingResponsesSystemCount(input))) {
+    const text = textFromBlocks(responsesContentBlocks(item.content))
+    if (text) texts.push(text)
+  }
+  return texts.length === 0 ? undefined : texts.join('\n\n')
+}
+
+/**
+ * How many items at the head of a Responses `input` array are system
+ * prompt: the leading run of message-shaped items with a
+ * `system`/`developer` role. A `function_call`/`function_call_output`
+ * item ends the run (it is conversation, not preamble).
+ *
+ * @param {Record<string, unknown>[]} items
+ * @returns {number}
+ */
+function leadingResponsesSystemCount(items) {
+  let count = 0
+  for (const item of items) {
+    const type = stringValue(item.type)
+    if (type !== undefined && type !== 'message') break
+    const role = stringValue(item.role)
+    if (role !== 'system' && role !== 'developer') break
+    count += 1
+  }
+  return count
+}
+
+/**
+ * One request-side Responses `input` item as a message, or `undefined`
+ * for the item kinds that project nothing (reasoning replays, item
+ * references, unrecognized future kinds - skipped rather than guessed,
+ * the same fail-closed posture the backfill's provider allowlist takes).
+ *
+ * @param {Record<string, unknown>} item
+ * @returns {Record<string, unknown> | undefined}
+ */
+function responsesInputItemMessage(item) {
+  const type = stringValue(item.type)
+  if (type === undefined || type === 'message') {
+    const role = stringValue(item.role)
+    if (!role) return undefined
+    return { role, content: responsesContentBlocks(item.content) }
+  }
+  if (type === 'function_call') {
+    /** @type {Record<string, unknown>} */
+    const block = { type: 'tool_use' }
+    const id = stringValue(item.call_id) ?? stringValue(item.id)
+    if (id) block.id = id
+    const name = stringValue(item.name)
+    if (name) block.name = name
+    block.input = openaiToolArguments(item.arguments)
+    return { role: 'assistant', content: [block] }
+  }
+  if (type === 'function_call_output') {
+    /** @type {Record<string, unknown>} */
+    const block = { type: 'tool_result' }
+    const callId = stringValue(item.call_id)
+    if (callId) block.tool_use_id = callId
+    const text = typeof item.output === 'string'
+      ? item.output
+      : textFromBlocks(responsesContentBlocks(item.output))
+    if (text !== undefined) block.content = text
+    return { role: 'user', content: [block] }
+  }
+  return undefined
+}
+
+/**
+ * Responses content parts as shared-vocabulary blocks: `input_text`,
+ * `output_text`, and plain `text` parts become text blocks; a `refusal`
+ * part becomes a text block carrying the refusal (it is what the user
+ * saw); other parts (images, files) pass through as-is, the same
+ * preservation choice {@link openaiContentBlocks} makes.
+ *
+ * @param {unknown} content
+ * @returns {Record<string, unknown>[]}
+ */
+function responsesContentBlocks(content) {
+  if (typeof content === 'string') return content.length === 0 ? [] : [{ type: 'text', text: content }]
+  if (!Array.isArray(content)) return []
+  /** @type {Record<string, unknown>[]} */
+  const blocks = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      if (part.length > 0) blocks.push({ type: 'text', text: part })
+      continue
+    }
+    if (!isPlainObject(part)) continue
+    const type = stringValue(part.type)
+    if (type === 'input_text' || type === 'output_text' || type === 'text') {
+      const text = stringValue(part.text)
+      if (text !== undefined) blocks.push({ type: 'text', text })
+      continue
+    }
+    if (type === 'refusal') {
+      const refusal = stringValue(part.refusal)
+      if (refusal !== undefined) blocks.push({ type: 'text', text: refusal })
+      continue
+    }
+    blocks.push({ ...part })
+  }
+  return blocks
+}
+
+/**
+ * The assistant message of a non-streamed Responses body: the `output`
+ * array folded into one assistant turn, in output order. `message` items
+ * contribute their text parts, `function_call` items become `tool_use`
+ * blocks, `reasoning` items become `thinking` blocks (summary text as
+ * the thinking, `encrypted_content` latched as the signature so a
+ * summary-less reasoning item still hashes stably).
+ *
+ * `usage` is re-keyed to the Chat Completions field names before it is
+ * latched, deliberately: Responses `input_tokens` is GROSS (it includes
+ * `input_tokens_details.cached_tokens`), and `usageAttributes` already
+ * knows how to net a gross prompt count via the
+ * `prompt_tokens`/`cached_tokens` pair, so translating the keys reuses
+ * the one existing netting path instead of growing a third (LLP 0035
+ * net-input).
+ *
+ * @param {unknown} responseBody
+ * @returns {Record<string, unknown> | undefined}
+ */
+export function openaiResponsesAssistant(responseBody) {
+  if (!isPlainObject(responseBody)) return undefined
+  const output = Array.isArray(responseBody.output) ? responseBody.output : undefined
+  if (!output && responseBody.object !== 'response') return undefined
+  /** @type {Record<string, unknown>[]} */
+  const content = []
+  for (const item of output ?? []) {
+    if (!isPlainObject(item)) continue
+    const type = stringValue(item.type)
+    if (type === 'message') {
+      for (const block of responsesContentBlocks(item.content)) content.push(block)
+    } else if (type === 'function_call') {
+      /** @type {Record<string, unknown>} */
+      const block = { type: 'tool_use' }
+      const id = stringValue(item.call_id) ?? stringValue(item.id)
+      if (id) block.id = id
+      const name = stringValue(item.name)
+      if (name) block.name = name
+      block.input = openaiToolArguments(item.arguments)
+      content.push(block)
+    } else if (type === 'reasoning') {
+      /** @type {Record<string, unknown>} */
+      const block = { type: 'thinking', thinking: reasoningSummaryText(item) ?? '' }
+      const signature = stringValue(item.encrypted_content)
+      if (signature) block.signature = signature
+      content.push(block)
+    }
+  }
+
+  /** @type {Record<string, unknown>} */
+  const message = { role: 'assistant', content }
+  const id = stringValue(responseBody.id)
+  if (id) message.id = id
+  const model = stringValue(responseBody.model)
+  if (model) message.model = model
+  const incomplete = isPlainObject(responseBody.incomplete_details)
+    ? stringValue(responseBody.incomplete_details.reason)
+    : undefined
+  const status = stringValue(responseBody.status)
+  const stopReason = incomplete ?? (status && status !== 'completed' ? status : undefined)
+  if (stopReason) message.stop_reason = stopReason
+  const usage = responsesUsageAsChatUsage(responseBody.usage)
+  if (usage) message.usage = usage
+  return message
+}
+
+/**
+ * @param {Record<string, unknown>} item
+ * @returns {string | undefined}
+ */
+function reasoningSummaryText(item) {
+  if (typeof item.summary === 'string') return item.summary.length === 0 ? undefined : item.summary
+  if (!Array.isArray(item.summary)) return undefined
+  const texts = []
+  for (const part of item.summary) {
+    if (isPlainObject(part) && typeof part.text === 'string' && part.text.length > 0) texts.push(part.text)
+  }
+  return texts.length === 0 ? undefined : texts.join('\n\n')
+}
+
+/**
+ * Responses usage under Chat Completions keys, so `usageAttributes` nets
+ * the gross input count against the cached read through its existing
+ * `prompt_tokens`/`prompt_tokens_details.cached_tokens` path.
+ *
+ * @param {unknown} usage
+ * @returns {Record<string, unknown> | undefined}
+ */
+function responsesUsageAsChatUsage(usage) {
+  if (!isPlainObject(usage)) return undefined
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  const input = numberValue(usage.input_tokens)
+  if (input !== undefined) out.prompt_tokens = input
+  const output = numberValue(usage.output_tokens)
+  if (output !== undefined) out.completion_tokens = output
+  const inputDetails = isPlainObject(usage.input_tokens_details) ? usage.input_tokens_details : undefined
+  const cached = inputDetails ? numberValue(inputDetails.cached_tokens) : undefined
+  if (cached !== undefined) out.prompt_tokens_details = { cached_tokens: cached }
+  const outputDetails = isPlainObject(usage.output_tokens_details) ? usage.output_tokens_details : undefined
+  const reasoning = outputDetails ? numberValue(outputDetails.reasoning_tokens) : undefined
+  if (reasoning !== undefined) out.completion_tokens_details = { reasoning_tokens: reasoning }
+  return Object.keys(out).length === 0 ? undefined : out
+}
+
+/**
+ * The assistant message of a streamed Responses exchange. The Responses
+ * SSE stream ends with a terminal event (`response.completed` /
+ * `response.incomplete` / `response.failed`) whose payload carries the
+ * ENTIRE final response object, so the happy path is a single reuse of
+ * {@link openaiResponsesAssistant} on that payload rather than a delta
+ * stitch. A stream that died before its terminal event degrades to the
+ * `response.output_item.done` items that did finish (each carries its
+ * complete item), marked `stop_reason = 'error'` like both sibling
+ * reconstructions; per-delta stitching of a half-finished item is
+ * deliberately not attempted, and a cut stream with ZERO finished items
+ * yields no assistant row at all.
+ *
+ * @param {Array<{ data: string, event?: string }>} streamEvents
+ * @returns {Record<string, unknown> | undefined}
+ */
+function responsesAssistantFromStream(streamEvents) {
+  /** @type {Record<string, unknown> | undefined} */
+  let terminal
+  /** @type {Record<string, unknown>[]} */
+  const doneItems = []
+  let sawResponsesEvent = false
+  for (const row of streamEvents) {
+    if (row.data === '[DONE]') continue
+    const payload = parseMaybeJson(row.data)
+    if (!isPlainObject(payload)) continue
+    const type = stringValue(payload.type)
+    if (!type || !type.startsWith('response.')) continue
+    sawResponsesEvent = true
+    if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
+      if (isPlainObject(payload.response)) terminal = payload.response
+    } else if (type === 'response.output_item.done' && isPlainObject(payload.item)) {
+      doneItems.push(payload.item)
+    }
+  }
+  if (terminal) return openaiResponsesAssistant(terminal)
+  // A cut stream with no finished items has nothing to degrade to: emit
+  // no assistant row rather than an empty-content row that would still
+  // carry a match key and be eligible for the ordinal settlement fallback.
+  if (!sawResponsesEvent || doneItems.length === 0) return undefined
+  const partial = openaiResponsesAssistant({ object: 'response', output: doneItems })
+  if (!partial) return undefined
+  partial.stop_reason = 'error'
+  return partial
 }
 
 /**
