@@ -696,7 +696,7 @@ export function composePickerConfig(args) {
     // default-only EADDRINUSE fallback (LLP 0114 #explicit-listen-fails-loudly).
     // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
-      name: '@hypaware/ai-gateway',
+      name: GATEWAY_PLUGIN,
       config: { upstreams },
     })
   }
@@ -808,6 +808,8 @@ function composerManagedPlugins(descriptors) {
  *   outright and unchecking a row really removes its upstream.
  * - **Sinks** the composition names are merged the same way (a hand-edited
  *   `schedule` or `dir` wins); sinks it does not name are passed through.
+ *   A composed sink an existing sink already provides under another id is
+ *   dropped rather than added beside it ({@link sinkAlreadyProvided}).
  * - **Retention** is written at `query.cache.retention.default_days` and
  *   nothing else under `query` is touched.
  * - **Unknown top-level keys are passed through** untouched.
@@ -820,6 +822,7 @@ function composerManagedPlugins(descriptors) {
  */
 function carryForwardExistingConfig(composed, existing, descriptors) {
   const existingPlugins = existing.plugins ?? []
+  const existingSinks = existing.sinks ?? {}
   const composedSinks = composed.sinks ?? {}
 
   // Sinks first: which ones survive decides which export plugins are still
@@ -827,12 +830,28 @@ function carryForwardExistingConfig(composed, existing, descriptors) {
   /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   for (const [id, sink] of Object.entries(composedSinks)) {
-    sinks[id] = mergeSink(sink, existing.sinks?.[id])
+    const prior = existingSinks[id]
+    // Only same-shape entries merge, and a differently shaped entry is not
+    // evicted either. Folding a blob sink over a request sink of the same id
+    // keeps `plugin` beside `writer`/`destination`, which matches neither
+    // sink shape and which cross-validation rejects outright
+    // (`request_sink_invalid_keys`); replacing it instead would silently
+    // delete a sink the composer never wrote. So the id's occupant stays.
+    if (prior) {
+      if (sameSinkShape(sink, prior)) sinks[id] = mergeSink(sink, prior)
+      continue
+    }
+    // Composition always names its export sink `local`, but the config may
+    // already run the same writer to the same destination under a name the
+    // user chose. Adding `local` beside it would export every dataset twice
+    // on two schedules, so the sink already on disk wins.
+    if (sinkAlreadyProvided(sink, existingSinks)) continue
+    sinks[id] = sink
   }
   /** @type {Set<string>} */
   const pinnedPlugins = new Set()
-  for (const [id, sink] of Object.entries(existing.sinks ?? {})) {
-    if (id in composedSinks) continue
+  for (const [id, sink] of Object.entries(existingSinks)) {
+    if (id in sinks) continue
     sinks[id] = sink
     for (const name of sinkPluginNames(sink)) pinnedPlugins.add(name)
   }
@@ -903,9 +922,43 @@ function sinkPluginNames(sink) {
 }
 
 /**
- * Merge one composed sink with the entry of the same id already in the
- * config: the user's `config` keys (a hand-edited `schedule`, a moved
- * `dir`) win over the composed defaults.
+ * Whether two sink entries are the same union member. `SinkConfigInstance`
+ * is a discriminated union (blob: `writer` + `destination`; request:
+ * `plugin`), and the two shapes are mutually exclusive by validation, so
+ * entries that disagree here are different sinks that happen to share an id
+ * rather than two versions of one sink.
+ *
+ * @param {SinkConfigInstance} a
+ * @param {SinkConfigInstance} b
+ * @returns {boolean}
+ */
+function sameSinkShape(a, b) {
+  return ('plugin' in a) === ('plugin' in b)
+}
+
+/**
+ * Whether the config already runs this composed sink's plugins under some
+ * id. Sink ids are the user's to choose, so the composer's `local` export
+ * and a hand-renamed `exports` running the same writer to the same
+ * destination are one export, not two: composing both would write every
+ * dataset twice, on two schedules, into the same tree.
+ *
+ * @param {SinkConfigInstance} composed
+ * @param {Record<string, SinkConfigInstance>} existingSinks
+ * @returns {boolean}
+ */
+function sinkAlreadyProvided(composed, existingSinks) {
+  const signature = sinkPluginNames(composed).slice().sort().join(',')
+  return Object.values(existingSinks).some(
+    (sink) => sinkPluginNames(sink).slice().sort().join(',') === signature
+  )
+}
+
+/**
+ * Merge one composed sink with the same-shaped entry of the same id already
+ * in the config: the user's `config` keys (a hand-edited `schedule`, a moved
+ * `dir`) win over the composed defaults. Callers must have checked
+ * {@link sameSinkShape} first.
  *
  * @param {SinkConfigInstance} composed
  * @param {SinkConfigInstance | undefined} prior

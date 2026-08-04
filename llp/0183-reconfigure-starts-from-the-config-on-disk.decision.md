@@ -93,7 +93,16 @@ because a general merge would resurrect what the user just unchecked:
   preference, so composition owns it outright and unchecking a row really
   removes its upstream.
 - **Sinks** the composition names merge the same way (a hand-edited
-  `schedule` or `dir` wins); sinks it does not name pass through.
+  `schedule` or `dir` wins); sinks it does not name pass through. Sink
+  ids are the user's to choose, so a composed sink whose plugins some
+  existing sink already runs is dropped rather than added beside it: the
+  composer's `local` and a hand-renamed `exports` writing the same
+  parquet to the same local-fs tree are one export, not two. Only
+  same-shaped entries merge, and a differently shaped occupant of the
+  same id is left alone rather than evicted: folding a blob sink over a
+  request sink would keep `plugin` beside `writer`/`destination`, which
+  cross-validation rejects as `request_sink_invalid_keys`, and replacing
+  it would delete a sink the composer never wrote.
 - **Export is read back, not re-defaulted.** A config with a
   parquet-to-local-fs sink reconfigures as `local-parquet`; any other
   config reconfigures as `keep-local`, which preserves its own sinks

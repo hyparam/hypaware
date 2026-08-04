@@ -615,6 +615,81 @@ test('runWizardPick: a disabled plugin reads as an off row, and re-picking it tu
   assert.equal(otel.enabled, undefined)
 })
 
+test('runWizardPick: a reconfigure does not add a second export sink beside a renamed one', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // The composer always names its export sink `local`; this install renamed
+  // it. It still reads back as `local-parquet`, so composing `local` beside
+  // it would export every dataset twice, on two schedules, into two trees.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+    ],
+    sinks: {
+      exports: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/exports', schedule: '0 * * * *' },
+      },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.equal(result.exportPicked, 'local-parquet')
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.deepEqual(Object.keys(written.sinks), ['exports'])
+  assert.equal(written.sinks.exports.config.dir, '/srv/exports')
+  assert.equal(written.sinks.exports.config.schedule, '0 * * * *')
+})
+
+test('runWizardPick: a request sink parked on the composer sink id is not folded into a mixed shape', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // `local` here is a request sink. Merging the composed blob sink over it
+  // would keep `plugin` beside `writer`/`destination`, which cross-validation
+  // rejects as `request_sink_invalid_keys` - a reconfigure that writes a
+  // config the kernel refuses to load.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/central' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+    ],
+    sinks: {
+      local: { plugin: '@hypaware/central', config: { url: 'https://central.example' } },
+      exports: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  for (const [id, sink] of Object.entries(written.sinks)) {
+    const mixed = 'plugin' in /** @type {any} */ (sink) &&
+      ('writer' in /** @type {any} */ (sink) || 'destination' in /** @type {any} */ (sink))
+    assert.equal(mixed, false, `sink '${id}' mixes both sink shapes`)
+  }
+  // The user's central sink survives intact rather than being half-overwritten.
+  assert.deepEqual(written.sinks.local, {
+    plugin: '@hypaware/central',
+    config: { url: 'https://central.example' },
+  })
+})
+
 test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated from the picks', async () => {
   const asked = makeBuf()
   const confirm = defaultOverwriteConfirmFactory({
