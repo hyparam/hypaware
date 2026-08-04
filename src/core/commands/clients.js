@@ -424,6 +424,27 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun,
         json: parsed.json,
       })
+      // A successful manual attach is the only re-arm a `refused` marker gets
+      // in this pass: clear whatever marker sits at this request key so the
+      // next reconcile pass treats it as a fresh target. Best-effort and
+      // unconditional, mirroring the detach-side call below - clearing a
+      // non-existent problem is a no-op, and a marker-store I/O failure here
+      // must never fail the attach that just succeeded.
+      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: explicit hyp attach clears a refused marker; the reconciler never re-arms one on its own
+      // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: hyp attach's success path retracts its own client-action marker, mirroring hyp detach's clear below
+      try {
+        clearClientActionMarker({
+          stateRoot: readObservabilityEnv(ctx.env).stateDir,
+          kind: 'attach',
+          requestKey: name,
+        })
+      } catch (markerErr) {
+        getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
+          hyp_client: name,
+          error_kind: 'marker_retract_failed',
+          detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+        })
+      }
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated
