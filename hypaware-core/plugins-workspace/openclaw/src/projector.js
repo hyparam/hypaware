@@ -62,6 +62,17 @@ const OPENAI_PROVIDER = 'openai'
 const SESSION_HASH_HEAD_CHARS = 256
 
 /**
+ * The `stop_reason` every stream reconstruction here stamps when the stream
+ * ended without its terminal event (`message_stop` on the Anthropic wire, a
+ * `finish_reason` on Chat Completions). Neither API sends `error` as a real
+ * stop reason, so it is unambiguously this projector's own marker for "the
+ * answer was cut short", and it is the one signal {@link isEmptyCutRow}
+ * reads to tell a cut stream apart from a response that terminated and
+ * genuinely said nothing.
+ */
+const CUT_STREAM_STOP_REASON = 'error'
+
+/**
  * Build the OpenClaw exchange projector.
  *
  * `match()` keys on the `x-hypaware-client: openclaw` request header
@@ -129,11 +140,22 @@ export function createOpenclawExchangeProjector() {
       for (const message of messages) {
         const role = stringValue(message.role)
         if (!role) continue
+        const stopReason = stringValue(message.stop_reason)
+        // The floor is here, at the one place a row is assembled, rather
+        // than inside each wire shape's reconstruction, so every shape this
+        // projector branches to (and any added later) inherits it.
+        if (isEmptyCutRow(role, message.content, stopReason)) {
+          ctx.log.debug?.('plugin.openclaw.empty_row_drop', {
+            reason: 'cut_stream_no_content',
+            exchange_id: input.exchange_id,
+            role,
+          })
+          continue
+        }
         /** @type {AiGatewayProjectedMessage} */
         const projected = { role, content: /** @type {any} */ (message.content) }
         const usage = usageAttributes(message)
         if (usage) projected.attributes = usage
-        const stopReason = stringValue(message.stop_reason)
         if (stopReason) projected.stop_reason = stopReason
         projectedMessages.push(projected)
       }
@@ -324,6 +346,43 @@ export function openclawSessionId(reqBody, systemText, exchangeId) {
 }
 
 /**
+ * The one floor both wire shapes share: an assistant row with no content at
+ * all, produced by a stream that was cut before it terminated, is not a row.
+ *
+ * Every row this projector emits carries fallback identity, so the gateway
+ * mints it a `message_index` and settlement may later match it by
+ * `(role, ordinal)` within a five-minute window when the content match key
+ * misses (Section 5's fallback matcher). A content-free row is exactly the
+ * row that match key cannot distinguish: `wireMatchKey('assistant', [])` is
+ * one canonical value, identical whichever wire shape produced it, so an
+ * empty row would sit in the ordinal fallback's candidate list and could
+ * acquire a native `message_id` belonging to some other turn, or collide
+ * with an empty row captured off the other wire.
+ *
+ * Deliberately "cut AND empty", not "empty". A response that reached its
+ * terminal event and genuinely produced nothing (a content filter, a
+ * zero-output completion) is a real answer with a real wire stop reason, and
+ * the row set has to keep it. Only the synthetic
+ * {@link CUT_STREAM_STOP_REASON} marks the case where there is no answer to
+ * record, and only the assistant role can carry it: request-history rows
+ * come from the caller, never from a stream this projector stitched.
+ *
+ * @ref LLP 0161#match-keys [constrained-by]: the ordinal/time fallback makes
+ * a live `message_index` on a content-free row an identity hazard, not just
+ * a useless row
+ * @param {string} role
+ * @param {unknown} content
+ * @param {string | undefined} stopReason
+ * @returns {boolean}
+ */
+function isEmptyCutRow(role, content, stopReason) {
+  if (role !== 'assistant' || stopReason !== CUT_STREAM_STOP_REASON) return false
+  if (typeof content === 'string') return content.length === 0
+  if (Array.isArray(content)) return content.length === 0
+  return true
+}
+
+/**
  * Canonical message list for one exchange: the request's chat history
  * plus the assistant response (JSON body, or reconstructed from the
  * SSE event stream when the response was streamed).
@@ -351,7 +410,9 @@ export function anthropicMessages(reqBody, responseBody, streamEvents) {
  * `content_block_delta` / `content_block_stop` build each block,
  * `message_delta` folds in stop_reason and usage updates, and
  * `message_stop` marks completion. A stream that ends early still
- * yields what arrived, marked `stop_reason = 'error'`.
+ * yields what arrived, marked `stop_reason = CUT_STREAM_STOP_REASON`; when
+ * nothing arrived, that marker is what {@link isEmptyCutRow} drops the row
+ * on, so the envelope alone never becomes a row.
  *
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | null}
@@ -436,7 +497,7 @@ function reconstructAssistantMessage(streamEvents) {
   message.content = Array.from(blocksByIndex.entries())
     .sort(([a], [b]) => a - b)
     .map(([, block]) => block)
-  if (!sawMessageStop && message.stop_reason == null) message.stop_reason = 'error'
+  if (!sawMessageStop && message.stop_reason == null) message.stop_reason = CUT_STREAM_STOP_REASON
   return message
 }
 
@@ -674,9 +735,12 @@ function openaiAssistantFromBody(responseBody) {
  * arguments, keyed by the tool call's `index` (its `id` and `name`
  * usually arrive only on that call's first chunk, so both are latched).
  * `usage` rides a final chunk when the caller asked for it. A stream
- * that ends without a `finish_reason` still yields what arrived, marked
- * `stop_reason = 'error'`, exactly as the Anthropic side does for a
- * stream with no `message_stop`.
+ * that ends without a `finish_reason` still yields what arrived (the
+ * stitched partial text is kept, not discarded), marked
+ * `stop_reason = CUT_STREAM_STOP_REASON`, exactly as the Anthropic side
+ * does for a stream with no `message_stop`. When the stitch yields no
+ * content at all, that marker is what {@link isEmptyCutRow} drops the row
+ * on.
  *
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | null}
@@ -741,7 +805,7 @@ function reconstructOpenaiAssistantMessage(streamEvents) {
   if (model) message.model = model
   if (usage) message.usage = usage
   if (stopReason) message.stop_reason = stopReason
-  else if (!sawFinish) message.stop_reason = 'error'
+  else if (!sawFinish) message.stop_reason = CUT_STREAM_STOP_REASON
   return message
 }
 

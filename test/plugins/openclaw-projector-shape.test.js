@@ -364,6 +364,125 @@ test('project() marks a truncated OpenAI stream stop_reason=error', async () => 
   assert.equal(assistant.stop_reason, 'error')
 })
 
+/**
+ * The one match key every content-free assistant row hashes to, whichever
+ * wire shape produced it. Named here because it is the collision the
+ * cut-stream floor exists to prevent: three decoders converging on one key
+ * means an empty row from one shape can settle against an empty row from
+ * another.
+ */
+const EMPTY_ASSISTANT_MATCH_KEY = wireMatchKey('assistant', [])
+
+/**
+ * @param {any} projection
+ */
+function matchKeys(projection) {
+  return projection.messages.map((/** @type {any} */ m) => m.attributes?.openclaw?.match_key)
+}
+
+// A stream cut before anything finished has no content to record. The row
+// this used to emit carried an empty content array, a live message_index and
+// the canonical empty-assistant match key, so it stayed eligible for the
+// ordinal settlement fallback and could acquire a native message_id it had no
+// content for.
+test('project() emits no assistant row for a cut OpenAI stream that carried no content', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-7', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' } }] },
+    ]),
+  })
+
+  assert.ok(projection)
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user'])
+  assert.ok(!matchKeys(projection).includes(EMPTY_ASSISTANT_MATCH_KEY))
+})
+
+test('project() emits no assistant row for a cut Anthropic stream that carried no content', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_02',
+          role: 'assistant',
+          model: 'claude-sonnet-4-5',
+          content: [],
+          usage: { input_tokens: 3, output_tokens: 0 },
+        },
+      },
+    ]),
+  })
+
+  assert.ok(projection)
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user'])
+  assert.ok(!matchKeys(projection).includes(EMPTY_ASSISTANT_MATCH_KEY))
+})
+
+// The floor is "cut AND empty", not "empty": a response that reached its
+// terminal event and genuinely produced nothing is a real answer the row set
+// must keep, on either wire.
+test('project() still records a terminal Anthropic stream whose content is genuinely empty', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_03', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 0 } },
+      { type: 'message_stop' },
+    ]),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'end_turn')
+})
+
+test('project() still records a terminal OpenAI stream whose content is genuinely empty', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-8', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: 'content_filter' }] },
+    ]),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'content_filter')
+})
+
+test('project() still records a non-streamed OpenAI response whose content is empty', async () => {
+  const projection = await project({
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: JSON.stringify({
+      id: 'chatcmpl-9',
+      object: 'chat.completion',
+      model: 'gpt-5',
+      choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'content_filter' }],
+    }),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'content_filter')
+})
+
 // @ref LLP 0157#requirements [tests]: R8, every fallback-identity row carries
 // the LLP 0159 match key - on both shapes, streamed and not.
 test('project() stamps openclaw.match_key on every row of both shapes', async () => {
