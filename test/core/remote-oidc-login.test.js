@@ -80,8 +80,19 @@ test('the loopback receiver gets a contact URL only for a Hyperparam-run target'
   await loginWithBrowser({ identityBase: 'https://hypaware.hyperparam.app/v1/identity', noBrowser: true, fetchImpl, startReceiver })
   // Self-hosting is supported, and its admin is not us: no vendor link there.
   await loginWithBrowser({ identityBase: 'https://hyp.internal/v1/identity', noBrowser: true, fetchImpl, startReceiver })
+  // Near-misses of the built-in origin, so a future loosening of the compare
+  // to a suffix or substring match fails here instead of shipping: a name that
+  // merely looks like ours must not borrow our contact form.
+  for (const near of [
+    'https://evil-hypaware.hyperparam.app/v1/identity',
+    'https://hypaware.hyperparam.app.evil.com/v1/identity',
+    'https://hypaware.hyperparam.app.attacker.example/v1/identity',
+    'http://hypaware.hyperparam.app/v1/identity',
+  ]) {
+    await loginWithBrowser({ identityBase: near, noBrowser: true, fetchImpl, startReceiver })
+  }
 
-  assert.deepEqual(contactUrls, ['https://hyperparam.app/contact', undefined])
+  assert.deepEqual(contactUrls, ['https://hyperparam.app/contact', undefined, undefined, undefined, undefined, undefined])
 })
 
 test('--no-browser prints the URL instead of opening it', async () => {
