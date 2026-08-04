@@ -475,7 +475,7 @@ export async function runPickerWalkthrough(opts) {
     { component: 'walkthrough' }
   )
 
-  // @ref LLP 0179#decision [implements]: client-ness is read from the picked
+  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
   // rows' manifest client contributions, not a name list copied per call site
   const clientsPicked = derivePickedClients(
     picks.sources,
@@ -1062,7 +1062,7 @@ async function runFinaleBackfill(args) {
   // daemon sweep that imports its history on schedule (LLP 0170), so a
   // "skip for now" answer would promise a control the wizard does not
   // have. It gets a disclosure and its first import runs below instead.
-  // @ref LLP 0179#decision [implements]: only non-sweep providers reach the consent question
+  // @ref LLP 0180#decision [implements]: only non-sweep providers reach the consent question
   const sweeping = new Set(backfill.sweeping ?? [])
   const asked = providers.filter((p) => !sweeping.has(p))
 
@@ -1238,7 +1238,7 @@ export function orderPickerDescriptors(descriptors) {
  * @param {Map<string, PickerDescriptor>} pickerDescriptors
  * @param {Map<string, ClientDescriptor>} clientDescriptors
  * @returns {string[]}
- * @ref LLP 0179#decision [implements]: derivation from client contributions, not enumeration
+ * @ref LLP 0180#decision [implements]: derivation from client contributions, not enumeration
  */
 export function derivePickedClients(sources, pickerDescriptors, clientDescriptors) {
   /** @type {Set<string>} */

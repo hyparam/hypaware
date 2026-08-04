@@ -476,13 +476,13 @@ test('a failing provider does not abort the other selected providers', async () 
   assert.match(stderr.text(), /backfill claude failed: claude boom/)
 })
 
-// --- sweep-backed providers (LLP 0179): disclosure instead of a question ---
+// --- sweep-backed providers (LLP 0180): disclosure instead of a question ---
 // A provider whose contribution declares a daemon sweep imports its history
 // on schedule regardless of any consent answer (LLP 0170), so the finale
 // never asks for it: the question covers only the non-sweep providers, and
 // the sweep-backed one runs its first import with a disclosure line.
-// @ref LLP 0179#decision [tests]:
-
+// @ref LLP 0180#decision [tests]: a sweep-backed provider is disclosed and
+// imported rather than asked, and only a cancel takes it down with the rest
 test('a sweep-backed provider is disclosed and runs even when consent is declined', async () => {
   const env = await tmpEnv('hypaware-bf-sweep-declined-')
   const stdout = makeBuf()

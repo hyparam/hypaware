@@ -1,4 +1,4 @@
-# LLP 0179: The wizard finale attaches OpenClaw
+# LLP 0180: The wizard finale attaches OpenClaw
 
 **Type:** Decision
 **Status:** Accepted

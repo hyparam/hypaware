@@ -199,7 +199,7 @@ export interface PickerBackfillRunner {
    * Provider names whose contribution declares a daemon sweep schedule
    * (LLP 0170). The finale never asks backfill consent for these: the
    * sweep imports their history regardless of any answer, so they get a
-   * disclosure and an immediate first import instead (LLP 0179).
+   * disclosure and an immediate first import instead (LLP 0180).
    */
   sweeping?: string[]
   run(args: {

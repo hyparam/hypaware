@@ -235,7 +235,7 @@ export async function runWizardPick(opts) {
   // on a fully managed machine, silently no-op'ing the whole finale (issue #380).
   // @ref LLP 0135#finale [implements]: the client-asset install iterates clientsPicked, which must include org-locked clients
   const clientCandidates = new Set([...rawSources, ...lockedSources])
-  // @ref LLP 0179#decision [implements]: client-ness is read from the picked
+  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
   // rows' manifest client contributions, not a name list copied per call site
   const clientDescriptors = opts.catalog
     ? opts.catalog.clientDescriptors

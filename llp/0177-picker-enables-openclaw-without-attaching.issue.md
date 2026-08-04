@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-03
 **Related:** LLP 0011, LLP 0135, LLP 0174, LLP 0175, LLP 0169
-**Extended-by:** LLP 0179 (the fix decision)
+**Extended-by:** LLP 0180 (the fix decision)
 
 ## Summary
 
