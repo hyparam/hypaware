@@ -120,31 +120,35 @@ function sinkPluginNames(raw) {
  * acquires a server identity while creating its sink, which a CLI boot must
  * not do.
  *
- * The true positive survives. When the config does not name the plugin, the
- * sink really is misconfigured and both the warning and its "add it to
- * plugins[]" repair are actionable.
+ * The condition is exactly "the config asked for this plugin and the boot
+ * profile withheld it anyway", read off boot's own selection
+ * (`withheldByProfile`) rather than inferred from the config alone. Being
+ * named in `plugins[]` is not sufficient: a config can name a plugin that no
+ * profile could activate (never installed, or eliminated by dependency
+ * resolution), and those are real defects whose warning and "add it to
+ * plugins[]" repair stay actionable. Neither is the profile alone: a sink
+ * naming a plugin the config never enabled is still misconfigured. Under the
+ * `config` profile the two can never coincide (that profile selects every
+ * config-named plugin it has a manifest for), so it needs no special case.
  *
  * @param {MaterializeError} err
- * @param {{ bootProfile: BootProfile, config: HypAwareV2Config | null, activePlugins: ActivePlugin[] }} args
+ * @param {{ config: HypAwareV2Config | null, activePlugins: ActivePlugin[], withheldByProfile: PluginName[] }} args
  * @returns {boolean}
  */
-function sinkPluginExcludedByBootProfile(err, { bootProfile, config, activePlugins }) {
+function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldByProfile }) {
   if (err.errorKind !== 'sink_plugin_not_active') return false
-  // The `config` profile activates exactly what the config names, so a
-  // plugin that is inactive there is genuinely absent, disabled, or
-  // unresolvable: a real defect, not a profile artifact.
-  if (bootProfile === 'config') return false
   const raw = config?.sinks?.[err.instance]
   if (!raw) return false
   const names = sinkPluginNames(raw)
   if (names.length === 0) return false
   const active = new Set(activePlugins.map((p) => p.name))
+  const withheld = new Set(withheldByProfile)
   const namedByConfig = new Set(
     (config?.plugins ?? [])
       .filter((entry) => entry.enabled !== false)
       .map((entry) => /** @type {PluginName} */ (entry.name))
   )
-  return names.every((name) => active.has(name) || namedByConfig.has(name))
+  return names.every((name) => active.has(name) || (namedByConfig.has(name) && withheld.has(name)))
 }
 
 /**
@@ -269,7 +273,12 @@ export async function dispatch(argv, opts = {}) {
         // A profile that ignores `plugins[]` (the walkthrough's
         // `all-available`) cannot activate an opt-in plugin the config does
         // name, so its sink failure says nothing about the config.
-        if (sinkPluginExcludedByBootProfile(err, { bootProfile, config: boot.config, activePlugins })) continue
+        const excluded = sinkPluginExcludedByBootProfile(err, {
+          config: boot.config,
+          activePlugins,
+          withheldByProfile: boot.withheldByProfile,
+        })
+        if (excluded) continue
         stderr.write(
           `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
         )
