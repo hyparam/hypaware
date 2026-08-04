@@ -104,6 +104,42 @@ test('an unknown error code still gets the generic page', async () => {
   await rejected
 })
 
+test('an org refusal points at --org rather than enumerating the account orgs', async () => {
+  for (const [code, expected] of [
+    ['org_not_permitted', /Check the <code>--org<\/code> name/],
+    ['org_selection_required', /run the login again with <code>--org &lt;name&gt;<\/code>/],
+  ]) {
+    const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+    const rejected = assert.rejects(() => recv.waitForCode())
+    const url = new URL(recv.redirectUri)
+    url.searchParams.set('error', /** @type {string} */ (code))
+    url.searchParams.set('state', 's1')
+    const body = await (await fetch(url, { redirect: 'manual' })).text()
+    assert.match(body, /** @type {RegExp} */ (expected))
+    // LLP 0058 D7: the client never sees the user's org list, so the page must
+    // not pretend to name the orgs it could have picked.
+    assert.doesNotMatch(body, /undefined/)
+    await rejected
+  }
+})
+
+test('an error code that names an Object.prototype key still gets the generic page', async () => {
+  // The code is attacker-chosen, so a bare `REFUSAL_PAGES[code] ?? GENERIC` would
+  // resolve `constructor`/`toString`/`__proto__` off the prototype chain and render
+  // "undefined" as both the title and the detail.
+  for (const code of ['constructor', 'toString', '__proto__', 'valueOf']) {
+    const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+    const rejected = assert.rejects(() => recv.waitForCode())
+    const url = new URL(recv.redirectUri)
+    url.searchParams.set('error', code)
+    url.searchParams.set('state', 's1')
+    const body = await (await fetch(url, { redirect: 'manual' })).text()
+    assert.match(body, /<h1>Login failed<\/h1>/)
+    assert.doesNotMatch(body, /undefined/)
+    await rejected
+  }
+})
+
 test('an error= callback with no state is ignored, not surfaced (anti-DoS)', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
   const waiting = recv.waitForCode()

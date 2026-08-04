@@ -77,6 +77,7 @@ const CONTACT_URL = 'https://hyperparam.app/contact'
 // strands them: authentication worked, admission did not, and only someone
 // else can grant it. Each entry is a literal (never callback input), because
 // respond() interpolates title/detail into the page unescaped.
+// @ref LLP 0058#d7 [implements]: the browser half of the surfaced-error taxonomy explainLoginError covers in the terminal
 const GENERIC_FAILURE_PAGE = {
   title: 'Login failed',
   detail: 'You can close this tab and return to the terminal.',
@@ -197,7 +198,11 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       // it reaches the error message, the log ERROR_KIND, and the terminal, so a
       // crafted value can't inject newlines into logs or terminal output.
       const safeError = sanitizeErrorCode(error ?? '')
-      const page = REFUSAL_PAGES[safeError] ?? GENERIC_FAILURE_PAGE
+      // `Object.hasOwn`, not a plain index + `??`: the key is attacker-chosen, so
+      // `?error=constructor` (or `toString`, `__proto__`, ...) would otherwise hit
+      // Object.prototype, return a non-nullish value that `??` accepts, and render
+      // a page titled "undefined" instead of falling through to the generic one.
+      const page = Object.hasOwn(REFUSAL_PAGES, safeError) ? REFUSAL_PAGES[safeError] : GENERIC_FAILURE_PAGE
       respond(res, page.title, page.detail)
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return
