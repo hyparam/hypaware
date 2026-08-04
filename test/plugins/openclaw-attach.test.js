@@ -155,13 +155,19 @@ test('attach refuses without writing when a provider key already exists (R2)', a
     try {
       const { outcome, stdout } = await runAttach(staged)
 
-      assert.equal(outcome.status, 'failed')
+      // Terminal, not transient: no reconciler pass changes what the user put
+      // at this key, so the marker must stop rather than climb `attempts`
+      // (LLP 0184 / LLP 0186). The four environmental `errorKind`s below stay
+      // `failed`.
+      assert.equal(outcome.status, 'refused')
       assert.match(
-        outcome.status === 'failed' ? outcome.reason : '',
+        outcome.status === 'refused' ? outcome.reason : '',
         new RegExp(`models\\.providers\\.${existingKey} already exists`)
       )
       // The reason has to be actionable, not just a diagnosis.
-      assert.match(outcome.status === 'failed' ? outcome.reason : '', /hyp detach --client openclaw/)
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /hyp detach --client openclaw/)
+      // The user-facing surface is unchanged by the outcome split: a refusal
+      // still prints as "did not apply", exactly as a hard failure does.
       assert.match(stdout, /did not apply/)
 
       // Pure read-then-decide: the file is byte-identical to what was staged.
@@ -278,8 +284,8 @@ test('an entry that is not ours still refuses, however close it looks (R2)', asy
     const staged = await stage(before)
     try {
       const { outcome } = await runAttach(staged)
-      assert.equal(outcome.status, 'failed', label)
-      assert.match(outcome.status === 'failed' ? outcome.reason : '', /models\.providers\.anthropic already exists/)
+      assert.equal(outcome.status, 'refused', label)
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /models\.providers\.anthropic already exists/)
       // Pure read-then-decide still: nothing partially written over a refusal.
       assert.deepEqual(await readConfig(staged.settingsPath), before, label)
     } finally {
@@ -297,8 +303,18 @@ test('attach never throws on refusal, so attach-on-join warns instead of failing
     // throw fails the test outright, which is the assertion. The reconciler's
     // `perform()` turns a throw into a `failed` outcome for the *whole join*
     // action, so the refusal has to come back as a value.
-    const { outcome } = await runAttach(staged, { json: true })
-    assert.equal(outcome.status, 'failed')
+    const { outcome, stdout } = await runAttach(staged, { json: true })
+    assert.equal(outcome.status, 'refused')
+
+    // The outcome split stops at the reconciler seam. `--json` is a wire
+    // contract a scripted caller already parses, so the refusal still reports
+    // `status: "failed"` there, byte-for-byte as before: the terminal/transient
+    // distinction is about how the reconciler schedules a retry, not about what
+    // this attach did.
+    const payload = JSON.parse(stdout.trim())
+    assert.equal(payload.status, 'failed')
+    assert.equal(payload.changed, false)
+    assert.match(payload.reason, /models\.providers\.openai already exists/)
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }
@@ -355,7 +371,7 @@ test('attach --dry-run reports the refusal it would hit, not a write it would no
   })
   try {
     const { outcome } = await runAttach(staged, { dryRun: true })
-    assert.equal(outcome.status, 'failed')
+    assert.equal(outcome.status, 'refused')
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }

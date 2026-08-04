@@ -20,18 +20,33 @@ export interface OpenclawAttachOptions {
 /**
  * What the effect reports back. Deliberately the `ActionOutcome` shape the
  * generic client-action reconciler already understands (LLP 0169): a refusal
- * is a returned `failed`, never a throw, so nothing is half-written and the
+ * is a returned value, never a throw, so nothing is half-written and the
  * caller decides what to do with it.
  *
  * The kernel types the *registered* `attach()` as `Promise<void>`, so
- * `index.js`'s wrapper rethrows a `failed` outcome to make it visible at all;
- * `perform()`'s catch turns it back into this same shape, which the
- * reconciler records, warns about, and retries next pass without failing the
- * join (LLP 0172 §1.3).
+ * `index.js`'s wrapper rethrows a non-`done` outcome to make it visible at
+ * all; `perform()`'s catch turns it back into this same shape, which the
+ * reconciler records and acts on (LLP 0172 §1.3).
+ *
+ * `failed` and `refused` split that non-`done` half by whether a retry could
+ * ever help. `failed` is the transient case (an unresolvable settings path, a
+ * missing endpoint this boot, a read or write error): recorded, warned about,
+ * and retried next pass without failing the join. `refused` is the terminal
+ * one and has exactly one source, the `models.providers` ownership conflict of
+ * LLP 0167#attach-detach: a value HypAware did not write sits at a key attach
+ * owns, which is a property of the user's config that no number of passes
+ * changes, so the reconciler writes a terminal marker and stops rather than
+ * climbing `attempts` forever (LLP 0184). Only the user removing the entry (or
+ * running `hyp detach`) clears it, and only an explicit `hyp attach` re-arms.
+ *
+ * This split is internal to the reconciler seam. The CLI-facing attach output
+ * (`--json` payload and prose) still reports `status: 'failed'` for both, so
+ * a scripted caller's wire contract is unchanged.
  */
 export type OpenclawAttachOutcome =
   | { status: 'done' }
   | { status: 'failed', reason: string }
+  | { status: 'refused', reason: string }
 
 /**
  * The `type: "session"` header line of an OpenClaw session JSONL file
