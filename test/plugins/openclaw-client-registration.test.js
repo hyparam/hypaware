@@ -13,6 +13,7 @@ import { activate } from '../../hypaware-core/plugins-workspace/openclaw/src/ind
 import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
 import { buildAttachPluginCatalog, buildClientDescriptorMap, runAttach, runDetach } from '../../src/core/commands/clients.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
+import { isActionRefused } from '../../src/core/config/action_refusal.js'
 
 /**
  * `gateway.registerClient({ name: 'openclaw', ... })` is what makes the
@@ -189,12 +190,16 @@ test('activate() attach() reports the same write under --json', async () => {
 })
 
 // @ref LLP 0172#lane-a-attach [tests]: a refusal reaches the reconciler as a
-// retryable failure. The kernel types the registered `attach()` as
-// `Promise<void>`, so the effect's returned outcome reaches no caller and the
-// wrapper has to rethrow it. Returning quietly recorded a `done` marker that
-// `isCurrent()` then matched forever, so the join never re-attached after the
-// user cleared the conflicting entry, and `hyp attach` exited 0 on a refusal.
-test('activate() attach() rethrows a refusal so the join records a retryable failure', async () => {
+// recorded outcome on this action alone. The kernel types the registered
+// `attach()` as `Promise<void>`, so the effect's returned outcome reaches no
+// caller and the wrapper has to rethrow it. Returning quietly recorded a `done`
+// marker that `isCurrent()` then matched forever, so the join never re-attached
+// after the user cleared the conflicting entry, and `hyp attach` exited 0 on a
+// refusal.
+// @ref LLP 0186#migration-who-calls-markactionrefused [tests]: the rethrown
+// Error is marked, which is the only way the terminal/transient bit survives
+// the void-returning seam.
+test('activate() attach() rethrows a refusal, marked so it is not retried forever', async () => {
   const staged = stageActivation({
     models: { providers: { anthropic: { baseUrl: 'https://mine.example', models: [] } } },
   })
@@ -205,7 +210,14 @@ test('activate() attach() rethrows a refusal so the join records a retryable fai
     const stderr = makeBuf()
     await assert.rejects(
       () => staged.client().attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, json: true }),
-      /already exists/
+      (err) => {
+        assert.match(String(/** @type {Error} */ (err).message), /already exists/)
+        // The ownership conflict is a property of the user's config, so a
+        // bare Error here (which reads as transient) is the LLP 0184 bug:
+        // `attempts` climbs forever over something no pass can fix.
+        assert.equal(isActionRefused(err), true)
+        return true
+      }
     )
 
     // The reported line is still written before the throw: the throw is what
@@ -219,13 +231,61 @@ test('activate() attach() rethrows a refusal so the join records a retryable fai
   }
 })
 
+// The companion to the above, and the reason the mark is a per-call-site
+// decision rather than "everything attach.js rethrows is refused": a config it
+// cannot read may well be readable next pass, so its Error stays unmarked and
+// the reconciler keeps retrying it.
+// @ref LLP 0186#migration-who-calls-markactionrefused [tests]: the four
+// environmental errorKinds did not migrate
+test('activate() attach() rethrows a hard failure unmarked, so it is still retried', async () => {
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'hyp-openclaw-activate-missing-'))
+  try {
+    const gateway = /** @type {any} */ ({
+      registerUpstreamPreset() {},
+      registerExchangeProjector() {},
+      registerSettlementEnricher() {},
+      /** @type {any} */
+      client: undefined,
+      registerClient(/** @type {any} */ client) { this.client = client },
+    })
+    const ctx = /** @type {any} */ ({
+      env: { HOME: homeDir, HYP_HOME: path.join(homeDir, '.hyp') },
+      plugin: { version: '0.0.0-test' },
+      configRegistry: { registerSection() {} },
+      requireCapability: () => gateway,
+      backfills: { register() {} },
+    })
+    await activate(ctx)
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    await assert.rejects(
+      () => gateway.client.attach({ endpoint: 'http://127.0.0.1:4317', stdout, stderr, json: true }),
+      (err) => {
+        // `read`, not the ownership conflict: there is no openclaw.json here.
+        assert.match(String(/** @type {Error} */ (err).message), /does not exist/)
+        assert.equal(isActionRefused(err), false)
+        return true
+      }
+    )
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true })
+  }
+})
+
 // The other half of the same clause: the throw must reach the reconciler as a
-// recorded `failed` outcome and must NOT abort the join's other actions.
+// recorded non-`done` outcome and must NOT abort the join's other actions.
 // `perform()`'s catch is the seam that converts it, so drive the real handler
 // rather than asserting on the wrapper alone.
-// @ref LLP 0172#lane-a-attach [tests]: refusal is recorded and retried, and the
-// sibling client attached in the same pass still lands
-test('a refused openclaw attach is a failed reconciler outcome, not a done marker, and the join continues', async () => {
+//
+// Which non-`done` status it converts to is deliberately not asserted here:
+// classifying a marked Error as the terminal `refused` versus the transient
+// `failed` is `action_attach.js`'s job, tested there (LLP 0186). What this
+// file owns is that the outcome is never `done`, carries the reason, and
+// leaves the join's other actions alone.
+// @ref LLP 0172#lane-a-attach [tests]: refusal is recorded on this action and
+// the sibling client attached in the same pass still lands
+test('a refused openclaw attach is never a done reconciler outcome, and the join continues', async () => {
   const staged = stageActivation({
     models: { providers: { openai: { baseUrl: 'https://mine.example', models: [] } } },
   })
@@ -250,11 +310,11 @@ test('a refused openclaw attach is a failed reconciler outcome, not a done marke
     })
 
     const refused = await handler.perform({ requestKey: 'openclaw', params: { client: 'openclaw' } }, ctx)
-    assert.equal(refused.status, 'failed')
+    assert.notEqual(refused.status, 'done')
     assert.match(String(refused.reason), /already exists/)
 
-    // A `failed` outcome carries no marker detail to go `done` on, so the next
-    // pass re-performs rather than short-circuiting on `isCurrent`.
+    // A non-`done` outcome carries no marker detail, so nothing can later
+    // short-circuit on `isCurrent` and call the refusal applied.
     assert.equal(refused.detail, undefined)
 
     const sibling = await handler.perform({ requestKey: 'sibling', params: { client: 'sibling' } }, ctx)

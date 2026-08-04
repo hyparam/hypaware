@@ -156,7 +156,7 @@ export function createOpenclawAttach(opts) {
               `exists in ${settingsPath} and was not written by HypAware; attach ` +
               `refuses to merge (LLP 0167#attach-detach). ` +
               `Remove it by hand or run 'hyp detach --client ${CLIENT_NAME}' first.`
-            return fail(span, attachCtx, logger, settingsPath, reason, 'refused')
+            return refuse(span, attachCtx, logger, settingsPath, reason)
           }
 
           if (attachCtx.dryRun === true) {
@@ -380,16 +380,17 @@ function normalizeEndpoint(endpoint) {
 
 /**
  * Record a refusal or hard failure on the span, the log, and the caller's
- * chosen output mode, and hand back the `{status:'failed', reason}` shape.
+ * chosen output mode. Side effects only: the outcome shape is the caller's,
+ * which is the whole reason this is split out of {@link fail}.
  *
- * Returning rather than throwing is what makes LLP 0169's join-safety clause
- * reachable: the generic `ActionOutcome` contract downgrades a `failed`
- * outcome to a recorded, retried warning that does not abort the join's other
- * actions, so the only obligation here is to never throw out of this path (and
- * to have written nothing before reaching it). Reaching that contract still
- * takes one translation: the kernel types the *registered* `attach()` as
- * `Promise<void>`, so `index.js`'s wrapper rethrows this outcome and
- * `perform()`'s catch turns it back into the same shape (LLP 0172 §1.3).
+ * Every one of these three surfaces reports `status: 'failed'` for a refusal
+ * as much as for a hard failure, and deliberately so. `writeAttachOutput`'s
+ * `--json` payload is a wire contract a scripted caller already parses, and
+ * the terminal/transient distinction {@link refuse} draws is a fact about how
+ * *the reconciler* should schedule a retry, not about what the user's attach
+ * just did: from the CLI's side both did not apply, both print the same
+ * actionable reason, and neither changed the file. The `errorKind` span
+ * attribute is where the two stay distinguishable in telemetry.
  *
  * @param {{ setAttribute(key: string, value: unknown): void }} span
  * @param {AiGatewayClientAttachContext} attachCtx
@@ -397,12 +398,9 @@ function normalizeEndpoint(endpoint) {
  * @param {string | undefined} settingsPath
  * @param {string} reason
  * @param {string} errorKind
- * @returns {OpenclawAttachOutcome}
- * @ref LLP 0169#decision [implements]: a refuse during join warns and never
- *   fails the join, via the existing ActionOutcome 'failed' contract, not a
- *   new one.
+ * @returns {void}
  */
-function fail(span, attachCtx, logger, settingsPath, reason, errorKind) {
+function reportAttachFailure(span, attachCtx, logger, settingsPath, reason, errorKind) {
   span.setAttribute('status', 'failed')
   span.setAttribute('restored', false)
   span.setAttribute('changed', false)
@@ -421,7 +419,67 @@ function fail(span, attachCtx, logger, settingsPath, reason, errorKind) {
     changed: false,
     reason,
   })
+}
+
+/**
+ * A hard failure: something environmental went wrong (the settings path did
+ * not resolve, the endpoint was absent, the read or the write threw) and a
+ * later pass may well succeed, so the outcome is the transient
+ * `{status:'failed', reason}` the reconciler records, warns about, and retries.
+ *
+ * Returning rather than throwing is what makes LLP 0169's join-safety clause
+ * reachable: the generic `ActionOutcome` contract downgrades a `failed`
+ * outcome to a recorded, retried warning that does not abort the join's other
+ * actions, so the only obligation here is to never throw out of this path (and
+ * to have written nothing before reaching it). Reaching that contract still
+ * takes one translation: the kernel types the *registered* `attach()` as
+ * `Promise<void>`, so `index.js`'s wrapper rethrows this outcome and
+ * `perform()`'s catch turns it back into the same shape (LLP 0172 §1.3).
+ *
+ * @param {{ setAttribute(key: string, value: unknown): void }} span
+ * @param {AiGatewayClientAttachContext} attachCtx
+ * @param {{ warn(event: string, fields: Record<string, unknown>): void }} logger
+ * @param {string | undefined} settingsPath
+ * @param {string} reason
+ * @param {string} errorKind  one of `settings_path`, `endpoint`, `read`, `write`
+ * @returns {OpenclawAttachOutcome}
+ * @ref LLP 0169#decision [implements]: a refuse during join warns and never
+ *   fails the join, via the existing ActionOutcome 'failed' contract, not a
+ *   new one.
+ */
+function fail(span, attachCtx, logger, settingsPath, reason, errorKind) {
+  reportAttachFailure(span, attachCtx, logger, settingsPath, reason, errorKind)
   return { status: 'failed', reason }
+}
+
+/**
+ * The ownership conflict of {@link conflictingProviderKeys}: a value HypAware
+ * did not write already sits at a `models.providers` key attach owns. Reported
+ * identically to a hard {@link fail} on every user-facing surface, but handed
+ * back as the terminal `refused` outcome, because no number of reconciler
+ * passes changes what is in the user's config. `failed` here is what produced
+ * LLP 0184's forever-retried marker with `attempts` climbing; only the user
+ * removing the entry (or `hyp detach`) fixes it, and only an explicit
+ * `hyp attach` re-arms the marker.
+ *
+ * Its own function rather than a `status` argument to {@link fail} on purpose:
+ * this is the sole refusal in the adapter, so there is no parameter for a
+ * future call site to pass wrong, and the four `errorKind`s that stay
+ * transient cannot drift into it by accident.
+ *
+ * @param {{ setAttribute(key: string, value: unknown): void }} span
+ * @param {AiGatewayClientAttachContext} attachCtx
+ * @param {{ warn(event: string, fields: Record<string, unknown>): void }} logger
+ * @param {string} settingsPath
+ * @param {string} reason
+ * @returns {OpenclawAttachOutcome}
+ * @ref LLP 0186#migration-who-calls-markactionrefused [implements]: the
+ *   ownership-conflict call site alone returns 'refused'; the other four
+ *   errorKinds keep returning 'failed' and keep retrying.
+ */
+function refuse(span, attachCtx, logger, settingsPath, reason) {
+  reportAttachFailure(span, attachCtx, logger, settingsPath, reason, 'refused')
+  return { status: 'refused', reason }
 }
 
 /**
