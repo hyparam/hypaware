@@ -474,6 +474,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'refused') {
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})  run 'hyp attach ${a.requestKey}' after fixing the cause`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }
