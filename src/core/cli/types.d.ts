@@ -243,6 +243,14 @@ export interface FinaleSummary {
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
+  /**
+   * Clients still carrying a HypAware attach marker that this run's config no
+   * longer enables: the state an unchecked-on-re-run client is left in. The
+   * finale names them and stops there (LLP 0185); the detach stays the user's
+   * to run. Optional so a scripted finale runner (tests, the wizard's
+   * injectable seam) need not synthesize it.
+   */
+  attachedNotConfigured?: string[]
 }
 
 export interface PickerWalkthroughResult {

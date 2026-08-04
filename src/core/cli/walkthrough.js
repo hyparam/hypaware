@@ -5,8 +5,10 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
+import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -1011,6 +1013,24 @@ export async function runPickerFinale(args) {
     summary,
   })
 
+  // Re-running the picker regenerates the config from the picks alone, so a
+  // client the previous run attached and this run left unchecked keeps routing
+  // through the gateway that no longer collects it. Nothing here undoes that:
+  // the finale only attaches, and the reconciler's reverse lane covers only the
+  // config-named org/central keys, never a wizard attach on the local layer.
+  // Naming the stranded clients before the restart is what keeps the breakage
+  // visible; the undo stays the user's to run.
+  // @ref LLP 0185#warn-do-not-detach [implements]: the finale names what it left attached and stops there
+  summary.attachedNotConfigured = await findAttachedNotConfiguredClients({
+    clientsPicked,
+    config,
+    env,
+    homeDir,
+  })
+  if (summary.attachedNotConfigured.length > 0) {
+    writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
+  }
+
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     try {
       const { restartServiceDaemon } = await import('../daemon/install.js')
@@ -1027,6 +1047,87 @@ export async function runPickerFinale(args) {
   }
 
   return summary
+}
+
+/**
+ * The plugin names the org's central layer declares, read-only and
+ * best-effort. A centrally named client is attached and reversed by the
+ * reconciler, not by the wizard, so it must never be counted as stranded by
+ * the local layer's picks. Any failure to read the layer degrades to "no
+ * central plugins", which can only cost an extra warning, never a wrong undo.
+ *
+ * @ref LLP 0031#central-layer-is-sacrosanct [constrained-by]: the central layer is read here, never written or interpreted beyond its plugin names
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<Set<string>>}
+ */
+async function readCentralPluginNames(env) {
+  try {
+    const { stateDir } = readObservabilityEnv(env)
+    const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
+    if (!centralPath) return new Set()
+    const loaded = await loadConfigFile(centralPath)
+    if (!loaded.ok) return new Set()
+    return new Set((loaded.config.plugins ?? []).map((entry) => entry.name))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * The clients this run leaves stranded: their settings still carry a HypAware
+ * attach marker, they are not among this run's picks, and neither the config
+ * the finale just wrote nor the org's central layer enables their adapter. The
+ * marker is read through the same descriptor-driven probe `hyp status` uses, so
+ * "still attached" means exactly what the status surface means by it.
+ *
+ * @param {{
+ *   clientsPicked: string[],
+ *   config: HypAwareV2Config,
+ *   env: NodeJS.ProcessEnv,
+ *   homeDir: string,
+ * }} args
+ * @returns {Promise<string[]>} stranded client names, in catalog order
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: the on-disk marker is the only evidence of a prior attach, so it is what the check reads
+ */
+export async function findAttachedNotConfiguredClients({ clientsPicked, config, env, homeDir }) {
+  if (!homeDir) return []
+  const picked = new Set(clientsPicked)
+  const configured = new Set((config.plugins ?? []).map((entry) => entry.name))
+  for (const name of await readCentralPluginNames(env)) configured.add(name)
+
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  /** @type {string[]} */
+  const stranded = []
+  for (const [clientName, descriptor] of descriptors) {
+    if (picked.has(clientName) || configured.has(descriptor.plugin)) continue
+    if (!descriptor.attachProbe) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    if (probe.attached) stranded.push(clientName)
+  }
+  return stranded
+}
+
+/**
+ * Name the stranded clients and the one command that clears each. The wizard
+ * says what it found and what to run; it does not run it, because rewriting a
+ * client's settings is not something a menu confirm asked for.
+ *
+ * A dry run carries the same tag the rest of the finale uses: the clients
+ * really are attached, but the config that strands them was not written.
+ *
+ * @param {{
+ *   clients: string[],
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   dryRun: boolean,
+ * }} args
+ */
+function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
+  stdout.write('\n')
+  stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
+  stdout.write('These tools still send their requests through the HypAware gateway,\n')
+  stdout.write('but this setup no longer collects them, so their requests can start\n')
+  stdout.write('failing. Point each one back at its provider with:\n')
+  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
 }
 
 /**
