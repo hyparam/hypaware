@@ -395,9 +395,12 @@ async function loadWizardCatalog() {
 }
 
 /**
- * The scoped re-entry's locked-set computation, guarded: a resolution
- * failure renders an unlocked picker (additions still compose; the
- * export seam, not the picker, enforces the org boundary, LLP 0132).
+ * The locked-set computation for every entry that reaches the picker on
+ * an already-managed machine without a join (the scoped re-entry, and the
+ * first-run path a managed machine falls to when its merged config no
+ * longer validates), guarded: a resolution failure renders an unlocked
+ * picker (additions still compose; the export seam, not the picker,
+ * enforces the org boundary, LLP 0132).
  *
  * @param {PluginCatalog} catalog
  * @param {Pick<RunInitWizardOptions, 'env'>} opts

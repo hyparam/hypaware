@@ -140,6 +140,12 @@ test('evaluateReturningGate: a managed machine with an invalid config is still m
   assert.equal(gate.managed, true)
 })
 
+// Defensive coverage of the guard's *other* branch, not a state the
+// collector emits: `collectHypAwareStatus` sets `configExists` from a
+// non-null effective config, and `mergeConfigLayers` always returns one
+// once a central layer loaded, so on a real machine `hasCentral` implies
+// `configExists`. Pinned so a future rewrite of the `||` cannot make
+// `managed` depend on `configExists` again.
 test('evaluateReturningGate: a managed machine with no config at all is still managed', async () => {
   const { opts } = ctxWithStdin('\n')
   opts.collectStatus = async () => fixtureReport({ configExists: false, hasCentral: true })
