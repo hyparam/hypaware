@@ -207,14 +207,14 @@ export interface RunWizardJoinOptions {
    */
   catalog: PluginCatalog
   /**
-   * The command context `runRemoteLogin` runs against (production wiring,
+   * The command context the login lane runs against (production wiring,
    * supplied by `runInitWizard`). Optional so tests can inject `runLogin`
    * and never touch the real login lane.
    */
   ctx?: CommandRunContext
   /**
-   * Override the login lane (tests). Defaults to `runRemoteLogin` over
-   * `ctx` with its stderr captured for `classifyLoginFailure`.
+   * Override the login lane (tests). Defaults to `remoteLogin` over `ctx`,
+   * whose returned `reason` is what `classifyLoginFailure` reads.
    */
   runLogin?: () => Promise<LoginLaneResult>
   /**

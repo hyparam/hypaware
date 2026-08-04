@@ -153,6 +153,34 @@ test('post-auth failures name their step rather than collapsing into the login f
   await fs.writeFile(path.join(hypHome, 'hypaware'), 'not a dir')
   const login = /** @type {any} */ (async () => ({ refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }))
   assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 1, reason: 'store_failed' })
+
+  // The seed, the enroll, and the daemon install are three more steps that run
+  // after a sign-in that worked; each names itself rather than reporting the
+  // login as the thing that failed.
+  const gwLogin = /** @type {any} */ (async () => gatewaySession())
+  const { ctx: seedCtx } = await makeCtx({
+    hypHome: await tmpHome(),
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const seed = /** @type {any} */ (async () => { throw new Error('disk is sad') })
+  assert.deepEqual(await remoteLogin(['prod'], seedCtx, { login: gwLogin, seed }), { exitCode: 1, reason: 'seed_failed' })
+
+  const { ctx: enrollCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const enrollThrows = /** @type {any} */ (async () => { throw new Error('server unreachable') })
+  assert.deepEqual(
+    await remoteLogin(['prod'], enrollCtx, { login: gwLogin, enroll: enrollThrows }),
+    { exitCode: 1, reason: 'enroll_failed' }
+  )
+
+  // An incomplete daemon install carries the installer's own code out, so the
+  // outcome is not `exitCode: 1` and not `'ok'` either.
+  const { ctx: daemonCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 3 }))
+  const waitForAttach = /** @type {any} */ (async () => [])
+  assert.deepEqual(
+    await remoteLogin(['prod'], daemonCtx, { login: gwLogin, enroll, waitForAttach }),
+    { exitCode: 3, reason: 'daemon_incomplete' }
+  )
 })
 
 test('a usage error and the exclusivity gate are distinguishable, both exit 2', async () => {
