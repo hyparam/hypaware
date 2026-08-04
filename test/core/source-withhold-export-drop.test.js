@@ -1,14 +1,15 @@
 // @ts-check
 
-// Export-seam source-scoped withholding (LLP 0132 #source-scoped-withholding,
-// task T5): the shared export read (`storage.readRowsSince`) withholds a row
-// attributed (via the dataset's declared `attribution_column`) to a picker
-// source classified `'local'` on a machine with a central layer, but still
-// surfaces its `after` so the cursor advances across it (drop-but-advance,
-// mirroring the existing `cwd`/`local-only` filter's continuation semantics).
-// A dataset with no declared `attribution_column` is never subject to this
-// withholding, the conservative default (LLP 0132, `PluginDatasetManifest
-// .attribution_column`).
+// Export-seam source-scoped withholding (LLP 0181): the shared export read
+// (`storage.readRowsSince`) withholds a row attributed (via the dataset's
+// declared `attribution_column`) to a withheld picker source (an opted-out
+// source on an enrolled machine), but still surfaces its `after` so the
+// cursor advances across it (drop-but-advance, mirroring the existing
+// `cwd`/`local-only` filter's continuation semantics). A dataset with no
+// declared `attribution_column` is never subject to per-row withholding,
+// the conservative default; a dataset whose every contributing source is
+// withheld is dropped wholesale via `shouldWithholdDataset`
+// (LLP 0181 #enforcement-scope).
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -174,6 +175,75 @@ test('readRowsSince: a `columns` projection omitting the attribution column stil
   assert.equal(droppedCount, 1, 'the hermes-attributed row is still withheld despite the projection')
   assert.deepEqual(shipped, [{ id: 1n }], 'the shipped row is the projected columns only')
   assert.ok(!('client_name' in shipped[0]), "the forced-in attribution column is stripped back off, the caller's projection contract is honored")
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('readRowsSince: a dataset with no attribution column whose every owning source is withheld is dropped wholesale, cursor still advancing', async () => {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    sourceWithholdResolver: createSourceWithholdResolver({
+      withheldSourceIds: ['otel'],
+      datasetAttributionColumns: new Map(),
+      datasetOwnedSourceIds: new Map([['demo', ['otel']]]),
+    }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, client_name: null },
+    { id: 2, client_name: null },
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  let droppedCount = 0
+  let prev = -1n
+  for (const part of await svc.discoverCachePartitions()) {
+    for await (const entry of svc.readRowsSince(part.path, {})) {
+      const cur = BigInt(entry.after.seq)
+      assert.ok(cur >= prev, 'drop-but-advance holds for the dataset-scoped drop too')
+      prev = cur
+      assert.ok(entry.dropped, 'every row of a wholly-withheld dataset is dropped')
+      droppedCount += 1
+    }
+  }
+  assert.equal(droppedCount, 2)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('readRowsSince: the provider form of withheldSourceIds is consulted live, so an opt-out lands mid-run without a rebuild', async () => {
+  const cacheRoot = await makeTmpDir()
+  /** @type {Set<string>} */
+  let withheld = new Set()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    sourceWithholdResolver: createSourceWithholdResolver({
+      withheldSourceIds: () => withheld,
+      datasetAttributionColumns: new Map([['demo', 'client_name']]),
+    }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, client_name: 'hermes' },
+    { id: 2, client_name: 'claude' },
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  const readIds = async () => {
+    /** @type {number[]} */
+    const out = []
+    for (const part of await svc.discoverCachePartitions()) {
+      for await (const entry of svc.readRowsSince(part.path, {})) {
+        if (!entry.dropped) out.push(Number(entry.row.id))
+      }
+    }
+    return out.sort((a, b) => a - b)
+  }
+
+  assert.deepEqual(await readIds(), [1, 2], 'nothing withheld before the opt-out')
+  withheld = new Set(['hermes'])
+  assert.deepEqual(await readIds(), [2], 'the provider is re-consulted, so the opt-out applies without rebuilding the resolver')
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })

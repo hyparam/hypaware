@@ -24,7 +24,7 @@
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "The Claude Mac app. Needs a Claude sign-in and your admin password; asks before changing anything.",
+        "summary": "Requires Claude sign-in and admin approval.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
         "needs_setup": true,
         "configure_command": "claude-desktop install",

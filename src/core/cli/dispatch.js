@@ -28,6 +28,7 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
+import { colorizeStderr } from './style.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
@@ -120,7 +121,13 @@ function bootProfileActivatesPlugins(bootProfile) {
  */
 export async function dispatch(argv, opts = {}) {
   const stdout = opts.stdout ?? process.stdout
-  const stderr = opts.stderr ?? process.stderr
+  // Every diagnostic in the CLI - this function's own, and every core or
+  // plugin command's, since they all receive this binding as `ctx.stderr` -
+  // reaches the terminal through here. Colouring the severity prefix at the
+  // one place stderr is bound is what keeps a run from being half-coloured.
+  // A non-TTY (tests, pipes) or `NO_COLOR` returns the stream untouched.
+  // @ref LLP 0183#choke-point [implements]: severity colour is applied where stderr is bound
+  const stderr = colorizeStderr(opts.stderr ?? process.stderr, opts.env ?? process.env)
   // Default stdin to the process stream, exactly as stdout/stderr do. The bin
   // entry calls dispatch(argv) with no opts, so without this fallback every
   // plugin command runs with an undefined ctx.stdin and interactive flows

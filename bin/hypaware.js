@@ -3,7 +3,18 @@
 
 import process from 'node:process'
 
+// The two leaf modules the palette needs, imported statically because they
+// are pure - no observability, no HYP_HOME, nothing the `__smoke_internal`
+// branch below is careful to load late. Everything else here stays a lazy
+// dynamic import.
+// @ref LLP 0183#choke-point [implements]: the entry's own diagnostics get the same colouring dispatch gives commands
+import { ANSI, colorizeStderr, paint } from '../src/core/cli/style.js'
+import { useColor } from '../src/core/cli/stdio.js'
+
 const argv = process.argv.slice(2)
+
+const stderr = colorizeStderr(process.stderr, process.env)
+const color = useColor(process.stderr, process.env)
 
 // `__smoke_internal <flow>` is the in-process entry the registered
 // `smoke` command re-execs us with. It bypasses the dispatcher because
@@ -18,7 +29,7 @@ const argv = process.argv.slice(2)
 if (argv[0] === '__smoke_internal') {
   const flow = argv[1]
   if (!flow) {
-    process.stderr.write('usage: hyp smoke <flow-name>\n')
+    stderr.write('usage: hyp smoke <flow-name>\n')
     process.exit(2)
   }
   try {
@@ -28,9 +39,11 @@ if (argv[0] === '__smoke_internal') {
     process.exit(0)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    process.stderr.write(`smoke ${flow}: FAIL\n${message}\n`)
+    // `FAIL` is the verdict the eye looks for in a scrollback of smoke runs,
+    // and it is not a prefix any severity rule recognizes, so paint it here.
+    stderr.write(`smoke ${flow}: ${paint('FAIL', ANSI.red, color)}\n${message}\n`)
     const detail = err && /** @type {{ detail?: string }} */ (err).detail
-    if (typeof detail === 'string') process.stderr.write(`  ${detail}\n`)
+    if (typeof detail === 'string') stderr.write(`  ${detail}\n`)
     process.exit(1)
   }
 }
@@ -45,7 +58,7 @@ const { installStreamErrorHandlers } = await import('../src/core/cli/stream_erro
 // event, which bypasses the try/catch below and every one inside the
 // commands. Unlistened, it crashes a run that had already succeeded.
 installStreamErrorHandlers([process.stdout, process.stderr], (message) => {
-  try { process.stderr.write(message) } catch { /* the stream is what failed */ }
+  try { stderr.write(message) } catch { /* the stream is what failed */ }
 })
 
 const obs = installObservability()
@@ -54,7 +67,7 @@ try {
   exitCode = await dispatch(argv)
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err)
-  process.stderr.write(`hyp: ${message}\n`)
+  stderr.write(`hyp: ${message}\n`)
   exitCode = 1
 } finally {
   await obs.shutdown()

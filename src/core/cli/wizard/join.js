@@ -118,8 +118,8 @@ async function runJoinFlow(opts, span) {
  * two-layer config from disk and keep every catalog picker id whose
  * owning plugin classifies `'central'`. The pick phase locks exactly this
  * set (LLP 0129 #join-before-picker). Shared by the join phase (after
- * convergence) and the wizard's scoped re-entry, where no join runs but a
- * managed machine's org rows must still render locked.
+ * convergence) and the returning gate, where no join runs but an already
+ * managed machine's org rows must still render locked (LLP 0182).
  *
  * The classifier needs the catalog as its third argument to resolve a
  * source id to its owning plugin (the design sketch elides it for

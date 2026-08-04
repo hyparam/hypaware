@@ -33,7 +33,7 @@ test('picker prompt prints context under source options and defaults export to l
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /3\) capture raw Anthropic API traffic\n     Advanced API proxy mode/)
+  assert.match(text, /3\) Anthropic API\n     For apps you manually point at HypAware/)
   // The export question is no longer rendered.
   assert.doesNotMatch(text, /keep local query cache only/)
   assert.doesNotMatch(text, /Where should HypAware export/)

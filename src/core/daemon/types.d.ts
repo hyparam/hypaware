@@ -101,6 +101,7 @@ export type StatusDiagnosticKind =
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
+  | 'client_sync_list_unreadable'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the

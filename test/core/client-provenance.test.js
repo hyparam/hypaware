@@ -13,7 +13,7 @@ import { classifyClientProvenance } from '../../src/core/cli/wizard/provenance.j
 // pick phase's row locking, the `hyp status` syncing/local-only split, and
 // the export seam's source-scoped withhold set all derive from this one
 // three-way read (LLP 0132 #rule). Test the classification directly.
-// @ref LLP 0132#rule [tests]:
+// @ref LLP 0181#locked [tests]:
 
 /**
  * Build a catalog stub with just the two descriptor maps the classifier

@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-22
 **Related:** LLP 0011, LLP 0031, LLP 0058, LLP 0063, LLP 0128
+**Extended-by:** [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md) (§returning-gate below: the managed machine's separate scoped row and `'scoped'` pathway are withdrawn in favour of one `Reconfigure` for every machine; being managed now only pre-locks the org's picker rows)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on
 > acceptance. Amends [LLP 0011](./0011-setup-and-onboarding.decision.md):
@@ -58,6 +59,12 @@ meaningful local additions
 
 Quit stays the default on a bare enter (0011's never-reconfigure-by-
 accident rule, untouched).
+
+> **Extended-by: [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md).**
+> The two-row split above is withdrawn: every configured machine gets one
+> `Reconfigure`, which re-enters the fork. A managed machine no longer has
+> a pathway of its own; `managed` survives only as the input that locks
+> the org's picker rows. `hyp leave` remains the enrollment exit.
 
 ## Consequences
 

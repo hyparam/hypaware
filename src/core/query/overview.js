@@ -17,6 +17,8 @@
 
 import { executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
+// @ref LLP 0183#palette [implements]: one ANSI table for the whole CLI
+import { ANSI, paint } from '../cli/style.js'
 
 /** The dataset both overview queries read. Absent, there is nothing to show. */
 export const OVERVIEW_DATASET = 'ai_gateway_messages'
@@ -251,23 +253,6 @@ const BAR_WIDTH = 18
 /** Model names longer than this are ellipsized so the columns stay aligned. */
 const MAX_MODEL_WIDTH = 30
 
-const ANSI = {
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  cyan: '\x1b[36m',
-  magenta: '\x1b[35m',
-  reset: '\x1b[0m',
-}
-
-
-/**
- * @param {string} text
- * @param {string} sgr
- * @param {boolean} on
- */
-function paint(text, sgr, on) {
-  return on ? `${sgr}${text}${ANSI.reset}` : text
-}
 
 /**
  * Build the query runner from a command context. Runs the same executor,

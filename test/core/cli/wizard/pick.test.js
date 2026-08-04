@@ -56,6 +56,23 @@ function capturingPrompt(answer) {
 }
 
 /**
+ * Record the defaults-gate question (LLP 0185 #pick-gate) and answer it
+ * with a fixed choice. `'customize'` opens the full menu, which is what
+ * most existing tests exercise.
+ * @param {string} answer
+ */
+function capturingConfirm(answer) {
+  /** @type {{ question: any }} */
+  const state = { question: null }
+  /** @type {any} */
+  const confirm = async (/** @type {any} */ question) => {
+    state.question = question
+    return answer
+  }
+  return { confirm, state }
+}
+
+/**
  * @param {string} tmp
  * @returns {NodeJS.ProcessEnv}
  */
@@ -119,6 +136,7 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(['codex']),
   }))
   // The codex row came pre-checked from detection.
@@ -127,6 +145,78 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(codexRow.disabled, undefined)
   assert.deepEqual(result.sourcesPicked, ['codex'])
   assert.equal(result.retentionDays, 90)
+})
+
+// --- the defaults gate (LLP 0185 #pick-gate) ---
+// @ref LLP 0185#pick-gate [tests]:
+
+test('runWizardPick: accepting the defaults gate picks exactly the detected sources, no menu', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  let menuShown = false
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { menuShown = true; return [] },
+    confirm,
+    detect: async () => new Set(['codex']),
+  }))
+  assert.equal(menuShown, false, 'accepting the defaults never opens the menu')
+  assert.equal(state.question.title, 'HypAware will record:')
+  assert.ok(state.question.items.some((/** @type {string} */ i) => /codex/i.test(i)), 'sources are listed one per line under the title')
+  assert.equal(state.question.default, 'accept')
+  // Bare labels, no summaries: the title already says everything.
+  assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.label), ['Record all', 'Select what to record'])
+  assert.ok(state.question.options.every((/** @type {any} */ o) => o.summary === undefined))
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+})
+
+test('runWizardPick: the gate names locked sources as fleet-managed and accept keeps them', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(['codex']),
+    locked: ['claude'],
+  }))
+  assert.ok(state.question.items.some((/** @type {string} */ i) => /· managed by your fleet/.test(i)), 'a locked row keeps its fleet suffix in the list')
+  // The locked claude is dropped from local-layer composition as always...
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+  // ...but stays a picked client for the finale's local work.
+  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
+})
+
+test('runWizardPick: no gate when nothing is detected and nothing is locked', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  let gateShown = false
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => { gateShown = true; return 'accept' },
+    detect: async () => new Set(),
+  }))
+  assert.equal(gateShown, false, 'an empty default is nothing to confirm; the menu shows directly')
+  assert.deepEqual(result.sourcesPicked, ['otel'])
+})
+
+test('runWizardPick: a cancelled gate returns the deterministic cancel result', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
+  const stderr = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr, env: hermeticEnv(tmp), catalog,
+    prompt: async () => [],
+    confirm: async () => { throw new PromptCancelledError() },
+    detect: async () => new Set(['codex']),
+  }))
+  assert.equal(result.cancelled, true)
+  assert.equal(result.exitCode, 130)
+  assert.match(stderr.text(), /hyp init: cancelled/)
 })
 
 // --- retention defaults (LLP 0137): never asked, pathway-supplied ---
@@ -190,6 +280,7 @@ test('runWizardPick: a locked row renders checked, disabled, and fleet-labeled',
   const { prompt, state } = capturingPrompt(['claude'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -207,6 +298,7 @@ test('runWizardPick: a locked source is filtered out of the returned picks and c
   const { prompt } = capturingPrompt(['claude', 'codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -252,6 +344,7 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
+    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude', 'codex'],
   }))
@@ -266,37 +359,42 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
-// --- managed machines: local additions annotated (LLP 0132) ---
-// @ref LLP 0132#never-silent [tests]:
+// --- managed machines: no local-only annotation (LLP 0181) ---
+// The pre-0181 '· stays on this machine' suffix is retired: an addition on
+// a managed machine now syncs by default, and the sync-scope step after the
+// picker is where local-only is offered.
+// @ref LLP 0181#never-silent [tests]:
 
-test('runWizardPick: on a managed machine, non-locked rows say "stays on this machine"', async () => {
+test('runWizardPick: a managed machine no longer labels non-locked rows "stays on this machine"', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(['codex']),
     locked: ['claude'],
     managed: true,
   }))
   const rows = state.question.options
-  // The locked row keeps the fleet label and never the local-only one.
+  // The locked row keeps the fleet label.
   const claudeRow = rows.find((/** @type {any} */ o) => o.value === 'claude')
   assert.match(claudeRow.label, /managed by your fleet/)
-  assert.doesNotMatch(claudeRow.label, /stays on this machine/)
-  // Every non-locked row is annotated, detected or not.
+  // No row carries the retired suffix; a detected row keeps its own label.
   const codexRow = rows.find((/** @type {any} */ o) => o.value === 'codex')
-  assert.match(codexRow.label, /detected · stays on this machine/)
-  const otelRow = rows.find((/** @type {any} */ o) => o.value === 'otel')
-  assert.match(otelRow.label, /stays on this machine/)
+  assert.match(codexRow.label, /detected/)
+  for (const row of rows) {
+    assert.doesNotMatch(row.label, /stays on this machine/)
+  }
 })
 
-test('runWizardPick: an unmanaged (solo) machine never shows the local-only suffix', async () => {
+test('runWizardPick: an unmanaged (solo) machine never shows a local-only suffix either', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(['claude']),
   }))
   for (const row of state.question.options) {
@@ -345,6 +443,76 @@ test('runWizardPick: --force overwrites an existing config after backing it up',
   assert.equal(result.exitCode, 0)
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/otel'))
+})
+
+// --- deferred write (LLP 0185 #commit-point) ---
+// @ref LLP 0185#commit-point [tests]:
+
+test('runWizardPick: deferWrite composes but never writes, guards, or prompts to overwrite', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const env = hermeticEnv(tmp)
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  let overwriteAsked = false
+
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env, catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => { overwriteAsked = true; return true },
+    deferWrite: true,
+  }))
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.configPending, true)
+  assert.equal(overwriteAsked, false, 'the guard belongs to the commit, not the deferred pick')
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n', 'the existing config is untouched')
+  assert.ok(result.config.plugins?.some((/** @type {any} */ p) => p.name === '@hypaware/otel'), 'the composed config is returned in memory')
+})
+
+test('commitWizardPickedConfig: writes the config, backing up an existing one first', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stdout = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout, stderr: makeBuf(),
+    interactive: true,
+    confirmOverwrite: async () => true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
+  })
+
+  assert.equal(committed.ok, true)
+  assert.match(stdout.text(), /Backed up existing config to /)
+  const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/otel'))
+})
+
+test('commitWizardPickedConfig: a declined overwrite refuses without touching the config', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stderr = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout: makeBuf(), stderr,
+    interactive: true,
+    confirmOverwrite: async () => false,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [] }),
+  })
+
+  assert.equal(committed.ok, false)
+  assert.match(stderr.text(), /hyp init: /)
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
 // --- cancel ---

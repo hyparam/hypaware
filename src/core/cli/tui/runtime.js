@@ -111,6 +111,9 @@ export async function run(initialState, io) {
           } else if (state.status === 'cancelled') {
             cleanup()
             reject(new PromptCancelledError())
+          } else if (state.status === 'backed') {
+            cleanup()
+            reject(new PromptBackRequestedError())
           }
         } catch (err) {
           cleanup()
@@ -240,5 +243,32 @@ export class PromptCancelledError extends Error {
 export function isPromptCancelledError(err) {
   return err instanceof PromptCancelledError || (
     err instanceof Error && err.name === 'PromptCancelledError'
+  )
+}
+
+/**
+ * Thrown when the user steps back from a prompt that opted into
+ * back-navigation (`allowBack`, LLP 0186): escape on the TUI path, `b`
+ * on the readline fallbacks. A control-flow signal like
+ * {@link PromptCancelledError}, not a failure: callers re-run the
+ * previous screen.
+ */
+export class PromptBackRequestedError extends Error {
+  constructor(message = 'TUI prompt backed out') {
+    super(message)
+    this.name = 'PromptBackRequestedError'
+  }
+}
+
+/**
+ * Identify a back request across direct runtime errors and wrapped
+ * copies that preserve the established error name.
+ *
+ * @param {unknown} err
+ * @returns {err is PromptBackRequestedError}
+ */
+export function isPromptBackError(err) {
+  return err instanceof PromptBackRequestedError || (
+    err instanceof Error && err.name === 'PromptBackRequestedError'
   )
 }

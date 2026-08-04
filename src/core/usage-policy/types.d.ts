@@ -95,6 +95,27 @@ export interface LocalOnlyListFileV2 {
   entries: LocalOnlyEntry[]
 }
 
+// A single record in the machine-local per-client sync opt-out list
+// (`<stateDir>/usage-policy/client-sync.json`, LLP 0181). `source` is a
+// picker source id (the same id space the withhold seam matches row
+// attribution against); `class` is fixed to `local-only` today and exists
+// for shape symmetry with `LocalOnlyEntry`. On an enrolled machine every
+// configured source syncs by default; a listed source is withheld at the
+// export seam unless it classifies `central` (org-configured sources cannot
+// be opted out, LLP 0181 #locked).
+export interface ClientSyncEntry {
+  source: string
+  class: 'local-only'
+}
+
+// Version-1 on-disk shape of the machine-local client-sync list (LLP 0181).
+// File absence is meaningful (the upgrade-migration marker) and is NOT the
+// same as an empty `entries` list; see `readClientSyncEntries`.
+export interface ClientSyncListFile {
+  version: 1
+  entries: ClientSyncEntry[]
+}
+
 // Terminal sentinel an adapter's exchange projector returns to express an
 // intentional `.hypignore` usage-policy drop (the exchange must never be
 // recorded). Distinct from a bare `undefined` "this projector declined" return

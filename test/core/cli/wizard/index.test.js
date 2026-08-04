@@ -11,7 +11,7 @@ import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/firs
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
-// the fork/join loop, phase threading (locked/managed/scoped), the
+// the fork/join loop, phase threading (locked/managed), the
 // non-interactive short-circuit, and the cancel/refusal exits. Phases are
 // scripted through the test seams; each phase's own behavior is covered by
 // its sibling test file.
@@ -82,6 +82,7 @@ function wizardOpts(home, over = {}) {
     fork: async () => 'local',
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
       opts._finaleArgs = args
@@ -99,7 +100,7 @@ function wizardOpts(home, over = {}) {
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
-  for (const name of ['gate', 'fork', 'join', 'pick', 'configure']) {
+  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure']) {
     const inner = opts[name]
     opts[name] = async (/** @type {any[]} */ ...a) => { calls.push(name); return inner(...a) }
   }
@@ -131,20 +132,185 @@ test('runInitWizard: gate status delegates to runStatus and returns its code', a
   assert.deepEqual(calls, ['gate'])
 })
 
-test('runInitWizard: scoped re-entry skips the fork and picks scoped + managed', async () => {
+// A managed machine reconfigures through the same fork as anyone else
+// (LLP 0182). What being managed still buys is the locked set and the
+// `managed` flag the picker labels its rows from - not a pathway.
+// @ref LLP 0182#one-reconfigure [tests]:
+test('runInitWizard: a managed machine reconfigures through the fork, carrying managed into the picker', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
-    gate: async () => ({ action: 'scoped-reconfigure', managed: true, report: {} }),
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.ok(!calls.includes('fork'))
-  assert.ok(!calls.includes('join'))
-  assert.equal(opts._pickOpts.scoped, true)
+  assert.ok(calls.includes('fork'))
   assert.equal(opts._pickOpts.managed, true)
-  assert.equal(result.pathway, 'scoped')
+  assert.equal(result.pathway, 'local')
+})
+
+// LLP 0137 #pathway-defaults keys the 120-day window on the cache being
+// the only copy of history. A managed machine has an org server holding
+// the durable copy, so it takes the 90-day default even when its
+// Reconfigure walks down the local pathway.
+test('runInitWizard: a managed machine on the local pathway keeps the 90-day default, not the local 120', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  await runInitWizard(opts)
+  assert.equal(opts._pickOpts.retentionDefault, undefined)
+})
+
+// A managed machine choosing local is asked once whether it means
+// "disconnect" or "adjust while staying connected" (LLP 0185
+// #fork-disconnect). Yes runs hyp leave; no and cancel keep enrollment.
+// @ref LLP 0185#fork-disconnect [tests]:
+
+test('runInitWizard: managed + local + stay connected keeps the locked rows and the sync lane', async () => {
+  let leaveRan = false
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(leaveRan, false)
+  assert.equal(opts._pickOpts.managed, true)
+  assert.ok(calls.includes('syncScope'), 'still enrolled, so the sync lane still runs')
+})
+
+test('runInitWizard: managed + local + disconnect runs hyp leave and continues as a solo install', async () => {
+  let leaveRan = false
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'disconnect',
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(leaveRan, true)
+  assert.equal(opts._pickOpts.managed, undefined, 'no longer managed after the teardown')
+  assert.equal(opts._pickOpts.locked, undefined, 'no rows left to lock')
+  assert.equal(opts._pickOpts.retentionDefault, 120, 'a solo machine takes the local retention default')
+  assert.ok(!calls.includes('syncScope'), 'no server left to scope syncing for')
+})
+
+test('runInitWizard: a failed hyp leave returns to the fork still connected', async () => {
+  const forkChoices = ['local', 'quit']
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => forkChoices.shift(),
+    confirm: async () => 'disconnect',
+    leave: async () => 1,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(calls.filter((c) => c === 'fork').length, 2, 'the fork is re-presented')
+  assert.ok(!calls.includes('pick'), 'the quit ended the run before any phase')
+  assert.match(stderr.text(), /still connected/)
+})
+
+test('runInitWizard: cancelling the disconnect question returns to the fork', async () => {
+  const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
+  const forkChoices = ['local', 'quit']
+  let leaveRan = false
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => forkChoices.shift(),
+    confirm: async () => { throw new PromptCancelledError() },
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(leaveRan, false)
+  assert.equal(calls.filter((c) => c === 'fork').length, 2)
+})
+
+test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {
+  let confirmAsked = false
+  const { opts } = wizardOpts(await tmpHome(), {
+    confirm: async () => { confirmAsked = true; return 'stay' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(confirmAsked, false, 'nothing to disconnect from')
+})
+
+test('runInitWizard: a managed machine can still re-join a team from the gate', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => 'team',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(calls.includes('join'))
+  assert.equal(result.pathway, 'team')
 })
 
 // --- the fork/join loop ---
+
+// --- the sync-scope step (LLP 0181 #never-silent) ---
+
+test('runInitWizard: the team pathway runs the sync-scope step between pick and configure', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure', 'finale'])
+  // Candidates are the pick result's locked-filtered descriptors.
+  assert.deepEqual(opts._syncOpts.candidates, pickResult().descriptors)
+})
+
+test('runInitWizard: the sync-scope step receives the locked descriptors so it can state the whole sync picture', async () => {
+  const catalog = emptyCatalog()
+  const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  catalog.pickerDescriptors.set('claude', claudeDescriptor)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
+})
+
+test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(calls.includes('syncScope'), 'managed gates the step, not the pathway label')
+})
+
+test('runInitWizard: an unmanaged local run never sees the sync-scope step', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome())
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(!calls.includes('syncScope'), 'a solo machine has no server to scope syncing for')
+})
+
+test('runInitWizard: non-interactive picks skip the sync-scope step (default-sync is the scripted outcome)', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(!calls.includes('syncScope'))
+})
+
+test('runInitWizard: a cancelled sync-scope step exits 130 and runs nothing further', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    syncScope: async () => ({ cancelled: true, optedOut: [] }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.ok(!calls.includes('configure'), 'cancel stops before the configure phase')
+  assert.ok(!calls.includes('finale'))
+})
 
 test('runInitWizard: local pathway runs pick -> configure -> finale, no join', async () => {
   const { opts, calls } = wizardOpts(await tmpHome())
@@ -259,6 +425,114 @@ test('runInitWizard: an overwrite refusal returns the pick phase exit 1', async 
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
   assert.ok(!calls.includes('finale'))
+})
+
+// --- deferred config commit (LLP 0185 #commit-point) ---
+// The pick lane composes; the orchestrator commits after the sync lane, so
+// the overwrite confirm is the last question and a cancel at the sync lane
+// leaves the existing config untouched.
+// @ref LLP 0185#commit-point [tests]:
+
+test('runInitWizard: a pending config lands on disk after the sync lane, before configure', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  let onDiskDuringSync = true
+  const { opts, calls } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ configPath, configPending: true }),
+    syncScope: async () => {
+      onDiskDuringSync = await fs.access(configPath).then(() => true, () => false)
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(onDiskDuringSync, false, 'the sync lane runs before the config write')
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
+  assert.ok(calls.includes('configure'), 'the acting phases still run after the commit')
+})
+
+test('runInitWizard: a declined commit exits 1, runs nothing further, and narrates on the team pathway', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  const { opts, calls, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ configPath, configPending: true }),
+    confirmOverwrite: async () => false,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.notEqual(result.cancelled, true)
+  assert.ok(calls.includes('syncScope'), 'the questions all ran before the commit refused')
+  assert.ok(!calls.includes('configure'))
+  assert.ok(!calls.includes('finale'))
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n', 'the existing config is untouched')
+  assert.match(stdout.text(), /This machine is enrolled/)
+})
+
+test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ configPath }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(await fs.access(configPath).then(() => true, () => false), false, 'no pending flag, no write')
+})
+
+// A team-pathway abort lands after the join lane already enrolled the
+// machine; the wizard cannot roll that back, so it must say what state the
+// machine is in (default-sync plus the standing control) instead of exiting
+// silently. Narration only, never another prompt.
+// @ref LLP 0185#abort-narration [tests]:
+
+test('runInitWizard: a team-path overwrite refusal narrates the enrolled state and the deadline', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ exitCode: 1 }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  const text = stdout.text()
+  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /hyp policy client <name> local-only/)
+  assert.match(text, /Nothing has been uploaded yet/)
+})
+
+test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hold means no deadline claim', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    pick: async () => pickResult({ exitCode: 130, cancelled: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  const text = stdout.text()
+  assert.match(text, /This machine is enrolled/)
+  assert.doesNotMatch(text, /Nothing has been uploaded yet/)
+})
+
+test('runInitWizard: a team-path sync-scope cancel narrates that default-sync stands', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    syncScope: async () => ({ cancelled: true, optedOut: [] }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.match(stdout.text(), /This machine is enrolled/)
+})
+
+test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    pick: async () => pickResult({ exitCode: 1 }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.doesNotMatch(stdout.text(), /This machine is enrolled/)
 })
 
 test('runInitWizard: a cancelled finale returns 130 with the cancel notice', async () => {

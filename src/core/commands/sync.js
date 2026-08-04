@@ -11,7 +11,7 @@ import {
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
 } from '../usage-policy/first_sync_hold.js'
-import { readLocalOnlyEntries } from '../usage-policy/index.js'
+import { readClientSyncEntries, readLocalOnlyEntries } from '../usage-policy/index.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -294,14 +294,19 @@ function nameServer(url, remotes) {
  * read changes what the user is told, not what ships.
  *
  * @param {string} stateDir
- * @returns {Promise<{ localOnly: number, ignore: number } | { error: string }>}
+ * @returns {Promise<{ localOnly: number, ignore: number, clientLocalOnly: string[] } | { error: string }>}
  */
 async function readExclusions(stateDir) {
   try {
     const entries = await readLocalOnlyEntries({ stateDir })
+    // The per-client opt-out store (LLP 0181 #never-silent): clients kept
+    // local-only are named, not counted - the list is short and "openclaw"
+    // tells the user something "1 client" does not.
+    const clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
     return {
       localOnly: entries.filter((e) => e.class === 'local-only').length,
       ignore: entries.filter((e) => e.class === 'ignore').length,
+      clientLocalOnly: clientEntries.map((e) => e.source).sort(),
     }
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
@@ -315,7 +320,7 @@ async function readExclusions(stateDir) {
  *
  * @param {{
  *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
- *   exclusions: { localOnly: number, ignore: number } | { error: string },
+ *   exclusions: { localOnly: number, ignore: number, clientLocalOnly?: string[] } | { error: string },
  * }} args
  * @returns {string}
  */
@@ -339,13 +344,19 @@ function renderPlan({ destinations, exclusions }) {
   if ('error' in exclusions) {
     lines.push(`  warning: could not read the local-only list (${exclusions.error});\n`)
     lines.push('  exclusions still apply, but cannot be summarized here\n')
-  } else if (exclusions.localOnly > 0 || exclusions.ignore > 0) {
-    const parts = []
-    if (exclusions.localOnly > 0) parts.push(`${plural(exclusions.localOnly, 'directory', 'directories')} marked local-only`)
-    if (exclusions.ignore > 0) parts.push(`${plural(exclusions.ignore, 'directory', 'directories')} marked ignore`)
-    lines.push(`  withholding ${parts.join(', ')}\n`)
   } else {
-    lines.push('  no directories are marked local-only or ignore\n')
+    const clientLocalOnly = exclusions.clientLocalOnly ?? []
+    if (exclusions.localOnly > 0 || exclusions.ignore > 0) {
+      const parts = []
+      if (exclusions.localOnly > 0) parts.push(`${plural(exclusions.localOnly, 'directory', 'directories')} marked local-only`)
+      if (exclusions.ignore > 0) parts.push(`${plural(exclusions.ignore, 'directory', 'directories')} marked ignore`)
+      lines.push(`  withholding ${parts.join(', ')}\n`)
+    } else if (clientLocalOnly.length === 0) {
+      lines.push('  no directories or clients are marked local-only or ignore\n')
+    }
+    if (clientLocalOnly.length > 0) {
+      lines.push(`  keeping these clients local-only: ${clientLocalOnly.join(' · ')}\n`)
+    }
   }
   return lines.join('')
 }

@@ -154,6 +154,12 @@ sites share it:
 
 ## Wizard orchestration {#orchestration}
 
+> **Extended-by [LLP 0186](./0186-wizard-back-navigation.decision.md):**
+> the phase sequence below also runs backwards one step at a time -
+> escape at a question lane returns to the lane before it, with a
+> completed join reused rather than re-run. The forward flow and every
+> phase's contract are unchanged.
+
 `runInitWizard(opts)` (`src/core/cli/wizard/index.js`) replaces
 `runPickerWalkthrough` as `runInit`'s entry point for the interactive case
 (`opts.picks` absent). Non-interactive callers (`--yes`, `--dry-run`, presets,
@@ -325,6 +331,12 @@ transient network error) to `'failed' | 'abandoned'` for
 (`@ref LLP 0129#failed-join-returns-to-fork`).
 
 ## Pick phase {#pick}
+
+> **Extended-by [LLP 0185](./0185-wizard-defaults-gate.decision.md):**
+> when detection or the locked set yields a non-empty default, the lane
+> now opens with a defaults gate (state the selection, accept on a bare
+> enter, menu on request). The menu described below is unchanged and one
+> keypress away.
 
 `runWizardPick` keeps `walkthrough.js`'s existing shape (prompt, write, guard,
 overwrite confirm) but two things change:
@@ -524,6 +536,13 @@ the plist with sudo (plus `killall cfprefsd` and an app restart,
 over a file core can neither read nor reverse.
 
 ## Export-seam source-scoped withholding {#export-seam}
+
+> **Extended-by [LLP 0181](./0181-enrolled-default-sync-with-client-optout.decision.md):**
+> the withheld set is no longer "the picker source ids classified
+> `'local'`"; it is the explicit per-client opt-out store, minus
+> central-classified sources. The seam mechanics below (attribution
+> column, drop-but-advance) are unchanged, and datasets without an
+> attribution column gain a dataset-scoped withholding rule.
 
 Extends `readRowsSince` (`src/core/cache/storage.js:243`), which already
 enforces `cwd`-derived `local-only` withholding via `usagePolicyResolver`

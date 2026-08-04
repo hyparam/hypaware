@@ -15,6 +15,45 @@ export type AsyncBackfillConsentPrompt = (args: {
   retentionDays: number
 }) => Promise<boolean>
 
+/** One choice offered by the wizard's defaults gate. */
+export interface ConfirmSelectOption {
+  value: string
+  label: string
+  summary?: string
+}
+
+/**
+ * The gate question a wizard lane asks before opening its full menu
+ * (LLP 0185): a single-select between accepting the stated defaults and
+ * opening the menu to change them. Renders as a TUI select on a real TTY
+ * and as a numbered readline fallback elsewhere; a bare enter takes
+ * `default` (the first option when unset), so accepting the defaults is
+ * one keypress on both paths.
+ */
+export interface ConfirmSelectQuestion {
+  title: string
+  /** Position line above the title (LLP 0135 #progress), wizard-only. */
+  progress?: string
+  /**
+   * Context lines listed under the title, one per entry: what the accept
+   * option covers. Rendered verbatim (callers own indentation) on both
+   * the TUI and readline paths.
+   */
+  items?: string[]
+  options: ConfirmSelectOption[]
+  /** Value returned on a bare enter; defaults to the first option. */
+  default?: string
+  /**
+   * Back-navigation opt-in (LLP 0186): the TUI select's escape and the
+   * readline fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling, returning the user to the previous screen.
+   * Only wizard lanes with a screen behind them set this.
+   */
+  allowBack?: boolean
+}
+
+export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Promise<string>
+
 /**
  * The bundled picker source ids. Rows are manifest-sourced (LLP 0130), so
  * this union tracks the bundled plugins' `contributes.picker` names; a
@@ -72,6 +111,13 @@ export interface WalkthroughQuestion {
   progress?: string
   options: WalkthroughOption[]
   bounds?: { min?: number; max?: number }
+  /**
+   * Back-navigation opt-in (LLP 0186): the TUI multiselect's escape and
+   * the numbered fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling. Set only by wizard lanes that have a screen
+   * to return to; `runPickerWalkthrough` never sets it.
+   */
+  allowBack?: boolean
 }
 
 export interface WalkthroughOptions {

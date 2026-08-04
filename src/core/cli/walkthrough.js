@@ -13,7 +13,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select } from './tui/index.js'
-import { isPromptCancelledError } from './tui/runtime.js'
+import { PromptBackRequestedError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 
 /**
@@ -33,6 +33,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 /**
  * @import {
  *   AsyncBackfillConsentPrompt,
+ *   AsyncConfirmSelectPrompt,
  *   AsyncPickPrompt,
  *   PickerBackfillRunner,
  *   PickerSource,
@@ -95,8 +96,13 @@ function legacyNumberedPromptFactory(opts) {
           output.write(`     ${opt.summary}\n`)
         }
       })
-      const answer = await rl.question('select (e.g. 1,3 or "all"): ')
+      const answer = await rl.question(
+        question.allowBack ? 'select (e.g. 1,3, "all", or b to go back): ' : 'select (e.g. 1,3 or "all"): '
+      )
       const trimmed = answer.trim().toLowerCase()
+      // The readline form of the TUI's escape (LLP 0186): same signal,
+      // same caller handling, so both paths step back identically.
+      if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
       if (!trimmed) return []
       if (trimmed === 'all') return question.options.map((o) => o.value)
       const indices = trimmed
@@ -126,7 +132,7 @@ export function defaultOverwriteConfirmFactory(opts) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
       const answer = await rl.question(
-        `A config already exists at ${targetPath}. Overwrite it (a backup is kept)? [y/N]: `
+        'Overwrite existing config (a backup is kept)? [y/N]: '
       )
       return /^y(es)?$/i.test(answer.trim())
     } finally {
@@ -146,6 +152,7 @@ function tuiPromptFactory(opts) {
     const result = await multiselect({
       title: question.title,
       ...(question.progress ? { progress: question.progress } : {}),
+      ...(question.allowBack ? { allowBack: true } : {}),
       options: question.options.map((o) => ({
         value: o.value,
         label: o.label,
@@ -174,6 +181,84 @@ function tuiPromptFactory(opts) {
 export function defaultPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiPromptFactory(opts)
   return legacyNumberedPromptFactory(opts)
+}
+
+/**
+ * Build the wizard's defaults-gate prompt (LLP 0185): a single-select
+ * between accepting a lane's stated defaults and opening its full menu.
+ * Routes to the TUI select on a real TTY, else a numbered readline
+ * fallback where a bare enter takes the question's default.
+ *
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
+ * @returns {AsyncConfirmSelectPrompt}
+ */
+export function defaultConfirmSelectPromptFactory(opts) {
+  if (shouldUseTui(opts)) return tuiConfirmSelectPromptFactory(opts)
+  return legacyConfirmSelectPromptFactory(opts)
+}
+
+/**
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
+ * @returns {AsyncConfirmSelectPrompt}
+ */
+function tuiConfirmSelectPromptFactory(opts) {
+  return async function ask(question) {
+    const choice = await select({
+      title: question.title,
+      ...(question.progress ? { progress: question.progress } : {}),
+      ...(question.items ? { items: question.items } : {}),
+      ...(question.allowBack ? { allowBack: true } : {}),
+      options: question.options.map((o) => ({
+        value: o.value,
+        label: o.label,
+        ...(o.summary && o.summary !== o.label ? { summary: o.summary } : {}),
+      })),
+      ...(question.default !== undefined ? { default: question.default } : {}),
+      clearOnResolve: true,
+      stdin: opts.stdin ?? process.stdin,
+      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+      env: opts.env,
+    })
+    return String(choice)
+  }
+}
+
+/**
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
+ * @returns {AsyncConfirmSelectPrompt}
+ */
+function legacyConfirmSelectPromptFactory(opts) {
+  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
+  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
+  return async function ask(question) {
+    const rl = readline.createInterface({ input, output, terminal: false })
+    try {
+      // @ref LLP 0135#progress [implements]: the non-TUI fallback prints the position too
+      if (question.progress) output.write(`\n${question.progress}`)
+      output.write(`\n${question.title}\n`)
+      for (const item of question.items ?? []) output.write(`${item}\n`)
+      question.options.forEach((opt, idx) => {
+        output.write(`  ${idx + 1}) ${opt.label}\n`)
+        if (opt.summary && opt.summary !== opt.label) {
+          output.write(`     ${opt.summary}\n`)
+        }
+      })
+      const fallback = question.default ?? question.options[0].value
+      const fallbackIdx = question.options.findIndex((o) => o.value === fallback)
+      const answer = await rl.question(
+        question.allowBack ? `select [${fallbackIdx + 1}, b back]: ` : `select [${fallbackIdx + 1}]: `
+      )
+      // The readline form of the TUI's escape (LLP 0186).
+      if (question.allowBack && answer.trim().toLowerCase() === 'b') throw new PromptBackRequestedError()
+      const n = Number.parseInt(answer.trim(), 10)
+      if (Number.isInteger(n) && n >= 1 && n <= question.options.length) {
+        return question.options[n - 1].value
+      }
+      return fallback
+    } finally {
+      rl.close()
+    }
+  }
 }
 
 /**

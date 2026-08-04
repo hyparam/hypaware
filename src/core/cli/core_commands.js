@@ -48,7 +48,7 @@ import {
   runSkillsInstall,
   runUnignore,
 } from '../commands/clients.js'
-import { runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runPolicyClient, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
 
 /**
  * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -385,6 +385,20 @@ function buildCoreCommands(registry) {
       summary: 'Enumerate machine-local usage-class entries',
       usage: 'hyp policy list [--json]',
       run: runPolicyList,
+    },
+    {
+      name: 'policy client',
+      summary: 'Keep a client local-only, or return it to the sync-by-default',
+      usage: 'hyp policy client [<name>] [sync|local-only] [--json]',
+      help: [
+        'On a machine connected to a server, every configured client syncs by',
+        'default. `policy client <name> local-only` keeps that client\'s rows on',
+        'this machine; `policy client <name> sync` removes the opt-out (future',
+        'rows only - rows withheld while local-only are never uploaded). Clients',
+        'your fleet config carries always sync and cannot be opted out. With no',
+        'arguments, lists the opted-out clients.',
+      ].join('\n'),
+      run: runPolicyClient,
     },
     {
       name: 'purge',
