@@ -1,6 +1,7 @@
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { OverviewQueryRunner } from '../../query/types.d.ts'
+import type { LoginOutcomeReason } from '../../remote/types.d.ts'
 import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type {
   AsyncBackfillConsentPrompt,
@@ -150,13 +151,18 @@ export interface LayeredProvenance {
 
 /**
  * What the login lane returns to the join wrapper: the `hyp remote login`
- * exit code plus its captured stderr. `classifyLoginFailure` maps the D7
- * taxonomy phrases in `stderr` to `'failed' | 'abandoned'` (LLP 0058 D7);
- * the query-only text is surfaced verbatim to the user by the login lane
- * itself, so the wrapper only classifies, never re-prints.
+ * exit code, the reason behind it, and its captured stderr.
+ * `classifyLoginFailure` maps `reason` to `'failed' | 'abandoned'`
+ * (LLP 0179#no-prose-control-flow); `stderr` is narration only, echoed back
+ * as the failure `detail`, never matched against.
  */
 export interface LoginLaneResult {
   exitCode: number
+  /**
+   * Absent only on a test double that predates the outcome return; the
+   * classifier reads that as retriable.
+   */
+  reason?: LoginOutcomeReason
   stderr: string
 }
 
@@ -178,10 +184,15 @@ export interface WizardJoinResult {
   managed?: boolean
   /**
    * On a failure (`'failed' | 'abandoned'`): the login lane's own captured
-   * explanation, so `runInitWizard`'s `printJoinFailure` can echo the D7
-   * meaning without re-deriving it.
+   * explanation, for narration. The lane already printed it; nothing
+   * branches on it (LLP 0179#no-prose-control-flow).
    */
   detail?: string
+  /**
+   * On a failure: the login lane's reason code, which is what
+   * `printJoinFailure` branches on to name the wizard-level consequence.
+   */
+  reason?: LoginOutcomeReason
 }
 
 export interface RunWizardJoinOptions {

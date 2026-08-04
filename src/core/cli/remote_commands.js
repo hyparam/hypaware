@@ -30,7 +30,7 @@ import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpoint
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { OidcSession } from '../../../src/core/remote/types.js'
+ * @import { LoginOutcome, OidcSession } from '../../../src/core/remote/types.js'
  */
 
 /**
@@ -361,26 +361,49 @@ export async function runRemoteAdd(argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait
+ * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
+  return (await remoteLogin(argv, ctx, deps)).exitCode
+}
+
+/**
+ * The login lane proper: everything `hyp remote login` does, reported as an
+ * outcome rather than an exit code. The command surface above collapses it to
+ * a number, which is where a number belongs; the wizard's join phase branches
+ * on `reason` instead of matching the D7 sentences out of captured stderr,
+ * which is what it used to have to do.
+ *
+ * Output is unchanged and still happens here, interleaved with the work: the
+ * consent notice has to precede the browser (LLP 0063 D3) and the first-sync
+ * hold message has to follow its marker write (LLP 0101), so the printing is
+ * ordered by the work, not appended to it.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps]
+ * @returns {Promise<LoginOutcome>}
+ * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
+ */
+export async function remoteLogin(argv, ctx, deps = {}) {
   const tokenFileArg = valueFlag(argv, '--token-file')
   const tokenFile = tokenFileArg.value
   if (tokenFileArg.present && !tokenFile) {
     ctx.stderr.write('hyp remote login: --token-file expects a path\n')
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
   const orgArg = valueFlag(argv, '--org')
   const org = orgArg.value
   if (orgArg.present && !org) {
     ctx.stderr.write('hyp remote login: --org expects an org name\n')
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
   const hostArg = valueFlag(argv, '--host')
   const host = hostArg.value
   if (hostArg.present && !host) {
     ctx.stderr.write('hyp remote login: --host expects a host label\n')
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
@@ -485,7 +508,7 @@ export function valueFlag(argv, flag) {
  * @param {string | undefined} tokenFile
  * @param {any} stdin
  * @param {CommandRunContext} ctx
- * @returns {Promise<number>}
+ * @returns {Promise<LoginOutcome>}
  * @ref LLP 0058#d8 [implements]: static token stays the documented headless fallback
  */
 async function runStaticLogin(name, tokenFile, stdin, ctx) {
@@ -497,7 +520,7 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
       : (await readAllStdin(stdin)).trim()
   } catch (err) {
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
+    return { exitCode: 1, reason: 'login_failed' }
   }
   if (!token) {
     ctx.stderr.write('hyp remote login: empty token\n')
@@ -506,7 +529,7 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
     if (!tokenFile) {
       ctx.stderr.write('  (to sign in with a browser instead, re-run with --browser)\n')
     }
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
 
   return persistStaticToken(name, token, ctx)
@@ -521,7 +544,7 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
  * @param {string} name
  * @param {string} token a non-empty, trimmed token
  * @param {CommandRunContext} ctx
- * @returns {Promise<number>}
+ * @returns {Promise<LoginOutcome>}
  */
 async function persistStaticToken(name, token, ctx) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -531,7 +554,7 @@ async function persistStaticToken(name, token, ctx) {
     // writeToken now contends for the cross-process credentials lock and can
     // throw a lock timeout; keep the friendly `hyp remote login:` contract.
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
+    return { exitCode: 1, reason: 'store_failed' }
   }
   ctx.stdout.write(`stored query-scoped token for '${name}'\n`)
 
@@ -541,7 +564,7 @@ async function persistStaticToken(name, token, ctx) {
   if (!remotes[name]) {
     ctx.stderr.write(`note: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>'\n`)
   }
-  return 0
+  return { exitCode: 0, reason: 'ok' }
 }
 
 /**
@@ -557,7 +580,7 @@ async function persistStaticToken(name, token, ctx) {
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
- * @returns {Promise<number>}
+ * @returns {Promise<LoginOutcome>}
  */
 async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
@@ -565,12 +588,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   if (!entry) {
     ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
     ctx.stderr.write("  (or pass a static token with --token-file <path>)\n")
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
   const identityBase = deriveIdentityBase(entry.url)
   if (!identityBase) {
     ctx.stderr.write(`hyp remote login: target '${name}' has an invalid url (${entry.url})\n`)
-    return 2
+    return { exitCode: 2, reason: 'usage' }
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -587,7 +610,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
     ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)
     ctx.stderr.write("  disconnect first ('hyp leave'), then log in to the new server\n")
-    return 2
+    return { exitCode: 2, reason: 'connected_elsewhere' }
   }
 
   // Consent is a pre-auth warning, not a prompt (LLP 0063 D3): completing the
@@ -623,7 +646,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     if (!callbackError) {
       ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
     }
-    return 1
+    // The server's own refusal code, carried out as the reason: this is the
+    // fact the wizard used to reconstruct by matching explainLoginError's
+    // English back out of stderr (LLP 0179#no-prose-control-flow).
+    return { exitCode: 1, reason: loginFailureReason(callbackError) }
   }
   // The single-use code is already spent by here, so a write failure (most
   // likely a lock timeout under a concurrent hyp process) is not a login
@@ -634,14 +660,14 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   } catch (err) {
     ctx.stderr.write(`hyp remote login: signed in but could not store the session: ${err instanceof Error ? err.message : String(err)}\n`)
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
-    return 1
+    return { exitCode: 1, reason: 'store_failed' }
   }
   ctx.stdout.write(`logged in to '${name}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
   // unseeded (LLP 0063 D3) - declining enrollment, not just forwarding.
-  if (!session.gateway) return 0
+  if (!session.gateway) return { exitCode: 0, reason: 'ok' }
   if (noForward) {
     // --no-forward declines *new* enrollment; it cannot un-enroll a machine
     // that already forwards (that is `hyp leave`). Tell the truth for each case
@@ -651,7 +677,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     } else {
       ctx.stdout.write('note: --no-forward - signed in for queries only; this machine is not enrolled and will not forward logs\n')
     }
-    return 0
+    return { exitCode: 0, reason: 'ok' }
   }
 
   // One login, two credentials (LLP 0061 D1): the gateway credential seeds the
@@ -665,7 +691,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     seeded = await seed({ stateDir, configPath: localConfigPath(ctx), targetUrl: entry.url, gateway: session.gateway })
   } catch (err) {
     ctx.stderr.write(`hyp remote login: signed in, but could not seed the forwarding credential: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
+    return { exitCode: 1, reason: 'seed_failed' }
   }
 
   // The in-login local-only picker is retired (LLP 0102): enrollment-time
@@ -703,11 +729,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
-      return 1
+      return { exitCode: 1, reason: 'enroll_failed' }
     }
     if (result.connectedElsewhere) {
       ctx.stderr.write(`hyp remote login: this machine connected to ${result.connectedElsewhere} during sign-in - not enrolling\n`)
-      return 1
+      return { exitCode: 1, reason: 'connected_elsewhere' }
     }
     // Name the server, don't print its URL: every modern terminal autolinks a
     // bare `https://` run (there is no escape that suppresses it), and this
@@ -738,12 +764,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     if (noDaemon) {
       ctx.stdout.write("daemon install skipped (--no-daemon); run 'hyp daemon install' to finish enrolling\n")
       ctx.stderr.write(DURABLE_HINT)
-      return 0
+      return { exitCode: 0, reason: 'ok' }
     }
     if (result.daemonCode !== 0) {
       ctx.stderr.write("note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n")
       ctx.stderr.write(DURABLE_HINT)
-      return result.daemonCode
+      return { exitCode: result.daemonCode, reason: 'daemon_incomplete' }
     }
     // The daemon is installed; it now pulls the org config and auto-attaches any
     // clients it enables (LLP 0044). Wait for that first reconcile so we report
@@ -764,7 +790,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
     }
     ctx.stderr.write(DURABLE_HINT)
-    return 0
+    return { exitCode: 0, reason: 'ok' }
   }
 
   // A matching sink already existed: this was a re-seed (already enrolled).
@@ -786,23 +812,54 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // already forwarding, so there is no "first" sync to defer - this fork writes
   // no hold (LLP 0101 #which). The durable CLI floor stays discoverable.
   ctx.stderr.write(DURABLE_HINT)
-  return 0
+  return { exitCode: 0, reason: 'ok' }
 }
 
 /**
- * The D7 messages that describe a *definitive* login rejection: retrying
- * the same bare login cannot fix any of them. For `no_membership` and
- * `org_not_permitted` an admin has to act; for `org_selection_required`
- * (a multi-org account with no selector) the user has to pick an org via
- * `hyp remote login --org <name>`, which the wizard's bare login cannot
- * supply. Exported as the single source of truth so the wizard join
- * phase's `classifyLoginFailure` recognizes them from the captured
- * login-lane stderr without re-encoding the taxonomy (LLP 0058 D7). A
- * transient/other error carries none of these phrases.
+ * The D7 messages that describe a *definitive* login rejection: retrying the
+ * same bare login cannot fix any of them. For `no_membership` and
+ * `org_not_permitted` an admin has to act; for `org_selection_required` (a
+ * multi-org account with no selector) the user has to pick an org via
+ * `hyp remote login --org <name>`, which the wizard's bare login cannot supply.
+ *
+ * Prose, and nothing else. These were exported so the wizard could recognize
+ * a refusal by substring-matching them out of captured stderr, which made
+ * English load-bearing; `loginFailureReason` reports the same distinctions as
+ * codes now, so these can be reworded freely.
+ * @ref LLP 0179#no-prose-control-flow [implements]: the messages stop being API
  */
-export const LOGIN_NO_MEMBERSHIP_MESSAGE = 'this account is not a member of any org on this server - ask an admin to invite you'
-export const LOGIN_ORG_NOT_PERMITTED_MESSAGE = 'the selected org is not permitted for this account - check the --org name'
-export const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run with --org <name> to choose one'
+const LOGIN_NO_MEMBERSHIP_MESSAGE = 'this account is not a member of any org on this server - ask an admin to invite you'
+const LOGIN_ORG_NOT_PERMITTED_MESSAGE = 'the selected org is not permitted for this account - check the --org name'
+const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run with --org <name> to choose one'
+
+/**
+ * The reason code behind a failed sign-in: the server-surfaced callback error
+ * (LLP 0058 D7) when there was one, otherwise a local failure - a loopback
+ * timeout, a network error, an abandoned browser flow - which is retriable and
+ * so is not one of the definitive refusals.
+ *
+ * The `default` covers a code we do not model (a new server refusal, or a raw
+ * OAuth error): retriable is the safe reading, since the alternative tells a
+ * user to stop trying over a code we do not understand.
+ *
+ * @param {string | undefined} callbackError
+ * @returns {LoginOutcome['reason']}
+ * @ref LLP 0179#outcome [implements]: the D7 code the terminal explains, reported rather than re-derived
+ */
+function loginFailureReason(callbackError) {
+  switch (callbackError) {
+    case 'no_membership':
+      return 'no_membership'
+    case 'org_not_permitted':
+      return 'org_not_permitted'
+    case 'org_selection_required':
+      return 'org_selection_required'
+    case 'access_denied':
+      return 'denied'
+    default:
+      return 'login_failed'
+  }
+}
 
 /**
  * Translate a server-surfaced callback `error` (D7) into a clear message. The

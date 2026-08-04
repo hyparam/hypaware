@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
@@ -109,6 +109,67 @@ test('a successful sign-in whose session write fails reports a store failure, no
   assert.match(err.join(''), /signed in but could not store the session/)
   assert.doesNotMatch(err.join(''), /machine with no browser/)
   assert.equal(out.join(''), '')
+})
+
+// --- the outcome the wizard reads (LLP 0179 #outcome) ---
+// @ref LLP 0179#outcome [tests]:
+
+test('a server refusal is reported as its own reason, not just an exit code', async () => {
+  for (const [callbackError, reason] of [
+    ['no_membership', 'no_membership'],
+    ['org_not_permitted', 'org_not_permitted'],
+    ['org_selection_required', 'org_selection_required'],
+    ['access_denied', 'denied'],
+    // A refusal code we do not model reads as retriable: telling a user to
+    // stop trying over a code we cannot interpret is the worse error.
+    ['some_new_server_refusal', 'login_failed'],
+  ]) {
+    const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+    const login = /** @type {any} */ (async () => {
+      throw Object.assign(new Error(`login failed: ${callbackError}`), { callbackError })
+    })
+    const outcome = await remoteLogin(['prod'], ctx, { login })
+    assert.deepEqual(outcome, { exitCode: 1, reason }, callbackError)
+    // The lane still explains itself in prose; the reason is additional, not a
+    // replacement.
+    assert.match(err.join(''), /^hyp remote login: .+$/m, callbackError)
+  }
+})
+
+test('a local failure with no server code is retriable, and a success is ok', async () => {
+  const { ctx: failCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const timeout = /** @type {any} */ (async () => { throw new Error('timed out waiting for the browser login to complete') })
+  assert.deepEqual(await remoteLogin(['prod'], failCtx, { login: timeout }), { exitCode: 1, reason: 'login_failed' })
+
+  const { ctx: okCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const login = /** @type {any} */ (async () => ({ refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }))
+  assert.deepEqual(await remoteLogin(['prod'], okCtx, { login }), { exitCode: 0, reason: 'ok' })
+})
+
+test('post-auth failures name their step rather than collapsing into the login failure', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  // A plain file where the state dir must be makes the session write throw.
+  await fs.writeFile(path.join(hypHome, 'hypaware'), 'not a dir')
+  const login = /** @type {any} */ (async () => ({ refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }))
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 1, reason: 'store_failed' })
+})
+
+test('a usage error and the exclusivity gate are distinguishable, both exit 2', async () => {
+  const { ctx: usageCtx } = await makeCtx({ hypHome: await tmpHome() })
+  assert.deepEqual(await remoteLogin(['prod', '--org'], usageCtx, {}), { exitCode: 2, reason: 'usage' })
+
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  await writeCentralSeed(hypHome, 'https://elsewhere.example')
+  const login = /** @type {any} */ (async () => { throw new Error('the browser must never open here') })
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 2, reason: 'connected_elsewhere' })
+})
+
+test('runRemoteLogin stays the exit-code adapter over the same run', async () => {
+  const { ctx } = await makeCtx({ hypHome: await tmpHome() })
+  const login = /** @type {any} */ (async () => ({ refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }))
+  assert.equal(await runRemoteLogin(['prod'], ctx, { login }), 0)
 })
 
 test('--no-browser passes noBrowser through to the flow', async () => {
