@@ -483,6 +483,82 @@ test('project() still records a non-streamed OpenAI response whose content is em
   assert.equal(assistant.stop_reason, 'content_filter')
 })
 
+// The floor's marker value and a wire stop reason can collide. First-party
+// Anthropic and OpenAI never send `error`, but this projector reads whatever
+// the upstream sent: an unrecognized upstream is parsed as the Anthropic wire
+// by design, and an OpenAI-compatible endpoint behind a config upstream can
+// send `finish_reason: "error"`. A response that terminated saying `error` is
+// a real answer, so cut-ness is carried by object identity rather than
+// re-derived from the emitted string.
+test('project() still records a terminal response whose wire stop reason is literally error', async () => {
+  const streamed = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-10', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: 'error' }] },
+    ]),
+  })
+  const streamedAssistant = streamed.messages.at(-1)
+  assert.equal(streamedAssistant.role, 'assistant')
+  assert.deepEqual(streamedAssistant.content, [])
+  assert.equal(streamedAssistant.stop_reason, 'error')
+
+  const body = await project({
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: JSON.stringify({
+      id: 'chatcmpl-11',
+      object: 'chat.completion',
+      model: 'gpt-5',
+      choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'error' }],
+    }),
+  })
+  const bodyAssistant = body.messages.at(-1)
+  assert.equal(bodyAssistant.role, 'assistant')
+  assert.deepEqual(bodyAssistant.content, [])
+  assert.equal(bodyAssistant.stop_reason, 'error')
+
+  const anthropic = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_04', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+      { type: 'message_delta', delta: { stop_reason: 'error' } },
+      { type: 'message_stop' },
+    ]),
+  })
+  const anthropicAssistant = anthropic.messages.at(-1)
+  assert.equal(anthropicAssistant.role, 'assistant')
+  assert.deepEqual(anthropicAssistant.content, [])
+  assert.equal(anthropicAssistant.stop_reason, 'error')
+})
+
+// A caller-supplied history turn is never this projector's own cut stream,
+// whatever `stop_reason` the client replayed on it.
+test('project() never drops a request-history assistant turn that replays stop_reason error', async () => {
+  const projection = await project({
+    request_headers: headers(undefined),
+    request_body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      system: 'You are OpenClaw, a personal AI assistant.',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [], stop_reason: 'error' },
+        { role: 'user', content: [{ type: 'text', text: 'again' }] },
+      ],
+    }),
+    response_body: JSON.stringify(ANTHROPIC_RESPONSE),
+  })
+
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), [
+    'user', 'assistant', 'user', 'assistant',
+  ])
+})
+
 // @ref LLP 0157#requirements [tests]: R8, every fallback-identity row carries
 // the LLP 0159 match key - on both shapes, streamed and not.
 test('project() stamps openclaw.match_key on every row of both shapes', async () => {

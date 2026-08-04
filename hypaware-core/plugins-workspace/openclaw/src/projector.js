@@ -64,13 +64,52 @@ const SESSION_HASH_HEAD_CHARS = 256
 /**
  * The `stop_reason` every stream reconstruction here stamps when the stream
  * ended without its terminal event (`message_stop` on the Anthropic wire, a
- * `finish_reason` on Chat Completions). Neither API sends `error` as a real
- * stop reason, so it is unambiguously this projector's own marker for "the
- * answer was cut short", and it is the one signal {@link isEmptyCutRow}
- * reads to tell a cut stream apart from a response that terminated and
- * genuinely said nothing.
+ * `finish_reason` on Chat Completions). Recorded as-is on the row, because
+ * that is the value this projector has always emitted for a cut stream and
+ * it is a column users query.
+ *
+ * It is NOT what {@link isEmptyCutRow} reads. First-party Anthropic and
+ * OpenAI never send `error` as a stop reason, but this projector reads
+ * whatever the upstream sent: an unrecognized upstream is parsed as the
+ * Anthropic wire by design (see `project()`), and an OpenAI-compatible
+ * endpoint reached through a config upstream can and does send
+ * `finish_reason: "error"`. A terminal response that really said `error` is
+ * a real answer, so cut-ness is carried out of band by
+ * {@link cutStreamMessages} instead of being re-derived from a string the
+ * wire can also produce.
  */
 const CUT_STREAM_STOP_REASON = 'error'
+
+/**
+ * The reconstructed messages this projector cut short, by object identity.
+ *
+ * A wire body is parsed JSON, so it can forge any field value but never an
+ * entry in this set: membership is added only by {@link markCutStream},
+ * called only on the branch that stamps {@link CUT_STREAM_STOP_REASON}
+ * itself. That is what makes {@link isEmptyCutRow}'s "cut AND empty" test
+ * true by construction rather than by an assumption about which stop
+ * reasons the upstream is capable of sending.
+ *
+ * @type {WeakSet<object>}
+ */
+const cutStreamMessages = new WeakSet()
+
+/**
+ * Stamp a reconstruction the stream cut short. One call, not two
+ * statements, because the recorded `stop_reason` and the set membership
+ * are halves of one fact: a wire shape that stamped the marker without
+ * registering the message would emit a content-free row that
+ * {@link isEmptyCutRow} no longer recognizes. Every reconstruction added
+ * here should mark its cut branch through this function.
+ *
+ * @param {Record<string, unknown>} message
+ * @returns {Record<string, unknown>}
+ */
+function markCutStream(message) {
+  message.stop_reason = CUT_STREAM_STOP_REASON
+  cutStreamMessages.add(message)
+  return message
+}
 
 /**
  * Build the OpenClaw exchange projector.
@@ -144,7 +183,7 @@ export function createOpenclawExchangeProjector() {
         // The floor is here, at the one place a row is assembled, rather
         // than inside each wire shape's reconstruction, so every shape this
         // projector branches to (and any added later) inherits it.
-        if (isEmptyCutRow(role, message.content, stopReason)) {
+        if (isEmptyCutRow(role, message)) {
           ctx.log.debug?.('plugin.openclaw.empty_row_drop', {
             reason: 'cut_stream_no_content',
             exchange_id: input.exchange_id,
@@ -362,21 +401,23 @@ export function openclawSessionId(reqBody, systemText, exchangeId) {
  * Deliberately "cut AND empty", not "empty". A response that reached its
  * terminal event and genuinely produced nothing (a content filter, a
  * zero-output completion) is a real answer with a real wire stop reason, and
- * the row set has to keep it. Only the synthetic
- * {@link CUT_STREAM_STOP_REASON} marks the case where there is no answer to
- * record, and only the assistant role can carry it: request-history rows
- * come from the caller, never from a stream this projector stitched.
+ * the row set has to keep it. Cut-ness is read from
+ * {@link cutStreamMessages}, never from the emitted stop reason: a message
+ * parsed out of a response body can carry any `stop_reason` string the
+ * upstream chose, including `error`, but only a message this projector
+ * stitched and cut short is in that set. Request-history messages are
+ * excluded twice over, by the set and by the assistant-role test.
  *
  * @ref LLP 0161#match-keys [constrained-by]: the ordinal/time fallback makes
  * a live `message_index` on a content-free row an identity hazard, not just
  * a useless row
  * @param {string} role
- * @param {unknown} content
- * @param {string | undefined} stopReason
+ * @param {Record<string, unknown>} message
  * @returns {boolean}
  */
-function isEmptyCutRow(role, content, stopReason) {
-  if (role !== 'assistant' || stopReason !== CUT_STREAM_STOP_REASON) return false
+function isEmptyCutRow(role, message) {
+  if (role !== 'assistant' || !cutStreamMessages.has(message)) return false
+  const content = message.content
   if (typeof content === 'string') return content.length === 0
   if (Array.isArray(content)) return content.length === 0
   return true
@@ -410,9 +451,10 @@ export function anthropicMessages(reqBody, responseBody, streamEvents) {
  * `content_block_delta` / `content_block_stop` build each block,
  * `message_delta` folds in stop_reason and usage updates, and
  * `message_stop` marks completion. A stream that ends early still
- * yields what arrived, marked `stop_reason = CUT_STREAM_STOP_REASON`; when
- * nothing arrived, that marker is what {@link isEmptyCutRow} drops the row
- * on, so the envelope alone never becomes a row.
+ * yields what arrived, marked `stop_reason = CUT_STREAM_STOP_REASON` and
+ * recorded in {@link cutStreamMessages}; when nothing arrived, that record
+ * is what {@link isEmptyCutRow} drops the row on, so the envelope alone
+ * never becomes a row.
  *
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | null}
@@ -497,7 +539,7 @@ function reconstructAssistantMessage(streamEvents) {
   message.content = Array.from(blocksByIndex.entries())
     .sort(([a], [b]) => a - b)
     .map(([, block]) => block)
-  if (!sawMessageStop && message.stop_reason == null) message.stop_reason = CUT_STREAM_STOP_REASON
+  if (!sawMessageStop && message.stop_reason == null) markCutStream(message)
   return message
 }
 
@@ -738,9 +780,9 @@ function openaiAssistantFromBody(responseBody) {
  * that ends without a `finish_reason` still yields what arrived (the
  * stitched partial text is kept, not discarded), marked
  * `stop_reason = CUT_STREAM_STOP_REASON`, exactly as the Anthropic side
- * does for a stream with no `message_stop`. When the stitch yields no
- * content at all, that marker is what {@link isEmptyCutRow} drops the row
- * on.
+ * does for a stream with no `message_stop`, and recorded in
+ * {@link cutStreamMessages}. When the stitch yields no content at all,
+ * that record is what {@link isEmptyCutRow} drops the row on.
  *
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | null}
@@ -805,7 +847,7 @@ function reconstructOpenaiAssistantMessage(streamEvents) {
   if (model) message.model = model
   if (usage) message.usage = usage
   if (stopReason) message.stop_reason = stopReason
-  else if (!sawFinish) message.stop_reason = CUT_STREAM_STOP_REASON
+  else if (!sawFinish) markCutStream(message)
   return message
 }
 
