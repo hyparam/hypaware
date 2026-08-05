@@ -5,9 +5,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
-import { derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
+import { defaultOverwriteConfirmFactory, derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
@@ -399,4 +400,355 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.clientDescriptors
   )
   assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'openclaw'])
+})
+
+// --- reconfigure: the existing config, not detection, is the starting state ---
+// @ref LLP 0183#seed-from-config [tests]:
+
+/**
+ * Write a local config at the path `runWizardPick` resolves for `env`, so
+ * the next run is a reconfigure rather than a first run.
+ *
+ * @param {string} tmp
+ * @param {Record<string, unknown>} config
+ * @returns {Promise<string>}
+ */
+async function seedLocalConfig(tmp, config) {
+  const configPath = path.join(tmp, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  return configPath
+}
+
+test('runWizardPick: a reconfigure pre-checks the undetectable otel row it already collects', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // @hypaware/otel declares no `detect` rule, so detection can never re-seed
+  // this row. Before the fix it came back unchecked and confirming the picker
+  // silently dropped OTEL collection.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [{ name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } }],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt(['otel'])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const otelRow = state.question.options.find((/** @type {any} */ o) => o.value === 'otel')
+  assert.equal(otelRow.checked, true)
+})
+
+test('runWizardPick: a reconfigure leaves a deliberately excluded client unchecked even when it is detected', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // Claude is installed on this machine (detection finds it) but the user
+  // deliberately left it out last time. Re-checking it would re-include it on
+  // a blind confirm, which is a capture-consent regression.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [{ name: '@hypaware/otel' }],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt(['otel'])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(['claude']),
+    confirmOverwrite: async () => true,
+  }))
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.notEqual(claudeRow.checked, true)
+  // The row still says it was detected, so the suggestion is visible; it is
+  // just not ticked on the user's behalf.
+  assert.match(claudeRow.label, /detected/)
+})
+
+test('runWizardPick: a 120-day retention survives a team-path reconfigure', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A solo 120-day install walking down the team path. Resetting to the
+  // pathway default would hand the next retention sweep days 90-120 of
+  // history to purge, with no question asked.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [{ name: '@hypaware/otel' }],
+    query: { cache: { retention: { default_days: 120 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.equal(result.retentionDays, 120)
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.query.cache.retention.default_days, 120)
+})
+
+test('runWizardPick: a first run still seeds from detection and takes the pathway retention default', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(['claude']),
+    retentionDefault: 120,
+  }))
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.equal(claudeRow.checked, true)
+  assert.equal(result.retentionDays, 120)
+})
+
+test('runWizardPick: a reconfigure carries forward plugins and sink edits the picker does not own', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel', config: { listen_host: '0.0.0.0', listen_port: 4319 } },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/gascity', config: { room: 'wallaby' } },
+    ],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/exports', schedule: '0 * * * *' },
+      },
+    },
+    query: { cache: { retention: { default_days: 120 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  // A plugin no picker row and no export choice contributes is not the
+  // composer's to drop.
+  const gascity = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/gascity')
+  assert.deepEqual(gascity, { name: '@hypaware/gascity', config: { room: 'wallaby' } })
+  // Hand-edited plugin config wins over the manifest's composed defaults.
+  const otel = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/otel')
+  assert.equal(otel.config.listen_host, '0.0.0.0')
+  assert.equal(otel.config.listen_port, 4319)
+  // As does a hand-edited sink schedule and destination directory.
+  assert.equal(written.sinks.local.config.schedule, '0 * * * *')
+  assert.equal(written.sinks.local.config.dir, '/srv/exports')
+})
+
+test('runWizardPick: a reconfigure of a cache-only install does not silently add an export sink', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // `hyp init --export keep-local` wrote this config. The wizard no longer
+  // asks about export, so it must not re-decide it either.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [{ name: '@hypaware/otel' }],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.equal(result.exportPicked, 'keep-local')
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.sinks, undefined)
+})
+
+test('runWizardPick: unchecking a row still removes its plugin and its gateway upstream', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // Carrying config forward must not resurrect a source the user just
+  // unchecked: codex's adapter and its two upstreams have to go.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+        { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+        { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
+      ] } },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual(result.sourcesPicked, ['claude'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.ok(!written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/codex'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+})
+
+test('runWizardPick: a disabled plugin reads as an off row, and re-picking it turns it back on', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [{ name: '@hypaware/otel', enabled: false }],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const otelRow = state.question.options.find((/** @type {any} */ o) => o.value === 'otel')
+  assert.notEqual(otelRow.checked, true)
+  // Picking the row is what "on" means, so the stale disable does not survive.
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const otel = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/otel')
+  assert.equal(otel.enabled, undefined)
+})
+
+test('runWizardPick: a reconfigure does not add a second export sink beside a renamed one', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // The composer always names its export sink `local`; this install renamed
+  // it. It still reads back as `local-parquet`, so composing `local` beside
+  // it would export every dataset twice, on two schedules, into two trees.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+    ],
+    sinks: {
+      exports: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/exports', schedule: '0 * * * *' },
+      },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.equal(result.exportPicked, 'local-parquet')
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.deepEqual(Object.keys(written.sinks), ['exports'])
+  assert.equal(written.sinks.exports.config.dir, '/srv/exports')
+  assert.equal(written.sinks.exports.config.schedule, '0 * * * *')
+})
+
+test('runWizardPick: a request sink parked on the composer sink id is not folded into a mixed shape', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // `local` here is a request sink. Merging the composed blob sink over it
+  // would keep `plugin` beside `writer`/`destination`, which cross-validation
+  // rejects as `request_sink_invalid_keys` - a reconfigure that writes a
+  // config the kernel refuses to load.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/central' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+    ],
+    sinks: {
+      local: { plugin: '@hypaware/central', config: { url: 'https://central.example' } },
+      exports: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  for (const [id, sink] of Object.entries(written.sinks)) {
+    const mixed = 'plugin' in /** @type {any} */ (sink) &&
+      ('writer' in /** @type {any} */ (sink) || 'destination' in /** @type {any} */ (sink))
+    assert.equal(mixed, false, `sink '${id}' mixes both sink shapes`)
+  }
+  // The user's central sink survives intact rather than being half-overwritten.
+  assert.deepEqual(written.sinks.local, {
+    plugin: '@hypaware/central',
+    config: { url: 'https://central.example' },
+  })
+})
+
+test('runWizardPick: a differently written blob sink parked on the composer sink id is not rewritten', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // `local` here is a jsonl export the user built; the parquet export the
+  // composer reads back lives under `archive`. Merging by id alone would
+  // rewrite `local`'s writer to parquet, so a reconfigure would silently
+  // change the format of an export the composer never chose and leave two
+  // parquet sinks writing to two trees.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/format-jsonl' },
+    ],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-jsonl',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/jsonl', schedule: '0 3 * * *' },
+      },
+      archive: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { dir: '/srv/parquet', schedule: '0 4 * * *' },
+      },
+    },
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.deepEqual(written.sinks.local, {
+    writer: '@hypaware/format-jsonl',
+    destination: '@hypaware/local-fs',
+    config: { dir: '/srv/jsonl', schedule: '0 3 * * *' },
+  })
+  assert.deepEqual(written.sinks.archive, {
+    writer: '@hypaware/format-parquet',
+    destination: '@hypaware/local-fs',
+    config: { dir: '/srv/parquet', schedule: '0 4 * * *' },
+  })
+  assert.deepEqual(Object.keys(written.sinks).sort(), ['archive', 'local'])
+})
+
+test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated from the picks', async () => {
+  const asked = makeBuf()
+  const confirm = defaultOverwriteConfirmFactory({
+    stdin: /** @type {any} */ (Readable.from(['n\n'])),
+    stdout: /** @type {any} */ (asked),
+  })
+  await confirm('/home/tester/.hyp/hypaware-config.json')
+  // "Overwrite it?" reads as "keep adjusting my picks"; the file is rewritten
+  // from the picks, and the prompt has to say so before the y/N.
+  assert.match(asked.text(), /rewritten from your picks/i)
+  assert.match(asked.text(), /carried over/i)
 })

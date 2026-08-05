@@ -12,6 +12,8 @@ import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   buildWalkthroughClientDescriptorMap,
   composePickerConfig,
+  configuredExportChoice,
+  configuredPickerSources,
   defaultOverwriteConfirmFactory,
   defaultPickerDetect,
   defaultPromptFactory,
@@ -49,8 +51,10 @@ const LOCAL_ONLY_LABEL_SUFFIX = ' · stays on this machine'
  * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
  * `PICKER_SOURCES` table, and understands central-layer-locked rows.
  *
- * A row's initial checked state is `detected.has(id) || locked.includes(id)`.
- * A locked id renders `disabled: true` with the `· managed by your fleet`
+ * A row's initial checked state is `locked.includes(id)`, then whatever the
+ * local config on disk already collects, and only on a first run (no config
+ * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
+ * `· managed by your fleet`
  * suffix and is filtered out of the returned sources before composition: it
  * is already in the central layer, so composing it again into the local
  * layer would be the exact collision join-before-pick exists to avoid
@@ -68,9 +72,16 @@ const LOCAL_ONLY_LABEL_SUFFIX = ' · stays on this machine'
  * `interactive = !opts.picks` split so every existing non-interactive picker
  * test keeps its shape.
  *
+ * On a reconfigure the local config already on disk is read first and is
+ * what the phase starts from: the rows it collects, the retention window it
+ * carries, and the export destination it expresses (LLP 0183). The wizard
+ * asks about none of those three, so re-deriving them would silently
+ * discard answers the user gave on a previous run.
+ *
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
  * @ref LLP 0132#never-silent [implements]: on a managed machine, non-locked rows are labeled "stays on this machine"
+ * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -91,8 +102,23 @@ export async function runWizardPick(opts) {
   const lockedSources = (opts.locked ?? []).filter((id) => descriptors.has(id))
   const lockedSet = new Set(lockedSources)
 
-  // Interactive only: detection seeds the pre-checked boxes. Best-effort -
-  // a detector failure leaves the set empty rather than blocking onboarding.
+  const obsEnv = readObservabilityEnv(env)
+  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
+
+  // Interactive only: the local config this run replaces. Reading it up
+  // front is what makes the phase a reconfigure rather than a fresh compose
+  // that happens to land on an occupied path. Non-interactive callers
+  // (`--yes`, presets, `--from-file`) state every input on the command line,
+  // so they keep composing from scratch and their output stays byte-identical.
+  const existing = interactive ? await readLocalConfig(configPath) : undefined
+  const configured = existing ? configuredPickerSources(existing, descriptors) : undefined
+
+  // Interactive only: detection seeds the pre-checked boxes on a **first
+  // run**. Best-effort - a detector failure leaves the set empty rather than
+  // blocking onboarding. On a reconfigure it only labels rows `· detected`:
+  // "installed on this machine" is a suggestion, and letting it re-check a
+  // client the user deliberately excluded would re-consent to capture on
+  // their behalf.
   // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
   /** @type {Set<PickerSource>} */
   let detected = new Set()
@@ -113,6 +139,8 @@ export async function runWizardPick(opts) {
       sources_available: descriptorList.length,
       sources_detected: detected.size,
       sources_locked: lockedSources.length,
+      sources_configured: configured?.size ?? 0,
+      reconfigure: existing !== undefined,
       scoped: opts.scoped === true,
       status: 'ok',
     },
@@ -146,7 +174,7 @@ export async function runWizardPick(opts) {
         // fallback prints the same text as plain text.
         // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
         ...(opts.progress ? { progress: opts.progress } : {}),
-        options: descriptorList.map((d) => buildPickOption(d, detected, lockedSet, opts.managed === true)),
+        options: descriptorList.map((d) => buildPickOption(d, detected, lockedSet, opts.managed === true, configured)),
       })
       rawSources = /** @type {PickerSource[]} */ (
         sourceRaw.filter((v) => descriptors.has(v))
@@ -155,12 +183,18 @@ export async function runWizardPick(opts) {
       // is always kept, and on top of it we default to scheduled local
       // Parquet exports so the first run produces durable files out of the
       // box. Other destinations remain available via `hyp init --export`.
-      exportChoice = /** @type {PickerExport} */ ('local-parquet')
+      // A reconfigure reads the answer back off disk instead: a question
+      // that is never asked cannot be re-answered by defaulting it again.
+      exportChoice = existing ? configuredExportChoice(existing) : /** @type {PickerExport} */ ('local-parquet')
       // Retention is not asked either: the orchestrator supplies the
       // pathway default (90-day team / 120-day local), overridable only
-      // via `hyp init --retention-days` on the non-interactive path.
+      // via `hyp init --retention-days` on the non-interactive path. On a
+      // reconfigure the window already in the config wins over the pathway
+      // default - shortening it here would hand the next retention sweep
+      // history to purge as a side effect of a menu walk.
       // @ref LLP 0137#pathway-defaults [implements]: the retention question is removed from onboarding
-      retentionDays = opts.retentionDefault ?? DEFAULT_RETENTION_DAYS
+      // @ref LLP 0183#retention [implements]: an existing retention window survives a reconfigure onto another pathway
+      retentionDays = configuredRetentionDays(existing) ?? opts.retentionDefault ?? DEFAULT_RETENTION_DAYS
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -183,10 +217,14 @@ export async function runWizardPick(opts) {
   })
 
   const hypHome = resolveHypHome(env)
-  const config = composePickerConfig({ sources, descriptors, exportChoice, retentionDays, hypHome })
-
-  const obsEnv = readObservabilityEnv(env)
-  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
+  const config = composePickerConfig({
+    sources,
+    descriptors,
+    exportChoice,
+    retentionDays,
+    hypHome,
+    ...(existing ? { existing } : {}),
+  })
 
   // Guard against clobbering an existing local config (LLP 0031). Interactive
   // runs prompt for confirmation; non-interactive runs require `--force`.
@@ -280,21 +318,31 @@ export async function runWizardPick(opts) {
 /**
  * Build one picker row's prompt option from its descriptor. A locked row
  * is checked and disabled with the `· managed by your fleet` suffix; a
- * merely detected row is checked with the ` · detected` suffix; otherwise
- * the bare descriptor label. On a managed machine every non-locked row
- * additionally carries `· stays on this machine`, so a dev toggling a box
- * beyond the org set knows the addition is local-only before picking it
+ * detected row carries the ` · detected` suffix; otherwise the bare
+ * descriptor label. On a managed machine every non-locked row additionally
+ * carries `· stays on this machine`, so a dev toggling a box beyond the org
+ * set knows the addition is local-only before picking it
  * (LLP 0132 #never-silent).
+ *
+ * `configured` is the set of rows the local config already collects,
+ * present only on a reconfigure. When it is present it, not detection,
+ * decides the checked state: the config is the record of what the user
+ * chose, and detection is a fact about the machine. The `· detected`
+ * label is unaffected either way, so a newly installed client is still
+ * surfaced as a suggestion - just not ticked on the user's behalf.
  *
  * @param {PickerDescriptor} d
  * @param {Set<PickerSource>} detected
  * @param {Set<string>} lockedSet
  * @param {boolean} managed
+ * @param {Set<string> | undefined} configured
  * @returns {WalkthroughOption}
+ * @ref LLP 0183#seed-from-config [implements]: on a reconfigure the config decides the checkboxes; detection only labels
  */
-function buildPickOption(d, detected, lockedSet, managed) {
+function buildPickOption(d, detected, lockedSet, managed, configured) {
   const locked = lockedSet.has(d.id)
   const isDetected = detected.has(/** @type {PickerSource} */ (d.id))
+  const checked = locked || (configured ? configured.has(d.id) : isDetected)
   let label = d.label
   if (locked) {
     label += LOCKED_LABEL_SUFFIX
@@ -306,9 +354,49 @@ function buildPickOption(d, detected, lockedSet, managed) {
     value: d.id,
     label,
     ...(d.summary ? { summary: d.summary } : {}),
-    ...(locked || isDetected ? { checked: true } : {}),
+    ...(checked ? { checked: true } : {}),
     ...(locked ? { disabled: true } : {}),
   }
+}
+
+/**
+ * Read the local config layer this run replaces, or `undefined` when there
+ * is none to read. Deliberately forgiving: a missing, unreadable, or
+ * unparseable file simply means "first run" for seeding purposes, and the
+ * overwrite guard (which backs the file up) still runs over whatever is on
+ * disk. Only the local layer is read - carrying central-layer plugins into
+ * the local layer is exactly the collision join-before-pick avoids
+ * (LLP 0129 #join-before-picker), and locked rows already arrive from the
+ * join phase.
+ *
+ * @param {string} configPath
+ * @returns {Promise<HypAwareV2Config | undefined>}
+ */
+async function readLocalConfig(configPath) {
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const config = /** @type {HypAwareV2Config} */ (parsed)
+  if (config.version !== 2) return undefined
+  return config
+}
+
+/**
+ * The retention window an existing config carries, when it states one.
+ * A config without the key falls through to the pathway default: there is
+ * no answer to preserve.
+ *
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {number | undefined}
+ */
+function configuredRetentionDays(config) {
+  const days = config?.query?.cache?.retention?.default_days
+  return typeof days === 'number' && Number.isFinite(days) ? days : undefined
 }
 
 /**
