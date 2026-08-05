@@ -396,9 +396,9 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
 // The pre-0188 '· stays on this machine' suffix is retired: an addition on
 // a managed machine now syncs by default, and the sync-scope step after the
 // picker is where local-only is offered.
-// @ref LLP 0188#never-silent [tests]: the retired suffix must survive on no row
-// of either machine kind, because a row still promising "stays on this machine"
-// would contradict the default-sync the sync-scope step now states
+// @ref LLP 0188#never-silent [tests]: both machine kinds are pinned because the
+// suffix's absence on a solo machine is what proves it was retired outright,
+// not just re-scoped to unmanaged rows
 
 test('runWizardPick: a managed machine no longer labels non-locked rows "stays on this machine"', async () => {
   const tmp = await mkTmp()
