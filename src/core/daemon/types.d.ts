@@ -97,6 +97,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'recent_errors'
   | 'remote_config_rolled_back'
