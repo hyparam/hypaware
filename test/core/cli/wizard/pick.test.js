@@ -21,8 +21,10 @@ import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 // are filtered out of the returned picks before composition (LLP 0129
 // #join-before-picker). Non-interactive callers set `opts.picks` and skip
 // prompting, matching today's `interactive = !opts.picks` split.
-// @ref LLP 0129#join-before-picker [tests]:
-// @ref LLP 0031#status-provenance [tests]:
+// @ref LLP 0129#join-before-picker [tests]: `locked` is the org config the join
+// already waited for, which is what makes a locked row truthful and not a guess
+// @ref LLP 0031#status-provenance [tests]: a locked row's "managed by your
+// fleet" label is status's central/local provenance split in picker form
 
 /** @returns {Promise<PluginCatalog>} */
 async function realCatalog() {
@@ -130,7 +132,8 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
 })
 
 // --- retention defaults (LLP 0137): never asked, pathway-supplied ---
-// @ref LLP 0137#pathway-defaults [tests]:
+// @ref LLP 0137#pathway-defaults [tests]: the pick phase never prompts for a
+// window; `retentionDefault` is the pathway's number, 90 the fall-through
 
 test('runWizardPick: interactive runs take the 90-day default without a retention prompt', async () => {
   const tmp = await mkTmp()
@@ -267,7 +270,8 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
 })
 
 // --- managed machines: local additions annotated (LLP 0132) ---
-// @ref LLP 0132#never-silent [tests]:
+// @ref LLP 0132#never-silent [tests]: on a managed machine no local addition is
+// left unmarked, and the suffix appears nowhere else
 
 test('runWizardPick: on a managed machine, non-locked rows say "stays on this machine"', async () => {
   const tmp = await mkTmp()
