@@ -97,10 +97,12 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
+  | 'client_sync_list_unreadable'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -126,10 +128,14 @@ export interface StatusDiagnostic {
  * - `done`: run-once effect completed (carries `rows` + `at`).
  * - `failed`: last attempt failed; retried next pass (carries `reason`,
  *   `lastAttempt`, `attempts`).
+ * - `refused`: terminal; the reconciler will never retry it on its own,
+ *   needs an explicit `hyp attach <requestKey>` re-run to clear (carries
+ *   `reason` + `at`, no `attempts`). Informational like `failed`: never
+ *   degrades `overall`.
  * - `pending`: desired on this joined host but no marker yet.
  * - `n/a`: suppressed (`on_join: false`) or inert (host never joined).
  */
-export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
+export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a' | 'refused'
 
 /** One reconciler action's state for the status surface. */
 export interface ClientActionReport {

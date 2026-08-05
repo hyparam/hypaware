@@ -121,7 +121,10 @@ export async function runDaemonStop(_argv, ctx) {
     return 0
   }
   if (outcome === 'timed_out') {
-    ctx.stderr.write('daemon: stop signal sent but daemon did not exit within 5s\n')
+    // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
+    // is a failure (exit 1), and the `hyp <cmd>:` shape is what every other
+    // daemon subcommand's errors already use - and what marks it as one.
+    ctx.stderr.write('hyp daemon stop: stop signal sent but the daemon did not exit within 5s\n')
     return 1
   }
   ctx.stdout.write('daemon: stopped\n')

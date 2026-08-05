@@ -106,7 +106,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     assert.equal(config.sinks?.local?.destination, '@hypaware/local-fs')
     assert.equal(config.sinks?.local?.writer, '@hypaware/format-parquet')
     // Wire-through evidence: the TUI rendered the source list at least once.
-    assert.match(io.output(), /capture raw Anthropic API traffic/)
+    assert.match(io.output(), /Anthropic API/)
   } finally {
     if (prevNoColor === undefined) delete process.env.NO_COLOR
     else process.env.NO_COLOR = prevNoColor

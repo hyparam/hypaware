@@ -12,7 +12,7 @@ import { renderConfigSummary } from '../../src/core/cli/wizard/fork.js'
 
 // Re-running `hypaware` on a configured install fronts the wizard with
 // the returning gate's friendly summary + menu instead of starting
-// fresh. The gate itself (options, legacy prompt, scoped re-entry) is
+// fresh. The gate itself (options, legacy prompt, managed re-entry) is
 // unit-tested in test/core/cli/wizard/fork.test.js; this file keeps the
 // summary renderer and the end-to-end dispatch shape.
 // @ref LLP 0011#returning-to-a-configured-install [tests]:
@@ -46,6 +46,7 @@ function makeReport(over = {}) {
     cache: { totalBytes: 65 * 1024 * 1024, oldestDate: null },
     retention: { days: 30, source: 'default' },
     layered: null,
+    clientSync: null,
     ...over,
   })
 }
@@ -55,33 +56,41 @@ test('renderConfigSummary: a local install reads as set up, not fleet-managed', 
   renderConfigSummary({ report: makeReport(), locked: false, stdout })
   const text = stdout.text()
 
-  assert.match(text, /HypAware is set up\./)
+  assert.match(text, /HypAware is already configured\./)
   assert.doesNotMatch(text, /managed by your fleet/)
   assert.doesNotMatch(text, /locked here/)
-  assert.match(text, /Collecting:\s+Claude/)
-  assert.match(text, /Saving to:\s+local Parquet files/)
+  assert.match(text, /Collecting:\s+Claude\n/)
+  assert.doesNotMatch(text, /Saving to:/)
+  assert.doesNotMatch(text, /\(synced\)|\(local only\)/)
   assert.match(text, /Daemon:\s+running/)
   assert.match(text, /Cache:\s+65 MB · 30-day retention/)
 })
 
-test('renderConfigSummary: a fleet-managed install says so and notes the lock', () => {
+// On a managed machine the client list carries the reach split (LLP 0188
+// #never-silent): centrally-managed clients sync to the org, and so do
+// local-layer additions unless the machine's opt-out store says otherwise,
+// which is what the (local only) marker reports. The old "Saving to" sink
+// line is gone; the split on the clients themselves is the signal.
+test('renderConfigSummary: a fleet-managed install marks each client synced vs local only', () => {
   const stdout = makeBuf()
   const report = makeReport({
     layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
+    clients: [
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, attached: true },
+      { name: 'openclaw', plugin: '@hypaware/openclaw', configured: true, attached: false },
+    ],
+    clientSync: { syncing: ['claude', 'codex'], localOnly: ['openclaw'] },
     sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
   })
   renderConfigSummary({ report, locked: true, stdout })
   const text = stdout.text()
 
-  assert.match(text, /HypAware is set up \(managed by your fleet\)\./)
-  assert.match(text, /Settings are locked here and managed centrally\./)
-  assert.match(text, /Saving to:\s+central fleet sink/)
-})
-
-test('renderConfigSummary: no sinks falls back to local cache only', () => {
-  const stdout = makeBuf()
-  renderConfigSummary({ report: makeReport({ sinks: [] }), locked: false, stdout })
-  assert.match(stdout.text(), /Saving to:\s+local query cache only/)
+  assert.match(text, /HypAware is already configured\./)
+  assert.doesNotMatch(text, /managed by your fleet/)
+  assert.doesNotMatch(text, /locked here/)
+  assert.match(text, /Collecting:\s+Claude \(synced\), Codex \(synced\), OpenClaw \(local only\)/)
+  assert.doesNotMatch(text, /Saving to:/)
 })
 
 // End-to-end through dispatch: a configured install run with no args
@@ -108,7 +117,7 @@ test('hyp init on a configured install fronts the picker with the summary menu',
   })
 
   assert.equal(code, 0, stderr.text())
-  assert.match(stdout.text(), /HypAware is set up\./)
+  assert.match(stdout.text(), /HypAware is already configured\./)
   assert.match(stdout.text(), /What would you like to do\?/)
   // The first-run picker never ran.
   assert.doesNotMatch(stdout.text(), /Welcome to HypAware/)

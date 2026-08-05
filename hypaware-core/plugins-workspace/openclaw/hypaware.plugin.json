@@ -34,8 +34,8 @@
     "picker": [
       {
         "name": "openclaw",
-        "label": "capture OpenClaw conversations",
-        "summary": "Captures OpenClaw conversations in two tiers: live capture through the local gateway once attached, plus a periodic sweep of local session transcripts that backfills every provider within the sweep interval. No separate package to install.",
+        "label": "OpenClaw",
+        "summary": "Live traffic plus local session history; attach rewrites OpenClaw's gateway config.",
         "detect": { "settings_file": ".openclaw/openclaw.json" },
         "compose": {
           "plugin": { "name": "@hypaware/openclaw" },

@@ -6,9 +6,9 @@
 
 import process from 'node:process'
 
-import { run, PromptCancelledError } from './runtime.js'
+import { run, PromptCancelledError, PromptBackRequestedError } from './runtime.js'
 
-export { PromptCancelledError }
+export { PromptCancelledError, PromptBackRequestedError }
 
 /**
  * Render an interactive multi-select prompt with checkbox toggling and
@@ -22,7 +22,8 @@ export async function multiselect(spec) {
   /** @type {MultiselectState} */
   const initial = {
     kind: 'multiselect',
-    title: spec.title,
+    ...(spec.title !== undefined ? { title: spec.title } : {}),
+    ...(spec.items !== undefined ? { items: spec.items } : {}),
     options: spec.options.map((o) => ({
       value: o.value,
       label: o.label,
@@ -34,6 +35,7 @@ export async function multiselect(spec) {
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
+    ...(spec.allowBack ? { allowBack: true } : {}),
     ...(spec.bounds !== undefined ? { bounds: spec.bounds } : {}),
   }
   const io = resolveIo(spec)
@@ -57,7 +59,8 @@ export async function select(spec) {
   /** @type {SelectState} */
   const initial = {
     kind: 'select',
-    title: spec.title,
+    ...(spec.title !== undefined ? { title: spec.title } : {}),
+    ...(spec.items !== undefined ? { items: spec.items } : {}),
     options: spec.options.map((o) => ({
       value: o.value,
       label: o.label,
@@ -67,6 +70,7 @@ export async function select(spec) {
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
+    ...(spec.allowBack ? { allowBack: true } : {}),
   }
   const io = resolveIo(spec)
   const final = /** @type {SelectState} */ (await run(initial, io))
@@ -85,12 +89,14 @@ export async function text(spec) {
   /** @type {TextState} */
   const initial = {
     kind: 'text',
-    title: spec.title,
+    ...(spec.title !== undefined ? { title: spec.title } : {}),
+    ...(spec.items !== undefined ? { items: spec.items } : {}),
     value: '',
     mask: spec.mask === true,
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
+    ...(spec.allowBack ? { allowBack: true } : {}),
     ...(spec.default !== undefined ? { default: spec.default } : {}),
     ...(spec.validate !== undefined ? { validate: spec.validate } : {}),
   }

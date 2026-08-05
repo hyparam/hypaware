@@ -256,7 +256,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
       const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
-      // @ref LLP 0132#source-scoped-withholding [implements]: same not-bypassable-by-projection
+      // @ref LLP 0188#opt-out [implements]: same not-bypassable-by-projection
       // guarantee as `cwd` above, but the forced column is dataset-specific
       // (`attributionColumnFor`) rather than a fixed name; `undefined` means
       // this dataset declared no `attribution_column`, so nothing is forced
@@ -264,6 +264,14 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
       const forceAttribution =
         attributionColumn !== undefined && projected !== undefined && !projected.includes(attributionColumn)
+      // @ref LLP 0188#enforcement-scope [implements]: a dataset with no
+      // attribution column, all of whose contributing sources are opted out,
+      // is withheld wholesale; per-row filtering can never fire for it, so
+      // this dataset-scoped verdict is the only way its opt-out is honored.
+      // Evaluated per read (not hoisted further) so the resolver's live
+      // withheld set applies; a corrupt-store throw here propagates like the
+      // per-row one below and fails the partition read closed.
+      const withholdDataset = sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true
       /** @type {string[] | undefined} */
       let scanColumns = projected
       if (forceCwd || forceAttribution) {
@@ -280,6 +288,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
+      let droppedUnattributedRowCount = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
@@ -292,6 +301,12 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // A corrupt/unreadable list makes `resolve` throw; we let it propagate
         // so the partition read fails and the sink's per-partition retry leaves
         // the watermark untouched (LLP 0080 #fail-safe), never a silent skip.
+        if (withholdDataset) {
+          droppedRowCount += 1
+          droppedSourceRowCount += 1
+          yield { after, dropped: true }
+          continue
+        }
         const cwd = row.cwd
         if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') {
           droppedRowCount += 1
@@ -299,16 +314,29 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
-        // @ref LLP 0132#source-scoped-withholding [implements]: a row attributed
-        // to a picker source classified `'local'` on a machine with a central
-        // layer is dropped from the payload here, same drop-but-advance
-        // continuation semantics as the `cwd` filter above, so a sink's
-        // watermark still moves past a withheld row (LLP 0070#incremental).
-        if (sourceWithholdResolver && attributionColumn !== undefined && sourceWithholdResolver.shouldWithhold(row[attributionColumn])) {
-          droppedRowCount += 1
-          droppedSourceRowCount += 1
-          yield { after, dropped: true }
-          continue
+        // @ref LLP 0188#opt-out [implements]: a row attributed to an
+        // opted-out picker source on a machine with a central layer is
+        // dropped from the payload here, same drop-but-advance continuation
+        // semantics as the `cwd` filter above, so a sink's watermark still
+        // moves past a withheld row (LLP 0070#incremental).
+        if (sourceWithholdResolver && attributionColumn !== undefined) {
+          const attributionValue = row[attributionColumn]
+          // @ref LLP 0192#fail-closed [implements]: a row with no usable
+          // attribution value cannot be tied to any synced source, so once
+          // any of this dataset's producers is opted out it is withheld
+          // instead of shipped (pre-0192, every unattributed row escaped
+          // both withhold rules).
+          const attributed = typeof attributionValue === 'string' && attributionValue !== ''
+          const withholdRow = attributed
+            ? sourceWithholdResolver.shouldWithhold(attributionValue)
+            : sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true
+          if (withholdRow) {
+            droppedRowCount += 1
+            droppedSourceRowCount += 1
+            if (!attributed) droppedUnattributedRowCount += 1
+            yield { after, dropped: true }
+            continue
+          }
         }
         // We forced `cwd`/the attribution column in for the filters only;
         // don't leak either into a payload the caller's projection didn't ask
@@ -327,6 +355,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
+          // Separate count so the fail-closed rule's over-withholding is
+          // observable in the field, not inferred (LLP 0192 #consequences).
+          ...(droppedUnattributedRowCount > 0 ? { dropped_unattributed_row_count: droppedUnattributedRowCount } : {}),
         })
       }
     },
