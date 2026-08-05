@@ -6,7 +6,9 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
 import { attach } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
+import { isActionRefused } from '../../src/core/config/action_refusal.js'
 
 /**
  * T1 (LLP 0045/0046): the Claude `_hypaware` marker is a self-describing
@@ -361,5 +363,108 @@ test('attach records no prev_base_url when the base URL is absent, whatever else
     assert.equal('prev_base_url' in marker, false)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// LLP 0186/0187 T6: the JSONC throw site is marked as a permanent refusal,
+// so the reconciler short-circuits instead of retrying an edit attach can
+// never safely make (LLP 0184's field bug, under a different label).
+test('attach refuses a JSONC settings.json and marks the error as refused', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(
+      settingsPath,
+      '{\n  // a JSONC comment, which JSON.parse cannot handle\n  "env": {}\n}\n'
+    )
+
+    await assert.rejects(
+      () => attach({ ...ATTACH, settingsPath }),
+      (/** @type {unknown} */ err) => {
+        assert.equal(isActionRefused(err), true)
+        assert.equal(/** @type {any} */ (err).code, 'JSONC')
+        assert.match(/** @type {any} */ (err).message, /appears to be JSONC; refuse to modify/)
+        return true
+      }
+    )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Companion case: a plain malformed (non-JSONC) settings.json still throws
+// ClaudeSettingsError, but is not marked as a permanent refusal, it is an
+// environmental failure the reconciler is allowed to keep retrying.
+test('attach on malformed non-JSONC JSON is not marked as refused', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, '{ "env": ')
+
+    await assert.rejects(
+      () => attach({ ...ATTACH, settingsPath }),
+      (/** @type {unknown} */ err) => {
+        assert.equal(isActionRefused(err), false)
+        assert.equal(/** @type {any} */ (err).code, 'MALFORMED_JSON')
+        return true
+      }
+    )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The two tests above pin `settings.js`, but the mark only reaches the
+// reconciler if it survives the registered `attach()` wrapper too: the kernel
+// types that hook as `Promise<void>`, so `perform()`'s catch sees whatever
+// object comes out of `activate()`'s registration, not what settings.js threw.
+// `index.js` rethrows the original error and `withSpan` rethrows an Error
+// unchanged, and this is what proves both, the way
+// openclaw-client-registration.test.js proves OpenClaw's half. A wrapper that
+// rewrapped the error would silently downgrade the refusal to a retried
+// `failed` with nothing else failing.
+// @ref LLP 0186#migration-who-calls-markactionrefused [tests]: Claude's JSONC
+// refusal reaches the reconciler seam still marked
+test('activate() attach() rethrows the JSONC refusal with the refusal mark intact', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-activate-jsonc-'))
+  try {
+    await fs.mkdir(path.join(homeDir, '.claude'), { recursive: true })
+    await fs.writeFile(
+      path.join(homeDir, '.claude', 'settings.json'),
+      '{\n  // a JSONC comment, which JSON.parse cannot handle\n  "env": {}\n}\n'
+    )
+
+    /** @type {any} */
+    const gateway = {
+      registerUpstreamPreset() {},
+      registerExchangeProjector() {},
+      registerSettlementEnricher() {},
+      /** @type {any} */
+      client: undefined,
+      registerClient(/** @type {any} */ client) { this.client = client },
+    }
+    const ctx = /** @type {any} */ ({
+      env: { HOME: homeDir, HYP_HOME: path.join(homeDir, '.hyp') },
+      paths: { stateDir: path.join(homeDir, '.hyp', 'plugins', 'claude') },
+      plugin: { version: '0.0.0-test' },
+      configRegistry: { registerSection() {} },
+      requireCapability: () => gateway,
+      backfills: { register() {} },
+      commands: { register() {} },
+      skills: { register() {} },
+      agents: { register() {} },
+      initPresets: { register() {} },
+    })
+    await activateClaude(ctx)
+
+    const buf = { write() {} }
+    await assert.rejects(
+      () => gateway.client.attach({ endpoint: 'http://127.0.0.1:4388', stdout: buf, stderr: buf, json: true }),
+      (/** @type {unknown} */ err) => {
+        assert.match(/** @type {any} */ (err).message, /appears to be JSONC; refuse to modify/)
+        assert.equal(isActionRefused(err), true, 'the wrapper must not strip the refusal mark')
+        return true
+      }
+    )
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
   }
 })

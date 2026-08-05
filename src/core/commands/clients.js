@@ -18,6 +18,7 @@ import {
   clearClientActionMarker,
   readClientActionStatus,
   readInstalledAssets,
+  rearmRefusedActionMarker,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
@@ -424,6 +425,44 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun,
         json: parsed.json,
       })
+      // A successful manual attach is the only re-arm a `refused` marker gets
+      // in this pass: after it, the next reconcile pass must stop
+      // short-circuiting on the marker and re-`perform()` the request key.
+      //
+      // Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose.
+      // A `done` marker is the only record naming the files an org-driven
+      // attach installed, so clearing it would strand them past any later
+      // `hyp detach`, which reads exactly this marker to know what to remove
+      // (LLP 0138#marker-undo). A `failed` marker needs no help: nothing
+      // short-circuits it, so the next pass already retries it. And a dry run
+      // must leave the marker store exactly as it found it, the same way the
+      // detach path returns before its own clear under `--dry-run`.
+      //
+      // The re-arm itself is a drop only when the marker records no
+      // `installed_assets`. One that carries them is the same undo record a
+      // `done` marker is (a refusal on a re-`perform()` carries the earlier
+      // successful attach's copies forward), so it is rewritten to `failed`
+      // rather than dropped: same re-arm, record intact. That branch lives in
+      // `rearmRefusedActionMarker` beside the store it rewrites.
+      //
+      // Best-effort: a marker-store I/O failure must never fail the attach that
+      // just succeeded.
+      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
+      if (parsed.dryRun !== true) {
+        try {
+          rearmRefusedActionMarker({
+            stateRoot: readObservabilityEnv(ctx.env).stateDir,
+            kind: 'attach',
+            requestKey: name,
+          })
+        } catch (markerErr) {
+          getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
+            hyp_client: name,
+            error_kind: 'marker_retract_failed',
+            detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+          })
+        }
+      }
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated

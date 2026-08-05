@@ -957,6 +957,15 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
           ...(typeof marker.last_attempt === 'string' ? { lastAttempt: marker.last_attempt } : {}),
           ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
         })
+      } else if (marker && marker.status === 'refused') {
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: terminal refused marker, reason+at, no attempts
+        actions.push({
+          kind,
+          requestKey,
+          state: 'refused',
+          ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
+          ...(typeof marker.at === 'string' ? { at: marker.at } : {}),
+        })
       } else if (marker) {
         // `done` (run-once / attached) or `applied` (reversible): the effect
         // is in place. For attach a `done` marker is the "attached" rendering.

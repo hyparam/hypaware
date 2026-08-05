@@ -10,6 +10,7 @@ import {
   removeClientAssets,
 } from '../runtime/client_assets.js'
 import { readInstalledAssets } from './action_reconciler.js'
+import { isActionRefused } from './action_refusal.js'
 import { readAttachPolicy } from './attach_policy.js'
 import { detachClientFromDisk } from './client_detach_disk.js'
 
@@ -129,7 +130,9 @@ export function createAttachHandler(opts = {}) {
      * stderr, json:true })`, parses the one-line JSON the adapter emits, and
      * records `settings_path` / `prev_value` as the marker detail. A throw
      * (file not writable, malformed settings) becomes a `failed` outcome the
-     * reconciler records and retries next pass.
+     * reconciler records and retries next pass, unless the adapter marked it
+     * a permanent refusal (LLP 0186), which becomes a `refused` outcome the
+     * reconciler short-circuits unconditionally instead.
      *
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
@@ -166,7 +169,14 @@ export function createAttachHandler(opts = {}) {
       try {
         await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
       } catch (err) {
-        return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
+        // A marked refusal (LLP 0186) is a permanent precondition failure only
+        // the user can fix; anything else is the transient `failed` the
+        // reconciler retries next pass.
+        // @ref LLP 0186#markactionrefused--isactionrefused [implements]: perform()'s catch reads the marked-Error convention to tell a refusal from an environmental failure
+        return {
+          status: isActionRefused(err) ? 'refused' : 'failed',
+          reason: err instanceof Error ? err.message : String(err),
+        }
       }
 
       // Attach means "wire this client into HypAware", and the client's

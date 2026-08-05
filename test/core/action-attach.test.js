@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createAttachHandler, attachHandler } from '../../src/core/config/action_attach.js'
+import { markActionRefused } from '../../src/core/config/action_refusal.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 
 /**
@@ -388,6 +389,19 @@ test('perform() returns failed when the adapter throws (file not writable)', asy
   )
   assert.equal(outcome.status, 'failed')
   assert.match(String(outcome.reason), /EACCES/)
+})
+
+test('perform() returns refused when the adapter throws a marked refusal', async () => {
+  const registration = attachRegistration('claude', {
+    throws: markActionRefused(new Error('models.providers.anthropic already exists and was not written by HypAware')),
+  })
+  const handler = createAttachHandler()
+  const outcome = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude' } },
+    makeCtx({ clients: clientsWith({ claude: registration }) }),
+  )
+  assert.equal(outcome.status, 'refused')
+  assert.match(String(outcome.reason), /already exists/)
 })
 
 test('perform() returns failed when the registry has no such client', async () => {
