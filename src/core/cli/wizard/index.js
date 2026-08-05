@@ -19,7 +19,12 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { LOCAL_INSTALL_RETENTION_DAYS, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
+import {
+  LOCAL_INSTALL_RETENTION_DAYS,
+  runPickerFinale,
+  writeAttachedNotConfiguredReminder,
+  writeWalkthroughRunSummary,
+} from '../walkthrough.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
@@ -212,18 +217,55 @@ export async function runInitWizard(opts) {
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
-  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+  const firstLookRan = interactive && !cancelled && opts.finale?.dryRun !== true
+  // Whether the block actually reached the screen, which is not the same
+  // question: the step is documented to degrade to a silent skip rather than
+  // fail a finished install (LLP 0135 #first-look), so an unregistered
+  // dataset, an unreadable cache, or a render that throws all leave
+  // `firstLookRan` true and stdout untouched. The closing repeat below reads
+  // this, not the gate, because what it needs to know is what was written.
+  let firstLookShown = false
+  if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
-    await runWizardFirstLook({
+    const look = await runWizardFirstLook({
       runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
     })
+    firstLookShown = look.shown
     // The abandoned queries from an expired deadline keep running and can
     // still resolve with a withheld-row report. Close the sink so that
     // report cannot land after the privacy narration below, which is
     // documented to be the last thing on screen.
     notices.close()
+  }
+
+  // The finale already named these, before the daemon restart that strands
+  // them (LLP 0185 #warn-do-not-detach). That print is no longer on screen by
+  // the time this run ends: the summary, then the first look's ~60 lines, then
+  // the narration below all follow it without a pause. Repeat it here, short,
+  // and only when this closing sequence actually wrote something, so the
+  // direct `runPickerWalkthrough` entry point (whose summary follows the
+  // finale with nothing in between) keeps its single print.
+  //
+  // `firstLookShown` is the whole condition, the team pathway included. It is
+  // read rather than `firstLookRan` because a first look that skipped itself
+  // wrote nothing, and rather than `pathway`, because a `pathway` is only ever
+  // resolved on an interactive run: a team run that is neither cancelled nor a
+  // dry run has already run the first look, so `|| pathway === 'team'` would
+  // widen this to exactly the runs where the first look did *not* run
+  // (cancelled at the backfill consent, or a dry run). Every run either
+  // condition would add wrote nothing between the finale and here, so the
+  // repeat would land a few lines under the print it repeats.
+  // @ref LLP 0188#when [constrained-by]: nothing written in between, no repeat
+  // @ref LLP 0188#repeat-at-the-end [implements]: the wizard repeats what its own closing output buried
+  const stranded = finaleSummary?.attachedNotConfigured ?? []
+  if (stranded.length > 0 && firstLookShown) {
+    writeAttachedNotConfiguredReminder({
+      clients: stranded,
+      stdout: opts.stdout,
+      dryRun: opts.finale?.dryRun === true,
+    })
   }
 
   // The wizard's last words on the team pathway: when the first upload

@@ -1481,6 +1481,38 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
 }
 
 /**
+ * The closing repeat of the stranded-attach warning, for an entry point whose
+ * finale is not the last thing it writes.
+ *
+ * The finale's own warning stays exactly where LLP 0185 put it, before the
+ * daemon restart that is the point of no return. This is a second, compact
+ * print for the caller that keeps writing afterwards: the wizard follows the
+ * finale with a run summary, a first look that is roughly sixty lines of real
+ * query output, and on the team path a privacy narration, none of which pause,
+ * so on a real terminal the original warning is scrolled away by the time the
+ * run ends. It matters most on a managed host, where the finale's print is the
+ * only signal there is because `hyp status`'s mirror diagnostic is gated to
+ * hosts with no central layer (LLP 0185 #status-backstop).
+ *
+ * Only a caller that printed something substantial in between calls this.
+ * `runPickerWalkthrough` writes a short run summary and stops, so it keeps the
+ * single finale print and never repeats it onto the same screen.
+ *
+ * @ref LLP 0188#repeat-at-the-end [implements]: the repeat belongs to the caller whose own output buried the first print
+ * @param {{
+ *   clients: string[],
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   dryRun: boolean,
+ * }} args
+ */
+export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) {
+  stdout.write('\n')
+  stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
+  stdout.write('Their requests can start failing until you run:\n')
+  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+}
+
+/**
  * Run the onboarding backfill step. For each picked client that has a
  * registered backfill provider (intersection of `clientsPicked` and
  * `backfill.available`), import its local history into the query cache.
