@@ -216,7 +216,10 @@ test('readRowsSince: a dataset with no attribution column whose every owning sou
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
-// @ref LLP 0192#fail-closed [tests]: an unattributed row cannot be tied to a synced source, so one standing opt-out over the dataset's producers withholds it
+// The arming set is the dataset's declared owners (`datasetOwnedSourceIds`),
+// not every source that writes into it, so this fixture hands the resolver an
+// explicit owner list rather than inferring one from who produced a row.
+// @ref LLP 0192#fail-closed [tests]: an unattributed row cannot be tied to a synced source, so one standing opt-out among the dataset's declared owners withholds it (`some`, not `every`)
 test('readRowsSince: unattributed rows in an attributed dataset are withheld once any owning source is opted out (fail closed)', async () => {
   const cacheRoot = await makeTmpDir()
   const svc = createQueryStorageService({
