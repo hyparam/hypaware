@@ -425,25 +425,39 @@ async function runClientLifecycle(action, argv, ctx) {
         json: parsed.json,
       })
       // A successful manual attach is the only re-arm a `refused` marker gets
-      // in this pass: clear whatever marker sits at this request key so the
-      // next reconcile pass treats it as a fresh target. Best-effort and
-      // unconditional, mirroring the detach-side call below - clearing a
-      // non-existent problem is a no-op, and a marker-store I/O failure here
-      // must never fail the attach that just succeeded.
-      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: explicit hyp attach clears a refused marker; the reconciler never re-arms one on its own
-      // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: hyp attach's success path retracts its own client-action marker, mirroring hyp detach's clear below
-      try {
-        clearClientActionMarker({
-          stateRoot: readObservabilityEnv(ctx.env).stateDir,
-          kind: 'attach',
-          requestKey: name,
-        })
-      } catch (markerErr) {
-        getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
-          hyp_client: name,
-          error_kind: 'marker_retract_failed',
-          detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
-        })
+      // in this pass: drop it so the next reconcile pass sees no marker at this
+      // request key, treats it as a fresh target, and re-`perform()`s.
+      //
+      // Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose.
+      // A `done` marker is the only record naming the files an org-driven
+      // attach installed, so clearing it would strand them past any later
+      // `hyp detach`, which reads exactly this marker to know what to remove
+      // (LLP 0138#marker-undo). A `failed` marker needs no help: nothing
+      // short-circuits it, so the next pass already retries it. And a dry run
+      // must leave the marker store exactly as it found it, the same way the
+      // detach path returns before its own clear under `--dry-run`.
+      //
+      // Best-effort: a marker-store I/O failure must never fail the attach that
+      // just succeeded.
+      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach clears a refused marker, and only that; the reconciler never re-arms one on its own
+      if (parsed.dryRun !== true) {
+        try {
+          const markerStateRoot = readObservabilityEnv(ctx.env).stateDir
+          const existingMarker = readClientActionStatus({ stateRoot: markerStateRoot }).byKind.attach?.[name]
+          if (existingMarker?.status === 'refused') {
+            clearClientActionMarker({
+              stateRoot: markerStateRoot,
+              kind: 'attach',
+              requestKey: name,
+            })
+          }
+        } catch (markerErr) {
+          getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
+            hyp_client: name,
+            error_kind: 'marker_retract_failed',
+            detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+          })
+        }
       }
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the

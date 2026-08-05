@@ -325,7 +325,8 @@ directly, on-disk, entirely independent of the reconciler's marker store
 successful reversal, at the call site around line 1164 today). Add the
 symmetric call on a successful manual attach: after
 `registration.attach(...)` (or the equivalent adapter call the command
-path uses) resolves without throwing, call
+path uses) resolves without throwing, and the run was not a `--dry-run`,
+read the marker at that request key and, **only if it is `refused`**, call
 `clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })`.
 
 This is deliberately a **clear**, not a rewrite to `done`: it does not need
@@ -341,14 +342,23 @@ previous output (LLP 0086#re-attach-on-drift's constraint on OpenClaw's
 `conflictingProviderKeys`, and the general re-attach-on-drift design), so a
 redundant re-write is a no-op write, not a second effect.
 
-Only `refused` needs this treatment. A `failed` marker is not blocked by
-anything today (only `done` and, as of this document, `refused` short-circuit
-the forward gap), so a manual attach that fixes a merely-`failed` case is
-already picked up by the very next reconcile pass without any new code; the
-`clearClientActionMarker` call after a successful manual attach is harmless
-in that case too (clearing a non-existent problem is a no-op), so the
-implementation does not need to branch on the marker's prior status before
-calling it.
+Only `refused` needs this treatment, and only `refused` may get it. A
+`failed` marker is not blocked by anything today (only `done` and, as of this
+document, `refused` short-circuit the forward gap), so a manual attach that
+fixes a merely-`failed` case is already picked up by the very next reconcile
+pass without any new code. A `done` marker must **not** be cleared here: it
+is the only record naming the files an org-driven attach installed, and `hyp
+detach` reads exactly that marker to know what to remove, so dropping it over
+a manual re-attach would strand those files with nothing naming them
+(LLP 0138#marker-undo, the same invariant the reconciler's own carry-forward
+branches protect). The clear is therefore gated on the marker's prior status
+being `refused`, not applied blindly.
+
+For the same reason the clear is skipped entirely under `hyp attach
+--dry-run`: a dry run reports what an attach would do and writes nothing, and
+the marker store is state like any other. `hyp detach --dry-run` already
+returns before its own `clearClientActionMarker` call; the attach side matches
+it.
 
 ### Follow-up candidate, not built here
 
@@ -427,7 +437,10 @@ Mirrors LLP 0041's own test strategy, extended for the new state:
   attach <client>`, clears the marker (`readClientActionStatus` shows no
   entry at that request key); the next `reconcile()` pass re-`perform()`s and
   writes a fresh `done` marker. A `hyp attach` that itself fails leaves the
-  `refused` marker in place (nothing is cleared on a failed manual attach).
+  `refused` marker in place (nothing is cleared on a failed manual attach), a
+  `done` marker carrying `installed_assets` survives a successful manual
+  attach untouched (the undo record is not collateral of the re-arm), and
+  `hyp attach --dry-run` clears nothing at all.
 - **Reverse-gap interaction.** A `refused` marker with no `installed_assets`
   for a request key the config stops naming is dropped, like an assetless
   `failed` one; a `refused` marker that carries `installed_assets` is routed

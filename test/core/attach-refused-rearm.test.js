@@ -140,6 +140,23 @@ function seedRefusedMarker(stateRoot, requestKey) {
 }
 
 /**
+ * Pre-seed an arbitrary attach marker, for the cases where the re-arm must
+ * leave one alone.
+ *
+ * @param {string} stateRoot
+ * @param {string} requestKey
+ * @param {Record<string, unknown>} marker
+ */
+function seedMarker(stateRoot, requestKey, marker) {
+  const dir = path.join(stateRoot, 'config-control')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'client-actions.json'),
+    JSON.stringify({ attach: { [requestKey]: marker } }, null, 2) + '\n'
+  )
+}
+
+/**
  * A minimal reconcile input naming just `claude`, mirroring
  * test/core/attach-endpoint-drift.test.js's `reconcileInput` helper.
  *
@@ -248,6 +265,81 @@ test('a failed manual hyp attach leaves the refused marker in place (never clear
     const marker = readClientActionStatus({ stateRoot }).byKind.attach?.claude
     assert.equal(marker?.status, 'refused', 'a failed manual attach must never clear the refused marker')
     assert.equal(marker && 'attempts' in marker, false, 'a refused marker never carries attempts')
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The re-arm is scoped to `refused` markers because a `done` marker is the
+// only record naming the files an org-driven attach installed, and `hyp
+// detach` reads exactly this marker to know what to remove. An unscoped clear
+// would strand them: the manual attach's own asset copies are deliberately
+// unrecorded, so nothing else names them.
+// @ref LLP 0138#marker-undo [tests]: a manual re-attach must not drop the undo
+//   record of an effect an earlier reconciled attach applied
+test('a successful manual hyp attach leaves a done marker (and its installed_assets) alone', async () => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-attach-rearm-done-'))
+  const stateRoot = path.join(home, 'hypaware')
+  try {
+    seedMarker(stateRoot, 'claude', {
+      status: 'done',
+      request_key: 'claude',
+      at: '2026-07-01T00:00:00.000Z',
+      installed_assets: [path.join(home, '.claude', 'skills', 'org-helper')],
+    })
+
+    const { registry, kernel, calls } = fakeClientKernel()
+    const result = await attach('claude', {
+      hypHome: home,
+      env: { ...process.env, HOME: home, HYP_HOME: home },
+      // @ts-expect-error test-only kernel injection
+      registry,
+      kernel,
+    })
+    assert.equal(result.status, 'ok')
+    assert.deepEqual(calls, ['claude'])
+
+    const marker = readClientActionStatus({ stateRoot }).byKind.attach?.claude
+    assert.equal(marker?.status, 'done', 'a done marker survives a manual re-attach')
+    assert.deepEqual(
+      marker?.installed_assets,
+      [path.join(home, '.claude', 'skills', 'org-helper')],
+      'the undo record naming org-installed assets is not collateral of the re-arm'
+    )
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
+// A dry run reports what an attach would do and writes nothing. The marker
+// store is state like any other, and `hyp detach --dry-run` already returns
+// before its own clearClientActionMarker call.
+// @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [tests]: the re-arm is
+//   skipped under --dry-run, so a dry run leaves the marker store byte-identical
+test('hyp attach --dry-run never clears a refused marker', async () => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-attach-rearm-dry-'))
+  const stateRoot = path.join(home, 'hypaware')
+  try {
+    seedRefusedMarker(stateRoot, 'claude')
+    const before = fs.readFileSync(path.join(stateRoot, 'config-control', 'client-actions.json'), 'utf8')
+
+    const { registry, kernel } = fakeClientKernel()
+    const result = await attach('claude', {
+      hypHome: home,
+      env: { ...process.env, HOME: home, HYP_HOME: home },
+      dryRun: true,
+      // @ts-expect-error test-only kernel injection
+      registry,
+      kernel,
+    })
+    assert.equal(result.status, 'ok')
+
+    assert.equal(
+      fs.readFileSync(path.join(stateRoot, 'config-control', 'client-actions.json'), 'utf8'),
+      before,
+      'a dry run must leave the marker store exactly as it found it'
+    )
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach?.claude?.status, 'refused')
   } finally {
     await fsp.rm(home, { recursive: true, force: true })
   }

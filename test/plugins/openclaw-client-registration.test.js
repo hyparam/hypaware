@@ -278,14 +278,16 @@ test('activate() attach() rethrows a hard failure unmarked, so it is still retri
 // `perform()`'s catch is the seam that converts it, so drive the real handler
 // rather than asserting on the wrapper alone.
 //
-// Which non-`done` status it converts to is deliberately not asserted here:
-// classifying a marked Error as the terminal `refused` versus the transient
-// `failed` is `action_attach.js`'s job, tested there (LLP 0186). What this
-// file owns is that the outcome is never `done`, carries the reason, and
-// leaves the join's other actions alone.
+// This is the only end-to-end assertion over the whole chain (real adapter ->
+// `refuse()` -> the wrapper's marked throw -> `perform()`'s classification),
+// so it pins the exact status rather than merely "not done": every link has to
+// hold for `refused` to come out the other end, and a weaker assertion would
+// stay green if any one of them regressed to `failed`.
 // @ref LLP 0172#lane-a-attach [tests]: refusal is recorded on this action and
 // the sibling client attached in the same pass still lands
-test('a refused openclaw attach is never a done reconciler outcome, and the join continues', async () => {
+// @ref LLP 0186#migration-who-calls-markactionrefused [tests]: the ownership
+// conflict reaches the reconciler seam as the terminal `refused` outcome
+test('a refused openclaw attach is a refused reconciler outcome, not done, and the join continues', async () => {
   const staged = stageActivation({
     models: { providers: { openai: { baseUrl: 'https://mine.example', models: [] } } },
   })
@@ -310,7 +312,7 @@ test('a refused openclaw attach is never a done reconciler outcome, and the join
     })
 
     const refused = await handler.perform({ requestKey: 'openclaw', params: { client: 'openclaw' } }, ctx)
-    assert.notEqual(refused.status, 'done')
+    assert.equal(refused.status, 'refused')
     assert.match(String(refused.reason), /already exists/)
 
     // A non-`done` outcome carries no marker detail, so nothing can later
