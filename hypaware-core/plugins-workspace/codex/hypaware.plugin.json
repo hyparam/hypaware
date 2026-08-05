@@ -32,8 +32,8 @@
     "picker": [
       {
         "name": "codex",
-        "label": "capture Codex conversations (CLI and Desktop)",
-        "summary": "Configures Codex to use the local gateway and records Codex request/response traffic. One pick covers both: Codex CLI and Codex Desktop share ~/.codex/config.toml.",
+        "label": "Codex",
+        "summary": "CLI and Desktop conversations; points Codex at the local gateway and installs helper skills.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },

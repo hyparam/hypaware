@@ -35,8 +35,8 @@
     "picker": [
       {
         "name": "claude",
-        "label": "capture Claude Code conversations",
-        "summary": "Configures Claude Code, installs Claude helper skills, and enriches rows from local Claude transcripts. Captures anything that runs the Claude Code CLI or Claude Agent SDK, including an OpenClaw configured with a claude-cli/<model> backend (the default on a subscription machine), which lands here as claude with no OpenClaw-side setup.",
+        "label": "Claude Code",
+        "summary": "CLI and SDK conversations, including OpenClaw's claude-cli backend; attaches Claude Code and installs helper skills.",
         "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
           "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },

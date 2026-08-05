@@ -20,7 +20,14 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
-import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
+import {
+  ClientSyncListUnreadableError,
+  localOnlyListPath,
+  LocalOnlyListUnreadableError,
+  optedOutClientSourceIds,
+  readClientSyncEntries,
+  readLocalOnlyDirs,
+} from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
@@ -300,6 +307,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // always boots, so a broken/absent local layer is a warning, never an
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
+
+  // A local layer that is present but does not parse: `activePlugins` is then
+  // empty (or central-only) because the file could not be read, not because
+  // the operator disabled anything. Any diagnostic whose repair is "your
+  // config no longer names this" would be reading a parse failure as intent,
+  // so the attached-but-not-configured check below stands down here and lets
+  // `config_unreadable` / `config_local_unreadable` own the run.
+  const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
@@ -638,34 +653,75 @@ export async function collectHypAwareStatus(opts = {}) {
         message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
         repair: [`hyp attach --client ${clientName}`],
       })
+    } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
+      // The mirror image of `client_attach_missing`: the marker is on disk but
+      // nothing enables the adapter, so this client still routes through a
+      // gateway that no longer collects it (and, with no gateway configured at
+      // all, through a dead port). Re-running the picker and unchecking a
+      // previously picked client is the way in; the wizard warns at the time,
+      // and this is the after-the-fact backstop for a run already closed.
+      //
+      // Solo hosts only. On a joined host a config-named client's attach is the
+      // reconciler's to reverse, so the same shape there is a pass it has not
+      // run yet, not a state the operator should undo by hand. And only when
+      // the local layer actually parsed: an unreadable file says nothing about
+      // what the operator enabled, so "not configured" would be a guess, and
+      // detaching on a guess is the one irreversible thing here.
+      // @ref LLP 0185#status-backstop [implements]: attached-but-not-configured is a warning on solo hosts, and the reconciler's business on managed ones
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_attached_not_configured',
+        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
+        repair: [`hyp detach --client ${clientName}`],
+      })
     }
   }
 
-  // ----- client sync provenance split (LLP 0132 #never-silent) -----
-  // On a managed machine the central sink exports the whole cache, so a
-  // source the user added to the *local* layer (LLP 0031) is collected and
-  // locally queryable but never forwarded (LLP 0132 #rule). That withholding
-  // must never be a silent state: group the picked (configured) clients by
-  // provenance so `hyp status` can show the "syncing / local-only" split.
-  // A solo host (no central layer) has nothing to withhold from, so the
-  // split is null there and the V1 surface is unchanged.
-  // @ref LLP 0132#never-silent [implements]: hyp status shows the syncing vs local-only client split so a local addition on a managed machine is never silent
+  // ----- client sync split (LLP 0188 #never-silent) -----
+  // On an enrolled machine every configured source syncs by default; only
+  // the machine-local opt-out store (LLP 0188 #opt-out) keeps one local.
+  // That withholding must never be a silent state: split every configured
+  // picker source (not just attach-probed clients - a hermes opt-out must
+  // be visible too) into syncing vs local-only. A solo host (no central
+  // layer) has nothing to withhold from, so the split is null there and
+  // the V1 surface is unchanged. A corrupt opt-out store degrades to a
+  // null split plus a warning diagnostic: status is best-effort, the
+  // export seam is what enforces (and fails closed on the same file).
+  // @ref LLP 0188#never-silent [implements]: hyp status shows the syncing vs local-only split, driven by the opt-out store
   /** @type {{ syncing: string[], localOnly: string[] } | null} */
   let clientSync = null
   if (hasCentral && catalog) {
     const layeredForProvenance = { centralConfig, effective: config }
-    /** @type {string[]} */
-    const syncing = []
-    /** @type {string[]} */
-    const localOnly = []
-    for (const c of clients) {
-      if (!c.configured) continue
-      const provenance = classifyClientProvenance(c.name, layeredForProvenance, catalog)
-      if (provenance === 'local') localOnly.push(c.name)
-      else syncing.push(c.name)
+    /** @type {Set<string> | null} */
+    let optedOut = null
+    try {
+      optedOut = new Set(optedOutClientSourceIds(await readClientSyncEntries({ stateDir: stateRoot })))
+    } catch (err) {
+      if (!(err instanceof ClientSyncListUnreadableError)) throw err
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_sync_list_unreadable',
+        message: `the machine-local client policy store at '${err.filePath}' is unreadable or malformed - exports fail until it is repaired or removed`,
+        repair: ['inspect and fix or remove the file, then rerun hyp status'],
+      })
     }
-    if (syncing.length > 0 || localOnly.length > 0) {
-      clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+    if (optedOut !== null) {
+      /** @type {string[]} */
+      const syncing = []
+      /** @type {string[]} */
+      const localOnly = []
+      for (const id of catalog.pickerDescriptors.keys()) {
+        const provenance = classifyClientProvenance(id, layeredForProvenance, catalog)
+        if (provenance === 'absent') continue
+        // Central sources always sync; an opt-out entry for one is inert
+        // (LLP 0188 #locked), so only a 'local'-provenance opt-out lands
+        // in the local-only column.
+        if (provenance === 'local' && optedOut.has(id)) localOnly.push(id)
+        else syncing.push(id)
+      }
+      if (syncing.length > 0 || localOnly.length > 0) {
+        clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+      }
     }
   }
 
@@ -927,6 +983,15 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
           ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
           ...(typeof marker.last_attempt === 'string' ? { lastAttempt: marker.last_attempt } : {}),
           ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
+        })
+      } else if (marker && marker.status === 'refused') {
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: terminal refused marker, reason+at, no attempts
+        actions.push({
+          kind,
+          requestKey,
+          state: 'refused',
+          ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
+          ...(typeof marker.at === 'string' ? { at: marker.at } : {}),
         })
       } else if (marker) {
         // `done` (run-once / attached) or `applied` (reversible): the effect

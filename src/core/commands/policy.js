@@ -6,13 +6,24 @@ import process from 'node:process'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import { Attr, getActiveSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { LocalOnlyListUnreadableError, localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
-import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
+import {
+  ClientSyncListUnreadableError,
+  clientSyncListPath,
+  LocalOnlyListUnreadableError,
+  localOnlyListPath,
+  readClientSyncEntries,
+  readLocalOnlyEntries,
+  writeClientSyncEntries,
+} from '../usage-policy/index.js'
+import { defaultConfigPath } from '../config/schema.js'
+import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
- * @import { UsageClass } from '../../../src/core/usage-policy/types.js'
+ * @import { ClientSyncEntry, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -341,6 +352,195 @@ export async function runPolicyUnset(argv, ctx) {
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
+const POLICY_CLIENT_USAGE = 'hyp policy client [<name>] [sync|local-only] [--json]'
+
+/** How the per-client store is named to a human, mirroring {@link STORE_LABEL}. */
+const CLIENT_STORE_LABEL = 'machine-local client policy store'
+
+/**
+ * The `policy client` edge's wording for a corrupt client-sync store,
+ * mirroring {@link reportUnreadableStore} for the directory store (same
+ * span-tagging rationale, issue #413).
+ *
+ * @param {CommandRunContext} ctx
+ * @param {ClientSyncListUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableClientStore(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
+  ctx.stderr.write(`error: the ${CLIENT_STORE_LABEL} at '${err.filePath}' is unreadable or malformed\n`)
+  return 1
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ name?: string, token?: 'sync' | 'local-only', json: boolean, error?: string }}
+ */
+function parsePolicyClientArgs(argv) {
+  const empty = { json: false }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      class: { type: 'string', enum: ['sync', 'local-only'] },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['name', 'class'],
+  })
+  if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_CLIENT_USAGE}` }
+  if (!parsed.ok) return { ...empty, error: parsed.error }
+  const p = /** @type {{ name?: string, class?: 'sync' | 'local-only', json: boolean }} */ (parsed.params)
+  return { name: p.name, token: p.class, json: p.json }
+}
+
+/**
+ * Resolve the catalog and layered config for provenance classification,
+ * best-effort: a broken config layer must not lock the user out of editing
+ * their own opt-out store, so a resolution failure degrades to "provenance
+ * unknown" (`layered: null`), which never blocks a write - only a proven
+ * `'central'` classification does (LLP 0188 #locked); the resolver applies
+ * the same exemption at build time, so a wrongly accepted entry is inert,
+ * never a leak.
+ *
+ * @param {CommandRunContext} ctx
+ */
+async function resolveClientPolicyContext(ctx) {
+  const catalog = await buildAttachPluginCatalog(ctx)
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | null} */
+  let layered = null
+  try {
+    layered = await resolveLayeredConfigFromDisk({
+      stateRoot: obsEnv.stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+  } catch { /* provenance degrades to unknown; the write path stays available */ }
+  return { catalog, layered, stateDir: obsEnv.stateDir }
+}
+
+/**
+ * `hyp policy client [<name>] [sync|local-only] [--json]`
+ *
+ * The per-client sibling of the directory verbs (LLP 0188): on an enrolled
+ * machine every configured source syncs by default, and this verb edits the
+ * machine-local opt-out store that keeps a client's rows local. With no
+ * arguments it enumerates the store plus the current syncing/local-only
+ * picture; with a name it reports that client's state; with a trailing
+ * token it writes (`local-only` opts out, `sync` removes the opt-out,
+ * idempotent both ways). A source the central config carries always syncs
+ * and cannot be opted out (LLP 0188 #locked). Flipping back to `sync`
+ * ships only future rows: withholding is drop-but-advance, so rows dropped
+ * while opted out are never retroactively uploaded
+ * (LLP 0188 #no-retroactive-ship) - the confirmation says so.
+ *
+ * @ref LLP 0188#opt-out [implements]: the post-onboarding CLI surface over the client-sync store
+ * @ref LLP 0188#locked [implements]: a central-classified source is refused with the managed-by-your-fleet wording
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPolicyClient(argv, ctx) {
+  const parsed = parsePolicyClientArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  const { catalog, layered, stateDir } = await resolveClientPolicyContext(ctx)
+  const storePath = clientSyncListPath(stateDir)
+  /** @type {ClientSyncEntry[] | null} */
+  let entries
+  try {
+    entries = await readClientSyncEntries({ stateDir })
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
+  const optedOut = new Set((entries ?? []).map((e) => e.source))
+  /** @type {(name: string) => 'central' | 'local' | 'absent' | 'unknown'} */
+  const provenanceOf = (name) =>
+    layered ? classifyClientProvenance(name, layered, catalog) : 'unknown'
+
+  if (!parsed.name) {
+    if (parsed.json) {
+      ctx.stdout.write(JSON.stringify({ entries: entries ?? [], path: storePath }) + '\n')
+      return 0
+    }
+    if (optedOut.size === 0) {
+      ctx.stdout.write(`no clients are kept local-only - every configured source syncs by default (${CLIENT_STORE_LABEL}: ${storePath})\n`)
+      return 0
+    }
+    ctx.stdout.write(`clients kept local-only: ${[...optedOut].sort().join(' · ')}\n`)
+    ctx.stdout.write(`(${CLIENT_STORE_LABEL}: ${storePath})\n`)
+    return 0
+  }
+
+  const name = parsed.name
+  const known = catalog.pickerDescriptors.has(name) || catalog.clientDescriptors.has(name)
+  if (!known) {
+    const knownIds = [...catalog.pickerDescriptors.keys()].sort().join(', ')
+    ctx.stderr.write(`error: unknown client '${name}' (known: ${knownIds})\n`)
+    return 2
+  }
+  const provenance = provenanceOf(name)
+
+  if (!parsed.token) {
+    if (parsed.json) {
+      const state = provenance === 'central' ? 'sync' : optedOut.has(name) ? 'local-only' : 'sync'
+      ctx.stdout.write(JSON.stringify({ source: name, state, managed: provenance === 'central', path: storePath }) + '\n')
+      return 0
+    }
+    if (provenance === 'central') {
+      ctx.stdout.write(`${name}: sync (managed by your fleet)\n`)
+    } else if (optedOut.has(name)) {
+      ctx.stdout.write(`${name}: local-only (${CLIENT_STORE_LABEL})\n`)
+    } else {
+      ctx.stdout.write(`${name}: sync (default)\n`)
+    }
+    return 0
+  }
+
+  if (parsed.token === 'local-only') {
+    if (provenance === 'central') {
+      ctx.stderr.write(`error: '${name}' is managed by your fleet and always syncs to your server\n`)
+      return 1
+    }
+    const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
+    try {
+      await writeClientSyncEntries({ stateDir, entries: next })
+    } catch (err) {
+      if (!(err instanceof ClientSyncListUnreadableError)) throw err
+      return reportUnreadableClientStore(ctx, err)
+    }
+    ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
+    ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
+    if (layered && !layered.centralConfig) {
+      ctx.stdout.write('  this machine is not connected to a server; the opt-out takes effect if it joins one\n')
+    }
+    return 0
+  }
+
+  // token === 'sync': remove the opt-out, idempotent.
+  if (!optedOut.has(name)) {
+    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (managed by your fleet)' : ' (default, unchanged)'}\n`)
+    return 0
+  }
+  try {
+    await writeClientSyncEntries({ stateDir, entries: (entries ?? []).filter((e) => e.source !== name) })
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
+  ctx.stdout.write(`${name}: sync\n`)
+  // @ref LLP 0188#no-retroactive-ship [implements]: the flip-back confirmation states the no-history-upload property so it reads as designed, not as a bug
+  ctx.stdout.write(`  future ${name} rows sync to your server; rows withheld while local-only are not uploaded\n`)
+  return 0
+}
+
 export async function runPolicyList(argv, ctx) {
   const parsed = parsePolicyListArgs(argv)
   if (parsed.error) {
@@ -356,19 +556,40 @@ export async function runPolicyList(argv, ctx) {
     if (!(err instanceof LocalOnlyListUnreadableError)) throw err
     return reportUnreadableStore(ctx, err)
   }
+  // The per-client opt-out store (LLP 0188) is enumerated alongside the
+  // directory entries: `list` answers "what have I marked on this machine",
+  // and a client marking is exactly that. Additive: the `--json` byte-compat
+  // guarantee binds `policy show --json` (LLP 0111 #show), not `list`.
+  const clientStorePath = clientSyncListPath(stateDir)
+  /** @type {ClientSyncEntry[]} */
+  let clientEntries = []
+  try {
+    clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
 
   if (parsed.json) {
-    ctx.stdout.write(JSON.stringify({ entries, path: listPath }) + '\n')
+    ctx.stdout.write(JSON.stringify({
+      entries,
+      path: listPath,
+      clients: { entries: clientEntries, path: clientStorePath },
+    }) + '\n')
     return 0
   }
 
-  if (entries.length === 0) {
+  if (entries.length === 0 && clientEntries.length === 0) {
     ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     return 0
   }
   for (const entry of entries) {
     ctx.stdout.write(`${entry.dir}: ${PUBLIC_VOCABULARY.className(entry.class)}\n`)
   }
-  ctx.stdout.write(`(policy store: ${listPath})\n`)
+  if (entries.length > 0) ctx.stdout.write(`(policy store: ${listPath})\n`)
+  if (clientEntries.length > 0) {
+    ctx.stdout.write(`clients kept local-only: ${clientEntries.map((e) => e.source).sort().join(' · ')}\n`)
+    ctx.stdout.write(`(${CLIENT_STORE_LABEL}: ${clientStorePath})\n`)
+  }
   return 0
 }

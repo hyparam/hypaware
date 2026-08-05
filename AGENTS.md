@@ -212,6 +212,7 @@ hyp smoke gateway_claude_capture
 hyp smoke gateway_codex_capture
 hyp smoke hypignore_capture_drop
 hyp smoke local_only_export_withhold
+hyp smoke source_optout_export_withhold
 hyp smoke otel_loopback_capture
 hyp smoke local_parquet_export
 hyp smoke status_diagnostics

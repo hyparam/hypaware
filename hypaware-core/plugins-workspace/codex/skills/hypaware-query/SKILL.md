@@ -87,6 +87,8 @@ Key columns:
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 
+OpenClaw records to multiple sources depending on route: direct provider calls from OpenClaw's own client land under `conversation_source = 'openclaw'` (backfilled from its session store), but runs where OpenClaw drives Claude Code (e.g. on a Claude Code subscription, via the Agent SDK) are captured by the Claude adapter with `entrypoint = 'sdk-cli'`, under `conversation_source = 'claude_code'` when captured live through the gateway or `'claude'` when backfilled from the transcript. Do not filter those runs by a single source label; the reliable filter for all OpenClaw activity across every label is `cwd LIKE '%/.openclaw/%'`.
+
 Run `hyp query schema ai_gateway_messages --format markdown` for the authoritative column reference.
 
 ## When the graph answers it cheaper

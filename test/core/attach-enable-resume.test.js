@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
 import { runAttach } from '../../src/core/commands/clients.js'
-import { defaultUnitDir, SYSTEMD_UNIT_BASE, defaultPlistDir, LAUNCH_LABEL } from '../../src/core/daemon/platform.js'
+import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 
 /**
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -74,29 +74,6 @@ function writeLocalConfig(home) {
 /** @param {string} dir */
 function backupsIn(dir) {
   return readdirSync(dir).filter((n) => n.includes('.bak-'))
-}
-
-/**
- * Drop a real service marker on disk so `serviceDaemonStatus` reports
- * `installed: true` without a real service manager needing to run - the same
- * fixture style `attach-endpoint-fallback.test.js` uses. The environment this
- * suite runs in has no `systemctl` / `launchctl` binary reachable, so the
- * subsequent `restartServiceDaemon` call genuinely throws (spawn `ENOENT`)
- * instead of needing a mocked import - a real per-step failure, not a
- * simulated one.
- *
- * @param {string} home
- */
-function installFakeDaemonService(home) {
-  if (process.platform === 'darwin') {
-    const dir = defaultPlistDir(home)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, `${LAUNCH_LABEL}.plist`), '<plist/>')
-  } else {
-    const dir = defaultUnitDir(home)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, `${SYSTEMD_UNIT_BASE}.service`), '[Unit]\n')
-  }
 }
 
 /**
@@ -206,6 +183,10 @@ async function withTempHome(fn) {
 test('accept, write succeeds, restart fails: names the restart step, the backup path, and the resume instruction; does not retry the enable', async () => {
   await withTempHome(async (home) => {
     writeLocalConfig(home)
+    // The marker makes `serviceDaemonStatus` report installed, so the flow goes
+    // on to `restartServiceDaemon`. What makes that restart fail is the
+    // test-runner guard in `runServiceCommand` refusing to spawn, NOT the
+    // absence of a service-manager binary: see `installFakeDaemonService`.
     installFakeDaemonService(home)
     const { ctx, stderr } = makeNotEnabledCtx({ home, answer: 'y' })
     const code = await runAttach(['claude'], ctx)

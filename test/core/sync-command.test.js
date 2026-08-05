@@ -12,7 +12,7 @@ import {
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
-import { writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
+import { writeClientSyncEntries, writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
 
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
@@ -305,6 +305,40 @@ test('the plan counts the directories being withheld', async () => {
   await runSync(['--dry-run'], ctx)
 
   assert.match(stdout.text, /withholding 2 directories marked local-only, 1 directory marked ignore/)
+})
+
+test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
+  const hypHome = await makeHome('client-exclusions')
+  await writeClientSyncEntries({
+    stateDir: stateDir(hypHome),
+    entries: [
+      { source: 'openclaw', class: 'local-only' },
+      { source: 'hermes', class: 'local-only' },
+    ],
+  })
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+    tty: true,
+  })
+
+  await runSync(['--dry-run'], ctx)
+
+  assert.match(stdout.text, /keeping these clients local-only: hermes · openclaw/)
+  assert.doesNotMatch(stdout.text, /no directories or clients are marked/)
+})
+
+test('with nothing marked, the plan says so in one line covering both stores', async () => {
+  const hypHome = await makeHome('no-exclusions')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+    tty: true,
+  })
+
+  await runSync(['--dry-run'], ctx)
+
+  assert.match(stdout.text, /no directories or clients are marked local-only or ignore/)
 })
 
 test('with no hold, --yes exports without inventing a review window', async () => {
