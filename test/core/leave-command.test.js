@@ -354,6 +354,133 @@ test('leave removes the assets its attach marker records, and leaves manual copi
   assert.equal(markers.attach, undefined)
 })
 
+test('leave drops an assetless refused attach marker the way it drops an assetless failed one', async () => {
+  // LLP 0186 added `refused` beside `failed` as a marker state that records no
+  // effect of its own: a refusal stops before touching the client's settings.
+  // The reconciler's reverse gap was taught that; leave's parallel gate still
+  // asked `status === 'failed'`, so a refused marker fell through to a disk
+  // reversal with nothing to reverse - and said so out loud, telling the user
+  // about settings that were never written.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+
+  // One store, three states. Only claude was ever applied; codex refused and
+  // openclaw failed, so neither wrote a settings file at all.
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: { status: 'done', request_key: 'claude' },
+          codex: {
+            status: 'refused',
+            request_key: 'codex',
+            reason: 'model_providers.hypaware already exists and was not written by HypAware',
+            at: '2026-08-04T00:00:00.000Z',
+          },
+          openclaw: { status: 'failed', request_key: 'openclaw', reason: 'boom', attempts: 1 },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+
+  // The refused marker never reached the disk reversal, so leave never reported
+  // on a settings file the refusal did not write. This is the regression: the
+  // pre-fix gate let `codex` through to `detachClientViaCore`, whose no-op
+  // result prints exactly this line.
+  assert.doesNotMatch(stdout.text(), /No HypAware marker found/)
+  assert.doesNotMatch(stdout.text(), /\.codex/)
+
+  // A refusal writes no settings file, and leave must not create one probing.
+  await assert.rejects(fs.stat(path.join(home, '.codex', 'config.toml')))
+
+  // The neighbours are untouched by the change: `done` still reverses on disk,
+  // and an assetless `failed` is still dropped. All three markers are gone.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  assert.equal(settings.env?.ANTHROPIC_BASE_URL, undefined)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
+test('leave still reverses a refused attach marker that carries installed assets', async () => {
+  // The other half of the same test: `refused` is not a licence to drop. An
+  // attach that went `done`, then re-`perform()`ed into a refusal, carries the
+  // earlier run's `installed_assets` forward, and the marker is the only thing
+  // on disk naming those copies (LLP 0138 #marker-undo). It has to take the
+  // real reversal, exactly as an asset-bearing `failed` marker does.
+  const { home, stateRoot, opts } = await makeDispatchOpts()
+
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const orgSkill = path.join(home, '.claude', 'skills', 'hypaware-privacy')
+  await fs.mkdir(orgSkill, { recursive: true })
+  await fs.writeFile(path.join(orgSkill, 'SKILL.md'), 'org\n', 'utf8')
+
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: {
+            status: 'refused',
+            request_key: 'claude',
+            reason: 'settings file is JSONC; refusing to modify',
+            installed_assets: [orgSkill],
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  await dispatch(['leave'], opts)
+
+  // Routed to the real reversal: the carried asset is gone and the settings the
+  // earlier successful attach wrote are reversed, not stranded by a drop.
+  await assert.rejects(fs.stat(orgSkill))
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
 test('leave self-heals an org attach whose plugin is gone: drops the marker, warns, stays clean', async () => {
   const { stateRoot, stdout, opts } = await makeDispatchOpts()
   assert.equal(
