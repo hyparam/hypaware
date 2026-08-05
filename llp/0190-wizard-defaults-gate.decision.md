@@ -77,9 +77,23 @@ enter-selects-none would have opted every candidate out - the exact
 inverse of the TUI default, with the defaults invisible. Other numbered
 questions (the pick menus, `runPickerWalkthrough`) keep the historical
 semantics untouched. An answer that names no row ("y", "0", an
-out-of-range index) still reads as "select nothing" - a known papercut
-deferred to issue #634 (a first re-ask attempt looped forever on piped
-stdin and was reverted).
+out-of-range index) is a typo rather than a selection, so the opted-in
+question prints what did not match and asks once more, and "none" is
+the word for a deliberate empty selection. The re-ask rides the same
+opt-in because the danger is specific to this menu's inverse default:
+questions without the flag never re-ask, and their prompt bytes and
+answers are unchanged. Two bounds hold it, both owed to a first attempt
+that shipped an ungated `while (true)` over the shared factory and was
+reverted (issue #634): the fallback asks a fixed number of times - one
+ask plus one re-ask - and then takes the historical empty selection, so
+no input can hold a scripted run at the prompt; and readline's `close`
+resolves the pending ask with the same default a bare enter takes (the
+checked set here, none elsewhere) instead of leaving it unsettled,
+which is the EOF hang `rl.question` has always had and the loop turned
+into a crash. Because readline emits every line of a chunk
+synchronously, the fallback also queues answer lines from the moment
+the interface opens rather than listening per question, so a correction
+arriving in the same pipe write as the typo is still read.
 This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over

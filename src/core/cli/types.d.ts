@@ -125,9 +125,10 @@ export interface WalkthroughQuestion {
    * state (`[x]`/`[ ]`) and a bare enter returns the checked values
    * instead of none, matching the TUI multiselect's enter. Set by the
    * wizard's sync menu, where checked means "syncs" and an invisible
-   * empty-selection default would invert it (LLP 0190 #sync-gate).
-   * Unset questions keep the historical semantics: no state rendered,
-   * bare enter selects nothing.
+   * empty-selection default would invert it (LLP 0190 #sync-gate). It
+   * also buys one re-ask on an answer that names no row, for the same
+   * reason. Unset questions keep the historical semantics: no state
+   * rendered, bare enter selects nothing, one ask only.
    */
   enterKeepsChecked?: boolean
 }

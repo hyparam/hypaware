@@ -106,6 +106,137 @@ test('enterKeepsChecked: typed indices still replace the checked set', async () 
   assert.deepEqual(picked, ['hermes'])
 })
 
+// A malformed answer ("y", "0", an out-of-range index) names no row, so
+// it used to read as "select nothing" - in the sync menu that silently
+// opted every candidate out. The opted-in question now says so and
+// re-asks, but only once, and never waits on a stream that cannot
+// answer: an endless pipe of garbage must terminate and EOF must
+// resolve. Nothing else about the fallback moves.
+// @ref LLP 0190#sync-gate [tests]:
+
+/**
+ * Ask one question through the real legacy prompt with the whole answer
+ * script handed over in a single chunk, the way a pipe delivers it.
+ * Readline emits every line of that chunk synchronously, so a re-ask
+ * that registers its listener a microtask later would never see the
+ * correction.
+ *
+ * @param {any} question
+ * @param {string} chunk
+ * @param {{ eof?: boolean }} [opts]
+ */
+async function askPiped(question, chunk, opts = {}) {
+  const input = new PassThrough()
+  let text = ''
+  const stdout = {
+    /** @param {string} c */
+    write(c) {
+      text += String(c)
+      return true
+    },
+  }
+  if (chunk) input.write(chunk)
+  if (opts.eof !== false) input.end()
+  const ask = defaultPromptFactory({ stdin: /** @type {any} */ (input), stdout: /** @type {any} */ (stdout), env: {} })
+  const picked = await ask(question)
+  input.end()
+  return { picked, text }
+}
+
+/**
+ * Answer every prompt with the same never-valid line, forever, and never
+ * close the stream: the shape of `{ printf '2\n'; yes; } | hyp init`.
+ * The prompt must stop asking on its own.
+ *
+ * @param {any} question
+ * @param {string} answer
+ */
+async function askEndless(question, answer) {
+  const input = new PassThrough()
+  let prompts = 0
+  let text = ''
+  const stdout = {
+    /** @param {string} c */
+    write(c) {
+      text += String(c)
+      if (String(c).startsWith('select')) {
+        prompts += 1
+        // A real `yes` is unbounded; the test needs a fuse so a
+        // regression fails loudly instead of hanging the suite.
+        assert.ok(prompts <= 10, `the prompt re-asked ${prompts} times; it must be bounded`)
+        input.write(answer)
+      }
+      return true
+    },
+  }
+  const ask = defaultPromptFactory({ stdin: /** @type {any} */ (input), stdout: /** @type {any} */ (stdout), env: {} })
+  const picked = await ask(question)
+  input.end()
+  return { picked, text, prompts }
+}
+
+test('enterKeepsChecked: an answer naming no row re-asks once, and a correction in the same chunk still wins', async () => {
+  const { picked, text } = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'y\n3\n')
+
+  assert.match(text, /nothing matched 'y' - enter numbers like 1,3, "all", or "none"/)
+  assert.deepEqual(picked, ['hermes'], 'the correction delivered in the same chunk is not lost')
+})
+
+test('enterKeepsChecked: endless invalid input stops after one re-ask instead of looping', async () => {
+  const { picked, prompts } = await askEndless(syncMenuQuestion({ enterKeepsChecked: true }), 'y\n')
+
+  assert.equal(prompts, 2, 'one ask plus one re-ask, then the fallback')
+  assert.deepEqual(picked, [], 'the historical empty selection stands once the budget is spent')
+})
+
+test('enterKeepsChecked: an invalid answer then EOF resolves with the checked defaults instead of hanging', async () => {
+  const { picked } = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'y\n')
+
+  assert.deepEqual(picked, ['claude', 'openclaw'], 'an unanswerable question takes the default, it does not wait')
+})
+
+test('EOF with no answer at all resolves on both paths', async () => {
+  const kept = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), '')
+  assert.deepEqual(kept.picked, ['claude', 'openclaw'])
+
+  const none = await askPiped(syncMenuQuestion(), '')
+  assert.deepEqual(none.picked, [], 'without the opt-in an unanswerable question is still none')
+})
+
+test('"none" is the explicit empty selection on both paths', async () => {
+  const kept = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'none\n')
+  assert.deepEqual(kept.picked, [])
+
+  const plain = await askPiped(syncMenuQuestion(), 'none\n')
+  assert.deepEqual(plain.picked, [])
+})
+
+test('enterKeepsChecked: a partially valid answer wins without a re-ask', async () => {
+  const { picked, text } = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), '0,3\n')
+
+  assert.deepEqual(picked, ['hermes'])
+  assert.doesNotMatch(text, /nothing matched/)
+})
+
+test('without enterKeepsChecked an answer naming no row still selects nothing, asked exactly once', async () => {
+  const { picked, text, prompts } = await askEndless(syncMenuQuestion(), 'y\n')
+
+  assert.equal(prompts, 1, 'callers that did not opt in never re-ask')
+  assert.deepEqual(picked, [], 'the historical semantics are untouched')
+  assert.doesNotMatch(text, /nothing matched/)
+})
+
+test('back and all survive on both paths', async () => {
+  await assert.rejects(askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'b\n'), /back/i)
+  await assert.rejects(askPiped(syncMenuQuestion(), 'b\n'), /back/i)
+
+  const kept = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'all\n')
+  assert.deepEqual(kept.picked, ['claude', 'openclaw', 'hermes'])
+
+  const plain = await askPiped(syncMenuQuestion(), 'all\n')
+  assert.deepEqual(plain.picked, ['claude', 'openclaw', 'hermes'])
+})
+
 test('without enterKeepsChecked a bare enter still selects nothing and no state is rendered', async () => {
   const { picked, text } = await askLegacy(syncMenuQuestion(), '\n')
 
