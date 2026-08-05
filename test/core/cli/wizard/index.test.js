@@ -358,6 +358,77 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
   assert.equal(dry.seen.length, 0)
 })
 
+// --- the stranded-attach warning's closing repeat (LLP 0188) ---
+
+/**
+ * A finale summary that reports clients this run left attached but no longer
+ * collects. The finale itself printed the full warning before the daemon
+ * restart; this is what it hands back for the closing repeat to read.
+ *
+ * @param {string[]} clients
+ */
+function strandedFinale(clients) {
+  return /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun: false },
+    globalInstall: { skipped: true, installed: false },
+    attach: [],
+    skillsInstalled: [],
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun: false, ok: false },
+    backfill: [],
+    attachedNotConfigured: clients,
+  })
+}
+
+// The finale names the stranded clients before the daemon restart (LLP 0185
+// #warn-do-not-detach) and then the wizard writes the run summary, the first
+// look's ~60 lines, and the privacy narration on top of it, so by the time an
+// attended run ends the warning has scrolled away. On a managed host it is
+// the only signal there is, because `hyp status`'s mirror diagnostic is gated
+// to hosts with no central layer.
+// @ref LLP 0188#repeat-at-the-end [tests]: the wizard repeats what its own closing output buried
+test('runInitWizard: an attended run repeats the stranded-attach warning after the first look', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const stub = firstLookStub(
+    [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+    [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }]
+  )
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: stub.runner,
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+
+  // The names and the one command that clears each, not a bare mention.
+  assert.match(text, /Still attached, no longer collected: codex/, text)
+  assert.match(text, /hyp detach --client codex/, text)
+  // Past the block that buried the finale's own print.
+  assert.ok(text.indexOf('First look') >= 0, text)
+  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('First look'), text)
+  // And still ahead of the privacy narration, which stays the last words.
+  assert.ok(
+    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text
+  )
+})
+
+// The repeat exists because the wizard's closing sequence buries the finale's
+// print. A scripted run writes nothing between the two, so repeating there
+// would be the double-print on one screen the shared run summary would have
+// caused. Its output stays byte-identical to what the finale alone produced.
+// @ref LLP 0188#when [tests]: no closing sequence, no repeat
+test('runInitWizard: a scripted run does not repeat the stranded-attach warning', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+})
+
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {
   const home = await tmpHome()
   const stateDir = path.join(home, '.hyp', 'hypaware')

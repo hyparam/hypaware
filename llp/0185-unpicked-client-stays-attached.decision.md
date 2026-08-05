@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0045 (the one disk-driven undo), LLP 0129 (Reconfigure re-enters the picker), LLP 0086 (the existing attach drift diagnostic), LLP 0180 (the finale's attach lane), LLP 0031 (central layer)
+**Extended-by:** LLP 0188 (the finale's print stays where §warn-do-not-detach put it; the wizard, whose closing sequence buries it, repeats it short at the end of the run)
 
 > Re-running `hyp init` and unchecking a client the previous run attached
 > regenerates a config without that client's adapter, while the client's own
@@ -89,6 +90,12 @@ of the `config_unreadable` finding that is the real repair. The known gap: a
 *local layer* addition stranded on a managed host is not diagnosed by status.
 The finale still warns about it at the time, which is where the state is
 created.
+
+> **Extended-by [LLP 0188](./0188-stranded-attach-warning-repeats-at-the-end.decision.md):**
+> the finale's print is where this decision put it, but it is not the last
+> thing `hyp init` writes. The wizard repeats it, short, after its first look
+> and before the privacy narration; `runPickerWalkthrough`, which writes
+> nothing substantial after the finale, still prints it once.
 
 <a id="not-configured-means-not-active"></a>**"Not configured" means what
 `hyp status` already means by it.** Both surfaces read a **local layer** plugin

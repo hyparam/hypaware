@@ -19,7 +19,12 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { LOCAL_INSTALL_RETENTION_DAYS, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
+import {
+  LOCAL_INSTALL_RETENTION_DAYS,
+  runPickerFinale,
+  writeAttachedNotConfiguredReminder,
+  writeWalkthroughRunSummary,
+} from '../walkthrough.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
@@ -202,7 +207,8 @@ export async function runInitWizard(opts) {
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
-  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+  const firstLookRan = interactive && !cancelled && opts.finale?.dryRun !== true
+  if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
     await runWizardFirstLook({
       runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
@@ -214,6 +220,23 @@ export async function runInitWizard(opts) {
     // report cannot land after the privacy narration below, which is
     // documented to be the last thing on screen.
     notices.close()
+  }
+
+  // The finale already named these, before the daemon restart that strands
+  // them (LLP 0185 #warn-do-not-detach). That print is no longer on screen by
+  // the time this run ends: the summary, then the first look's ~60 lines, then
+  // the narration below all follow it without a pause. Repeat it here, short,
+  // and only when this closing sequence actually wrote something, so the
+  // direct `runPickerWalkthrough` entry point (whose summary follows the
+  // finale with nothing in between) keeps its single print.
+  // @ref LLP 0188#repeat-at-the-end [implements]: the wizard repeats what its own closing output buried
+  const stranded = finaleSummary?.attachedNotConfigured ?? []
+  if (stranded.length > 0 && (firstLookRan || pathway === 'team')) {
+    writeAttachedNotConfiguredReminder({
+      clients: stranded,
+      stdout: opts.stdout,
+      dryRun: opts.finale?.dryRun === true,
+    })
   }
 
   // The wizard's last words on the team pathway: when the first upload
