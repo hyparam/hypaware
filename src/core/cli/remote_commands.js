@@ -584,22 +584,24 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   const targetOrigin = originOf(entry.url)
   const enrollment = await readCentralEnrollment({ stateDir, configPath: localConfigPath(ctx) })
   // Fail the gate CLOSED when it cannot read its own input (#623). A central
-  // layer that resolves to a path but does not load (corrupt, unreadable, or
-  // named by a pointer whose slot is gone) is an enrollment everywhere else in
-  // the codebase ('hyp leave' and the apply engine key on the path, not on the
-  // contents), so treating its zero origins as "not enrolled" would let a
-  // *second* org enroll an already-enrolled machine - the one thing D4 exists
-  // to prevent. Not enrolled is a central layer path that does not resolve at
-  // all, which never reaches here.
-  // Refuse instead, and name the unreadable layer rather than claiming the
-  // machine is not connected, which is precisely what we cannot establish.
-  // Rejects a same-origin re-login too: without a parse there is no origin to
-  // compare against, and 'hyp leave' clears the layer by path, so the advice
-  // is actionable either way.
+  // layer that is on disk but does not load, and one whose path this process
+  // cannot even resolve (a pointer that is not a slot symlink, a control
+  // directory it cannot list), are both enrollments by every other definition
+  // the codebase uses: the layer file still names another org's server, and
+  // repairing the pointer or the permissions brings it straight back. Reading
+  // either one's zero origins as "not enrolled" would let a *second* org
+  // enroll an already-enrolled machine - the one thing D4 exists to prevent.
+  // Not enrolled is a control directory with no central layer left in it, and
+  // that never reaches here.
+  // Refuse instead, and name the state we could not read rather than claiming
+  // the machine is not connected, which is precisely what we cannot establish.
+  // Rejects a same-origin re-login too: with no readable layer there is no
+  // origin to compare against, and 'hyp leave' tears down by path, so the
+  // advice is actionable either way.
   if (enrollment.unreadable) {
     ctx.stderr.write(`hyp remote login: this machine's central config layer (${enrollment.unreadable.configPath}) cannot be read, so its enrollment cannot be verified\n`)
     ctx.stderr.write(`  ${enrollment.unreadable.message}\n`)
-    ctx.stderr.write("  repair that file, or disconnect this machine ('hyp leave'), then log in again\n")
+    ctx.stderr.write("  repair it, or disconnect this machine ('hyp leave'), then log in again\n")
     return 2
   }
   const connectedOrigins = enrollment.origins

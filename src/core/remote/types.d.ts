@@ -10,17 +10,19 @@ import type { PersistedIdentity } from '../../../hypaware-core/plugins-workspace
 /**
  * What the central config layer says about this machine's enrollment
  * (LLP 0063 D4). Keeps "not enrolled" and "cannot tell" apart: an empty
- * `origins` with a non-null `unreadable` is a layer whose path resolved but
- * did not load, which the D4 gate must refuse rather than read as a free
- * machine. Not enrolled is no central layer path at all.
+ * `origins` with a non-null `unreadable` is a layer this process could not
+ * read, which the D4 gate must refuse rather than read as a free machine.
+ * Not enrolled is a control directory with no central layer left in it.
  */
 export interface CentralEnrollment {
   /** URL origins the central layer's `@hypaware/central` sinks target. */
   origins: string[]
   /**
-   * The load failure when the central layer's path resolved but the layer
-   * could not be read or parsed (a missing file at a resolved path included);
-   * `null` when the layer loaded, or when there is no layer path at all.
+   * Why the layer could not be read: it loaded no config (a missing file at a
+   * resolved path included), or its path could not be resolved at all while
+   * central-layer state was still on disk, in which case `configPath` is the
+   * control directory rather than a layer file. `null` when the layer loaded,
+   * or when there is verifiably no layer.
    */
   unreadable: {
     configPath: string

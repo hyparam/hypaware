@@ -7,7 +7,7 @@ import path from 'node:path'
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath } from '../config/schema.js'
-import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
+import { centralLayerResolutionFailure, centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
 import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import {
@@ -201,10 +201,11 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   // the cross-process credentials lock (LLP 0065) is a follow-up.
   //
   // Same fail-closed reading as the pre-auth gate (#623): a central layer that
-  // appeared but does not parse leaves this check unable to say whether a
-  // second enrollment is being created, so it must abort. Throwing is the
-  // whole handling: nothing has been written yet, and the caller already
-  // reports a throw here as "signed in, but enrollment failed".
+  // appeared but cannot be read - whether it does not parse or its path cannot
+  // even be resolved - leaves this check unable to say whether a second
+  // enrollment is being created, so it must abort. Throwing is the whole
+  // handling: nothing has been written yet, and the caller already reports a
+  // throw here as "signed in, but enrollment failed".
   const { origins: connectedOrigins, unreadable } = await readCentralEnrollment({ stateDir: stateRoot, configPath: localPath })
   if (unreadable) {
     throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
@@ -361,6 +362,14 @@ export async function runLeave(argv, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
   const centralLayerPath = resolveCentralLayerPath({ stateRoot })
+  // A null path is not proof there is nothing here: resolution swallows a
+  // pointer it cannot follow and a control directory it cannot list. The D4
+  // login gate refuses in exactly those states and sends the user here, so
+  // `leave` has to be able to finish the teardown they were told to run;
+  // otherwise the fail-closed gate is a lockout (#623). The teardown below is
+  // already the right one - `resetCentralLayerToSeed` force-removes the
+  // pointer and both slots by name, no resolution required.
+  const unresolvableCentralLayer = centralLayerResolutionFailure({ stateRoot })
   const attachMarkers = readClientActionStatus({ stateRoot }).byKind.attach ?? {}
   const attachedNames = Object.keys(attachMarkers)
 
@@ -368,7 +377,7 @@ export async function runLeave(argv, ctx) {
   // that failed partway leaves its attach markers on disk, so a re-run still
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
-  if (centralLayerPath === null && attachedNames.length === 0) {
+  if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
     ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
@@ -399,9 +408,21 @@ export async function runLeave(argv, ctx) {
       // 1. Central layer teardown: drop the seed, then clear the applied
       // slots / pointer / apply state. With both gone the machine has no
       // central layer at all: the exact inverse of join's write.
-      await fs.rm(centralSeedPath(stateRoot), { force: true })
-      resetCentralLayerToSeed(stateRoot)
-      ctx.stdout.write('✓ removed the central config layer\n')
+      //
+      // Counted-and-reported like every other step rather than an uncaught
+      // throw: the states the D4 gate now refuses on include a control
+      // directory this process cannot read, and that removal raises EACCES.
+      // Aborting there would strand the attach reversal in step 3 and leave
+      // the user with no way to act on the gate's advice.
+      try {
+        await fs.rm(centralSeedPath(stateRoot), { force: true })
+        resetCentralLayerToSeed(stateRoot)
+        ctx.stdout.write('✓ removed the central config layer\n')
+      } catch (err) {
+        failures += 1
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`✗ could not remove the central config layer: ${message}\n`)
+      }
 
       // 2. Restart the service so the running daemon reboots without the
       // central sink: forwarding and the config-pull loop stop here. Restart,

@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
+import { centralLayerResolutionFailure } from '../config/apply.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 
 /**
@@ -105,18 +106,23 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  * carries the load failure so the caller can say what is actually wrong
  * instead of the misleading "not connected".
  *
- * "Absent" is `resolveCentralLayerPath` returning **null** (no active-slot
- * pointer, no seed), and only that: with no path there is no load and nothing
- * to be unsure about. Every other load failure is unreadable, `config_missing`
- * included. A path that resolved but does not load is not a machine that never
- * enrolled: the seed branch `existsSync`-checks before returning the path, so
- * an ENOENT there is a live race with a concurrent removal, and the active-slot
+ * "Absent" is an enrollment that is *verifiably* not there, which takes two
+ * checks, not one. Every load failure is unreadable, `config_missing` included:
+ * a path that resolved but does not load is not a machine that never enrolled,
+ * because the seed branch `existsSync`-checks before returning the path (so an
+ * ENOENT there is a live race with a concurrent removal) and the active-slot
  * branch resolves a pointer the apply engine only ever flips *after* writing
- * its slot file, so a pointer naming a file that is gone is an applied-to
- * machine whose layer was removed out of band. `hyp leave` calls both of those
- * connected and tears them down, so refusing keeps the gate and `hyp leave`
- * agreeing, and the "run 'hyp leave', then log in again" advice clears the
- * state it names.
+ * its slot file (so a pointer naming a file that is gone is an applied-to
+ * machine whose layer was removed out of band).
+ *
+ * And a null path is *not* on its own an absence, because resolution itself can
+ * fail: `readActiveSlot` swallows every `readlink` error, and `existsSync`
+ * swallows `EACCES` on the control directory. A pointer replaced by a regular
+ * file, or a state directory this process cannot read, both yield null on a
+ * machine whose `config.a.json` still holds another org's sink verbatim.
+ * Reading that null as "free machine" is the same fail-open one level up, so
+ * `centralLayerResolutionFailure` re-checks it against the directory and this
+ * reports resolution failure as unreadable too.
  *
  * Deliberately reads the central layer, **not** the effective (local+central)
  * config: a hand-authored `@hypaware/central` sink in the user-owned local
@@ -133,7 +139,7 @@ export async function readCentralEnrollment({ stateDir, configPath }) {
   const { centralConfig, centralLoaded } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
   const unreadable = centralLoaded && centralLoaded.ok === false
     ? { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
-    : null
+    : centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
   const sinks = centralConfig?.sinks ?? {}
   const origins = new Set()
   for (const entry of Object.values(sinks)) {

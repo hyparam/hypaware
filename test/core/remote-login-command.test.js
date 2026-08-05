@@ -465,6 +465,94 @@ test('an active-slot pointer naming a file that is gone is unreadable, not absen
   assert.match(err.join(''), /config\.a\.json/)
 })
 
+test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too (LLP 0063 D4)', async () => {
+  // Round 1 closed "the layer does not load". Resolution is lossy one level
+  // above that: `readActiveSlot` swallows every readlink error into null, so a
+  // damaged pointer makes an enrolled machine look like it never joined even
+  // though the slot file still names the org's server verbatim. Repairing the
+  // pointer brings that enrollment straight back, so the gate must refuse.
+  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
+    ['pointer replaced by a regular file', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+    ['pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+    ['pointer symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+  ])) {
+    const hypHome = await tmpHome()
+    const { ctx, err } = await makeCtx({
+      hypHome,
+      remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+    })
+    const control = path.join(hypHome, 'hypaware', 'config-control')
+    await fs.mkdir(control, { recursive: true })
+    await fs.writeFile(path.join(control, 'config.a.json'), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+    }))
+    await writePointer(control)
+    let called = false
+    const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+    assert.equal(await runRemoteLogin(['other'], ctx, { login }), 2, name)
+    assert.equal(called, false, `${name}: rejected before any auth`)
+    assert.match(err.join(''), /cannot be read/, name)
+    assert.match(err.join(''), /config-control/, name)
+  }
+})
+
+test('a central layer directory that cannot be listed fails the D4 gate CLOSED (LLP 0063 D4)', async () => {
+  // `existsSync` reports EACCES as "not there", so an enrolled machine whose
+  // state directory this process cannot read resolved to null and read as free.
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+  })
+  const control = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(control, { recursive: true })
+  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  }))
+  await fs.chmod(control, 0o000)
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+  try {
+    assert.equal(await runRemoteLogin(['other'], ctx, { login }), 2)
+    assert.equal(called, false)
+    assert.match(err.join(''), /failed to read the central config directory/)
+  } finally {
+    await fs.chmod(control, 0o700)
+  }
+})
+
+test('an unresolvable pointer does not overshoot: control-dir residue that is not a layer still permits login (LLP 0063 D4)', async () => {
+  // What `hyp leave` and `resetCentralLayerToSeed` leave behind (apply state,
+  // orphan etags, an empty directory) is not an enrollment, and the widened
+  // fail-closed branch must not read it as one.
+  for (const [name, seedResidue] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
+    ['empty control dir', async () => {}],
+    ['apply state and an orphan etag', async (dir) => {
+      await fs.writeFile(path.join(dir, 'state.json'), '{}')
+      await fs.writeFile(path.join(dir, 'config.a.etag'), 'etag-1')
+    }],
+  ])) {
+    const hypHome = await tmpHome()
+    const { ctx } = await makeCtx({
+      hypHome,
+      remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+    })
+    const control = path.join(hypHome, 'hypaware', 'config-control')
+    await fs.mkdir(control, { recursive: true })
+    await seedResidue(control)
+    let called = false
+    const login = /** @type {any} */ (async () => { called = true; return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' } })
+
+    assert.equal(await runRemoteLogin(['other'], ctx, { login }), 0, name)
+    assert.equal(called, true, name)
+  }
+})
+
 test('an ABSENT central layer is not an enrollment and still permits login (LLP 0063 D4)', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({
