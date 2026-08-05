@@ -42,6 +42,21 @@ function emptyCatalog() {
   })
 }
 
+/**
+ * Write a central layer (the join seed slot, LLP 0031) under a wizard
+ * home, so the locked-set computation resolves it from disk exactly as it
+ * does on a real enrolled machine.
+ *
+ * @param {string} home
+ * @param {string[]} plugins
+ */
+async function seedCentralLayer(home, plugins) {
+  const control = path.join(home, '.hyp', 'hypaware', 'config-control')
+  await fs.mkdir(control, { recursive: true })
+  const config = { version: 2, plugins: plugins.map((name) => ({ name, enabled: true, config: {} })) }
+  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify(config))
+}
+
 /** A completed pick result the finale and configure stubs can consume. */
 function pickResult(over = {}) {
   return /** @type {any} */ ({
@@ -142,6 +157,26 @@ test('runInitWizard: scoped re-entry skips the fork and picks scoped + managed',
   assert.equal(opts._pickOpts.scoped, true)
   assert.equal(opts._pickOpts.managed, true)
   assert.equal(result.pathway, 'scoped')
+})
+
+// A managed machine whose merged config no longer validates falls to the
+// first-run path, but the central layer on disk still owns its rows. The
+// locked set has to be computed there too, or the picker offers the org's
+// rows for free composition into the local layer.
+// @ref LLP 0129#join-before-picker [tests]:
+test('runInitWizard: a managed first run locks the org rows from the on-disk central layer', async () => {
+  const home = await tmpHome()
+  await seedCentralLayer(home, ['@hypaware/claude'])
+  const catalog = emptyCatalog()
+  catalog.pickerDescriptors.set('claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude' })
+  const { opts } = wizardOpts(home, {
+    catalog,
+    gate: async () => ({ action: 'first-run', managed: true, report: {} }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(opts._pickOpts.locked, ['claude'])
+  assert.equal(opts._pickOpts.managed, true)
 })
 
 // --- the fork/join loop ---

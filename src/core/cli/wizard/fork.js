@@ -124,6 +124,8 @@ export async function legacyForkPrompt(opts, options) {
  *
  * A missing or invalid config is the first-run path, not the gate: the
  * caller falls straight through to `runWizardFork` (no pathway preset).
+ * `managed` is still reported truthfully on that path, so a machine with
+ * a central layer keeps its org rows locked (see the derivation below).
  * Once a valid config exists, a **managed** machine (the merged config
  * carries a central layer, LLP 0031) offers a scoped "adjust what this
  * machine collects" entry instead of dropping Reconfigure outright - no
@@ -148,12 +150,21 @@ export async function evaluateReturningGate(opts) {
   const collectStatus = opts.collectStatus ?? collectHypAwareStatus
   const report = await collectStatus(/** @type {CollectStatusOptions} */ ({ env: opts.env, runtime: opts.runtime }))
 
+  // Read `managed` before the first-run early return: a central layer on
+  // disk is a property of the machine (LLP 0031), not of whether the
+  // merged config currently validates. A central layer that stops merging
+  // cleanly (a server-side config change, client/server schema drift)
+  // still owns its rows, and the caller reads `managed` to decide whether
+  // to compute the locked set at all. Reporting `false` here left the
+  // org's rows editable, so picking one composed it into the local layer.
+  // @ref LLP 0129#join-before-picker [implements]: central rows lock whenever a central layer exists, invalid merge included
+  const managed = !!(report.layered && report.layered.hasCentral)
+
   if (!report.configExists || !report.configValid) {
-    log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action: 'first-run', managed: false })
-    return { action: 'first-run', managed: false, report }
+    log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action: 'first-run', managed })
+    return { action: 'first-run', managed, report }
   }
 
-  const managed = !!(report.layered && report.layered.hasCentral)
   renderConfigSummary({ report, locked: managed, stdout: opts.stdout })
   const options = buildReturningGateOptions(managed)
   const action = await promptReturningGateChoice(opts, options, managed)

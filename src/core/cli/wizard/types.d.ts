@@ -52,7 +52,12 @@ export type ReturningGateAction = 'first-run' | 'quit' | 'status' | 'reconfigure
 
 export interface ReturningGateResult {
   action: ReturningGateAction
-  /** True when the merged config carries a central layer (LLP 0031). */
+  /**
+   * True when a central layer is on disk (LLP 0031), independently of
+   * whether the merged config currently exists or validates: enrollment
+   * is a property of the machine, and the org's rows stay locked even on
+   * the `first-run` path a broken merge falls to.
+   */
   managed: boolean
   report: HypAwareStatusReport
 }
