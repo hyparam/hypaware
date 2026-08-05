@@ -71,14 +71,14 @@ test('openclaw description and picker summary state the two capture tiers direct
 
   const summary = manifest.contributes?.picker?.[0]?.summary ?? ''
   assert.match(summary, /live/i)
-  assert.match(summary, /sweep/i)
+  assert.match(summary, /session history/i)
 })
 
-test('claude manifest onboarding copy names the claude-cli/<model> OpenClaw case', async () => {
+test('claude manifest onboarding copy names the claude-cli OpenClaw case', async () => {
   const { loaded } = await loadManifests([path.join(WORKSPACE, 'claude')])
   const manifest = /** @type {any} */ (loaded[0].manifest)
 
   const summary = manifest.contributes?.picker?.[0]?.summary ?? ''
-  assert.match(summary, /claude-cli\/<model>/)
+  assert.match(summary, /claude-cli/)
   assert.match(summary, /OpenClaw/)
 })

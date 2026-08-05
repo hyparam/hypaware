@@ -12,6 +12,7 @@
 export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ ({
   join: 'Join your team',
   pick: 'Choose what to collect',
+  sync: 'Choose what syncs',
   finale: 'Finish setup',
 })
 
@@ -37,9 +38,8 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  *    every list here and `runInitWizard` passes it no progress line.
  */
 const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} */ ({
-  team: ['join', 'pick', 'finale'],
+  team: ['join', 'pick', 'sync', 'finale'],
   local: ['pick', 'finale'],
-  scoped: ['pick', 'finale'],
 })
 
 /**
@@ -47,12 +47,23 @@ const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} *
  * uncommitted pathway (the fork has not resolved, or the run is
  * non-interactive) has no itinerary and therefore no denominator.
  *
+ * The `sync` lane (LLP 0188 #never-silent) runs on every enrolled run:
+ * always on the team pathway (the run that just enrolled), and on the
+ * local pathway only for a managed machine reconfiguring through it
+ * (LLP 0182: `managed` is an input, not a pathway). `managed` is known
+ * at the gate, before the fork, so the denominator still resolves once.
+ *
  * @param {WizardPathway | undefined} pathway
+ * @param {{ managed?: boolean }} [opts]
  * @returns {WizardStepName[]}
  */
-export function wizardItinerary(pathway) {
+export function wizardItinerary(pathway, opts = {}) {
   if (!pathway) return []
-  return WIZARD_ITINERARIES[pathway] ?? []
+  const base = WIZARD_ITINERARIES[pathway] ?? []
+  if (pathway === 'local' && opts.managed === true) {
+    return base.flatMap((step) => (step === 'pick' ? ['pick', 'sync'] : [step]))
+  }
+  return base
 }
 
 /**
@@ -73,10 +84,11 @@ export function wizardItinerary(pathway) {
  *
  * @param {WizardPathway | undefined} pathway
  * @param {WizardStepName} step
+ * @param {{ managed?: boolean }} [opts]
  * @returns {string | undefined}
  */
-export function wizardStepProgress(pathway, step) {
-  const itinerary = wizardItinerary(pathway)
+export function wizardStepProgress(pathway, step, opts) {
+  const itinerary = wizardItinerary(pathway, opts)
   const index = itinerary.indexOf(step)
   if (index < 0) return undefined
   return `Step ${index + 1} of ${itinerary.length} · ${WIZARD_STEP_LABELS[step]}`

@@ -22,8 +22,13 @@ export interface Key {
  * cannot drift between the kinds.
  */
 export interface PromptChrome {
-  /** The bold headline: the question being asked. */
-  title: string
+  /**
+   * The bold headline: the question being asked. Omitted only when the
+   * caller has already printed the headline on the lines above the
+   * prompt (the returning gate's summary block); an omitted title
+   * renders no line, not a blank one.
+   */
+  title?: string
   /** The dim key-help line under the title; each kind has a default. */
   hint?: string
   /**
@@ -35,6 +40,23 @@ export interface PromptChrome {
    * state a position honestly, and an omitted field changes no output.
    */
   progress?: string
+  /**
+   * Optional context lines rendered verbatim between the title and the
+   * hint (LLP 0190): the wizard's defaults gates list what they are about
+   * to accept here, one entry per line, instead of cramming the list into
+   * the title. Rendered inside the frame so `clearOnResolve` erases the
+   * list with the prompt. Callers own any indentation. An omitted field
+   * changes no output.
+   */
+  items?: string[]
+  /**
+   * Opt-in back-navigation (LLP 0191): escape settles the prompt as
+   * `backed` (the runtime throws `PromptBackRequestedError`) instead of
+   * cancelling, and the default hint reads `esc back`. Ctrl+C cancels
+   * regardless. Only the wizard's step prompts set this; everywhere else
+   * escape keeps meaning cancel.
+   */
+  allowBack?: boolean
 }
 
 export interface MultiselectOption {
@@ -49,9 +71,14 @@ export interface MultiselectOption {
 export interface MultiselectState extends PromptChrome {
   kind: 'multiselect'
   options: MultiselectOption[]
+  /**
+   * Row index under the pointer. Ranges over `0..options.length`
+   * inclusive: `options.length` addresses the Submit row rendered below
+   * the options, which confirms on space as well as enter.
+   */
   cursor: number
   bounds?: { min?: number, max?: number }
-  status: 'active' | 'resolved' | 'cancelled'
+  status: 'active' | 'resolved' | 'cancelled' | 'backed'
   error?: string
 }
 
@@ -65,7 +92,7 @@ export interface SelectState extends PromptChrome {
   kind: 'select'
   options: SelectOption[]
   cursor: number
-  status: 'active' | 'resolved' | 'cancelled'
+  status: 'active' | 'resolved' | 'cancelled' | 'backed'
 }
 
 export interface TextState extends PromptChrome {
@@ -74,7 +101,7 @@ export interface TextState extends PromptChrome {
   value: string
   mask: boolean
   validate?: (v: string) => string | null
-  status: 'active' | 'resolved' | 'cancelled'
+  status: 'active' | 'resolved' | 'cancelled' | 'backed'
   error?: string
 }
 

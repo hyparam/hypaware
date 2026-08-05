@@ -366,11 +366,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  // Never-silent client provenance split (LLP 0132 #never-silent): on a
-  // managed host the picked clients divide into what the fleet forwards
-  // (`syncing`) and what stays on this machine (`local-only`), so a local
-  // addition is never invisible. Null (a solo host) leaves the V1 surface
-  // unchanged.
+  // Never-silent client sync split (LLP 0188 #never-silent): on an enrolled
+  // host the configured sources divide into what forwards (`syncing`, the
+  // default for everything) and what the user opted out (`local-only`), so
+  // a withheld source is never invisible. Null (a solo host) leaves the V1
+  // surface unchanged.
   if (report.clientSync) {
     const list = (/** @type {string[]} */ names) => (names.length > 0 ? names.join(' · ') : '(none)')
     stdout.write(

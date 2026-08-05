@@ -16,6 +16,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -134,6 +135,15 @@ export async function runJoin(argv, ctx) {
       status: 'ok',
     },
     async (span) => {
+      // Stamp the empty client-sync store BEFORE the central seed exists:
+      // the seed itself counts as a central layer on the next boot, and a
+      // boot that sees a central layer with no store runs the LLP 0188
+      // upgrade migration, which would wrongly opt out fresh picks. Best
+      // effort: a failure here under-syncs (the safe direction), never
+      // blocks enrollment.
+      // @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed is written
+      await seedClientSyncStoreBestEffort(ctx, obsEnv.stateDir)
+
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
       await atomicWriteJson(seedPath, seed, { mode: 0o600 })
@@ -218,6 +228,10 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
       plugins: [{ name: '@hypaware/central' }],
       sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
     }
+    // Same ordering constraint as `runJoin`: the client-sync stamp must land
+    // before the seed makes a central layer visible to boot (LLP 0188
+    // #migration); best effort, failure under-syncs.
+    await seedClientSyncStoreBestEffort(ctx, stateRoot)
     const seedPath = centralSeedPath(stateRoot)
     await atomicWriteJson(seedPath, seed, { mode: 0o600 })
     // Inherit join's #139 fix: supersede a stale applied slot so the fresh
@@ -254,6 +268,24 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
 /**
  * Undo a just-written central seed (best-effort): remove the seed file and
  * clear any applied slot, returning the machine to "no central layer". Used to
+ * Best-effort wrapper over `seedClientSyncStoreIfAbsent` for the two
+ * enrollment writers. A machine that enrolls without the stamp is treated as
+ * pre-upgrade by the next boot and gets its local picks migrated into
+ * opt-outs, so the failure direction is under-sync: warn and proceed.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} stateDir
+ */
+async function seedClientSyncStoreBestEffort(ctx, stateDir) {
+  try {
+    await seedClientSyncStoreIfAbsent({ stateDir })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`warning: could not stamp the client-sync store (${detail}); locally added clients will start local-only until 'hyp policy client <name> sync'\n`)
+  }
+}
+
+/**
  * roll `enrollCentralSink` back when identity-seeding fails after the seed was
  * committed, so a partial enrollment never lingers on disk.
  *

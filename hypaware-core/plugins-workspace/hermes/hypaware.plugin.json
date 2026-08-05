@@ -21,8 +21,8 @@
     "picker": [
       {
         "name": "hermes",
-        "label": "capture Hermes Agent sessions",
-        "summary": "Imports sessions from Hermes's own state.db read-only: history backfill plus ongoing polling, no proxying.",
+        "label": "Hermes Agent",
+        "summary": "Imports history and new sessions from its local database.",
         "detect": { "settings_file": ".hermes/state.db" },
         "compose": {
           "plugin": { "name": "@hypaware/hermes" },

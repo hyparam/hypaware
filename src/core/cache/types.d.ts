@@ -267,18 +267,21 @@ export interface RetentionResult {
 }
 
 /**
- * Export-seam source-scoped withholding (LLP 0132 #source-scoped-withholding):
- * a second, optional `readRowsSince` resolver alongside `UsagePolicyResolver`.
- * Where `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
+ * Export-seam source-scoped withholding (LLP 0188): a second, optional
+ * `readRowsSince` resolver alongside `UsagePolicyResolver`. Where
+ * `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
  * dataset-declared **attribution column** (`PluginDatasetManifest.attribution_column`,
- * e.g. `client_name` for `ai_gateway_messages`) and withholds rows attributed
- * to a picker source classified `'local'` on a machine with a central layer
- * (`classifyClientProvenance`, LLP 0132 #rule): a local addition on a managed
- * machine never leaves it, even though it stays fully queryable locally.
+ * e.g. `client_name` for `ai_gateway_messages`) and withholds rows
+ * attributed to an opted-out picker source (the machine-local client-sync
+ * store, LLP 0188 #opt-out) on a machine with a central layer: on an
+ * enrolled machine every source syncs by default, and a source the user
+ * keeps local never leaves it, even though it stays fully queryable
+ * locally.
  *
- * Built once at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
- * and threaded through `createQueryStorageService` the same way
- * `usagePolicyResolver` already is.
+ * Built at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
+ * over a live (TTL-re-read) withheld set, and threaded through
+ * `createQueryStorageService` the same way `usagePolicyResolver` already
+ * is.
  */
 export interface SourceWithholdResolver {
   /**
@@ -286,7 +289,8 @@ export interface SourceWithholdResolver {
    * `dataset`, or `undefined` when the dataset declared no
    * `attribution_column`, the conservative default, matching `local-only`'s
    * original design: a dataset with no declared attribution column is never
-   * subject to source-scoped withholding.
+   * subject to per-row source-scoped withholding (see
+   * `shouldWithholdDataset` for the dataset-scoped rule).
    */
   attributionColumnFor(dataset: string): string | undefined
   /**
@@ -296,6 +300,24 @@ export interface SourceWithholdResolver {
    * continuation semantics).
    */
   shouldWithhold(attributionValue: unknown): boolean
+  /**
+   * True when `dataset` has no attribution column, has at least one
+   * contributing picker source, and every such source is withheld: the
+   * whole dataset is then withheld (LLP 0188 #enforcement-scope), covering
+   * single-owner datasets (the otel signals) that per-row withholding can
+   * never reach. Optional so a hand-built test resolver without the
+   * dataset-ownership map behaves as before (nothing dataset-withheld).
+   */
+  shouldWithholdDataset?(dataset: string): boolean
+  /**
+   * Fail-closed rule for rows whose attribution value is unusable (not a
+   * non-empty string) in a dataset that DOES declare an attribution
+   * column: true when any contributing picker source is withheld, since
+   * an unlabeled row cannot be proven to belong to a synced source
+   * (LLP 0192 #fail-closed). Optional for the same hand-built-resolver
+   * reason as `shouldWithholdDataset`.
+   */
+  shouldWithholdUnattributed?(dataset: string): boolean
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
