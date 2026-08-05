@@ -208,13 +208,21 @@ export async function runInitWizard(opts) {
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
   const firstLookRan = interactive && !cancelled && opts.finale?.dryRun !== true
+  // Whether the block actually reached the screen, which is not the same
+  // question: the step is documented to degrade to a silent skip rather than
+  // fail a finished install (LLP 0135 #first-look), so an unregistered
+  // dataset, an unreadable cache, or a render that throws all leave
+  // `firstLookRan` true and stdout untouched. The closing repeat below reads
+  // this, not the gate, because what it needs to know is what was written.
+  let firstLookShown = false
   if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
-    await runWizardFirstLook({
+    const look = await runWizardFirstLook({
       runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
     })
+    firstLookShown = look.shown
     // The abandoned queries from an expired deadline keep running and can
     // still resolve with a withheld-row report. Close the sink so that
     // report cannot land after the privacy narration below, which is
@@ -230,17 +238,19 @@ export async function runInitWizard(opts) {
   // direct `runPickerWalkthrough` entry point (whose summary follows the
   // finale with nothing in between) keeps its single print.
   //
-  // `firstLookRan` is the whole condition, the team pathway included: a
-  // `pathway` is only ever resolved on an interactive run, so a team run that
-  // is neither cancelled nor a dry run has already run the first look. Adding
-  // `|| pathway === 'team'` would widen this to exactly the runs where the
-  // first look did *not* run (cancelled at the backfill consent, or a dry
-  // run), and those wrote nothing between the finale and here, so the repeat
-  // would land a few lines under the print it repeats.
-  // @ref LLP 0188#when [constrained-by]: no closing sequence, no repeat
+  // `firstLookShown` is the whole condition, the team pathway included. It is
+  // read rather than `firstLookRan` because a first look that skipped itself
+  // wrote nothing, and rather than `pathway`, because a `pathway` is only ever
+  // resolved on an interactive run: a team run that is neither cancelled nor a
+  // dry run has already run the first look, so `|| pathway === 'team'` would
+  // widen this to exactly the runs where the first look did *not* run
+  // (cancelled at the backfill consent, or a dry run). Every run either
+  // condition would add wrote nothing between the finale and here, so the
+  // repeat would land a few lines under the print it repeats.
+  // @ref LLP 0188#when [constrained-by]: nothing written in between, no repeat
   // @ref LLP 0188#repeat-at-the-end [implements]: the wizard repeats what its own closing output buried
   const stranded = finaleSummary?.attachedNotConfigured ?? []
-  if (stranded.length > 0 && firstLookRan) {
+  if (stranded.length > 0 && firstLookShown) {
     writeAttachedNotConfiguredReminder({
       clients: stranded,
       stdout: opts.stdout,

@@ -5,8 +5,7 @@
 **Systems:** Onboarding, CLI, Clients
 **Author:** Brendan / Claude
 **Date:** 2026-08-05
-**Extends:** LLP 0185 (an unpicked client is named, not detached)
-**Related:** LLP 0135 (the wizard's closing sequence), LLP 0100/0101 (the privacy narration), LLP 0086 (the attach drift diagnostic)
+**Related:** LLP 0185 (an unpicked client is named, not detached; this doc is its `Extended-by`), LLP 0135 (the wizard's closing sequence), LLP 0100/0101 (the privacy narration), LLP 0086 (the attach drift diagnostic)
 
 > [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) put the
 > stranded-attach warning in the finale, before the daemon restart. It is
@@ -55,15 +54,23 @@ nothing substantial after the finale, so it does not repeat, and no path
 prints the warning twice on one screen.
 
 <a id="when"></a>**The repeat is conditional on the closing sequence having
-run.** The wizard emits it only when the first look ran: attended,
-uncancelled, and not a dry run. That single condition covers the team pathway
-as well, because a pathway is only ever resolved on an interactive run, so a
-team run that is neither cancelled nor a dry run has already run the first
-look. Widening the condition to "or the pathway is `team`" on the theory that
-the privacy narration follows would admit only the runs where the first look
-did *not* run, and those are exactly the runs that wrote nothing between the
-finale and here: the repeat would land a few lines under the print it repeats,
-which is the same double print the shared run summary was rejected for.
+written something.** The wizard emits it only when the first look actually
+reached the screen. That is a narrower test than "the first look ran", and
+deliberately so: the step is documented to degrade to a silent skip rather
+than fail a finished install
+([LLP 0135 §first-look](./0135-install-experience-overhaul.design.md)), so an
+unregistered dataset, an unreadable cache, or a render that throws leaves an
+attended run that attempted the block and printed none of it. Nothing buried
+the finale's print on such a run, so nothing is repeated.
+
+That single condition covers the team pathway as well, because a pathway is
+only ever resolved on an interactive run, so a team run that is neither
+cancelled nor a dry run has already run the first look. Widening the condition
+to "or the pathway is `team`" on the theory that the privacy narration follows
+would admit only the runs where the first look did *not* run, and those are
+exactly the runs that wrote nothing between the finale and here: the repeat
+would land a few lines under the print it repeats, which is the same double
+print the shared run summary was rejected for.
 
 So a scripted `--yes` or `--dry-run` wizard run stays on the single finale
 print and its output is unchanged, matching the attended-only rule

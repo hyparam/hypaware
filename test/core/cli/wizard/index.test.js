@@ -449,6 +449,30 @@ test('runInitWizard: a run cancelled at the finale does not repeat the stranded-
   assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
 })
 
+// The first look is documented to degrade to a silent skip rather than fail a
+// finished install (LLP 0135 #first-look): an unregistered dataset, an
+// unreadable cache, or a render that throws all leave an attended run that
+// attempted the block and printed none of it. The gate that admits the repeat
+// is therefore the block having reached the screen, not the run having tried:
+// on a skip the finale's own print is still the last thing above the summary,
+// and repeating under it would be the same-screen double print.
+// @ref LLP 0188#when [tests]: a first look that printed nothing buried nothing
+test('runInitWizard: an attended run whose first look skips itself does not repeat the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    // The shape `firstLookRunnerFromCtx` yields when the overview dataset is
+    // not registered: the step returns `{ shown: false }` without writing.
+    firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.doesNotMatch(text, /First look/, text)
+  assert.doesNotMatch(text, /hyp detach --client/, text)
+})
+
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {
   const home = await tmpHome()
   const stateDir = path.join(home, '.hyp', 'hypaware')
