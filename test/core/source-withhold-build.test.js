@@ -20,6 +20,8 @@ import {
   datasetOwnedSourceIdsFromCatalog,
   ensureClientSyncMigration,
 } from '../../src/core/runtime/source_withhold.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import {
   clientSyncListPath,
   readClientSyncEntries,
@@ -225,6 +227,25 @@ test('fail-closed: any opted-out owner of an attributed dataset withholds its un
     'a dataset without an attribution column has no unattributed-row rule; shouldWithholdDataset covers it'
   )
   assert.equal(resolver.shouldWithholdUnattributed?.('unknown-dataset'), false)
+})
+
+// Binds LLP 0192 #fail-closed's stated arming set to the REAL bundled
+// manifests: `ai_gateway_messages` is declared by `@hypaware/ai-gateway`
+// alone, so its owners are exactly the two raw rows, and a client-only
+// opt-out (claude/codex/openclaw/hermes) does not arm the unattributed
+// rule - the intended scope, per the doc. If a manifest change moves this
+// (a client plugin declaring the dataset, a new contributor), this fails
+// and the doc's claim gets revisited instead of silently drifting.
+// @ref LLP 0192#fail-closed [tests]: the arming set is the manifest-declared owners, pinned against the real catalog
+test('fail-closed arming set matches the real bundled manifests: the raw rows own ai_gateway_messages', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const owners = datasetOwnedSourceIdsFromCatalog(catalog).get('ai_gateway_messages') ?? []
+  assert.deepEqual([...owners].sort(), ['raw-anthropic', 'raw-openai'])
+  assert.equal(
+    datasetAttributionColumnsFromCatalog(catalog).get('ai_gateway_messages'),
+    'client_name'
+  )
 })
 
 test('fail-closed: inert with nothing opted out, and inert for an opt-out on a non-owner', async () => {

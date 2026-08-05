@@ -58,25 +58,36 @@ conversations are unlabeled end to end, never scattered rows.
 
 Until attribution is fixed at capture, the export seam withholds an
 unattributed row (no usable string in the dataset's attribution column)
-whenever **any** picker source that contributes that dataset is
-currently opted out (`shouldWithholdUnattributed`).
+whenever any picker source whose plugin **declares** that dataset
+(`contributes.datasets`) is currently opted out
+(`shouldWithholdUnattributed`).
 
-Rationale: an unlabeled row cannot be proven to belong to a synced
-source. Once the user has expressed any opt-out over the dataset's
-producers, shipping anonymous rows risks shipping exactly what they
-opted out, and this seam guards an explicit promise ("unchecked sources
-stay on this machine"), so it errs toward withholding, the same
-direction as its corrupt-store handling.
+The arming set is deliberately the declared owners, and for the bundled
+catalog that is exactly the raw gateway rows: `ai_gateway_messages` is
+declared by `@hypaware/ai-gateway` alone, so its owners are
+`raw-anthropic` and `raw-openai`. The client plugins (claude, codex,
+openclaw, hermes) write into the dataset through their projectors but
+declare no `datasets`, so **a client-only opt-out does not arm this
+rule** - and that is the intended reading, not an accident: an
+unattributed row is, in practice, raw traffic (a request with no client
+evidence is what the raw rows exist to capture), so the raw rows' own
+sync state is the right governor. A user who opts out only `codex` gets
+every codex-labeled row withheld by the per-row rule; the unlabeled
+rows they left syncing belong to raw sources they left checked. The
+residual: a known client's row that arrives with its metadata lost is
+unattributed and ships unless a raw row is opted out - that class rides
+with the misattribution residual (LLP 0175 and the `'claude'` fallback
+above) and belongs to the deferred decision. A test binds this arming
+set to the real bundled manifests so drift surfaces as a failure here,
+not as silent scope change.
 
-The cost, stated rather than hidden: this over-withholds. One opt-out
-on any `ai_gateway_messages` contributor withholds every unattributed
-row in it, including traffic from apps the user never opted out. That
-is accepted for the interim because unattributed rows are precisely the
-raw-row traffic the opt-out most plausibly aims at, and the
-under-withholding alternative (extending the every-owner dataset rule
-to null rows) protects almost nothing in practice: `ai_gateway_messages`
-has many contributors, and a single synced client would keep all
-anonymous rows shipping. With no opt-outs standing, nothing changes.
+The cost, stated rather than hidden: within its arming set this
+over-withholds - one raw-row opt-out withholds every unattributed row,
+including traffic from an app the user never thought about. And because
+`readRowsSince` is the shared export read seam, a withheld row vanishes
+from local `local-fs`/iceberg exports too, not only the central forward
+(pre-existing LLP 0188 semantics, named here because this rule widens
+what is withheld). With no opt-outs standing, nothing changes.
 
 ## Deferred decision: attribution of last resort {#deferred}
 
@@ -113,6 +124,9 @@ retires it.
 - The `usage_policy.export_drop` event counts these drops separately
   (`dropped_unattributed_row_count`), so over-withholding in the field
   is observable rather than inferred.
+- A client-only opt-out (`codex`, `claude`, `openclaw`, `hermes`) does
+  not arm the rule; only a raw-row opt-out does. See #fail-closed for
+  why that is the intended scope.
 - `raw-anthropic` opt-outs still leak through the `'claude'`
   misattribution (the rows are labeled, just wrongly); only the
   attribution decision fixes that half.
