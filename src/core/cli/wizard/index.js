@@ -229,9 +229,18 @@ export async function runInitWizard(opts) {
   // and only when this closing sequence actually wrote something, so the
   // direct `runPickerWalkthrough` entry point (whose summary follows the
   // finale with nothing in between) keeps its single print.
+  //
+  // `firstLookRan` is the whole condition, the team pathway included: a
+  // `pathway` is only ever resolved on an interactive run, so a team run that
+  // is neither cancelled nor a dry run has already run the first look. Adding
+  // `|| pathway === 'team'` would widen this to exactly the runs where the
+  // first look did *not* run (cancelled at the backfill consent, or a dry
+  // run), and those wrote nothing between the finale and here, so the repeat
+  // would land a few lines under the print it repeats.
+  // @ref LLP 0188#when [constrained-by]: no closing sequence, no repeat
   // @ref LLP 0188#repeat-at-the-end [implements]: the wizard repeats what its own closing output buried
   const stranded = finaleSummary?.attachedNotConfigured ?? []
-  if (stranded.length > 0 && (firstLookRan || pathway === 'team')) {
+  if (stranded.length > 0 && firstLookRan) {
     writeAttachedNotConfiguredReminder({
       clients: stranded,
       stdout: opts.stdout,

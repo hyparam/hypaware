@@ -429,6 +429,26 @@ test('runInitWizard: a scripted run does not repeat the stranded-attach warning'
   assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
 })
 
+// A cancel at the backfill consent skips the first look, so the run summary is
+// the only thing between the finale's own warning (which the finale prints
+// before its restart block, cancelled or not) and the end of the run. The team
+// pathway is not on its own a reason to repeat: a pathway is only resolved on
+// an interactive run, so an uncancelled non-dry team run has already run the
+// first look, and the runs a `pathway === 'team'` clause would add are exactly
+// the ones with nothing in between.
+// @ref LLP 0188#when [tests]: a cancelled team run buried nothing, so it does not repeat
+test('runInitWizard: a run cancelled at the finale does not repeat the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    finaleRunner: async () => ({ ...strandedFinale(['codex']), cancelled: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.cancelled, true)
+  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+})
+
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {
   const home = await tmpHome()
   const stateDir = path.join(home, '.hyp', 'hypaware')

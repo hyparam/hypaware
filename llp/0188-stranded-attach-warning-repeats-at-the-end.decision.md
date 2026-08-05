@@ -55,12 +55,21 @@ nothing substantial after the finale, so it does not repeat, and no path
 prints the warning twice on one screen.
 
 <a id="when"></a>**The repeat is conditional on the closing sequence having
-run.** The wizard emits it only when the first look ran (attended,
-uncancelled, not a dry run) or the pathway is `team` (the privacy narration
-follows). A scripted `--yes` or `--dry-run` wizard run prints nothing between
-the finale and its summary, so it stays on the single finale print and its
-output is unchanged, matching the attended-only rule
-([LLP 0131](./0131-configure-phase.decision.md)).
+run.** The wizard emits it only when the first look ran: attended,
+uncancelled, and not a dry run. That single condition covers the team pathway
+as well, because a pathway is only ever resolved on an interactive run, so a
+team run that is neither cancelled nor a dry run has already run the first
+look. Widening the condition to "or the pathway is `team`" on the theory that
+the privacy narration follows would admit only the runs where the first look
+did *not* run, and those are exactly the runs that wrote nothing between the
+finale and here: the repeat would land a few lines under the print it repeats,
+which is the same double print the shared run summary was rejected for.
+
+So a scripted `--yes` or `--dry-run` wizard run stays on the single finale
+print and its output is unchanged, matching the attended-only rule
+([LLP 0131](./0131-configure-phase.decision.md)), and so does an interactive
+run cancelled at the backfill consent, whose summary is all that follows the
+finale.
 
 <a id="shorter"></a>**The repeat is shorter than the original.** The first
 print explains the consequence in full; repeating that paragraph verbatim
