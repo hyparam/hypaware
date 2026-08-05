@@ -88,6 +88,16 @@ export async function runInitWizard(opts) {
       pathway = 'scoped'
       managed = true
       locked = await computeLockedSafe(catalog, opts)
+    } else if (gate.action === 'first-run' && gate.managed) {
+      // A managed machine whose config is missing or fails to merge lands
+      // on the first-run path (the gate has no config to summarise), but
+      // the central layer on disk still owns its rows. Lock them here too:
+      // an editable org row that the user picks composes into the local
+      // layer, and the next central pull overrides or collides with it.
+      // The pathway stays unset, so the fork still runs.
+      // @ref LLP 0129#join-before-picker [implements]: the first-run path locks the org rows from the on-disk central layer rather than offering them for composition
+      managed = true
+      locked = await computeLockedSafe(catalog, opts)
     }
 
     // 'first-run' and a solo machine's 'reconfigure' both enter here.
@@ -427,9 +437,12 @@ async function loadWizardCatalog() {
 }
 
 /**
- * The scoped re-entry's locked-set computation, guarded: a resolution
- * failure renders an unlocked picker (additions still compose; the
- * export seam, not the picker, enforces the org boundary, LLP 0132).
+ * The locked-set computation for every entry that reaches the picker on
+ * an already-managed machine without a join (the scoped re-entry, and the
+ * first-run path a managed machine falls to when its merged config no
+ * longer validates), guarded: a resolution failure renders an unlocked
+ * picker (additions still compose; the export seam, not the picker,
+ * enforces the org boundary, LLP 0132).
  *
  * @param {PluginCatalog} catalog
  * @param {Pick<RunInitWizardOptions, 'env'>} opts

@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { runAttach } from '../../src/core/commands/clients.js'
-import { defaultPlistDir, defaultUnitDir, LAUNCH_LABEL, SYSTEMD_UNIT_BASE } from '../../src/core/daemon/platform.js'
+import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 
 /**
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -71,26 +71,6 @@ function makeCtx({ home, attachCalls, config }) {
     },
   })
   return { ctx: /** @type {CommandRunContext} */ (ctx), stdout, stderr }
-}
-
-/**
- * Drop the platform-appropriate daemon service marker (LaunchAgent plist on
- * macOS, systemd user unit on Linux) under `home`, so `serviceDaemonStatus`
- * reports `installed: true` for this homeDir without spawning a real service
- * manager.
- *
- * @param {string} home
- */
-function installFakeDaemonService(home) {
-  if (process.platform === 'darwin') {
-    const dir = defaultPlistDir(home)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, `${LAUNCH_LABEL}.plist`), '<plist/>')
-  } else {
-    const dir = defaultUnitDir(home)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, `${SYSTEMD_UNIT_BASE}.service`), '[Unit]\n')
-  }
 }
 
 /** @param {(home: string) => Promise<void> | void} fn */
