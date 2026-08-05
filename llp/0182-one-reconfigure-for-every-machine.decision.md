@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0129 (the returning gate this amends), LLP 0011 (the original gate), LLP 0031 (layered config: central wins), LLP 0132 (managed-local additions stay local-only), LLP 0135 (wizard orchestration), LLP 0137 (retention defaults)
-**Extended-by:** [LLP 0185](./0185-wizard-defaults-gate.decision.md#fork-disconnect) (a managed machine choosing the local pathway is now asked once whether to disconnect; yes runs `hyp leave`, no keeps the behavior decided here)
+**Extended-by:** [LLP 0190](./0190-wizard-defaults-gate.decision.md#fork-disconnect) (a managed machine choosing the local pathway is now asked once whether to disconnect; yes runs `hyp leave`, no keeps the behavior decided here)
 
 > [LLP 0129 §returning-gate](./0129-init-wizard-fork.decision.md#returning-gate)
 > gave a managed machine its own menu row and its own pathway: "adjust

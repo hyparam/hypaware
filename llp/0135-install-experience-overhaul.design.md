@@ -154,7 +154,7 @@ sites share it:
 
 ## Wizard orchestration {#orchestration}
 
-> **Extended-by [LLP 0186](./0186-wizard-back-navigation.decision.md):**
+> **Extended-by [LLP 0191](./0191-wizard-back-navigation.decision.md):**
 > the phase sequence below also runs backwards one step at a time -
 > escape at a question lane returns to the lane before it, with a
 > completed join reused rather than re-run. The forward flow and every
@@ -332,7 +332,7 @@ transient network error) to `'failed' | 'abandoned'` for
 
 ## Pick phase {#pick}
 
-> **Extended-by [LLP 0185](./0185-wizard-defaults-gate.decision.md):**
+> **Extended-by [LLP 0190](./0190-wizard-defaults-gate.decision.md):**
 > when detection or the locked set yields a non-empty default, the lane
 > now opens with a defaults gate (state the selection, accept on a bare
 > enter, menu on request). The menu described below is unchanged and one
@@ -537,7 +537,7 @@ over a file core can neither read nor reverse.
 
 ## Export-seam source-scoped withholding {#export-seam}
 
-> **Extended-by [LLP 0181](./0181-enrolled-default-sync-with-client-optout.decision.md):**
+> **Extended-by [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md):**
 > the withheld set is no longer "the picker source ids classified
 > `'local'`"; it is the explicit per-client opt-out store, minus
 > central-classified sources. The seam mechanics below (attribution

@@ -10,7 +10,7 @@
  * components now import, and classifies those leading words so a run's
  * diagnostics are coloured without every write site having to remember.
  *
- * @ref LLP 0183#palette [implements]: one palette, one severity vocabulary, applied at the stream
+ * @ref LLP 0189#palette [implements]: one palette, one severity vocabulary, applied at the stream
  */
 
 import { useColor } from './stdio.js'
@@ -46,7 +46,7 @@ export function paint(text, sgr, on) {
  * Colour is always the second encoding, never the only one - the leading
  * word survives a pipe, a monochrome terminal, and a colour-blind reader.
  *
- * @ref LLP 0183#rules [implements]: prefix-only painting, ordered first-match
+ * @ref LLP 0189#rules [implements]: prefix-only painting, ordered first-match
  * @ref LLP 0135#disclosure [constrained-by]: colour may never be the sole encoding of a distinction
  */
 const RULES = [
@@ -127,7 +127,7 @@ export function paintChunk(text, atLineStart) {
  * that probe those (the TUI, `installStreamErrorHandlers`) must not see a
  * degraded stream.
  *
- * @ref LLP 0183#choke-point [implements]: colour is applied where stderr is bound, not at ~250 write sites
+ * @ref LLP 0189#choke-point [implements]: colour is applied where stderr is bound, not at ~250 write sites
  *
  * @template T
  * @param {T} stream

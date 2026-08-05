@@ -30,7 +30,7 @@ export function reduce(state, key) {
     // Back is opt-in per prompt: only the wizard's step prompts set
     // `allowBack`, so escape keeps meaning cancel everywhere else.
     // Ctrl+C (above) cancels regardless.
-    // @ref LLP 0186#esc-back [implements]: escape settles as `backed` on an allowBack prompt; ctrl+c stays the cancel
+    // @ref LLP 0191#esc-back [implements]: escape settles as `backed` on an allowBack prompt; ctrl+c stays the cancel
     if (state.allowBack) return /** @type {State} */ ({ ...state, status: 'backed' })
     return cancelledOf(state)
   }

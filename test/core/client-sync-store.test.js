@@ -34,7 +34,7 @@ test('clientSyncListPath requires a stateDir', () => {
   assert.throws(() => clientSyncListPath(''))
 })
 
-// --- absent vs empty (the LLP 0181 migration marker) ------------------------
+// --- absent vs empty (the LLP 0188 migration marker) ------------------------
 
 test('readClientSyncEntries returns null when the store has never been written', async () => {
   const stateDir = await makeTmpDir()

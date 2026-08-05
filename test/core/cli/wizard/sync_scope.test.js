@@ -15,14 +15,14 @@ import {
 } from '../../../../src/core/usage-policy/client_sync.js'
 import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 
-// The wizard's sync-scope step (LLP 0181 #never-silent, LLP 0185 #sync-gate):
+// The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate):
 // a defaults gate stating what will sync, then on request a multiselect where
 // checked means "syncs" and unchecking keeps a source local-only. Everything
 // is checked by default on a fresh run, locked sources never shown (the
 // candidates list is already locked-filtered), and the write has editor
 // semantics over the shown candidates only.
-// @ref LLP 0181#never-silent [tests]:
-// @ref LLP 0185#sync-gate [tests]:
+// @ref LLP 0188#never-silent [tests]:
+// @ref LLP 0190#sync-gate [tests]:
 
 function makeBuf() {
   let value = ''
@@ -193,9 +193,9 @@ test('editor semantics: an entry for a source not shown this run is kept', async
   ], 'the unshown hermes entry survives the openclaw-only edit')
 })
 
-// Locked (org) sources always sync (LLP 0181 #locked); the step shows them
+// Locked (org) sources always sync (LLP 0188 #locked); the step shows them
 // read-only so "these will sync" is the whole picture, not the editable
-// slice (LLP 0185 #sync-gate).
+// slice (LLP 0190 #sync-gate).
 
 test('locked sources lead the gate list fleet-suffixed and the menu as read-only rows', async () => {
   const { env } = await makeHome()

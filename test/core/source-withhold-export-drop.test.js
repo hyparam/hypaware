@@ -1,6 +1,6 @@
 // @ts-check
 
-// Export-seam source-scoped withholding (LLP 0181): the shared export read
+// Export-seam source-scoped withholding (LLP 0188): the shared export read
 // (`storage.readRowsSince`) withholds a row attributed (via the dataset's
 // declared `attribution_column`) to a withheld picker source (an opted-out
 // source on an enrolled machine), but still surfaces its `after` so the
@@ -9,7 +9,7 @@
 // declared `attribution_column` is never subject to per-row withholding,
 // the conservative default; a dataset whose every contributing source is
 // withheld is dropped wholesale via `shouldWithholdDataset`
-// (LLP 0181 #enforcement-scope).
+// (LLP 0188 #enforcement-scope).
 
 import test from 'node:test'
 import assert from 'node:assert/strict'

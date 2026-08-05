@@ -272,7 +272,7 @@ test('render: hint override replaces default hint line', () => {
   assert.doesNotMatch(out, /space toggle/)
 })
 
-// Context lines (LLP 0185): the wizard's defaults gates list what they are
+// Context lines (LLP 0190): the wizard's defaults gates list what they are
 // about to accept between the title and the hint, verbatim and unstyled.
 test('render: items render verbatim between the title and the hint', () => {
   /** @type {any} */

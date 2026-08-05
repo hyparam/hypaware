@@ -21,7 +21,7 @@ import {
 const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs - unchecked sources stay on this machine.'
 
 /**
- * The wizard's sync-scope step (LLP 0181 #never-silent, LLP 0185
+ * The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190
  * #sync-gate): after the picker on every enrolled run, first a defaults
  * gate that states what will sync in one line and accepts on a bare
  * enter, then - only when the user asks to change it - a multiselect
@@ -31,7 +31,7 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs - unchecked sources stay on thi
  * re-running the wizard round-trips the store instead of resetting it.
  *
  * Locked (org-configured) sources are shown but never editable: they
- * always sync (LLP 0181 #locked), so the gate lists them - fleet-suffixed
+ * always sync (LLP 0188 #locked), so the gate lists them - fleet-suffixed
  * - and the menu renders them checked and disabled, keeping "these will
  * sync" the whole picture rather than the editable slice. `candidates` is
  * the pick result's locked-filtered descriptor list; when it is empty the
@@ -43,14 +43,14 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs - unchecked sources stay on thi
  * this run) are kept, never silently dropped - unpicking a source disables
  * its plugin, which is a stronger state than an opt-out, and re-picking it
  * later should find the opt-out still standing. The store, not this
- * prompt, is what the export seam enforces (LLP 0181 #opt-out).
+ * prompt, is what the export seam enforces (LLP 0188 #opt-out).
  *
  * A corrupt existing store skips the step with a warning naming the file:
  * never overwrite an uninterpretable privacy signal; the export seam fails
  * closed on it and `hyp status` names it too.
  *
- * @ref LLP 0181#never-silent [implements]: the enrolled wizard's sync-scope step names what syncs before anything ships
- * @ref LLP 0185#sync-gate [implements]: defaults gate first, menu on request; the menu checks what syncs
+ * @ref LLP 0188#never-silent [implements]: the enrolled wizard's sync-scope step names what syncs before anything ships
+ * @ref LLP 0190#sync-gate [implements]: defaults gate first, menu on request; the menu checks what syncs
  * @param {RunWizardSyncScopeOptions} opts
  * @returns {Promise<WizardSyncScopeResult>}
  */
@@ -120,7 +120,7 @@ export async function runWizardSyncScope(opts) {
 /**
  * The sync lane's question screens: the defaults gate stating the sync
  * split, then - on request - the multiselect that checks what syncs. The
- * two screens loop (LLP 0186 #lane-loops): the menu's back returns to
+ * two screens loop (LLP 0191 #lane-loops): the menu's back returns to
  * the gate, and the gate's back - offered only when the orchestrator
  * said there is somewhere to go (`opts.allowBack`) - propagates `back`
  * to the caller. Cancellation propagates as the prompt's own throw.
@@ -135,7 +135,7 @@ export async function runWizardSyncScope(opts) {
  */
 async function promptSyncScopeSelection({ opts, ask, confirm, optedOutBefore }) {
   // The full sync picture, not only the editable slice: the org's locked
-  // sources always sync (LLP 0181 #locked), so a gate that omitted them
+  // sources always sync (LLP 0188 #locked), so a gate that omitted them
   // would understate what the server sees. They keep the fleet suffix
   // and are never editable here.
   const locked = (opts.locked ?? []).map((d) => `${d.label}${LOCKED_LABEL_SUFFIX}`)

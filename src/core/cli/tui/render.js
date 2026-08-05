@@ -19,7 +19,7 @@
 // The palette is shared, not local: this module and the query overview each
 // used to carry their own copy, which is how the CLI ended up with a red
 // that only prompts knew about and no yellow anywhere.
-// @ref LLP 0183#palette [implements]: one ANSI table for the whole CLI
+// @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
 import { ANSI, paint } from '../style.js'
 
 /**
@@ -42,7 +42,7 @@ function chromeLines(state, opts) {
   const lines = []
   if (state.progress) lines.push(paint(state.progress, ANSI.dim, opts.color))
   if (state.title) lines.push(paint(state.title, ANSI.bold, opts.color))
-  // Context lines (LLP 0185): rendered verbatim, unstyled, one per entry -
+  // Context lines (LLP 0190): rendered verbatim, unstyled, one per entry -
   // the defaults gates list what they are about to accept here rather
   // than cramming it into the title.
   for (const item of state.items ?? []) lines.push(item)
@@ -68,7 +68,7 @@ const DEFAULT_HINT = {
   text:        'enter confirm · esc cancel',
 }
 
-// An allowBack prompt (LLP 0186) tells the truth about what escape does
+// An allowBack prompt (LLP 0191) tells the truth about what escape does
 // there: it steps back one screen instead of cancelling.
 const DEFAULT_HINT_BACK = {
   multiselect: 'space toggle · a all · enter confirm · esc back',

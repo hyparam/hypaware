@@ -5,8 +5,10 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
+import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -100,7 +102,7 @@ function legacyNumberedPromptFactory(opts) {
         question.allowBack ? 'select (e.g. 1,3, "all", or b to go back): ' : 'select (e.g. 1,3 or "all"): '
       )
       const trimmed = answer.trim().toLowerCase()
-      // The readline form of the TUI's escape (LLP 0186): same signal,
+      // The readline form of the TUI's escape (LLP 0191): same signal,
       // same caller handling, so both paths step back identically.
       if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
       if (!trimmed) return []
@@ -122,8 +124,15 @@ function legacyNumberedPromptFactory(opts) {
  * keystroke never destroys a working install. On yes the caller backs
  * the file up before replacing it.
  *
+ * The question says the file is *rewritten from the picks*, not merely
+ * "overwritten": the write is a whole-file regeneration, and a user whose
+ * mental model is "I am adjusting checkboxes" needs to know that before
+ * the y/N. It also names what survives the regeneration, so the answer is
+ * a decision about the picks rather than a bet on how much is lost.
+ *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
+ * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
  */
 export function defaultOverwriteConfirmFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
@@ -132,7 +141,10 @@ export function defaultOverwriteConfirmFactory(opts) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
       const answer = await rl.question(
-        'Overwrite existing config (a backup is kept)? [y/N]: '
+        `The config at ${targetPath} will be rewritten from your picks. ` +
+        'Your retention window, export destinations, hand-edited settings, and any ' +
+        'plugins the picker does not manage are carried over; a backup is kept. ' +
+        'Continue? [y/N]: '
       )
       return /^y(es)?$/i.test(answer.trim())
     } finally {
@@ -184,7 +196,7 @@ export function defaultPromptFactory(opts) {
 }
 
 /**
- * Build the wizard's defaults-gate prompt (LLP 0185): a single-select
+ * Build the wizard's defaults-gate prompt (LLP 0190): a single-select
  * between accepting a lane's stated defaults and opening its full menu.
  * Routes to the TUI select on a real TTY, else a numbered readline
  * fallback where a bare enter takes the question's default.
@@ -248,7 +260,7 @@ function legacyConfirmSelectPromptFactory(opts) {
       const answer = await rl.question(
         question.allowBack ? `select [${fallbackIdx + 1}, b back]: ` : `select [${fallbackIdx + 1}]: `
       )
-      // The readline form of the TUI's escape (LLP 0186).
+      // The readline form of the TUI's escape (LLP 0191).
       if (question.allowBack && answer.trim().toLowerCase() === 'b') throw new PromptBackRequestedError()
       const n = Number.parseInt(answer.trim(), 10)
       if (Number.isInteger(n) && n >= 1 && n <= question.options.length) {
@@ -708,12 +720,19 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  * plus a `local` sink writing parquet under `<HYP_HOME>/exports` are
  * included when `exportChoice === 'local-parquet'`.
  *
+ * `existing` is the local config this composition replaces, supplied only
+ * on a reconfigure. With it the result is the composition folded *over*
+ * what is already on disk rather than a fresh file: see
+ * {@link carryForwardExistingConfig} for the split between what the
+ * composer manages and what it merely passes through.
+ *
  * @param {{
  *   sources: PickerSource[],
  *   descriptors: Map<string, PickerDescriptor>,
  *   exportChoice: PickerExport,
  *   retentionDays: number,
  *   hypHome: string,
+ *   existing?: HypAwareV2Config | undefined,
  * }} args
  * @returns {HypAwareV2Config}
  * @ref LLP 0011#no-architectural-names [implements]: user picks what/where; HypAware derives the explicit plugin set, no role labels
@@ -738,12 +757,7 @@ export function composePickerConfig(args) {
     const compose = descriptor.compose
     if (!compose) continue
     if (compose.requires_gateway) requiresGateway = true
-    const requested = compose.gateway_upstream === undefined
-      ? []
-      : Array.isArray(compose.gateway_upstream)
-        ? compose.gateway_upstream
-        : [compose.gateway_upstream]
-    for (const up of requested) {
+    for (const up of requestedUpstreams(compose)) {
       if (!upstreams.some((existing) => existing.name === up.name)) upstreams.push({ ...up })
     }
     // A row may contribute one plugin (`plugin`) or several (`plugins`), all
@@ -754,11 +768,7 @@ export function composePickerConfig(args) {
     // row composed nothing and its catch-up command failed identically
     // forever).
     // @ref LLP 0139#compose-the-whole-dependency-set [implements]: a picker row composes every plugin its configure_command needs, not just its own adapter
-    const contributed = [
-      ...(compose.plugin ? [compose.plugin] : []),
-      ...(Array.isArray(compose.plugins) ? compose.plugins : []),
-    ]
-    for (const plugin of contributed) {
+    for (const plugin of contributedPlugins(compose)) {
       if (compose.requires_gateway) postExportPlugins.push(plugin)
       else preExportPlugins.push(plugin)
     }
@@ -773,7 +783,7 @@ export function composePickerConfig(args) {
     // default-only EADDRINUSE fallback (LLP 0114 #explicit-listen-fails-loudly).
     // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
-      name: '@hypaware/ai-gateway',
+      name: GATEWAY_PLUGIN,
       config: { upstreams },
     })
   }
@@ -783,11 +793,11 @@ export function composePickerConfig(args) {
   /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   if (args.exportChoice === 'local-parquet') {
-    plugins.push({ name: '@hypaware/local-fs' })
-    plugins.push({ name: '@hypaware/format-parquet' })
+    plugins.push({ name: LOCAL_FS_PLUGIN })
+    plugins.push({ name: PARQUET_PLUGIN })
     sinks['local'] = {
-      writer: '@hypaware/format-parquet',
-      destination: '@hypaware/local-fs',
+      writer: PARQUET_PLUGIN,
+      destination: LOCAL_FS_PLUGIN,
       config: {
         dir: path.join(args.hypHome, 'exports'),
         schedule: '*/5 * * * *',
@@ -808,7 +818,336 @@ export function composePickerConfig(args) {
     },
   }
   if (Object.keys(sinks).length > 0) config.sinks = sinks
-  return config
+  if (!args.existing) return config
+  return carryForwardExistingConfig(config, args.existing, args.descriptors)
+}
+
+/** The gateway plugin every `requires_gateway` row composes behind. */
+const GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
+
+/** The two plugins the `local-parquet` export half composes. */
+const LOCAL_FS_PLUGIN = /** @type {PluginName} */ ('@hypaware/local-fs')
+const PARQUET_PLUGIN = /** @type {PluginName} */ ('@hypaware/format-parquet')
+
+/**
+ * The upstreams one descriptor's `compose` contribution requests, as a
+ * list whether the manifest wrote one object or an array.
+ *
+ * @param {NonNullable<PickerDescriptor['compose']>} compose
+ * @returns {{ name: string, base_url: string, path_prefix: string, provider?: string }[]}
+ */
+function requestedUpstreams(compose) {
+  if (compose.gateway_upstream === undefined) return []
+  return Array.isArray(compose.gateway_upstream) ? compose.gateway_upstream : [compose.gateway_upstream]
+}
+
+/**
+ * The plugin instances one descriptor's `compose` contribution adds: its
+ * own adapter (`plugin`) plus anything it composes beside it (`plugins`).
+ *
+ * @param {NonNullable<PickerDescriptor['compose']>} compose
+ * @returns {PluginConfigInstance[]}
+ */
+function contributedPlugins(compose) {
+  return [
+    ...(compose.plugin ? [compose.plugin] : []),
+    ...(Array.isArray(compose.plugins) ? compose.plugins : []),
+  ]
+}
+
+/**
+ * Every plugin name composition is entitled to add or remove: the gateway,
+ * the export half's two plugins, and every plugin any picker row in the
+ * catalog contributes. A plugin outside this set is in the config because
+ * someone put it there by hand (`@hypaware/gascity`, `@hypaware/central`),
+ * so a reconfigure carries it forward untouched.
+ *
+ * @param {Map<string, PickerDescriptor>} descriptors
+ * @returns {Set<string>}
+ */
+function composerManagedPlugins(descriptors) {
+  const managed = new Set([GATEWAY_PLUGIN, LOCAL_FS_PLUGIN, PARQUET_PLUGIN])
+  for (const descriptor of descriptors.values()) {
+    if (!descriptor.compose) continue
+    for (const plugin of contributedPlugins(descriptor.compose)) managed.add(plugin.name)
+  }
+  return managed
+}
+
+/**
+ * Fold a fresh composition over the local config it replaces, so a
+ * reconfigure edits the file instead of regenerating it.
+ *
+ * The split is deliberate rather than a general merge, because a general
+ * merge would resurrect exactly what the user just unchecked (issue #603):
+ *
+ * - **Composer-managed plugins** ({@link composerManagedPlugins}) live and
+ *   die by the picks. One the picks no longer compose is dropped, unless a
+ *   carried-forward sink names it as its `writer`/`destination` - dropping
+ *   a plugin out from under a sink the composer chose to keep would write
+ *   a config that cannot activate.
+ * - **Every other plugin is passed through** in its existing order. The
+ *   composer never chose it, so it is not the composer's to drop.
+ * - **Per-plugin config is the user's**, merged over the manifest's
+ *   composed values key by key, so a hand-edited otel `listen_port`
+ *   survives. The one exception is the gateway's `upstreams`: that list is
+ *   derived from the picks, not a preference, so composition owns it
+ *   outright and unchecking a row really removes its upstream.
+ * - **Sinks** the composition names are merged the same way (a hand-edited
+ *   `schedule` or `dir` wins), but only onto the same sink ({@link sameSink});
+ *   sinks it does not name are passed through. A composed sink an existing
+ *   sink already provides under another id is dropped rather than added
+ *   beside it ({@link sinkAlreadyProvided}), and a different sink sitting on
+ *   a composed id keeps the id rather than being overwritten.
+ * - **Retention** is written at `query.cache.retention.default_days` and
+ *   nothing else under `query` is touched.
+ * - **Unknown top-level keys are passed through** untouched.
+ *
+ * @param {HypAwareV2Config} composed
+ * @param {HypAwareV2Config} existing
+ * @param {Map<string, PickerDescriptor>} descriptors
+ * @returns {HypAwareV2Config}
+ * @ref LLP 0183#carry-forward [implements]: a reconfigure keeps what the composer does not own; only the picked set is recomposed
+ */
+function carryForwardExistingConfig(composed, existing, descriptors) {
+  const existingPlugins = existing.plugins ?? []
+  const existingSinks = existing.sinks ?? {}
+  const composedSinks = composed.sinks ?? {}
+
+  // Sinks first: which ones survive decides which export plugins are still
+  // load-bearing, which decides what may be dropped from the plugin list.
+  /** @type {Record<string, SinkConfigInstance>} */
+  const sinks = {}
+  for (const [id, sink] of Object.entries(composedSinks)) {
+    const prior = existingSinks[id]
+    // Only the same sink merges: same union member, same plugins. Folding a
+    // blob sink over a request sink of the same id keeps `plugin` beside
+    // `writer`/`destination`, which matches neither sink shape and which
+    // cross-validation rejects outright (`request_sink_invalid_keys`);
+    // folding the parquet export over a jsonl one rewrites where the user's
+    // data goes and in what format. Both are different sinks that happen to
+    // share an id, not two versions of one sink.
+    if (prior && sameSink(sink, prior)) {
+      sinks[id] = mergeSink(sink, prior)
+      continue
+    }
+    // A different sink at the id is not evicted either: replacing it would
+    // silently delete a sink the composer never wrote, the same defect as
+    // regenerating the file. And composition always names its export sink
+    // `local`, while the config may already run the same writer to the same
+    // destination under a name the user chose; adding `local` beside it
+    // would export every dataset twice on two schedules. Either way the
+    // sinks already on disk win.
+    if (prior || sinkAlreadyProvided(sink, existingSinks)) continue
+    sinks[id] = sink
+  }
+  /** @type {Set<string>} */
+  const pinnedPlugins = new Set()
+  for (const [id, sink] of Object.entries(existingSinks)) {
+    if (id in sinks) continue
+    sinks[id] = sink
+    for (const name of sinkPluginNames(sink)) pinnedPlugins.add(name)
+  }
+
+  const managed = composerManagedPlugins(descriptors)
+  const composedNames = new Set((composed.plugins ?? []).map((p) => p.name))
+  const plugins = (composed.plugins ?? []).map((entry) =>
+    mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name))
+  )
+  for (const prior of existingPlugins) {
+    if (composedNames.has(prior.name)) continue
+    if (managed.has(prior.name) && !pinnedPlugins.has(prior.name)) continue
+    plugins.push(prior)
+  }
+
+  const query = {
+    ...(existing.query ?? {}),
+    cache: {
+      ...(existing.query?.cache ?? {}),
+      retention: {
+        ...(existing.query?.cache?.retention ?? {}),
+        default_days: composed.query?.cache?.retention?.default_days,
+      },
+    },
+  }
+
+  /** @type {HypAwareV2Config} */
+  const merged = { ...existing, version: 2, plugins, query: /** @type {HypAwareV2Config['query']} */ (query) }
+  if (Object.keys(sinks).length > 0) merged.sinks = sinks
+  else delete merged.sinks
+  return merged
+}
+
+/**
+ * Merge one composed plugin instance with the entry of the same name
+ * already in the config: the user's keys win, except the gateway's
+ * pick-derived `upstreams`.
+ *
+ * @param {PluginConfigInstance} composed
+ * @param {PluginConfigInstance | undefined} prior
+ * @returns {PluginConfigInstance}
+ */
+function mergePlugin(composed, prior) {
+  if (!prior) return composed
+  const config = { ...(composed.config ?? {}), ...(prior.config ?? {}) }
+  const upstreams = composed.config?.upstreams
+  if (composed.name === GATEWAY_PLUGIN && upstreams !== undefined) config.upstreams = upstreams
+  const merged = { ...prior, ...composed }
+  if (Object.keys(config).length > 0) merged.config = config
+  // Composing a plugin is what picking its row means, so a prior
+  // `enabled: false` does not carry over: the pick would otherwise write a
+  // config whose row reads picked and whose plugin never activates.
+  if (merged.enabled === false && composed.enabled === undefined) delete merged.enabled
+  return merged
+}
+
+/**
+ * The plugin names one sink entry depends on, across both sink shapes: a
+ * blob sink names a `writer` and a `destination`, a request sink a single
+ * `plugin`.
+ *
+ * @param {SinkConfigInstance} sink
+ * @returns {string[]}
+ */
+function sinkPluginNames(sink) {
+  if ('plugin' in sink) return [sink.plugin]
+  return [sink.writer, sink.destination]
+}
+
+/**
+ * A sink entry's identity for carry-forward: which plugins it runs, in the
+ * per-shape canonical order {@link sinkPluginNames} yields (a blob sink's
+ * `writer` then `destination`, a request sink's single `plugin`). Two
+ * entries with the same signature do the same job, whatever id they sit
+ * under.
+ *
+ * @param {SinkConfigInstance} sink
+ * @returns {string}
+ */
+function sinkSignature(sink) {
+  return sinkPluginNames(sink).join(',')
+}
+
+/**
+ * Whether two sink entries are the same sink: the same union member of
+ * `SinkConfigInstance` (blob: `writer` + `destination`; request: `plugin`)
+ * running the same plugins. Entries that disagree are different sinks that
+ * happen to share an id rather than two versions of one sink, so neither
+ * the shape check nor the plugin check may be dropped: merging across
+ * shapes writes a config cross-validation rejects, and merging a parquet
+ * export over a jsonl one silently rewrites the format and destination of
+ * data the composer never chose.
+ *
+ * @param {SinkConfigInstance} a
+ * @param {SinkConfigInstance} b
+ * @returns {boolean}
+ */
+function sameSink(a, b) {
+  if (('plugin' in a) !== ('plugin' in b)) return false
+  return sinkSignature(a) === sinkSignature(b)
+}
+
+/**
+ * Whether the config already runs this composed sink's plugins under some
+ * id. Sink ids are the user's to choose, so the composer's `local` export
+ * and a hand-renamed `exports` running the same writer to the same
+ * destination are one export, not two: composing both would write every
+ * dataset twice, on two schedules, into the same tree.
+ *
+ * @param {SinkConfigInstance} composed
+ * @param {Record<string, SinkConfigInstance>} existingSinks
+ * @returns {boolean}
+ */
+function sinkAlreadyProvided(composed, existingSinks) {
+  const signature = sinkSignature(composed)
+  return Object.values(existingSinks).some((sink) => sinkSignature(sink) === signature)
+}
+
+/**
+ * Merge one composed sink with the same sink already at that id in the
+ * config: the user's `config` keys (a hand-edited `schedule`, a moved
+ * `dir`) win over the composed defaults. Callers must have checked
+ * {@link sameSink} first.
+ *
+ * @param {SinkConfigInstance} composed
+ * @param {SinkConfigInstance | undefined} prior
+ * @returns {SinkConfigInstance}
+ */
+function mergeSink(composed, prior) {
+  if (!prior) return composed
+  return { ...prior, ...composed, config: { ...(composed.config ?? {}), ...(prior.config ?? {}) } }
+}
+
+/**
+ * The picker rows an existing local config already collects: the inverse
+ * of {@link composePickerConfig}'s per-descriptor fold. A row counts as
+ * configured when everything its `compose` contribution asks for is
+ * already there - its contributed plugins present, the gateway present if
+ * it requires one, and every upstream it requests already configured.
+ *
+ * This is what a reconfigure's checkboxes are seeded from. Detection
+ * cannot stand in for it: detection answers "is this client installed on
+ * the machine", which is neither what an undetectable row (otel, the raw
+ * API rows) collects today nor what a deliberately excluded client should
+ * come back as.
+ *
+ * Composition is lossy for a row whose whole contribution is an upstream
+ * some other row also contributes (`raw-anthropic` beside `claude`): the
+ * two compose to the same bytes, so such a row reads as configured
+ * whenever its upstream is. Its checked state is then cosmetic - checking
+ * or clearing it composes the identical config.
+ *
+ * An `enabled: false` plugin does not count: the row is off, whichever
+ * way it was turned off.
+ *
+ * @param {HypAwareV2Config} config
+ * @param {Map<string, PickerDescriptor>} descriptors
+ * @returns {Set<string>}
+ * @ref LLP 0183#seed-from-config [implements]: the reconfigure picker's checked rows are read back out of the config, not re-detected
+ */
+export function configuredPickerSources(config, descriptors) {
+  const active = (config.plugins ?? []).filter((p) => p.enabled !== false)
+  const pluginNames = new Set(active.map((p) => p.name))
+  const gateway = active.find((p) => p.name === GATEWAY_PLUGIN)
+  const upstreams = /** @type {{ name?: string }[]} */ (gateway?.config?.upstreams ?? [])
+  const upstreamNames = new Set(upstreams.map((u) => u.name))
+
+  /** @type {Set<string>} */
+  const configured = new Set()
+  for (const descriptor of descriptors.values()) {
+    const compose = descriptor.compose
+    if (!compose) continue
+    const contributed = contributedPlugins(compose)
+    const requested = requestedUpstreams(compose)
+    // A row that composes nothing at all can never be read back; leaving it
+    // unchecked is the conservative answer.
+    if (contributed.length === 0 && requested.length === 0 && !compose.requires_gateway) continue
+    if (!contributed.every((p) => pluginNames.has(p.name))) continue
+    if (compose.requires_gateway && !pluginNames.has(GATEWAY_PLUGIN)) continue
+    if (!requested.every((u) => upstreamNames.has(u.name))) continue
+    configured.add(descriptor.id)
+  }
+  return configured
+}
+
+/**
+ * The export choice an existing local config already expresses. The wizard
+ * stopped asking about export (LLP 0137's sibling default), so on a
+ * reconfigure it must read the answer back rather than re-decide it: a
+ * cache-only install stays cache-only, and an install exporting somewhere
+ * else keeps its own sinks instead of gaining a second, unasked-for one.
+ *
+ * @param {HypAwareV2Config} config
+ * @returns {PickerExport}
+ * @ref LLP 0183#carry-forward [implements]: export is carried forward, not re-defaulted, on a reconfigure
+ */
+export function configuredExportChoice(config) {
+  const sinks = Object.values(config.sinks ?? {})
+  const hasLocalParquet = sinks.some((sink) => {
+    const names = sinkPluginNames(sink)
+    return names.includes(PARQUET_PLUGIN) && names.includes(LOCAL_FS_PLUGIN)
+  })
+  return /** @type {PickerExport} */ (hasLocalParquet ? 'local-parquet' : 'keep-local')
 }
 
 /**
@@ -1096,6 +1435,24 @@ export async function runPickerFinale(args) {
     summary,
   })
 
+  // Re-running the picker regenerates the config from the picks alone, so a
+  // client the previous run attached and this run left unchecked keeps routing
+  // through the gateway that no longer collects it. Nothing here undoes that:
+  // the finale only attaches, and the reconciler's reverse lane covers only the
+  // config-named org/central keys, never a wizard attach on the local layer.
+  // Naming the stranded clients before the restart is what keeps the breakage
+  // visible; the undo stays the user's to run.
+  // @ref LLP 0185#warn-do-not-detach [implements]: the finale names what it left attached and stops there
+  summary.attachedNotConfigured = await findAttachedNotConfiguredClients({
+    clientsPicked,
+    config,
+    env,
+    homeDir,
+  })
+  if (summary.attachedNotConfigured.length > 0) {
+    writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
+  }
+
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     try {
       const { restartServiceDaemon } = await import('../daemon/install.js')
@@ -1112,6 +1469,100 @@ export async function runPickerFinale(args) {
   }
 
   return summary
+}
+
+/**
+ * The plugin names the org's central layer declares, read-only and
+ * best-effort. A centrally named client is attached and reversed by the
+ * reconciler, not by the wizard, so it must never be counted as stranded by
+ * the local layer's picks. Any failure to read the layer degrades to "no
+ * central plugins", which can only cost an extra warning, never a wrong undo.
+ *
+ * Deliberately *not* filtered by `enabled`, unlike the local set the caller
+ * builds: what matters here is that the org named the plugin at all, because a
+ * name is what makes the attach the reconciler's to reverse. Adding the filter
+ * would hand the operator a detach for an org-owned client.
+ *
+ * @ref LLP 0185#scope [constrained-by]: a centrally named adapter is never counted stranded, whatever its enabled flag says
+ * @ref LLP 0031#central-layer-is-sacrosanct [constrained-by]: the central layer is read here, never written or interpreted beyond its plugin names
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<Set<string>>}
+ */
+async function readCentralPluginNames(env) {
+  try {
+    const { stateDir } = readObservabilityEnv(env)
+    const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
+    if (!centralPath) return new Set()
+    const loaded = await loadConfigFile(centralPath)
+    if (!loaded.ok) return new Set()
+    return new Set((loaded.config.plugins ?? []).map((entry) => entry.name))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * The clients this run leaves stranded: their settings still carry a HypAware
+ * attach marker, they are not among this run's picks, and neither the config
+ * the finale just wrote nor the org's central layer enables their adapter. The
+ * marker is read through the same descriptor-driven probe `hyp status` uses, so
+ * "still attached" means exactly what the status surface means by it.
+ *
+ * @param {{
+ *   clientsPicked: string[],
+ *   config: HypAwareV2Config,
+ *   env: NodeJS.ProcessEnv,
+ *   homeDir: string,
+ * }} args
+ * @returns {Promise<string[]>} stranded client names, in catalog order
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: the on-disk marker is the only evidence of a prior attach, so it is what the check reads
+ */
+export async function findAttachedNotConfiguredClients({ clientsPicked, config, env, homeDir }) {
+  if (!homeDir) return []
+  const picked = new Set(clientsPicked)
+  // `enabled: false` is what `hyp status` reads as "not active" when it builds
+  // the same set, and an entry left in the file with the switch off collects
+  // exactly as little as an absent one. Reading it as configured here would
+  // make the two surfaces disagree about the same config.
+  // @ref LLP 0185#not-configured-means-not-active [implements]: a disabled plugin entry strands its client exactly as an absent one does
+  const configured = new Set(
+    (config.plugins ?? []).filter((entry) => entry.enabled !== false).map((entry) => entry.name)
+  )
+  for (const name of await readCentralPluginNames(env)) configured.add(name)
+
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  /** @type {string[]} */
+  const stranded = []
+  for (const [clientName, descriptor] of descriptors) {
+    if (picked.has(clientName) || configured.has(descriptor.plugin)) continue
+    if (!descriptor.attachProbe) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    if (probe.attached) stranded.push(clientName)
+  }
+  return stranded
+}
+
+/**
+ * Name the stranded clients and the one command that clears each. The wizard
+ * says what it found and what to run; it does not run it, because rewriting a
+ * client's settings is not something a menu confirm asked for.
+ *
+ * A dry run carries the same tag the rest of the finale uses: the clients
+ * really are attached, but the config that strands them was not written.
+ *
+ * @param {{
+ *   clients: string[],
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   dryRun: boolean,
+ * }} args
+ */
+function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
+  stdout.write('\n')
+  stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
+  stdout.write('These tools still send their requests through the HypAware gateway,\n')
+  stdout.write('but this setup no longer collects them, so their requests can start\n')
+  stdout.write('failing. Point each one back at its provider with:\n')
+  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
 }
 
 /**

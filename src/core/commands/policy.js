@@ -398,7 +398,7 @@ function parsePolicyClientArgs(argv) {
  * best-effort: a broken config layer must not lock the user out of editing
  * their own opt-out store, so a resolution failure degrades to "provenance
  * unknown" (`layered: null`), which never blocks a write - only a proven
- * `'central'` classification does (LLP 0181 #locked); the resolver applies
+ * `'central'` classification does (LLP 0188 #locked); the resolver applies
  * the same exemption at build time, so a wrongly accepted entry is inert,
  * never a leak.
  *
@@ -426,20 +426,20 @@ async function resolveClientPolicyContext(ctx) {
 /**
  * `hyp policy client [<name>] [sync|local-only] [--json]`
  *
- * The per-client sibling of the directory verbs (LLP 0181): on an enrolled
+ * The per-client sibling of the directory verbs (LLP 0188): on an enrolled
  * machine every configured source syncs by default, and this verb edits the
  * machine-local opt-out store that keeps a client's rows local. With no
  * arguments it enumerates the store plus the current syncing/local-only
  * picture; with a name it reports that client's state; with a trailing
  * token it writes (`local-only` opts out, `sync` removes the opt-out,
  * idempotent both ways). A source the central config carries always syncs
- * and cannot be opted out (LLP 0181 #locked). Flipping back to `sync`
+ * and cannot be opted out (LLP 0188 #locked). Flipping back to `sync`
  * ships only future rows: withholding is drop-but-advance, so rows dropped
  * while opted out are never retroactively uploaded
- * (LLP 0181 #no-retroactive-ship) - the confirmation says so.
+ * (LLP 0188 #no-retroactive-ship) - the confirmation says so.
  *
- * @ref LLP 0181#opt-out [implements]: the post-onboarding CLI surface over the client-sync store
- * @ref LLP 0181#locked [implements]: a central-classified source is refused with the managed-by-your-fleet wording
+ * @ref LLP 0188#opt-out [implements]: the post-onboarding CLI surface over the client-sync store
+ * @ref LLP 0188#locked [implements]: a central-classified source is refused with the managed-by-your-fleet wording
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -536,7 +536,7 @@ export async function runPolicyClient(argv, ctx) {
     return reportUnreadableClientStore(ctx, err)
   }
   ctx.stdout.write(`${name}: sync\n`)
-  // @ref LLP 0181#no-retroactive-ship [implements]: the flip-back confirmation states the no-history-upload property so it reads as designed, not as a bug
+  // @ref LLP 0188#no-retroactive-ship [implements]: the flip-back confirmation states the no-history-upload property so it reads as designed, not as a bug
   ctx.stdout.write(`  future ${name} rows sync to your server; rows withheld while local-only are not uploaded\n`)
   return 0
 }
@@ -556,7 +556,7 @@ export async function runPolicyList(argv, ctx) {
     if (!(err instanceof LocalOnlyListUnreadableError)) throw err
     return reportUnreadableStore(ctx, err)
   }
-  // The per-client opt-out store (LLP 0181) is enumerated alongside the
+  // The per-client opt-out store (LLP 0188) is enumerated alongside the
   // directory entries: `list` answers "what have I marked on this machine",
   // and a client marking is exactly that. Additive: the `--json` byte-compat
   // guarantee binds `policy show --json` (LLP 0111 #show), not `list`.

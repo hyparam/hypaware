@@ -299,7 +299,7 @@ function nameServer(url, remotes) {
 async function readExclusions(stateDir) {
   try {
     const entries = await readLocalOnlyEntries({ stateDir })
-    // The per-client opt-out store (LLP 0181 #never-silent): clients kept
+    // The per-client opt-out store (LLP 0188 #never-silent): clients kept
     // local-only are named, not counted - the list is short and "openclaw"
     // tells the user something "1 client" does not.
     const clientEntries = (await readClientSyncEntries({ stateDir })) ?? []

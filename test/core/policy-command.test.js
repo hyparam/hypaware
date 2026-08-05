@@ -694,7 +694,7 @@ test('hyp policy (bare) renders group help listing set/show/unset/list', async (
   })
 })
 
-/* ------------------------------ policy client (LLP 0181) ------------------------------ */
+/* ------------------------------ policy client (LLP 0188) ------------------------------ */
 
 test('hyp policy client: empty store lists nothing opted out and names the store', async () => {
   await withSandbox(async ({ root, hypHome }) => {
@@ -727,7 +727,7 @@ test('hyp policy client <name> local-only writes the opt-out; show and list refl
     const unset = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
     assert.equal(unset.code, 0)
     assert.match(unset.stdout, /openclaw: sync/)
-    // @ref LLP 0181#no-retroactive-ship: the flip-back names the property
+    // @ref LLP 0188#no-retroactive-ship: the flip-back names the property
     assert.match(unset.stdout, /rows withheld while local-only are not uploaded/)
     assert.deepEqual(await readClientSyncEntries({ stateDir }), [])
 
@@ -746,7 +746,7 @@ test('hyp policy client with an unknown name exits 2 and names known ids', async
   })
 })
 
-test('hyp policy client refuses to opt out a central-configured source (LLP 0181 #locked)', async () => {
+test('hyp policy client refuses to opt out a central-configured source (LLP 0188 #locked)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
     const seedPath = centralSeedPath(stateDir)

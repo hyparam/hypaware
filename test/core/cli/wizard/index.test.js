@@ -42,6 +42,21 @@ function emptyCatalog() {
   })
 }
 
+/**
+ * Write a central layer (the join seed slot, LLP 0031) under a wizard
+ * home, so the locked-set computation resolves it from disk exactly as it
+ * does on a real enrolled machine.
+ *
+ * @param {string} home
+ * @param {string[]} plugins
+ */
+async function seedCentralLayer(home, plugins) {
+  const control = path.join(home, '.hyp', 'hypaware', 'config-control')
+  await fs.mkdir(control, { recursive: true })
+  const config = { version: 2, plugins: plugins.map((name) => ({ name, enabled: true, config: {} })) }
+  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify(config))
+}
+
 /** A completed pick result the finale and configure stubs can consume. */
 function pickResult(over = {}) {
   return /** @type {any} */ ({
@@ -162,9 +177,9 @@ test('runInitWizard: a managed machine on the local pathway keeps the 90-day def
 })
 
 // A managed machine choosing local is asked once whether it means
-// "disconnect" or "adjust while staying connected" (LLP 0185
+// "disconnect" or "adjust while staying connected" (LLP 0190
 // #fork-disconnect). Yes runs hyp leave; no and cancel keep enrollment.
-// @ref LLP 0185#fork-disconnect [tests]:
+// @ref LLP 0190#fork-disconnect [tests]:
 
 test('runInitWizard: managed + local + stay connected keeps the locked rows and the sync lane', async () => {
   let leaveRan = false
@@ -248,9 +263,30 @@ test('runInitWizard: a managed machine can still re-join a team from the gate', 
   assert.equal(result.pathway, 'team')
 })
 
+// A managed machine whose merged config no longer validates falls to the
+// first-run path, but the central layer on disk still owns its rows. The
+// locked set has to be computed there too, or the picker offers the org's
+// rows for free composition into the local layer.
+// @ref LLP 0129#join-before-picker [tests]:
+test('runInitWizard: a managed first run locks the org rows from the on-disk central layer', async () => {
+  const home = await tmpHome()
+  await seedCentralLayer(home, ['@hypaware/claude'])
+  const catalog = emptyCatalog()
+  catalog.pickerDescriptors.set('claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude' })
+  const { opts } = wizardOpts(home, {
+    catalog,
+    gate: async () => ({ action: 'first-run', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(opts._pickOpts.locked, ['claude'])
+  assert.equal(opts._pickOpts.managed, true)
+})
+
 // --- the fork/join loop ---
 
-// --- the sync-scope step (LLP 0181 #never-silent) ---
+// --- the sync-scope step (LLP 0188 #never-silent) ---
 
 test('runInitWizard: the team pathway runs the sync-scope step between pick and configure', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
@@ -427,11 +463,11 @@ test('runInitWizard: an overwrite refusal returns the pick phase exit 1', async 
   assert.ok(!calls.includes('finale'))
 })
 
-// --- deferred config commit (LLP 0185 #commit-point) ---
+// --- deferred config commit (LLP 0190 #commit-point) ---
 // The pick lane composes; the orchestrator commits after the sync lane, so
 // the overwrite confirm is the last question and a cancel at the sync lane
 // leaves the existing config untouched.
-// @ref LLP 0185#commit-point [tests]:
+// @ref LLP 0190#commit-point [tests]:
 
 test('runInitWizard: a pending config lands on disk after the sync lane, before configure', async () => {
   const home = await tmpHome()
@@ -487,7 +523,7 @@ test('runInitWizard: a scripted pick result without configPending is never commi
 // machine; the wizard cannot roll that back, so it must say what state the
 // machine is in (default-sync plus the standing control) instead of exiting
 // silently. Narration only, never another prompt.
-// @ref LLP 0185#abort-narration [tests]:
+// @ref LLP 0190#abort-narration [tests]:
 
 test('runInitWizard: a team-path overwrite refusal narrates the enrolled state and the deadline', async () => {
   const home = await tmpHome()

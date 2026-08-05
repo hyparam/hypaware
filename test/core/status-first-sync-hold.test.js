@@ -103,7 +103,11 @@ test('a corrupt marker fails open (absent, no diagnostic, no degrade) - LLP 0101
   await fs.mkdir(path.dirname(markerPath), { recursive: true })
   await fs.writeFile(markerPath, '{ not valid json', 'utf8')
 
-  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  // An empty `homeDir`: this assertion is that the *diagnostics list* is
+  // untouched, so the client probes must read a home with no attach markers.
+  // Inheriting the runner's real `$HOME` made the assertion depend on whether
+  // whoever ran the suite happens to have HypAware attached.
+  const report = await collectHypAwareStatus({ env: env(hypHome), homeDir: hypHome })
   assert.equal(report.firstSyncHoldDeadline, null)
   assert.equal(report.overall, 'healthy', 'a corrupt marker is timing-only; it never degrades overall (fail-open)')
   assert.deepEqual(report.diagnostics, [], 'a corrupt hold marker mints no diagnostic - it is timing-only, not a privacy signal')

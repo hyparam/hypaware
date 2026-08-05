@@ -49,7 +49,7 @@ export class ClientSyncListUnreadableError extends Error {
  * rebuilds and `hyp leave`, never a repo dotfile and never layered/central
  * config.
  *
- * @ref LLP 0181#opt-out [implements]: the opt-out list is one machine-local file under HYP_HOME state
+ * @ref LLP 0188#opt-out [implements]: the opt-out list is one machine-local file under HYP_HOME state
  * @param {string} stateDir `readObservabilityEnv(env).stateDir`
  * @returns {string}
  */
@@ -98,14 +98,14 @@ function parseListShape(parsed) {
 
 /**
  * Read the machine-local client-sync opt-out list. A missing file returns
- * `null`, NOT `[]`: absence is the LLP 0181 migration marker (a machine that
+ * `null`, NOT `[]`: absence is the LLP 0188 migration marker (a machine that
  * enrolled before the default-sync flip has no file, and the boot migration
  * materializes its derived withheld set), so callers must be able to tell
  * "never stamped" from "stamped, nothing opted out". A present-but-unreadable
  * or unparseable file throws {@link ClientSyncListUnreadableError} rather
  * than silently resolving to empty.
  *
- * @ref LLP 0181#migration [implements]: store absence is the migration marker, so absent reads as null, never as empty
+ * @ref LLP 0188#migration [implements]: store absence is the migration marker, so absent reads as null, never as empty
  * @param {{ stateDir: string, fs?: typeof fsp }} opts
  * @returns {Promise<ClientSyncEntry[] | null>}
  */
@@ -165,9 +165,9 @@ export function optedOutClientSourceIds(entries) {
  * call wrote it. Enrollment calls this before writing the central seed so a
  * freshly enrolled machine is marked new-era (default-sync) before any boot
  * can see a central layer with no store and run the upgrade migration
- * (LLP 0181#migration ordering).
+ * (LLP 0188#migration ordering).
  *
- * @ref LLP 0181#migration [implements]: enrollment seeds the empty store before the central seed exists
+ * @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed exists
  * @param {{ stateDir: string, fs?: typeof fsp }} opts
  * @returns {Promise<boolean>} true when this call created the store
  */

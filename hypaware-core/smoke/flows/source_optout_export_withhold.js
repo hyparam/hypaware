@@ -33,7 +33,7 @@ const COLUMNS = [
 ]
 
 /**
- * Hermetic smoke for LLP 0181: on an enrolled machine every source syncs by
+ * Hermetic smoke for LLP 0188: on an enrolled machine every source syncs by
  * default, a `hyp policy client <name> local-only` opt-out withholds that
  * source's FUTURE rows at the export seam (drop-but-advance), and flipping
  * back to sync never retroactively ships the rows withheld in between.
@@ -46,12 +46,12 @@ const COLUMNS = [
  * `client_name` as its attribution column - the same wiring `bootKernel`
  * performs, minus the daemon.
  *
- * @ref LLP 0181#rule [tests]: tick 1 ships BOTH clients' rows with nothing
+ * @ref LLP 0188#rule [tests]: tick 1 ships BOTH clients' rows with nothing
  *   opted out - the default-sync reversal's headline assertion.
- * @ref LLP 0181#opt-out [tests]: after `hyp policy client openclaw
+ * @ref LLP 0188#opt-out [tests]: after `hyp policy client openclaw
  *   local-only`, tick 2 ships only the other client's new rows; the live
  *   (TTL-fresh) store read needs no resolver rebuild.
- * @ref LLP 0181#no-retroactive-ship [tests]: flipping back to sync ships
+ * @ref LLP 0188#no-retroactive-ship [tests]: flipping back to sync ships
  *   nothing on the next tick - the watermark already advanced across the
  *   withheld rows.
  *

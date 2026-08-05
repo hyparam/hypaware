@@ -307,7 +307,7 @@ test('the plan counts the directories being withheld', async () => {
   assert.match(stdout.text, /withholding 2 directories marked local-only, 1 directory marked ignore/)
 })
 
-test('the plan names the clients kept local-only (LLP 0181 #never-silent)', async () => {
+test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
   const hypHome = await makeHome('client-exclusions')
   await writeClientSyncEntries({
     stateDir: stateDir(hypHome),

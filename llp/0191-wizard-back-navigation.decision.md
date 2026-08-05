@@ -1,14 +1,14 @@
-# LLP 0186: The wizard steps back; escape means back where back exists
+# LLP 0191: The wizard steps back; escape means back where back exists
 
 **Type:** Decision
 **Status:** Draft
 **Systems:** Onboarding, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
-**Related:** LLP 0135 (#orchestration, #progress: the wizard this adds navigation to), LLP 0185 (#pick-gate, #sync-gate, #commit-point: the gate/menu screens and the boundary back cannot cross), LLP 0129 (#failed-join-returns-to-fork: the pre-existing fork re-entry), LLP 0063 (D3: the sign-in is the accepting act), LLP 0011 (autodetect seeds, never forces)
+**Related:** LLP 0135 (#orchestration, #progress: the wizard this adds navigation to), LLP 0190 (#pick-gate, #sync-gate, #commit-point: the gate/menu screens and the boundary back cannot cross), LLP 0129 (#failed-join-returns-to-fork: the pre-existing fork re-entry), LLP 0063 (D3: the sign-in is the accepting act), LLP 0011 (autodetect seeds, never forces)
 
 > Extends the prompt flow of [LLP 0135](./0135-install-experience-overhaul.design.md)
-> and the gate screens of [LLP 0185](./0185-wizard-defaults-gate.decision.md).
+> and the gate screens of [LLP 0190](./0190-wizard-defaults-gate.decision.md).
 > What the lanes ask and write is untouched; what changes is that an
 > attended run can move backwards through the questions before anything
 > commits.
@@ -51,7 +51,7 @@ through the fork that lands on the other pathway simply starts that
 pathway's count, exactly as a failed join's retry always has.
 
 <a id="lane-loops"></a>**Inside a lane, the menu backs to its gate.**
-Both gated lanes (pick and sync, LLP 0185) treat gate and menu as two
+Both gated lanes (pick and sync, LLP 0190) treat gate and menu as two
 screens of one question: escape at the menu returns to the gate
 whenever the gate was shown, and only the lane's *first* screen
 propagates `back` out to the orchestrator - and only when the
@@ -79,15 +79,15 @@ choosing "Join a team" again prints "Already signed in - continuing."
 instead of re-opening the login, and choosing "Local" keeps the org's
 locked rows and the managed sync lane, exactly like a managed machine
 reconfiguring down the local path (LLP 0182). Every enrolled-state
-narration (the abort narration of LLP 0185 #abort-narration, the
+narration (the abort narration of LLP 0190 #abort-narration, the
 closing privacy narration) keys on the remembered join rather than the
 final pathway, so a join-back-local run still hears what its enrollment
 means. The one true exit remains the fork's explicit disconnect
-(LLP 0185 #fork-disconnect), which runs `hyp leave` and therefore also
+(LLP 0190 #fork-disconnect), which runs `hyp leave` and therefore also
 clears the remembered join.
 
 **Back-navigation ends at the commit point.** Once the last question
-lane confirms, the wizard commits the config (LLP 0185 #commit-point)
+lane confirms, the wizard commits the config (LLP 0190 #commit-point)
 and everything after it - configure, finale, first look - acts rather
 than asks. Those steps run commands and edit files; a "back" there
 would be an undo feature wearing a navigation key, so it is not
@@ -98,7 +98,7 @@ Rejected: making escape mean back globally (outside the wizard escape
 has always meant cancel, and silently changing that in every prompt
 would turn a habit into data loss); a visible "Back" row in the menus
 (a navigation control is chrome, not a choice - it would compete with
-the real options and break the bare-enter defaults of LLP 0185);
+the real options and break the bare-enter defaults of LLP 0190);
 preserving half-toggled menu state across a back (a dismissed dialog
 that half-applies is worse than one that predictably discards).
 
@@ -118,7 +118,7 @@ that half-applies is worse than one that predictably discards).
 
 ## References
 
-- LLP 0135, LLP 0185, LLP 0129, LLP 0063, LLP 0182, LLP 0011
+- LLP 0135, LLP 0190, LLP 0129, LLP 0063, LLP 0182, LLP 0011
 - `src/core/cli/tui/keypress.js` (escape splits on `allowBack`),
   `src/core/cli/tui/runtime.js` (`PromptBackRequestedError`),
   `src/core/cli/tui/render.js` (`esc back` hints),

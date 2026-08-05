@@ -4,7 +4,7 @@
 import process from 'node:process'
 
 import { runFlow } from './lib/harness.js'
-// @ref LLP 0183#choke-point [implements]: the standalone smoke entry colours like the CLI does
+// @ref LLP 0189#choke-point [implements]: the standalone smoke entry colours like the CLI does
 import { ANSI, colorizeStderr, paint } from '../../src/core/cli/style.js'
 import { useColor } from '../../src/core/cli/stdio.js'
 

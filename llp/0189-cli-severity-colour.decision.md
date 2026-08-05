@@ -1,4 +1,4 @@
-# LLP 0183: CLI severity is coloured at the stream, not at the write site
+# LLP 0189: CLI severity is coloured at the stream, not at the write site
 
 **Type:** Decision
 **Status:** Accepted

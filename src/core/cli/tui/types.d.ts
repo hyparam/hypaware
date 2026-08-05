@@ -42,7 +42,7 @@ export interface PromptChrome {
   progress?: string
   /**
    * Optional context lines rendered verbatim between the title and the
-   * hint (LLP 0185): the wizard's defaults gates list what they are about
+   * hint (LLP 0190): the wizard's defaults gates list what they are about
    * to accept here, one entry per line, instead of cramming the list into
    * the title. Rendered inside the frame so `clearOnResolve` erases the
    * list with the prompt. Callers own any indentation. An omitted field
@@ -50,7 +50,7 @@ export interface PromptChrome {
    */
   items?: string[]
   /**
-   * Opt-in back-navigation (LLP 0186): escape settles the prompt as
+   * Opt-in back-navigation (LLP 0191): escape settles the prompt as
    * `backed` (the runtime throws `PromptBackRequestedError`) instead of
    * cancelling, and the default hint reads `esc back`. Ctrl+C cancels
    * regardless. Only the wizard's step prompts set this; everywhere else

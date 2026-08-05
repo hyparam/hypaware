@@ -256,7 +256,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
       const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
-      // @ref LLP 0181#opt-out [implements]: same not-bypassable-by-projection
+      // @ref LLP 0188#opt-out [implements]: same not-bypassable-by-projection
       // guarantee as `cwd` above, but the forced column is dataset-specific
       // (`attributionColumnFor`) rather than a fixed name; `undefined` means
       // this dataset declared no `attribution_column`, so nothing is forced
@@ -264,7 +264,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
       const forceAttribution =
         attributionColumn !== undefined && projected !== undefined && !projected.includes(attributionColumn)
-      // @ref LLP 0181#enforcement-scope [implements]: a dataset with no
+      // @ref LLP 0188#enforcement-scope [implements]: a dataset with no
       // attribution column, all of whose contributing sources are opted out,
       // is withheld wholesale; per-row filtering can never fire for it, so
       // this dataset-scoped verdict is the only way its opt-out is honored.
@@ -313,7 +313,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
-        // @ref LLP 0181#opt-out [implements]: a row attributed to an
+        // @ref LLP 0188#opt-out [implements]: a row attributed to an
         // opted-out picker source on a machine with a central layer is
         // dropped from the payload here, same drop-but-advance continuation
         // semantics as the `cwd` filter above, so a sink's watermark still

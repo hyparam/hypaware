@@ -12,13 +12,13 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { clientSyncListPath, writeClientSyncEntries } from '../../src/core/usage-policy/client_sync.js'
 
-// On an enrolled host every configured source syncs by default (LLP 0181
+// On an enrolled host every configured source syncs by default (LLP 0188
 // #rule); only the machine-local opt-out store keeps one local, and `hyp
 // status` must show the syncing / local-only split so that withholding is
 // never a silent state. The split covers every configured picker source
 // (a hermes opt-out is visible, not only attach-probed clients), and a
-// central-configured source is never local-only (LLP 0181 #locked).
-// @ref LLP 0181#never-silent [tests]:
+// central-configured source is never local-only (LLP 0188 #locked).
+// @ref LLP 0188#never-silent [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-client-sync-'))
@@ -75,7 +75,7 @@ test('an opted-out local source shows local-only; a stale central opt-out entry 
     stateDir: stateRoot,
     entries: [
       { source: 'codex', class: 'local-only' },
-      // Stale entry for an org-managed source: never local-only (LLP 0181 #locked).
+      // Stale entry for an org-managed source: never local-only (LLP 0188 #locked).
       { source: 'claude', class: 'local-only' },
     ],
   })

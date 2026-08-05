@@ -123,6 +123,8 @@ export async function legacyForkPrompt(opts, options) {
  *
  * A missing or invalid config is the first-run path, not the gate: the
  * caller falls straight through to `runWizardFork` (no pathway preset).
+ * `managed` is still reported truthfully on that path, so a machine with
+ * a central layer keeps its org rows locked (see the derivation below).
  * Once a valid config exists, every machine gets the same `Reconfigure`,
  * which re-enters the wizard at the fork exactly as a first run does.
  * `managed` (the merged config carries a central layer, LLP 0031) is
@@ -146,12 +148,21 @@ export async function evaluateReturningGate(opts) {
   const collectStatus = opts.collectStatus ?? collectHypAwareStatus
   const report = await collectStatus(/** @type {CollectStatusOptions} */ ({ env: opts.env, runtime: opts.runtime }))
 
+  // Read `managed` before the first-run early return: a central layer on
+  // disk is a property of the machine (LLP 0031), not of whether the
+  // merged config currently validates. A central layer that stops merging
+  // cleanly (a server-side config change, client/server schema drift)
+  // still owns its rows, and the caller reads `managed` to decide whether
+  // to compute the locked set at all. Reporting `false` here left the
+  // org's rows editable, so picking one composed it into the local layer.
+  // @ref LLP 0129#join-before-picker [implements]: central rows lock whenever a central layer exists, invalid merge included
+  const managed = !!(report.layered && report.layered.hasCentral)
+
   if (!report.configExists || !report.configValid) {
-    log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action: 'first-run', managed: false })
-    return { action: 'first-run', managed: false, report }
+    log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action: 'first-run', managed })
+    return { action: 'first-run', managed, report }
   }
 
-  const managed = !!(report.layered && report.layered.hasCentral)
   renderConfigSummary({ report, locked: managed, stdout: opts.stdout, env: opts.env })
   const options = buildReturningGateOptions()
   const action = await promptReturningGateChoice(opts, options)
@@ -266,7 +277,7 @@ export function renderConfigSummary({ report, locked, stdout, env }) {
  * (not the sink list) is what a returning user actually needs to
  * recognise; a solo host has no split and renders the plain list.
  *
- * @ref LLP 0181#never-silent [implements]: the gate summary marks each
+ * @ref LLP 0188#never-silent [implements]: the gate summary marks each
  *   client synced vs local only, so an opted-out client on an enrolled
  *   machine is never silent
  *
@@ -330,7 +341,7 @@ const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
  * line, and resolves to `quit` on an empty, unparseable, or out-of-range
  * answer so a non-TTY caller never reconfigures by accident. With
  * `allowBack`, a `b` answer resolves to `back` (the readline form of the
- * TUI's escape, LLP 0186); any other stray answer still quits.
+ * TUI's escape, LLP 0191); any other stray answer still quits.
  *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: RunWizardForkOptions['stdout'] }} opts
  * @param {ConfiguredMenuOption[]} options

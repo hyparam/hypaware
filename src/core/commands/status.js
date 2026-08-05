@@ -366,7 +366,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  // Never-silent client sync split (LLP 0181 #never-silent): on an enrolled
+  // Never-silent client sync split (LLP 0188 #never-silent): on an enrolled
   // host the configured sources divide into what forwards (`syncing`, the
   // default for everything) and what the user opted out (`local-only`), so
   // a withheld source is never invisible. Null (a solo host) leaves the V1
@@ -474,6 +474,17 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'refused') {
+        // The repair hint is unconditional, unlike the reason bits it follows:
+        // the hint is the whole point of the state (a refusal is terminal until
+        // the user acts), so a marker that carries no readable `reason` must
+        // still say what to do rather than render a bare `[refused]`, which is
+        // the attention signal without the action.
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        const repair = `run 'hyp attach ${a.requestKey}' after fixing the cause`
+        detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }

@@ -47,7 +47,7 @@ const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} *
  * uncommitted pathway (the fork has not resolved, or the run is
  * non-interactive) has no itinerary and therefore no denominator.
  *
- * The `sync` lane (LLP 0181 #never-silent) runs on every enrolled run:
+ * The `sync` lane (LLP 0188 #never-silent) runs on every enrolled run:
  * always on the team pathway (the run that just enrolled), and on the
  * local pathway only for a managed machine reconfiguring through it
  * (LLP 0182: `managed` is an input, not a pathway). `managed` is known

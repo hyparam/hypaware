@@ -17,7 +17,7 @@ import type {
 
 /**
  * The wizard's top-level pathway choice (LLP 0129 #fork). `quit` is the
- * safe default on a bare enter or a cancelled prompt. `back` (LLP 0186)
+ * safe default on a bare enter or a cancelled prompt. `back` (LLP 0191)
  * returns to the returning gate and is only reachable when the fork was
  * asked with `allowBack` (a reconfigure run; a first run has no screen
  * before the fork).
@@ -42,12 +42,12 @@ export type WizardPathway = 'team' | 'local'
 export type WizardStepName = 'join' | 'pick' | 'sync' | 'finale'
 
 /**
- * The sync-scope step (LLP 0181 #never-silent, LLP 0185 #sync-gate): after
+ * The sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate): after
  * the picker on every enrolled run, a defaults gate stating what will sync,
  * then - on request - a multiselect over the non-locked picked sources
  * where checked means "syncs" and unchecked keeps a source local-only.
  * Locked (org-configured) sources never appear: they always sync
- * (LLP 0181 #locked).
+ * (LLP 0188 #locked).
  */
 export interface RunWizardSyncScopeOptions {
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
@@ -57,16 +57,16 @@ export interface RunWizardSyncScopeOptions {
   /** The picked, locked-filtered descriptors (the pick result's `descriptors`). */
   candidates: PickerDescriptor[]
   /**
-   * The org's locked (central-layer) descriptors. Always-sync (LLP 0181
+   * The org's locked (central-layer) descriptors. Always-sync (LLP 0188
    * #locked) and never editable here, but listed - on the gate and as
    * checked, disabled menu rows - so "these will sync" states the whole
-   * picture, not only the editable slice (LLP 0185 #sync-gate).
+   * picture, not only the editable slice (LLP 0190 #sync-gate).
    */
   locked?: PickerDescriptor[]
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**
-   * Offer back-navigation out of the lane (LLP 0186): escape at the gate
+   * Offer back-navigation out of the lane (LLP 0191): escape at the gate
    * returns `back: true` to the orchestrator (which re-runs the pick
    * lane). The menu's own back always returns to the gate regardless.
    */
@@ -80,7 +80,7 @@ export interface RunWizardSyncScopeOptions {
 export interface WizardSyncScopeResult {
   /** The user cancelled at the prompt; the wizard exits 130. */
   cancelled?: boolean
-  /** The user stepped back out of the lane (LLP 0186); nothing written. */
+  /** The user stepped back out of the lane (LLP 0191); nothing written. */
   back?: true
   /** Candidate source ids the user opted out (kept local-only). */
   optedOut: string[]
@@ -94,7 +94,7 @@ export interface RunWizardForkOptions {
   stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
-   * Offer back-navigation (LLP 0186): escape (or `b` on the readline
+   * Offer back-navigation (LLP 0191): escape (or `b` on the readline
    * fallback) resolves to `'back'`. Set only when a screen precedes the
    * fork - the returning gate on a reconfigure run.
    */
@@ -111,7 +111,12 @@ export type ReturningGateAction = 'first-run' | 'quit' | 'status' | 'reconfigure
 
 export interface ReturningGateResult {
   action: ReturningGateAction
-  /** True when the merged config carries a central layer (LLP 0031). */
+  /**
+   * True when a central layer is on disk (LLP 0031), independently of
+   * whether the merged config currently exists or validates: enrollment
+   * is a property of the machine, and the org's rows stay locked even on
+   * the `first-run` path a broken merge falls to.
+   */
   managed: boolean
   report: HypAwareStatusReport
 }
@@ -331,7 +336,7 @@ export interface RunWizardPickOptions {
   /** Override the source prompt (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
   /**
-   * Override the defaults gate (LLP 0185 #pick-gate) shown before the
+   * Override the defaults gate (LLP 0190 #pick-gate) shown before the
    * source menu when detection or the locked set yields a default;
    * defaults to the confirm-select factory (tests pre-bake the choice).
    */
@@ -352,7 +357,7 @@ export interface RunWizardPickOptions {
    */
   retentionDefault?: number
   /**
-   * Offer back-navigation out of the lane (LLP 0186): escape (or `b`) at
+   * Offer back-navigation out of the lane (LLP 0191): escape (or `b`) at
    * the lane's first screen returns `back: true` to the orchestrator,
    * which re-presents the fork. The menu's back returns to the defaults
    * gate whenever the gate was shown, regardless of this flag.
@@ -360,7 +365,7 @@ export interface RunWizardPickOptions {
   allowBack?: boolean
   /**
    * Seed the checked rows with a previous run's confirmed selection
-   * (LLP 0186): set when the user steps back into the pick lane from a
+   * (LLP 0191): set when the user steps back into the pick lane from a
    * later step, so their answer is preserved instead of re-derived from
    * detection. Locked rows stay checked either way; detection is skipped
    * entirely when this is present.
@@ -375,7 +380,7 @@ export interface RunWizardPickOptions {
   /**
    * Skip the overwrite guard and the config write, returning the composed
    * config with `configPending` set. The wizard orchestrator sets this and
-   * commits via `commitWizardPickedConfig` after the sync lane (LLP 0185
+   * commits via `commitWizardPickedConfig` after the sync lane (LLP 0190
    * #commit-point), so the overwrite confirm is the last question and a
    * cancel at the sync lane leaves the existing config untouched.
    */
@@ -458,7 +463,7 @@ export interface RunInitWizardOptions {
   /**
    * Override the fleet teardown the managed-local disconnect confirm
    * invokes (tests). Defaults to `ctx.commands.run('leave', [])`, the real
-   * `hyp leave` (LLP 0185 #fork-disconnect).
+   * `hyp leave` (LLP 0190 #fork-disconnect).
    */
   leave?: () => Promise<number>
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
@@ -498,7 +503,7 @@ export interface WizardPickResult {
   /** True when the user cancelled at a prompt (exitCode 130). */
   cancelled?: boolean
   /**
-   * The user stepped back out of the lane (LLP 0186). Nothing was
+   * The user stepped back out of the lane (LLP 0191). Nothing was
    * composed or written; the orchestrator re-presents the previous step.
    */
   back?: true
@@ -516,7 +521,7 @@ export interface WizardPickResult {
   /**
    * Set on a `deferWrite` run: `config` is composed but not on disk yet;
    * the caller owns the commit (guard + write) before anything reads the
-   * config file (LLP 0185 #commit-point).
+   * config file (LLP 0190 #commit-point).
    */
   configPending?: true
 }

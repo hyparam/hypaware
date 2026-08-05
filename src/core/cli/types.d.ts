@@ -24,7 +24,7 @@ export interface ConfirmSelectOption {
 
 /**
  * The gate question a wizard lane asks before opening its full menu
- * (LLP 0185): a single-select between accepting the stated defaults and
+ * (LLP 0190): a single-select between accepting the stated defaults and
  * opening the menu to change them. Renders as a TUI select on a real TTY
  * and as a numbered readline fallback elsewhere; a bare enter takes
  * `default` (the first option when unset), so accepting the defaults is
@@ -44,7 +44,7 @@ export interface ConfirmSelectQuestion {
   /** Value returned on a bare enter; defaults to the first option. */
   default?: string
   /**
-   * Back-navigation opt-in (LLP 0186): the TUI select's escape and the
+   * Back-navigation opt-in (LLP 0191): the TUI select's escape and the
    * readline fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling, returning the user to the previous screen.
    * Only wizard lanes with a screen behind them set this.
@@ -112,7 +112,7 @@ export interface WalkthroughQuestion {
   options: WalkthroughOption[]
   bounds?: { min?: number; max?: number }
   /**
-   * Back-navigation opt-in (LLP 0186): the TUI multiselect's escape and
+   * Back-navigation opt-in (LLP 0191): the TUI multiselect's escape and
    * the numbered fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling. Set only by wizard lanes that have a screen
    * to return to; `runPickerWalkthrough` never sets it.
@@ -289,6 +289,14 @@ export interface FinaleSummary {
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
+  /**
+   * Clients still carrying a HypAware attach marker that this run's config no
+   * longer enables: the state an unchecked-on-re-run client is left in. The
+   * finale names them and stops there (LLP 0185); the detach stays the user's
+   * to run. Optional so a scripted finale runner (tests, the wizard's
+   * injectable seam) need not synthesize it.
+   */
+  attachedNotConfigured?: string[]
 }
 
 export interface PickerWalkthroughResult {

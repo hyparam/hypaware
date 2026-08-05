@@ -17,7 +17,7 @@
 
 import { executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
-// @ref LLP 0183#palette [implements]: one ANSI table for the whole CLI
+// @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
 import { ANSI, paint } from '../cli/style.js'
 
 /** The dataset both overview queries read. Absent, there is nothing to show. */

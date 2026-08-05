@@ -54,7 +54,7 @@ export {
   LocalOnlyListUnreadableError,
   LOCAL_ONLY_LIST_UNREADABLE_ERROR_KIND,
 } from './local_only.js'
-// The machine-local per-client sync opt-out list (LLP 0181): on an enrolled
+// The machine-local per-client sync opt-out list (LLP 0188): on an enrolled
 // machine every configured source syncs by default, and this store lists the
 // sources the user keeps local. Absence of the file is the upgrade-migration
 // marker (read returns null, never []); the export-seam resolver reads it

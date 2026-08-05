@@ -7,7 +7,7 @@ import process from 'node:process'
 // are pure - no observability, no HYP_HOME, nothing the `__smoke_internal`
 // branch below is careful to load late. Everything else here stays a lazy
 // dynamic import.
-// @ref LLP 0183#choke-point [implements]: the entry's own diagnostics get the same colouring dispatch gives commands
+// @ref LLP 0189#choke-point [implements]: the entry's own diagnostics get the same colouring dispatch gives commands
 import { ANSI, colorizeStderr, paint } from '../src/core/cli/style.js'
 import { useColor } from '../src/core/cli/stdio.js'
 

@@ -13,7 +13,7 @@
 > learns **source-scoped** withholding alongside its directory-scoped
 > classes.
 
-> **Superseded-by [LLP 0181](./0181-enrolled-default-sync-with-client-optout.decision.md):**
+> **Superseded-by [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md):**
 > the default flips. Local additions on an enrolled machine now sync
 > unless the user opts them out per client; the per-item toggle this
 > decision rejected is the new mechanism, and the previously derived

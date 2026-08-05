@@ -173,13 +173,13 @@ export async function bootKernel(opts = {}) {
       // The kernel runtime (and its storage service) is built here, after
       // the catalog and layered config are known, rather than at the top of
       // this function: `sourceWithholdResolver` needs both to classify each
-      // picker source's provenance (LLP 0181), and nothing before this
+      // picker source's provenance (LLP 0188), and nothing before this
       // point reads `runtime`. The migration runs first: both the daemon
       // and the CLI boot through here, so the first invocation after the
       // default-sync upgrade materializes the pre-0181 withheld set before
       // any export can read the store.
-      // @ref LLP 0181#migration [implements]: boot materializes the pre-0181 derived withheld set before building the resolver
-      // @ref LLP 0181#opt-out [implements]: boot builds the resolver from the very catalog + merged config this boot just resolved, over the live opt-out store
+      // @ref LLP 0188#migration [implements]: boot materializes the pre-0181 derived withheld set before building the resolver
+      // @ref LLP 0188#opt-out [implements]: boot builds the resolver from the very catalog + merged config this boot just resolved, over the live opt-out store
       await ensureClientSyncMigration({ catalog, layered: merged, stateDir: stateRoot })
       const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
       const runtime = createKernelRuntime({
@@ -196,12 +196,23 @@ export async function bootKernel(opts = {}) {
       // bundled skeleton. Excluded plugins are in the pool so they activate
       // when named in config or an init preset, the allowlist only governs
       // default activation, not discoverability.
-      const { installedNames, selected, selectedManifests } = selectBootPlugins({
+      const { installedNames, pool, selected, selectedManifests } = selectBootPlugins({
         discovered,
         installed,
         config,
         bootProfile,
       })
+
+      // Plugins this boot found a manifest for but whose profile did not
+      // select: the profile never gave them a chance to activate. `skipped`
+      // below cannot answer that question for callers, since it only walks
+      // `discovered.loaded` and so omits the V1-excluded bundled plugins
+      // (`@hypaware/central`, …) that `all-bundled`/`all-available` drop even
+      // when the config names them. Dispatch reads this to tell a profile
+      // artifact apart from a config defect when a sink fails to materialize.
+      const withheldByProfile = pool
+        .map((m) => /** @type {PluginName} */ (m.manifest.name))
+        .filter((name) => !selected.has(name))
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -250,6 +261,7 @@ export async function bootKernel(opts = {}) {
           mode,
           runId,
           skipped,
+          withheldByProfile,
           clientDescriptors: catalog.clientDescriptors,
         }
       }
@@ -301,6 +313,7 @@ export async function bootKernel(opts = {}) {
         mode,
         runId,
         skipped,
+        withheldByProfile,
         clientDescriptors: catalog.clientDescriptors,
       }
     },

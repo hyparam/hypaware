@@ -12,6 +12,8 @@ import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   buildWalkthroughClientDescriptorMap,
   composePickerConfig,
+  configuredExportChoice,
+  configuredPickerSources,
   defaultConfirmSelectPromptFactory,
   defaultOverwriteConfirmFactory,
   defaultPickerDetect,
@@ -43,11 +45,13 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
  * `PICKER_SOURCES` table, and understands central-layer-locked rows. When
  * detection or the locked set yields a default selection, a defaults gate
- * (LLP 0185 #pick-gate) states it first and a bare enter accepts it; the
+ * (LLP 0190 #pick-gate) states it first and a bare enter accepts it; the
  * full menu opens only on request.
  *
- * A row's initial checked state is `detected.has(id) || locked.includes(id)`.
- * A locked id renders `disabled: true` with the `· managed by your fleet`
+ * A row's initial checked state is `locked.includes(id)`, then whatever the
+ * local config on disk already collects, and only on a first run (no config
+ * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
+ * `· managed by your fleet`
  * suffix and is filtered out of the returned sources before composition: it
  * is already in the central layer, so composing it again into the local
  * layer would be the exact collision join-before-pick exists to avoid
@@ -65,8 +69,15 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * `interactive = !opts.picks` split so every existing non-interactive picker
  * test keeps its shape.
  *
+ * On a reconfigure the local config already on disk is read first and is
+ * what the phase starts from: the rows it collects, the retention window it
+ * carries, and the export destination it expresses (LLP 0183). The wizard
+ * asks about none of those three, so re-deriving them would silently
+ * discard answers the user gave on a previous run.
+ *
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
+ * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -87,8 +98,23 @@ export async function runWizardPick(opts) {
   const lockedSources = (opts.locked ?? []).filter((id) => descriptors.has(id))
   const lockedSet = new Set(lockedSources)
 
-  // Interactive only: detection seeds the pre-checked boxes. Best-effort -
-  // a detector failure leaves the set empty rather than blocking onboarding.
+  const obsEnv = readObservabilityEnv(env)
+  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
+
+  // Interactive only: the local config this run replaces. Reading it up
+  // front is what makes the phase a reconfigure rather than a fresh compose
+  // that happens to land on an occupied path. Non-interactive callers
+  // (`--yes`, presets, `--from-file`) state every input on the command line,
+  // so they keep composing from scratch and their output stays byte-identical.
+  const existing = interactive ? await readLocalConfig(configPath) : undefined
+  const configured = existing ? configuredPickerSources(existing, descriptors) : undefined
+
+  // Interactive only: detection seeds the pre-checked boxes on a **first
+  // run**. Best-effort - a detector failure leaves the set empty rather than
+  // blocking onboarding. On a reconfigure it only labels rows `· detected`:
+  // "installed on this machine" is a suggestion, and letting it re-check a
+  // client the user deliberately excluded would re-consent to capture on
+  // their behalf.
   // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
   /** @type {Set<PickerSource>} */
   let detected = new Set()
@@ -101,16 +127,22 @@ export async function runWizardPick(opts) {
     }
   }
 
-  // What seeds the checked rows: a re-entry after stepping back carries
-  // the previous run's confirmed selection, which then replaces detection
-  // wholesale - re-detecting would overwrite an answer the user already
-  // gave. The `· detected` suffix stays tied to `detected`, so re-entry
-  // rows carry no suffix: they are the user's picks, not a guess.
-  // @ref LLP 0186#re-entry-seeding [implements]: stepping back into pick shows the answer previously confirmed, not a fresh detection pass
+  // What seeds the checked rows, most-recent answer first: a re-entry
+  // after stepping back carries the previous run's confirmed selection;
+  // a reconfigure carries the config on disk (the record of what the
+  // user chose); a first run falls back to detection. The later tiers
+  // never override the earlier - re-detecting would overwrite an answer
+  // the user already gave, and re-checking a client the user deliberately
+  // excluded would re-consent to capture on their behalf. The `· detected`
+  // suffix stays tied to `detected`, so seeded rows carry it only when
+  // detection put it there: elsewhere they are the user's picks, not a
+  // guess.
+  // @ref LLP 0191#re-entry-seeding [implements]: stepping back into pick shows the answer previously confirmed, not a fresh detection pass
+  // @ref LLP 0183#seed-from-config [implements]: on a reconfigure the config decides the checkboxes; detection only labels
   /** @type {ReadonlySet<string>} */
   const seed = opts.initialSelection
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
-    : detected
+    : configured ?? detected
 
   await withSpan(
     'wizard.pick.start',
@@ -121,6 +153,8 @@ export async function runWizardPick(opts) {
       sources_detected: detected.size,
       sources_locked: lockedSources.length,
       managed: opts.managed === true,
+      sources_configured: configured?.size ?? 0,
+      reconfigure: existing !== undefined,
       status: 'ok',
     },
     async () => {},
@@ -159,12 +193,18 @@ export async function runWizardPick(opts) {
     // is always kept, and on top of it we default to scheduled local
     // Parquet exports so the first run produces durable files out of the
     // box. Other destinations remain available via `hyp init --export`.
-    exportChoice = /** @type {PickerExport} */ ('local-parquet')
+    // A reconfigure reads the answer back off disk instead: a question
+    // that is never asked cannot be re-answered by defaulting it again.
+    exportChoice = existing ? configuredExportChoice(existing) : /** @type {PickerExport} */ ('local-parquet')
     // Retention is not asked either: the orchestrator supplies the
     // pathway default (90-day team / 120-day local), overridable only
-    // via `hyp init --retention-days` on the non-interactive path.
+    // via `hyp init --retention-days` on the non-interactive path. On a
+    // reconfigure the window already in the config wins over the pathway
+    // default - shortening it here would hand the next retention sweep
+    // history to purge as a side effect of a menu walk.
     // @ref LLP 0137#pathway-defaults [implements]: the retention question is removed from onboarding
-    retentionDays = opts.retentionDefault ?? DEFAULT_RETENTION_DAYS
+    // @ref LLP 0183#retention [implements]: an existing retention window survives a reconfigure onto another pathway
+    retentionDays = configuredRetentionDays(existing) ?? opts.retentionDefault ?? DEFAULT_RETENTION_DAYS
   }
 
   // Filter locked ids out of the picks before composition: they are already
@@ -183,13 +223,17 @@ export async function runWizardPick(opts) {
   })
 
   const hypHome = resolveHypHome(env)
-  const config = composePickerConfig({ sources, descriptors, exportChoice, retentionDays, hypHome })
-
-  const obsEnv = readObservabilityEnv(env)
-  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
+  const config = composePickerConfig({
+    sources,
+    descriptors,
+    exportChoice,
+    retentionDays,
+    hypHome,
+    ...(existing ? { existing } : {}),
+  })
 
   // The wizard orchestrator defers the write until every question lane has
-  // run (LLP 0185 #commit-point): the overwrite confirm then lands after
+  // run (LLP 0190 #commit-point): the overwrite confirm then lands after
   // the sync lane, and a cancel there leaves the existing config untouched.
   // Without `deferWrite` the write (and its guard) happens here, keeping
   // the standalone shape every direct caller and test relies on.
@@ -265,7 +309,7 @@ export async function runWizardPick(opts) {
 /**
  * Commit a composed pick config to disk: the overwrite guard (LLP 0031),
  * the backup notice, and the write itself. Split out of `runWizardPick` so
- * the wizard orchestrator can run it after the sync lane (LLP 0185
+ * the wizard orchestrator can run it after the sync lane (LLP 0190
  * #commit-point) - the last thing before the wizard starts acting - while
  * the non-deferred pick keeps calling it inline. Interactive runs prompt
  * for confirmation; non-interactive runs require `--force`. Either path
@@ -274,7 +318,7 @@ export async function runWizardPick(opts) {
  * into its exit-1 result.
  *
  * @ref LLP 0031#local-layer-writers [implements]: pick-phase overwrite safety on the config write path
- * @ref LLP 0185#commit-point [implements]: the config write is callable after the question lanes, not only inside pick
+ * @ref LLP 0190#commit-point [implements]: the config write is callable after the question lanes, not only inside pick
  *
  * @param {{
  *   stdout: { write(chunk: string): unknown },
@@ -337,7 +381,7 @@ export async function commitWizardPickedConfig(args) {
 }
 
 /**
- * The pick lane's question screens: the defaults gate (LLP 0185
+ * The pick lane's question screens: the defaults gate (LLP 0190
  * #pick-gate), shown when the seed or the locked set yields default rows,
  * and the full multiselect. The two screens loop rather than fall
  * through: the menu's back returns to the gate whenever the gate exists,
@@ -346,7 +390,7 @@ export async function commitWizardPickedConfig(args) {
  * (`opts.allowBack`). A back with no target is not offered at all.
  * Cancellation propagates as the prompt's own throw.
  *
- * @ref LLP 0186#lane-loops [implements]: menu backs to gate; the lane's first screen backs out to the previous wizard step
+ * @ref LLP 0191#lane-loops [implements]: menu backs to gate; the lane's first screen backs out to the previous wizard step
  *
  * @param {{
  *   opts: RunWizardPickOptions,
@@ -361,7 +405,7 @@ export async function commitWizardPickedConfig(args) {
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
 async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet }) {
-  // Defaults gate (LLP 0185 #pick-gate): when the seed (detection, or a
+  // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
   // re-entry's previous selection) or the org's locked set yields a
   // usable default, state it in one line and let a bare enter accept it;
   // the full menu opens only on request. With no default there is
@@ -428,10 +472,11 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
 /**
  * Build one picker row's prompt option from its descriptor. A locked row
  * is checked and disabled with the `· managed by your fleet` suffix; a
- * seeded row (detected, or previously picked on a re-entry) is checked,
+ * seeded row (from the config on a reconfigure, a prior confirmed
+ * selection on a re-entry, or detection on a first run) is checked,
  * carrying the ` · detected` suffix only when detection put it there;
  * otherwise the bare descriptor label. The retired `· stays on this
- * machine` suffix is deliberately absent: under LLP 0181 an addition on a
+ * machine` suffix is deliberately absent: under LLP 0188 an addition on a
  * managed machine syncs by default, and the sync-scope step after this
  * prompt is where local-only is offered.
  *
@@ -457,6 +502,46 @@ function buildPickOption(d, seed, detected, lockedSet) {
     ...(locked || seeded ? { checked: true } : {}),
     ...(locked ? { disabled: true } : {}),
   }
+}
+
+/**
+ * Read the local config layer this run replaces, or `undefined` when there
+ * is none to read. Deliberately forgiving: a missing, unreadable, or
+ * unparseable file simply means "first run" for seeding purposes, and the
+ * overwrite guard (which backs the file up) still runs over whatever is on
+ * disk. Only the local layer is read - carrying central-layer plugins into
+ * the local layer is exactly the collision join-before-pick avoids
+ * (LLP 0129 #join-before-picker), and locked rows already arrive from the
+ * join phase.
+ *
+ * @param {string} configPath
+ * @returns {Promise<HypAwareV2Config | undefined>}
+ */
+async function readLocalConfig(configPath) {
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const config = /** @type {HypAwareV2Config} */ (parsed)
+  if (config.version !== 2) return undefined
+  return config
+}
+
+/**
+ * The retention window an existing config carries, when it states one.
+ * A config without the key falls through to the pathway default: there is
+ * no answer to preserve.
+ *
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {number | undefined}
+ */
+function configuredRetentionDays(config) {
+  const days = config?.query?.cache?.retention?.default_days
+  return typeof days === 'number' && Number.isFinite(days) ? days : undefined
 }
 
 /**
@@ -510,7 +595,7 @@ async function cancelledResult(opts) {
 
 /**
  * Build the result returned when the user steps back out of the lane
- * (LLP 0186). Unlike a cancel this is not an exit: nothing is composed
+ * (LLP 0191). Unlike a cancel this is not an exit: nothing is composed
  * or written, no notice is printed (the previous step redraws
  * immediately), and the orchestrator re-presents the step before pick.
  *

@@ -128,11 +128,11 @@ export async function run({ harness, expect }) {
       (v) => v === '@hypaware/central'
     )
     // Enrollment stamps the empty client-sync store BEFORE the seed exists
-    // (LLP 0181 #migration): a fresh join is new-era (default-sync), so no
+    // (LLP 0188 #migration): a fresh join is new-era (default-sync), so no
     // later boot can mistake it for a pre-upgrade machine and opt out its
     // fresh picks.
     expect.that(
-      'join: the client-sync store is stamped empty at enrollment (LLP 0181)',
+      'join: the client-sync store is stamped empty at enrollment (LLP 0188)',
       JSON.parse(await fs.readFile(path.join(stateRoot, 'usage-policy', 'client-sync.json'), 'utf8')),
       (v) => v.version === 1 && Array.isArray(v.entries) && v.entries.length === 0
     )

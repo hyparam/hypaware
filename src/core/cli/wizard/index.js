@@ -50,7 +50,7 @@ import { wizardStepProgress } from './steps.js'
  * #attended-only), matching the walkthrough's `interactive = !opts.picks`
  * split so every existing non-interactive shape is preserved.
  *
- * Attended runs can also step *back* (LLP 0186): escape at a question
+ * Attended runs can also step *back* (LLP 0191): escape at a question
  * lane returns to the lane before it (sync to pick, pick to the fork,
  * the fork to a reconfigure run's gate), with a completed join reused
  * rather than re-run and confirmed picks re-seeding the re-entered
@@ -77,7 +77,7 @@ export async function runInitWizard(opts) {
    * Run the returning gate and absorb its terminal choices. Returns the
    * wizard result when the gate ended the run, else null to continue to
    * the fork. A closure because back-navigation re-presents it: escape
-   * at the fork of a reconfigure run returns here (LLP 0186).
+   * at the fork of a reconfigure run returns here (LLP 0191).
    *
    * @returns {Promise<InitWizardResult | null>}
    */
@@ -102,8 +102,12 @@ export async function runInitWizard(opts) {
       // A managed machine reconfigures through the same fork as anyone
       // else (LLP 0182), but carries its org's rows in as a locked set:
       // the central layer wins the merge (LLP 0031), so an editable row
-      // would only write a local entry the next pull overrides.
+      // would only write a local entry the next pull overrides. This
+      // covers the first-run path too - a managed machine whose config is
+      // missing or fails to merge has no config to summarise, but the
+      // central layer on disk still owns its rows.
       // @ref LLP 0182#one-reconfigure [implements]: `managed` decides the locked set, not the pathway
+      // @ref LLP 0129#join-before-picker [implements]: the first-run path locks the org rows from the on-disk central layer rather than offering them for composition
       managed = true
       locked = await computeLockedSafe(catalog, opts)
     }
@@ -134,13 +138,13 @@ export async function runInitWizard(opts) {
   /** @type {string[]} */
   let sourcesOptedOut = []
 
-  // The question lanes and their back edges (LLP 0186 #back-edges):
+  // The question lanes and their back edges (LLP 0191 #back-edges):
   // escape steps one screen back - sync to pick (`continue atPick`), pick
   // to the fork (`continue atFork`), the fork to the returning gate -
   // while ctrl+c keeps cancelling the run. Everything after the loop
   // (config commit, configure, finale) acts rather than asks, so
-  // back-navigation ends at the commit point (LLP 0185 #commit-point).
-  // @ref LLP 0186#back-edges [implements]: the orchestrator's loop carries every step-level back transition
+  // back-navigation ends at the commit point (LLP 0190 #commit-point).
+  // @ref LLP 0191#back-edges [implements]: the orchestrator's loop carries every step-level back transition
   atFork: while (true) {
     if (interactive) {
       pathway = undefined
@@ -165,7 +169,7 @@ export async function runInitWizard(opts) {
           // Stepped back past a completed join and forward again: the
           // enrollment stands (LLP 0063 D3), so say so instead of
           // re-opening the login.
-          // @ref LLP 0186#join-not-undone [implements]: a remembered join is reused, never re-run
+          // @ref LLP 0191#join-not-undone [implements]: a remembered join is reused, never re-run
           opts.stdout.write('Already signed in - continuing.\n')
           pathway = 'team'
           locked = joined.lockedSources
@@ -180,7 +184,7 @@ export async function runInitWizard(opts) {
           // `hyp leave` teardown, so disconnection stays a named act rather
           // than a side effect. Declining or cancelling keeps the fleet
           // connection and the org's rows locked, exactly as before.
-          // @ref LLP 0185#fork-disconnect [implements]: local-on-managed asks "disconnect?" once; yes is hyp leave, no is the managed local pathway
+          // @ref LLP 0190#fork-disconnect [implements]: local-on-managed asks "disconnect?" once; yes is hyp leave, no is the managed local pathway
           if (managed) {
             const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
             /** @type {string | number} */
@@ -194,7 +198,7 @@ export async function runInitWizard(opts) {
                 ],
                 default: 'stay',
                 // The fork is always behind this question, so escape backs
-                // into it instead of cancelling (LLP 0186).
+                // into it instead of cancelling (LLP 0191).
                 allowBack: true,
               })
             } catch (err) {
@@ -259,7 +263,7 @@ export async function runInitWizard(opts) {
       // `--dry-run` / preset / `--from-file` output is byte-identical to
       // what it was before the breadcrumb existed (LLP 0131
       // #attended-only). `managed` is part of the itinerary: it adds the
-      // sync lane to a managed machine's local-pathway run (LLP 0181).
+      // sync lane to a managed machine's local-pathway run (LLP 0188).
       const pickProgress = wizardStepProgress(pathway, 'pick', { managed })
       const syncProgress = wizardStepProgress(pathway, 'sync', { managed })
 
@@ -295,7 +299,7 @@ export async function runInitWizard(opts) {
         ...(pickSeed ? { initialSelection: pickSeed } : {}),
         // The write commits below, after the sync lane: the overwrite confirm
         // is then the last question, and a cancel at the sync lane leaves the
-        // existing config untouched (LLP 0185 #commit-point).
+        // existing config untouched (LLP 0190 #commit-point).
         deferWrite: true,
       })
       if (picked.back) continue atFork
@@ -313,7 +317,7 @@ export async function runInitWizard(opts) {
       // lane, or a later pass through the fork - re-seeds with it.
       pickSeed = picked.sourcesPicked
 
-      // The sync-scope step (LLP 0181 #never-silent): on every enrolled run -
+      // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
       // the team pathway, or a managed machine on any pathway - ask which of
       // the picked, non-locked sources stay local-only. Default-sync means an
       // untouched prompt opts nothing out. Non-interactive runs skip it
@@ -342,7 +346,7 @@ export async function runInitWizard(opts) {
         if (syncScope.cancelled) {
           // Cancelling here leaves the store unwritten, so default-sync
           // stands; on an enrolled run that must be said, not implied
-          // (LLP 0181).
+          // (LLP 0188).
           if (joined) await narrateEnrolledAbort(opts)
           return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
         }
@@ -363,7 +367,7 @@ export async function runInitWizard(opts) {
   // A refusal mirrors pick's old overwrite-refusal exit (1, not cancelled),
   // and on the team pathway narrates the enrolled state it leaves behind.
   // Scripted phase stubs (tests) return no `configPending` and skip this.
-  // @ref LLP 0185#commit-point [implements]: the overwrite confirm is the wizard's last question, after the sync lane
+  // @ref LLP 0190#commit-point [implements]: the overwrite confirm is the wizard's last question, after the sync lane
   if (picked.configPending) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
@@ -399,7 +403,7 @@ export async function runInitWizard(opts) {
       picked,
       // Keyed on the remembered join, not the final pathway: a join this
       // run enrolled the machine even if the user then stepped back and
-      // finished down the local path (LLP 0186 #join-not-undone).
+      // finished down the local path (LLP 0191 #join-not-undone).
       joinedAlready: joined !== undefined,
       ...(finaleProgress ? { progress: finaleProgress } : {}),
     })
@@ -437,7 +441,7 @@ export async function runInitWizard(opts) {
   // happens and that nothing has shipped yet (LLP 0100/0101, narration
   // only - the hold itself was written by the join lane's login). Keyed
   // on the remembered join, like the abort narration above: enrollment
-  // survives a back through the fork (LLP 0186 #join-not-undone).
+  // survives a back through the fork (LLP 0191 #join-not-undone).
   if (joined) await narratePrivacyIfTeamPath(opts)
 
   log.info('wizard.finish', {
@@ -592,7 +596,7 @@ async function narratePrivacyIfTeamPath(opts) {
  * the deadline when a hold is live. Never another prompt - an abort
  * means "get me out", not "ask me differently".
  *
- * @ref LLP 0185#abort-narration [implements]: an abandoned enrolled run narrates the default-sync consequence and the standing control instead of re-prompting
+ * @ref LLP 0190#abort-narration [implements]: an abandoned enrolled run narrates the default-sync consequence and the standing control instead of re-prompting
  *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
  */
@@ -633,9 +637,13 @@ async function loadWizardCatalog() {
 }
 
 /**
- * A managed machine's locked-set computation, guarded: a resolution
- * failure renders an unlocked picker (additions still compose; the
- * export seam, not the picker, enforces the org boundary, LLP 0132).
+ * The locked-set computation for every entry that reaches the picker on
+ * an already-managed machine without a join (the returning gate's single
+ * Reconfigure re-entry, LLP 0182, and the first-run path a managed
+ * machine falls to when its merged config no longer validates), guarded:
+ * a resolution failure renders an unlocked picker (additions still
+ * compose; the export seam, not the picker, enforces the org boundary,
+ * LLP 0132).
  *
  * @param {PluginCatalog} catalog
  * @param {Pick<RunInitWizardOptions, 'env'>} opts

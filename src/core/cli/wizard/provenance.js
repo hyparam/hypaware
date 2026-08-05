@@ -18,7 +18,7 @@
  * (`src/core/cli/dispatch.js`) into a source-id-keyed three-way check any
  * picker-descriptor consumer can share: the pick phase's row locking, the
  * `hyp status` syncing/local-only split, the export seam's locked
- * exemption, and the upgrade migration (LLP 0181) all derive their
+ * exemption, and the upgrade migration (LLP 0188) all derive their
  * behavior from this one classification, so it is defined once and
  * unit-tested directly.
  *
@@ -30,12 +30,12 @@
  * "withhold nothing we cannot attribute" rule.
  *
  * `'local'` here is a pure membership fact (in effective, not in central);
- * it does not itself mean "withheld". Under LLP 0181 a `'local'` source
+ * it does not itself mean "withheld". Under LLP 0188 a `'local'` source
  * syncs by default; only an explicit opt-out withholds it, and a
  * `'central'` source cannot be withheld at all. The managed-machine gate
  * (there is a central layer at all) is applied by each consumer.
  *
- * @ref LLP 0181#locked [implements]: the shared client/source provenance helper the split line, the locked exemption, and the migration all read
+ * @ref LLP 0188#locked [implements]: the shared client/source provenance helper the split line, the locked exemption, and the migration all read
  * @param {string} clientName - a picker source id or a client name
  * @param {{ centralConfig?: HypAwareV2Config | null, effective?: HypAwareV2Config | null }} layered
  * @param {Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors'>} catalog

@@ -137,11 +137,11 @@ export async function runJoin(argv, ctx) {
     async (span) => {
       // Stamp the empty client-sync store BEFORE the central seed exists:
       // the seed itself counts as a central layer on the next boot, and a
-      // boot that sees a central layer with no store runs the LLP 0181
+      // boot that sees a central layer with no store runs the LLP 0188
       // upgrade migration, which would wrongly opt out fresh picks. Best
       // effort: a failure here under-syncs (the safe direction), never
       // blocks enrollment.
-      // @ref LLP 0181#migration [implements]: enrollment seeds the empty store before the central seed is written
+      // @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed is written
       await seedClientSyncStoreBestEffort(ctx, obsEnv.stateDir)
 
       // The token is the only credential on disk until the first
@@ -229,7 +229,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
       sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
     }
     // Same ordering constraint as `runJoin`: the client-sync stamp must land
-    // before the seed makes a central layer visible to boot (LLP 0181
+    // before the seed makes a central layer visible to boot (LLP 0188
     // #migration); best effort, failure under-syncs.
     await seedClientSyncStoreBestEffort(ctx, stateRoot)
     const seedPath = centralSeedPath(stateRoot)

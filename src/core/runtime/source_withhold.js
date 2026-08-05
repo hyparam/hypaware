@@ -24,7 +24,7 @@ import { getLogger, Attr } from '../observability/index.js'
 const CACHE_TTL_MS = 5_000
 
 /**
- * One-time upgrade migration for the LLP 0181 default-sync flip. Pre-0181
+ * One-time upgrade migration for the LLP 0188 default-sync flip. Pre-0181
  * the withheld set was derived at boot, not stored: every picker id
  * classified `'local'` on a machine with a central layer. The store's
  * absence marks a machine that enrolled under that rule (enrollment now
@@ -36,7 +36,7 @@ const CACHE_TTL_MS = 5_000
  * A corrupt store is left untouched (never overwrite an uninterpretable
  * privacy signal); the export seam fails closed on it instead.
  *
- * @ref LLP 0181#migration [implements]: store absence + central layer materializes the pre-0181 derived withheld set as opt-out entries
+ * @ref LLP 0188#migration [implements]: store absence + central layer materializes the pre-0181 derived withheld set as opt-out entries
  * @param {{
  *   catalog: Pick<PluginCatalog, 'plugins' | 'pickerDescriptors' | 'clientDescriptors'>,
  *   layered: { centralConfig?: HypAwareV2Config | null, effective?: HypAwareV2Config | null },
@@ -79,7 +79,7 @@ export async function ensureClientSyncMigration({ catalog, layered, stateDir }) 
 
 /**
  * Build the boot-time `readRowsSince` source-scoped withhold resolver
- * (LLP 0181) from the plugin catalog, the two-layer config `bootKernel`
+ * (LLP 0188) from the plugin catalog, the two-layer config `bootKernel`
  * already resolved, and the machine-local opt-out store. This is the
  * boot-glue `createKernelRuntime` itself can't do: it runs before the
  * catalog and layered config are known, and classifying provenance needs
@@ -97,14 +97,14 @@ export async function ensureClientSyncMigration({ catalog, layered, stateDir }) 
  * The withheld set is the store's opted-out sources minus every source
  * classified `'central'`: org-configured sources always sync, so a stale
  * opt-out entry for a source the org has since adopted is inert, never an
- * error (LLP 0181 #locked). An absent store reads as "nothing opted out"
+ * error (LLP 0188 #locked). An absent store reads as "nothing opted out"
  * (enrollment stamps it empty and boot migration materializes upgrades,
  * so absence here is post-migration deletion, which fails open exactly as
  * deleting the directory list does); a corrupt store throws
  * {@link ClientSyncListUnreadableError} from `shouldWithhold`, failing the
  * partition read closed so the sink watermark stays put.
  *
- * @ref LLP 0181#opt-out [implements]: the boot-time reduction of the opt-out store + provenance classification + the catalog's `attribution_column` declarations into the resolver `readRowsSince` consults
+ * @ref LLP 0188#opt-out [implements]: the boot-time reduction of the opt-out store + provenance classification + the catalog's `attribution_column` declarations into the resolver `readRowsSince` consults
  * @param {{
  *   catalog: Pick<PluginCatalog, 'plugins' | 'pickerDescriptors' | 'clientDescriptors'>,
  *   layered: { centralConfig?: HypAwareV2Config | null, effective?: HypAwareV2Config | null },
@@ -234,7 +234,7 @@ export function datasetAttributionColumnsFromCatalog(catalog) {
 /**
  * Fold the catalog into a dataset-name-keyed map of the picker source ids
  * whose owning plugin contributes that dataset. Feeds the dataset-scoped
- * withholding rule (LLP 0181 #enforcement-scope): a dataset with no
+ * withholding rule (LLP 0188 #enforcement-scope): a dataset with no
  * attribution column cannot be filtered per row, but when every source
  * that could have produced it is opted out, the whole dataset is withheld.
  * A dataset contributed by a plugin with no picker row maps to an empty

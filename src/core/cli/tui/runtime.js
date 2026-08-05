@@ -248,7 +248,7 @@ export function isPromptCancelledError(err) {
 
 /**
  * Thrown when the user steps back from a prompt that opted into
- * back-navigation (`allowBack`, LLP 0186): escape on the TUI path, `b`
+ * back-navigation (`allowBack`, LLP 0191): escape on the TUI path, `b`
  * on the readline fallbacks. A control-flow signal like
  * {@link PromptCancelledError}, not a failure: callers re-run the
  * previous screen.

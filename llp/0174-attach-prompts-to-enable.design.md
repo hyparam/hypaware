@@ -1,7 +1,7 @@
 # LLP 0174: Manual attach prompts to enable the client adapter
 
 **Type:** design
-**Status:** Accepted
+**Status:** Active
 **Systems:** Config, CLI, Onboarding
 **Author:** Brendan / Claude
 **Date:** 2026-08-03

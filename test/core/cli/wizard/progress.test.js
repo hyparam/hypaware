@@ -118,7 +118,7 @@ test('wizardStepProgress: the local pathway counts two steps', async () => {
   assert.equal(wizardStepProgress('local', 'sync'), undefined)
 })
 
-test('wizardStepProgress: a managed machine on the local pathway gains the sync lane (LLP 0181)', async () => {
+test('wizardStepProgress: a managed machine on the local pathway gains the sync lane (LLP 0188)', async () => {
   assert.deepEqual(wizardItinerary('local', { managed: true }), ['pick', 'sync', 'finale'])
   assert.equal(wizardStepProgress('local', 'pick', { managed: true }), 'Step 1 of 3 · Choose what to collect')
   assert.equal(wizardStepProgress('local', 'sync', { managed: true }), 'Step 2 of 3 · Choose what syncs')
@@ -176,11 +176,11 @@ test('runInitWizard: the fork never carries a counter, before or after a failed 
 
 // A managed machine's Reconfigure runs the fork like any other (LLP
 // 0182), so its counter is the fork's answer, not a pathway of its own -
-// but being managed adds the sync lane to that pathway's count (LLP 0181).
+// but being managed adds the sync lane to that pathway's count (LLP 0188).
 test('runInitWizard: a managed re-entry counts the pathway the fork returns, plus the sync lane', async () => {
   const { opts, seen } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
-    // Stay connected at the disconnect question (LLP 0185 #fork-disconnect).
+    // Stay connected at the disconnect question (LLP 0190 #fork-disconnect).
     confirm: async () => 'stay',
     syncScope: async (/** @type {any} */ o) => { seen.sync = o; return { optedOut: [] } },
   })

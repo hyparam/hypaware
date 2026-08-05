@@ -267,13 +267,13 @@ export interface RetentionResult {
 }
 
 /**
- * Export-seam source-scoped withholding (LLP 0181): a second, optional
+ * Export-seam source-scoped withholding (LLP 0188): a second, optional
  * `readRowsSince` resolver alongside `UsagePolicyResolver`. Where
  * `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
  * dataset-declared **attribution column** (`PluginDatasetManifest.attribution_column`,
  * e.g. `client_name` for `ai_gateway_messages`) and withholds rows
  * attributed to an opted-out picker source (the machine-local client-sync
- * store, LLP 0181 #opt-out) on a machine with a central layer: on an
+ * store, LLP 0188 #opt-out) on a machine with a central layer: on an
  * enrolled machine every source syncs by default, and a source the user
  * keeps local never leaves it, even though it stays fully queryable
  * locally.
@@ -303,7 +303,7 @@ export interface SourceWithholdResolver {
   /**
    * True when `dataset` has no attribution column, has at least one
    * contributing picker source, and every such source is withheld: the
-   * whole dataset is then withheld (LLP 0181 #enforcement-scope), covering
+   * whole dataset is then withheld (LLP 0188 #enforcement-scope), covering
    * single-owner datasets (the otel signals) that per-row withholding can
    * never reach. Optional so a hand-built test resolver without the
    * dataset-ownership map behaves as before (nothing dataset-withheld).

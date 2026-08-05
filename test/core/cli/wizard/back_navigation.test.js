@@ -24,17 +24,17 @@ import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
  * @import { PluginCatalog } from '../../../../src/core/types.js'
  */
 
-// Wizard back-navigation (LLP 0186): escape steps back one screen where a
+// Wizard back-navigation (LLP 0191): escape steps back one screen where a
 // screen exists behind the prompt (`allowBack`), ctrl+c stays the cancel,
 // lanes loop menu-to-gate internally and propagate `back` from their first
 // screen, the orchestrator carries the step-level edges, a completed join
 // is reused rather than re-run, and a re-entered pick lane is seeded with
 // the previously confirmed selection.
-// @ref LLP 0186#esc-back [tests]:
-// @ref LLP 0186#back-edges [tests]:
-// @ref LLP 0186#lane-loops [tests]:
-// @ref LLP 0186#re-entry-seeding [tests]:
-// @ref LLP 0186#join-not-undone [tests]:
+// @ref LLP 0191#esc-back [tests]:
+// @ref LLP 0191#back-edges [tests]:
+// @ref LLP 0191#lane-loops [tests]:
+// @ref LLP 0191#re-entry-seeding [tests]:
+// @ref LLP 0191#join-not-undone [tests]:
 
 function makeBuf() {
   let value = ''
@@ -204,7 +204,7 @@ test('runWizardPick: without a gate and without allowBack the menu offers no bac
   assert.deepEqual(result.sourcesPicked, ['claude'])
 })
 
-// @ref LLP 0186#re-entry-seeding [tests]:
+// @ref LLP 0191#re-entry-seeding [tests]:
 test('runWizardPick: initialSelection seeds the boxes and skips detection', async () => {
   const env = await hermeticEnv('hyp-back-pick-seed-')
   const catalog = await realCatalog()
@@ -361,7 +361,7 @@ test('runInitWizard: a back from pick re-presents the fork', async () => {
   assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
 })
 
-// @ref LLP 0186#join-not-undone [tests]:
+// @ref LLP 0191#join-not-undone [tests]:
 test('runInitWizard: back past a completed join reuses it instead of re-running the login', async () => {
   let pickCalls = 0
   const { opts, stdout, calls } = await wizardOpts({

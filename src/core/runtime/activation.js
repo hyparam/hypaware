@@ -64,7 +64,7 @@ export function createKernelRuntime(opts = {}) {
     // machine-local list under `<stateDir>/usage-policy/`, and `cacheRoot` is
     // `<stateDir>/cache`, so its parent is the state dir the list lives beside.
     usagePolicyResolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(path.dirname(cacheRoot)) }),
-    // @ref LLP 0181#opt-out [implements]: caller-supplied (`bootKernel`,
+    // @ref LLP 0188#opt-out [implements]: caller-supplied (`bootKernel`,
     // built from the opt-out store + `classifyClientProvenance` + the
     // plugin catalog, since the latter two need the resolved plugin
     // catalog and two-layer config this constructor doesn't have).

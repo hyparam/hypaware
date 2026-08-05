@@ -1,6 +1,6 @@
 // @ts-check
 
-// Boot-glue for export-seam source-scoped withholding (LLP 0181):
+// Boot-glue for export-seam source-scoped withholding (LLP 0188):
 // `buildSourceWithholdResolver` turns the opt-out store + provenance
 // classification + the catalog's attribution/ownership declarations into
 // the resolver `readRowsSince` consults, and `ensureClientSyncMigration`
@@ -112,7 +112,7 @@ test('opt-out entries feed the withheld set', async () => {
   assert.equal(resolver.shouldWithhold('openclaw'), false)
 })
 
-test('a central-classified source cannot be withheld: a stale entry is inert (LLP 0181 #locked)', async () => {
+test('a central-classified source cannot be withheld: a stale entry is inert (LLP 0188 #locked)', async () => {
   const stateDir = await makeTmpDir()
   await writeClientSyncEntries({
     stateDir,

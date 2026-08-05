@@ -1,13 +1,13 @@
-# LLP 0185: The wizard states its defaults and confirms; the sync menu checks what syncs
+# LLP 0190: The wizard states its defaults and confirms; the sync menu checks what syncs
 
 **Type:** Decision
 **Status:** Draft
 **Systems:** Onboarding, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
-**Related:** LLP 0181 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
+**Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
 
-> Extends [LLP 0181 §never-silent](./0181-enrolled-default-sync-with-client-optout.decision.md#never-silent)
+> Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
 > and the prompt flow of [LLP 0135 §pick](./0135-install-experience-overhaul.design.md).
 > The policy (default-sync, per-client opt-out, the `client-sync.json`
 > store, seam enforcement) is untouched; what changes is how the two
@@ -53,9 +53,9 @@ will sync to your server:" over one source per line, with a re-entry's
 standing opt-outs under a second "Staying local-only:" header - and
 accepts on a bare enter ("Sync all", or "Keep this" on a re-entry),
 which round-trips the store unchanged. The sync list is the *whole*
-picture: the org's locked sources always sync (LLP 0181 #locked), so
+picture: the org's locked sources always sync (LLP 0188 #locked), so
 they lead it, fleet-suffixed, and lead the menu as checked, disabled
-rows - the same read-only rendering the picker gives them. LLP 0181 kept
+rows - the same read-only rendering the picker gives them. LLP 0188 kept
 locked sources out of the step entirely; a "these will sync" statement
 that omits sources that do sync understates what the server sees, so
 they are now shown but remain uneditable, and they never enter the
@@ -64,10 +64,10 @@ opt-out computation.
 every candidate renders checked by default (default-sync is the point),
 a previously opted-out source arrives unchecked, and the opt-out set is
 the candidates left unchecked at confirm. This flips the polarity of the
-prompt LLP 0181 #never-silent quoted ("check any to keep local-only");
+prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over
 shown candidates, seam enforcement, corrupt-store fail-closed - is
-LLP 0181's and is unchanged.
+LLP 0188's and is unchanged.
 
 <a id="prompt-shape"></a>**One gate prompt shape for both lanes.** The
 gate is a `ConfirmSelectQuestion` asked through
@@ -115,7 +115,7 @@ narration when a hold is live. Never another prompt: a cancel means "get
 me out", and re-prompting an abandoning user was rejected for the same
 reason LLP 0129 rejected auto-degrading pathways - the wizard does not
 answer its own questions. This extends to attended aborts the same
-never-silent floor LLP 0181 already grants the scripted path
+never-silent floor LLP 0188 already grants the scripted path
 (default-sync is the outcome; `hyp policy client` is the control).
 
 <a id="commit-point"></a>**The config write commits after the last
@@ -134,7 +134,7 @@ finale. A refusal keeps pick's old exit-1 (not cancelled) shape and, on
 the team pathway, narrates the enrolled state per #abort-narration. The
 sync lane's `client-sync.json` write still precedes the commit; a store
 entry for a source whose config never lands is inert and errs toward
-under-sync, which LLP 0181 #migration already names as the safe
+under-sync, which LLP 0188 #migration already names as the safe
 direction. On a scripted run (`--yes`, presets) no lane runs between pick
 and the commit, so its ordering is unchanged; direct `runWizardPick`
 callers without `deferWrite` keep the inline write.
@@ -143,7 +143,7 @@ Rejected: folding the "accept defaults" row into the multiselect itself
 (a pseudo-row is not a selection, and enter-confirms-current-state
 already exists; the confusion was about what the checkboxes mean, which
 a pseudo-row does not fix). Also rejected: auto-skipping the sync step
-entirely when nothing is opted out - LLP 0181 #never-silent requires the
+entirely when nothing is opted out - LLP 0188 #never-silent requires the
 step to say what will ship before anything ships; the gate keeps the
 statement while removing the menu walk.
 
@@ -164,7 +164,7 @@ statement while removing the menu walk.
 
 ## References
 
-- LLP 0181, LLP 0135, LLP 0129, LLP 0011, LLP 0130
+- LLP 0188, LLP 0135, LLP 0129, LLP 0011, LLP 0130
 - `src/core/cli/wizard/pick.js` (pick gate),
   `src/core/cli/wizard/sync_scope.js` (sync gate + flipped menu),
   `src/core/cli/wizard/index.js` (abort narration),

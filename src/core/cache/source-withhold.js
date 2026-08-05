@@ -5,7 +5,7 @@
  */
 
 /**
- * Build the `readRowsSince` source-scoped withhold resolver (LLP 0181).
+ * Build the `readRowsSince` source-scoped withhold resolver (LLP 0188).
  * Pure and catalog-agnostic: the caller has already reduced "which picker
  * source ids are withheld" and "which column attributes a row to a picker
  * source, per dataset" down to plain data (`src/core/runtime/source_withhold.js`
@@ -18,10 +18,10 @@
  * form) or a provider function returning the current set: the boot-glue
  * passes a provider backed by a TTL-cached store read so an opt-out
  * written while the daemon runs takes effect without a restart
- * (LLP 0181 #opt-out). A provider's throw (the corrupt-store fail-safe)
+ * (LLP 0188 #opt-out). A provider's throw (the corrupt-store fail-safe)
  * propagates from `shouldWithhold`/`shouldWithholdDataset` to the caller.
  *
- * @ref LLP 0181#opt-out [implements]: the resolver `readRowsSince` consults, threaded the same way `usagePolicyResolver` is
+ * @ref LLP 0188#opt-out [implements]: the resolver `readRowsSince` consults, threaded the same way `usagePolicyResolver` is
  * @param {{
  *   withheldSourceIds: Iterable<string> | (() => ReadonlySet<string>),
  *   datasetAttributionColumns: Map<string, string>,
@@ -53,7 +53,7 @@ export function createSourceWithholdResolver({
         resolveWithheld().has(attributionValue)
       )
     },
-    // @ref LLP 0181#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every source that could have produced it is withheld
+    // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every source that could have produced it is withheld
     shouldWithholdDataset(dataset) {
       if (!datasetOwnedSourceIds) return false
       if (datasetAttributionColumns.has(dataset)) return false

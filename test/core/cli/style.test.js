@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 
 import { ANSI, colorizeStderr, paintChunk, paintLine } from '../../../src/core/cli/style.js'
 
-// The CLI severity palette (LLP 0183). Colour is applied once, where
+// The CLI severity palette (LLP 0189). Colour is applied once, where
 // `dispatch` binds stderr, so these tests pin two things: which leading word
 // means which colour, and that a stream which should not be coloured comes
 // back byte-identical.
