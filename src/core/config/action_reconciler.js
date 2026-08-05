@@ -526,6 +526,18 @@ export function readInstalledAssets(marker) {
  * otherwise, rather than being silently dropped by a gate nobody remembered to
  * update. A missing marker records nothing by construction.
  *
+ * **Known incomplete, in the one direction those two records do not cover.**
+ * A marker that reached `done` and was later rewritten `failed` or `refused`
+ * carries the earlier attach's *asset* list forward, but nothing carries its
+ * *settings* write forward: no field on the rewritten marker distinguishes it
+ * from one whose first `perform()` applied nothing at all. So an attach that
+ * landed a settings write while installing no assets (a client contributing
+ * none, a copy that failed, any pre-LLP-0138 marker) and then re-`perform()`ed
+ * into a failure or a refusal reads as "recorded nothing" here and is dropped
+ * over settings that are still on disk. Closing it means teaching the rewrite
+ * to record the effect it overwrites, a marker-schema question LLP 0138 has
+ * not settled, rather than changing this test.
+ *
  * @param {ActionMarker} [marker]
  * @returns {boolean}
  * @ref LLP 0138#marker-undo [implements]: a marker is never dropped over an

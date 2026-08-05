@@ -434,8 +434,8 @@ export async function runLeave(argv, ctx) {
           const marker = attachMarkers[name]
           const installedAssets = readInstalledAssets(marker)
           // A marker that recorded nothing applied no effect; just drop it,
-          // through the same {@link markerRecordsNoEffect} test the reconciler's
-          // own reverse pass uses, so the two gates cannot drift over a marker
+          // through the same `markerRecordsNoEffect` test the reconciler's own
+          // reverse pass uses, so the two gates cannot drift over a marker
           // state only one of them was taught about. That is not hypothetical:
           // this gate asked `status === 'failed'` and was left behind when
           // LLP 0186 added the terminal `refused` state, even though a refusal
