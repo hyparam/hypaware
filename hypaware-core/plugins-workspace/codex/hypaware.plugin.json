@@ -33,7 +33,7 @@
       {
         "name": "codex",
         "label": "Codex",
-        "summary": "CLI and Desktop conversations.",
+        "summary": "CLI and Desktop conversations; points Codex at the local gateway.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },
