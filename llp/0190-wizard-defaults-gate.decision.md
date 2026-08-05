@@ -39,9 +39,15 @@ a two-option select: "Record all" (the default, one keypress) or "Select
 what to record", which opens the unchanged multiselect. The list rides
 the prompt's `items` chrome, not the title: a comma-joined title was
 unreadable past a few sources, and rendering the lines inside the frame
-means `clearOnResolve` erases them with the prompt. The options carry
-bare labels, no summaries: the title and list already name everything
-the choice covers. With nothing detected
+means `clearOnResolve` erases them with the prompt. The gate's rows carry
+bare labels - the title and list already name everything the choice
+covers - but the accept option carries a one-line summary disclosing
+that accepting *configures* the listed tools: the gate is the happy path
+(enter, enter, finale), so it is the one screen guaranteed to be seen,
+and the side-effect disclosure otherwise lives only on menu rows the
+happy path never shows. The per-row specifics (attach, config writes,
+helper skills, the OTLP receiver) stay on the menu rows' summaries.
+With nothing detected
 and nothing locked there is nothing worth confirming, so the menu shows
 directly. The gate is a statement of the same rows the menu would
 pre-check (LLP 0011 #autodetect-vs-default still holds: detection seeds,
@@ -70,7 +76,10 @@ on the question, so the fallback renders each row's checked state
 enter-selects-none would have opted every candidate out - the exact
 inverse of the TUI default, with the defaults invisible. Other numbered
 questions (the pick menus, `runPickerWalkthrough`) keep the historical
-semantics untouched. This flips the polarity of the
+semantics untouched. The fallback also re-asks on an answer that names
+no row ("y", "0", an out-of-range index) instead of reading it as
+"select nothing"; the explicit empty selection is the word "none".
+This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over
 shown candidates, seam enforcement, corrupt-store fail-closed - is

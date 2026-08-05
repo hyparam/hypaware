@@ -35,7 +35,7 @@
       {
         "name": "openclaw",
         "label": "OpenClaw",
-        "summary": "Live traffic plus local session history.",
+        "summary": "Live traffic plus local session history; attach rewrites OpenClaw's gateway config.",
         "detect": { "settings_file": ".openclaw/openclaw.json" },
         "compose": {
           "plugin": { "name": "@hypaware/openclaw" },

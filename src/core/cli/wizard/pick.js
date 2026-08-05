@@ -425,7 +425,16 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
             (d) => `  ${d.label}${lockedSet.has(d.id) ? LOCKED_LABEL_SUFFIX : ''}`
           ),
           options: [
-            { value: 'accept', label: 'Record all' },
+            {
+              value: 'accept',
+              label: 'Record all',
+              // The gate is the happy path (enter, enter, finale), so it is
+              // where the side-effect disclosure has to live: the rows stay
+              // bare, but accepting must say the machine is being changed.
+              // The per-row specifics stay on the menu rows' summaries.
+              // @ref LLP 0190#pick-gate [implements]: the accept option carries the one-line configures-your-tools disclosure
+              summary: 'Configures these tools to record through HypAware; the menu rows say how.',
+            },
             { value: 'customize', label: 'Select what to record' },
           ],
           default: 'accept',

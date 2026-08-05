@@ -166,9 +166,14 @@ test('runWizardPick: accepting the defaults gate picks exactly the detected sour
   assert.equal(state.question.title, 'HypAware will record:')
   assert.ok(state.question.items.some((/** @type {string} */ i) => /codex/i.test(i)), 'sources are listed one per line under the title')
   assert.equal(state.question.default, 'accept')
-  // Bare labels, no summaries: the title already says everything.
+  // Rows stay bare, but the accept option carries the disclosure that
+  // accepting changes the machine: the gate is the happy path, so it is
+  // the one place the user is guaranteed to see it (LLP 0190 #pick-gate).
   assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.label), ['Record all', 'Select what to record'])
-  assert.ok(state.question.options.every((/** @type {any} */ o) => o.summary === undefined))
+  const accept = state.question.options.find((/** @type {any} */ o) => o.value === 'accept')
+  assert.match(accept.summary, /configures these tools/i, 'the accept option must disclose the side effects')
+  const customize = state.question.options.find((/** @type {any} */ o) => o.value === 'customize')
+  assert.equal(customize.summary, undefined)
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
