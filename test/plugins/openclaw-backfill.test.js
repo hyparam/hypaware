@@ -534,7 +534,7 @@ test('an unrelated ignored directory leaves the session projecting', async () =>
 })
 
 // ---------------------------------------------------------------------------
-// R10: the CLI-backend allowlist, which fails closed
+// R10: the CLI-backend denylist (LLP 0193); an unresolvable backend fails closed
 // ---------------------------------------------------------------------------
 
 // @ref LLP 0147 [tests]: a CLI-backend turn belongs to the sibling Claude/Codex
@@ -580,7 +580,7 @@ test('a claude-cli turn is excluded whole, prompt included, and reported as cove
   }
 })
 
-// The #543 regression case, both sides of the allowlist in one real-shape
+// The #543 regression case, both sides of the exclusion in one real-shape
 // file: a session that mixes an `anthropic` turn with a `claude-cli` turn must
 // PARTIALLY project. Before the envelope fix every record of every real
 // session read `provider: undefined`, so the whole file resolved to `unknown`
@@ -644,20 +644,118 @@ test('a mixed real-shape session partially projects: anthropic turns land, claud
   }
 })
 
-test('an unrecognized provider fails closed: excluded, reported, and not covered_by anything', async () => {
+// @ref LLP 0193#decision [tests]: the flip from allowlist to denylist. A
+// provider this repo has never heard of projects from birth, provided its
+// records carry a wire-shape api and not the CLI mechanism marker.
+test('an unrecognized direct-API provider projects, no release needed', async () => {
   const env = await stageEnv()
   try {
     await writeSession(env, {
       header: { cwd: '/work/repo' },
       records: [
-        { ...ASSISTANT_RECORD, id: 'msg-x', provider: 'some-future-vendor' },
+        USER_RECORD,
+        { ...ASSISTANT_RECORD, id: 'msg-x', provider: 'some-future-vendor', api: 'some-future-shape' },
+      ],
+    })
+    const { items, events } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).provider, 'some-future-vendor')
+    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-1', 'msg-x'])
+    assert.equal(events.filter((e) => e.event === 'excluded_backend').length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The turn that motivated LLP 0193 (issue #640), in the exact shape a live
+// session file stamps it: provider `ollama`, api `ollama` (its native
+// dialect, not a wire shape the gateway speaks), verified on OpenClaw
+// 2026.7.1-2. The session mixes providers on purpose:
+// @ref LLP 0194#decision [tests]: every row carries its own turn's provider,
+// prompts included (the smeared backend), so the ollama half of a mixed
+// session does not read as the first projected turn's vendor.
+test('an ollama turn projects at transcript fidelity, each row under its own provider', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        {
+          id: 'msg-user-2',
+          timestamp: '2026-07-30T10:01:00.000Z',
+          role: 'user',
+          content: [{ type: 'text', text: 'and locally?' }],
+        },
+        { ...ASSISTANT_RECORD, id: 'msg-ollama', model: 'gemma4:12b', provider: 'ollama', api: 'ollama' },
+      ],
+    })
+    const { items, events } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    // Exchange-level provider stays the first projected turn's, as the
+    // fallback for exchange-level consumers.
+    assert.equal(value(items[0]).provider, 'anthropic')
+    assert.equal(events.filter((e) => e.event === 'excluded_backend').length, 0)
+    const rows = await materialize(items[0])
+    assert.deepEqual(
+      rows.map((row) => [row.message_id, row.provider]),
+      [
+        ['msg-user-1', 'anthropic'],
+        ['msg-asst-1', 'anthropic'],
+        ['msg-user-2', 'ollama'],
+        ['msg-ollama', 'ollama'],
+      ]
+    )
+    assert.equal(rows[3].model, 'gemma4:12b')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0193#decision [tests]: the mechanism rung. `api: "cli"` excludes a
+// turn whatever its provider string is, so a CLI backend HypAware has never
+// heard of still stays out; nothing is known to cover it, and the event says
+// so by carrying no `covered_by`.
+test('an unrecognized provider stamped api "cli" is excluded, and not covered_by anything', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        { ...ASSISTANT_RECORD, id: 'msg-x', provider: 'some-future-cli', api: 'cli' },
       ],
     })
     const { items, events } = await collect(provider(env).run(runContext().ctx))
     assert.equal(items.length, 0, 'nothing projectable survived, so no item is yielded')
     assert.equal(events.length, 1)
-    assert.equal(events[0].attributes?.provider, 'some-future-vendor')
+    assert.equal(events[0].attributes?.provider, 'some-future-cli')
     assert.equal(events[0].attributes?.covered_by, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The stamping a live session file actually uses for a delegated turn
+// (provider `claude-cli`, api `cli`): both rungs of the denylist agree, and
+// the event still names the covering route.
+test('a claude-cli turn stamped api "cli" is excluded and covered by the Claude transcript', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        { ...ASSISTANT_RECORD, id: 'msg-cli', model: 'claude-opus-4-8', provider: 'claude-cli', api: 'cli' },
+      ],
+    })
+    const { items, events } = await collect(provider(env).run(runContext().ctx))
+    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-1', 'msg-asst-1'])
+    const excluded = events.filter((e) => e.event === 'excluded_backend')
+    assert.equal(excluded.length, 1)
+    assert.equal(excluded[0].attributes?.provider, 'claude-cli')
+    assert.equal(excluded[0].attributes?.covered_by, 'claude_transcript')
   } finally {
     await env.cleanup()
   }
@@ -913,7 +1011,7 @@ test('the default quiesce window excludes a fresh file and includes one older th
 // R10 composition: the quiesce filter operates on file recency only, and
 // must not disturb the existing CLI-backend forward/backward-fill logic once
 // a file clears the window.
-test('a file outside the quiesce window still goes through the CLI-backend allowlist unchanged', async () => {
+test('a file outside the quiesce window still goes through the CLI-backend exclusion unchanged', async () => {
   const env = await stageEnv()
   try {
     const filePath = await writeSession(env, {
