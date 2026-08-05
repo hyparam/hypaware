@@ -309,6 +309,15 @@ export interface SourceWithholdResolver {
    * dataset-ownership map behaves as before (nothing dataset-withheld).
    */
   shouldWithholdDataset?(dataset: string): boolean
+  /**
+   * Fail-closed rule for rows whose attribution value is unusable (not a
+   * non-empty string) in a dataset that DOES declare an attribution
+   * column: true when any contributing picker source is withheld, since
+   * an unlabeled row cannot be proven to belong to a synced source
+   * (LLP 0192 #fail-closed). Optional for the same hand-built-resolver
+   * reason as `shouldWithholdDataset`.
+   */
+  shouldWithholdUnattributed?(dataset: string): boolean
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {

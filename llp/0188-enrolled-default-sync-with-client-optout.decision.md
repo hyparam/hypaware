@@ -101,6 +101,12 @@ attributed to those clients by design (LLP 0147) and sync as such; and
 live-capture misattribution (LLP 0175) makes an opt-out only as good as
 the `client_name` on the row.
 
+> **Extended-by: [LLP 0192](./0192-unattributed-rows-escape-optout.issue.md).**
+> The `client_name` residual is systematic for the raw picker rows, not
+> incidental: a null-attribution row falls between both rules above and
+> always ships. LLP 0192 adds an interim fail-closed seam rule for
+> unattributed rows and defers the capture-side attribution fix.
+
 Rejected: keeping LLP 0132's local-only default with an opt-in toggle.
 The fleets asking for this change want coverage of new agents without a
 config chase; an opt-in default recreates the chase. The BYOD

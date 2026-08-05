@@ -184,6 +184,74 @@ test('dataset-scoped withholding: an unattributed dataset drops wholesale only w
   assert.equal(resolver.shouldWithholdDataset?.('unknown-dataset'), false)
 })
 
+/**
+ * Mirror the real gateway's ownership shape: a second, local plugin also
+ * contributes the attributed dataset, the way the codex/raw picker rows
+ * join claude's on `ai_gateway_messages`.
+ * @returns {any}
+ */
+function makeGatewayCoOwnedCatalog() {
+  const catalog = makeCatalog()
+  catalog.plugins.set('@hypaware/hermes', {
+    name: '@hypaware/hermes',
+    contributes: {
+      datasets: [
+        { name: 'signals' },
+        { name: 'ai_gateway_messages', attribution_column: 'client_name' },
+      ],
+    },
+  })
+  return catalog
+}
+
+// @ref LLP 0192#fail-closed [tests]: an unattributed row in an attributed dataset is withheld once any of that dataset's sources is opted out
+test('fail-closed: any opted-out owner of an attributed dataset withholds its unattributed rows', async () => {
+  const stateDir = await makeTmpDir()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'hermes', class: 'local-only' }] })
+  const resolver = buildSourceWithholdResolver({
+    catalog: makeGatewayCoOwnedCatalog(),
+    layered: makeLayered(ENROLLED),
+    stateDir,
+  })
+  assert.ok(resolver)
+  assert.equal(
+    resolver.shouldWithholdUnattributed?.('ai_gateway_messages'),
+    true,
+    'some, not every: one standing opt-out is enough for an unlabeled row'
+  )
+  assert.equal(
+    resolver.shouldWithholdUnattributed?.('signals'),
+    false,
+    'a dataset without an attribution column has no unattributed-row rule; shouldWithholdDataset covers it'
+  )
+  assert.equal(resolver.shouldWithholdUnattributed?.('unknown-dataset'), false)
+})
+
+test('fail-closed: inert with nothing opted out, and inert for an opt-out on a non-owner', async () => {
+  const freshStateDir = await makeTmpDir()
+  const nothing = buildSourceWithholdResolver({
+    catalog: makeGatewayCoOwnedCatalog(),
+    layered: makeLayered(ENROLLED),
+    stateDir: freshStateDir,
+  })
+  assert.equal(nothing?.shouldWithholdUnattributed?.('ai_gateway_messages'), false, 'no opt-outs -> nothing changes')
+
+  // In the base catalog only the central claude row owns the gateway
+  // dataset; a hermes opt-out is an opt-out on a non-owner.
+  const stateDir = await makeTmpDir()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'hermes', class: 'local-only' }] })
+  const nonOwner = buildSourceWithholdResolver({
+    catalog: makeCatalog(),
+    layered: makeLayered(ENROLLED),
+    stateDir,
+  })
+  assert.equal(
+    nonOwner?.shouldWithholdUnattributed?.('ai_gateway_messages'),
+    false,
+    'an opt-out on a source that cannot produce this dataset withholds nothing here'
+  )
+})
+
 // --- catalog folds -----------------------------------------------------------
 
 test('datasetAttributionColumnsFromCatalog folds declared attribution columns, first writer wins', () => {

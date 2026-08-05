@@ -62,5 +62,18 @@ export function createSourceWithholdResolver({
       const withheld = resolveWithheld()
       return owners.every((id) => withheld.has(id))
     },
+    // `some`, not `every`: an unlabeled row cannot be proven to belong to a
+    // synced source, so one standing opt-out over the dataset's producers is
+    // enough to withhold it. Deliberately over-withholds; the capture-side
+    // attribution fix that retires this is LLP 0192 #deferred.
+    // @ref LLP 0192#fail-closed [implements]: an unattributed row in an attributed dataset is withheld once any of that dataset's sources is opted out
+    shouldWithholdUnattributed(dataset) {
+      if (!datasetOwnedSourceIds) return false
+      if (!datasetAttributionColumns.has(dataset)) return false
+      const owners = datasetOwnedSourceIds.get(dataset)
+      if (!owners || owners.length === 0) return false
+      const withheld = resolveWithheld()
+      return owners.some((id) => withheld.has(id))
+    },
   }
 }

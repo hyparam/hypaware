@@ -288,6 +288,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
+      let droppedUnattributedRowCount = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
@@ -318,11 +319,24 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // dropped from the payload here, same drop-but-advance continuation
         // semantics as the `cwd` filter above, so a sink's watermark still
         // moves past a withheld row (LLP 0070#incremental).
-        if (sourceWithholdResolver && attributionColumn !== undefined && sourceWithholdResolver.shouldWithhold(row[attributionColumn])) {
-          droppedRowCount += 1
-          droppedSourceRowCount += 1
-          yield { after, dropped: true }
-          continue
+        if (sourceWithholdResolver && attributionColumn !== undefined) {
+          const attributionValue = row[attributionColumn]
+          // @ref LLP 0192#fail-closed [implements]: a row with no usable
+          // attribution value cannot be tied to any synced source, so once
+          // any of this dataset's producers is opted out it is withheld
+          // instead of shipped (pre-0192, every unattributed row escaped
+          // both withhold rules).
+          const attributed = typeof attributionValue === 'string' && attributionValue !== ''
+          const withholdRow = attributed
+            ? sourceWithholdResolver.shouldWithhold(attributionValue)
+            : sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true
+          if (withholdRow) {
+            droppedRowCount += 1
+            droppedSourceRowCount += 1
+            if (!attributed) droppedUnattributedRowCount += 1
+            yield { after, dropped: true }
+            continue
+          }
         }
         // We forced `cwd`/the attribution column in for the filters only;
         // don't leak either into a payload the caller's projection didn't ask
@@ -341,6 +355,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
+          // Separate count so the fail-closed rule's over-withholding is
+          // observable in the field, not inferred (LLP 0192 #consequences).
+          ...(droppedUnattributedRowCount > 0 ? { dropped_unattributed_row_count: droppedUnattributedRowCount } : {}),
         })
       }
     },

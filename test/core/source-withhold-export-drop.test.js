@@ -49,8 +49,12 @@ test('readRowsSince: rows attributed to a withheld source are dropped from the p
     { id: 1, client_name: 'claude' }, // not withheld -> shipped
     { id: 2, client_name: 'hermes' }, // withheld -> dropped
     { id: 3, client_name: 'hermes' }, // withheld -> dropped
-    { id: 4, client_name: '' }, // empty attribution -> passes (never matches a withheld id)
-    { id: 5, client_name: null }, // no attribution -> passes
+    // Empty/null attribution passes HERE only because this hand-built
+    // resolver has no datasetOwnedSourceIds map, so the LLP 0192
+    // fail-closed rule cannot fire; the production resolver always has
+    // the map (see the fail-closed test below).
+    { id: 4, client_name: '' },
+    { id: 5, client_name: null },
   ])
   await svc.flushTable(spoolPath, { reason: 'manual' })
 
@@ -208,6 +212,74 @@ test('readRowsSince: a dataset with no attribution column whose every owning sou
     }
   }
   assert.equal(droppedCount, 2)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+// @ref LLP 0192#fail-closed [tests]: an unattributed row cannot be tied to a synced source, so one standing opt-out over the dataset's producers withholds it
+test('readRowsSince: unattributed rows in an attributed dataset are withheld once any owning source is opted out (fail closed)', async () => {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    sourceWithholdResolver: createSourceWithholdResolver({
+      withheldSourceIds: ['hermes'],
+      datasetAttributionColumns: new Map([['demo', 'client_name']]),
+      datasetOwnedSourceIds: new Map([['demo', ['claude', 'hermes']]]),
+    }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, client_name: 'claude' }, // attributed to a synced source -> ships
+    { id: 2, client_name: 'hermes' }, // attributed to the opted-out source -> dropped
+    { id: 3, client_name: '' }, // unattributed -> dropped (fail closed)
+    { id: 4, client_name: null }, // unattributed -> dropped (fail closed)
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  /** @type {number[]} */
+  const shippedIds = []
+  let droppedCount = 0
+  let prev = -1n
+  for (const part of await svc.discoverCachePartitions()) {
+    for await (const entry of svc.readRowsSince(part.path, {})) {
+      const cur = BigInt(entry.after.seq)
+      assert.ok(cur >= prev, 'drop-but-advance holds for the fail-closed drop too')
+      prev = cur
+      if (entry.dropped) droppedCount += 1
+      else shippedIds.push(Number(entry.row.id))
+    }
+  }
+  assert.deepEqual(shippedIds, [1], 'only the row provably attributed to a synced source ships')
+  assert.equal(droppedCount, 3)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('readRowsSince: with no opt-out standing, unattributed rows still ship (the fail-closed rule is inert)', async () => {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    sourceWithholdResolver: createSourceWithholdResolver({
+      withheldSourceIds: [],
+      datasetAttributionColumns: new Map([['demo', 'client_name']]),
+      datasetOwnedSourceIds: new Map([['demo', ['claude', 'hermes']]]),
+    }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, client_name: null },
+    { id: 2, client_name: '' },
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  /** @type {number[]} */
+  const shippedIds = []
+  for (const part of await svc.discoverCachePartitions()) {
+    for await (const entry of svc.readRowsSince(part.path, {})) {
+      if (!entry.dropped) shippedIds.push(Number(entry.row.id))
+    }
+  }
+  assert.deepEqual(shippedIds.sort((a, b) => a - b), [1, 2], 'default-sync is unchanged until a real opt-out exists')
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
