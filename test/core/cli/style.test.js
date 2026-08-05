@@ -38,7 +38,7 @@ const OFF = ANSI.reset
 // every other assertion here reads RED/YELLOW/DIM off `ANSI`, so swapping
 // two palette values would repaint the whole CLI while this file stayed
 // green. These three pin the actual bytes.
-// @ref LLP 0189#palette [tests]:
+// @ref LLP 0189#palette [tests]: the palette bytes themselves, pinned literally
 test('the palette maps severities to the standard SGR codes, pinned as bytes', () => {
   assert.equal(paintLine('error: x'), '\x1b[31merror:\x1b[0m x')
   assert.equal(paintLine('warning: x'), '\x1b[33mwarning:\x1b[0m x')
@@ -46,15 +46,13 @@ test('the palette maps severities to the standard SGR codes, pinned as bytes', (
 })
 
 // @ref LLP 0189#rules [tests]: ordered first-match, not best-match
-test('the rules are ordered first-match: an error: prefix wins over a later failed: match on the same line', () => {
-  assert.equal(
-    paintLine('error: attach claude failed: boom'),
-    `${RED}error:${OFF} attach claude failed: boom`,
-    'the failed: rule must not repaint a line the error: rule already classified'
-  )
-  // The continuation rule is first for the same reason: an indented line
-  // that spells a severity word is still a continuation, never re-painted.
-  assert.equal(paintLine('  error: quoted from the config above'), '  error: quoted from the config above')
+test('rule order is observable: the continuation rule outranks failed: on an indented line', () => {
+  // '  attach claude failed: boom' matches BOTH the continuation rule and
+  // the failed: rule (`[^:]*` happily eats the leading spaces), so only
+  // the ordering keeps it plain. Hoisting the failed: rule to the top of
+  // RULES paints this line red and fails here - the mutation the previous
+  // version of this test could not see.
+  assert.equal(paintLine('  attach claude failed: boom'), '  attach claude failed: boom')
 })
 
 test('errors are red and warnings are yellow', () => {
