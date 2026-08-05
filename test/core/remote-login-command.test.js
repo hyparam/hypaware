@@ -442,6 +442,29 @@ test('an unreadable central layer also refuses a same-origin re-login: the gate 
   assert.match(err.join(''), /cannot be read/)
 })
 
+test('an active-slot pointer naming a file that is gone is unreadable, not absent (LLP 0063 D4)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+  })
+  // The apply engine only ever flips the pointer AFTER writing its slot file,
+  // so a pointer whose slot is missing is an applied-to (enrolled) machine
+  // whose layer was removed out of band, not a machine that never enrolled.
+  // `hyp leave` calls it connected and tears it down; the gate must agree.
+  const control = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(control, { recursive: true })
+  await fs.symlink('config.a.json', path.join(control, 'active'))
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+  const code = await runRemoteLogin(['other'], ctx, { login })
+  assert.equal(code, 2)
+  assert.equal(called, false)
+  assert.match(err.join(''), /central config layer .* cannot be read/)
+  assert.match(err.join(''), /config\.a\.json/)
+})
+
 test('an ABSENT central layer is not an enrollment and still permits login (LLP 0063 D4)', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({

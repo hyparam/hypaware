@@ -584,10 +584,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   const targetOrigin = originOf(entry.url)
   const enrollment = await readCentralEnrollment({ stateDir, configPath: localConfigPath(ctx) })
   // Fail the gate CLOSED when it cannot read its own input (#623). A central
-  // layer on disk that does not parse is an enrollment everywhere else in the
-  // codebase ('hyp leave' and the apply engine key on the file), so treating
-  // its zero origins as "not enrolled" would let a *second* org enroll a
-  // machine that is already enrolled - the one thing D4 exists to prevent.
+  // layer that resolves to a path but does not load (corrupt, unreadable, or
+  // named by a pointer whose slot is gone) is an enrollment everywhere else in
+  // the codebase ('hyp leave' and the apply engine key on the path, not on the
+  // contents), so treating its zero origins as "not enrolled" would let a
+  // *second* org enroll an already-enrolled machine - the one thing D4 exists
+  // to prevent. Not enrolled is a central layer path that does not resolve at
+  // all, which never reaches here.
   // Refuse instead, and name the unreadable layer rather than claiming the
   // machine is not connected, which is precisely what we cannot establish.
   // Rejects a same-origin re-login too: without a parse there is no origin to
