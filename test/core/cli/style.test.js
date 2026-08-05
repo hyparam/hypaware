@@ -62,9 +62,11 @@ test('a severity word mid-line is not a prefix, so the line stays plain', () => 
   // would eat unrelated leading text instead of colouring the word it found:
   // dropping the `^` from /^(error:)/i turns the first line below into
   // '\x1b[31merror:\x1b[0mg config error: EACCES' - 'readin' gone.
-  // One line per anchored rule, each shaped so that only an unanchored
-  // version of that rule can match it. Plain strings on both sides, so these
-  // stay true whatever the palette says.
+  // One line per anchored rule that needed one, each shaped so that only an
+  // unanchored version of that rule can match it (note: and tip: each get a
+  // line even though they share one rule; the continuation rule's anchor is
+  // already pinned by the tests below). Plain strings on both sides, so
+  // these stay true whatever the palette says.
   assert.equal(paintLine('reading config error: EACCES'), 'reading config error: EACCES')
   assert.equal(paintLine('logged one warning: none fatal'), 'logged one warning: none fatal')
   assert.equal(paintLine('see the note: at the end'), 'see the note: at the end')
