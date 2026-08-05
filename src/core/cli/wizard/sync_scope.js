@@ -201,6 +201,11 @@ async function promptSyncScopeSelection({ opts, ask, confirm, optedOutBefore }) 
           // The gate is always this lane's first screen, so the menu's
           // back always has a target.
           allowBack: true,
+          // In this menu checked means "syncs", so the numbered non-TTY
+          // fallback must keep the checked rows on a bare enter; its
+          // historical enter-selects-none would silently opt every
+          // candidate out, the exact inverse of the TUI default.
+          enterKeepsChecked: true,
         })
         const checkedSet = new Set(checked)
         return { optedOut: opts.candidates.map((d) => d.id).filter((id) => !checkedSet.has(id)).sort() }

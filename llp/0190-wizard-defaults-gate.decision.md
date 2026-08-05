@@ -63,7 +63,14 @@ opt-out computation.
 "Select what to sync" opens the multiselect, now titled "Choose what syncs - unchecked sources stay on this machine":
 every candidate renders checked by default (default-sync is the point),
 a previously opted-out source arrives unchecked, and the opt-out set is
-the candidates left unchecked at confirm. This flips the polarity of the
+the candidates left unchecked at confirm. The numbered non-TTY fallback
+keeps parity with that meaning: the sync menu sets `enterKeepsChecked`
+on the question, so the fallback renders each row's checked state
+(`[x]`/`[ ]`) and a bare enter keeps it, where the fallback's historical
+enter-selects-none would have opted every candidate out - the exact
+inverse of the TUI default, with the defaults invisible. Other numbered
+questions (the pick menus, `runPickerWalkthrough`) keep the historical
+semantics untouched. This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over
 shown candidates, seam enforcement, corrupt-store fail-closed - is

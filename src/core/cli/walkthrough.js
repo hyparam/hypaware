@@ -73,7 +73,8 @@ export function resolveHypHome(env) {
 /**
  * Build the default interactive prompt. Uses Node's `readline` against
  * the provided stdin/stdout. Accepts comma-separated indices (1-based)
- * or "all" for every option.
+ * or "all" for every option; a question with `enterKeepsChecked` also
+ * shows each row's checked state and keeps it on a bare enter.
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncPickPrompt}
@@ -93,19 +94,33 @@ function legacyNumberedPromptFactory(opts) {
         // Locked (disabled) rows are shown for context but never selectable
         // by number - they are already in the central layer and are filtered
         // out of the returned picks downstream regardless.
-        output.write(`  ${idx + 1}) ${opt.label}${opt.disabled ? ' (locked)' : ''}\n`)
+        const box = question.enterKeepsChecked ? (opt.checked ? '[x] ' : '[ ] ') : ''
+        output.write(`  ${idx + 1}) ${box}${opt.label}${opt.disabled ? ' (locked)' : ''}\n`)
         if (opt.summary && opt.summary !== opt.label) {
           output.write(`     ${opt.summary}\n`)
         }
       })
       const answer = await rl.question(
-        question.allowBack ? 'select (e.g. 1,3, "all", or b to go back): ' : 'select (e.g. 1,3 or "all"): '
+        question.allowBack
+          ? `select (e.g. 1,3, "all",${question.enterKeepsChecked ? ' enter keeps [x],' : ''} or b to go back): `
+          : question.enterKeepsChecked
+            ? 'select (e.g. 1,3, "all", or enter to keep [x]): '
+            : 'select (e.g. 1,3 or "all"): '
       )
       const trimmed = answer.trim().toLowerCase()
       // The readline form of the TUI's escape (LLP 0191): same signal,
       // same caller handling, so both paths step back identically.
       if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
-      if (!trimmed) return []
+      // A bare enter keeps the rendered checked set when the question
+      // opted in, mirroring the TUI multiselect's enter (checked rows,
+      // disabled included; callers filter locked rows regardless).
+      // Everywhere else it stays "select none", which scripted non-TTY
+      // runs of the picker rely on.
+      // @ref LLP 0190#sync-gate [implements]: the numbered fallback's enter keeps the checked defaults too
+      if (!trimmed) {
+        if (question.enterKeepsChecked) return question.options.filter((o) => o.checked).map((o) => o.value)
+        return []
+      }
       if (trimmed === 'all') return question.options.map((o) => o.value)
       const indices = trimmed
         .split(',')

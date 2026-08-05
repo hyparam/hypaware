@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
 
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -113,7 +114,74 @@ test('the menu checks what syncs: everything checked by default on a fresh run',
   assert.match(state.question.title, /unchecked sources stay on this machine/)
   assert.equal(state.question.progress, 'Step 3 of 4 · Choose what syncs')
   assert.ok(state.question.options.every((/** @type {any} */ o) => o.checked === true), 'default-sync: everything pre-checked on a fresh run')
+  assert.equal(state.question.enterKeepsChecked, true, 'the numbered fallback must keep the checked rows on a bare enter')
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'the store is stamped (empty), not left absent')
+})
+
+// The non-TTY fallback path end to end: no prompt seams, the real
+// readline factories driven by scripted answers. A bare enter at the
+// menu keeps the rendered defaults; the historical enter-selects-none
+// would have opted every candidate out, inverting the TUI default
+// (LLP 0190 #sync-gate).
+
+/**
+ * @param {PassThrough} input
+ * @param {string[]} answers one per prompt line, in order
+ */
+function promptDrivenOutput(input, answers) {
+  let value = ''
+  return {
+    /** @param {string} chunk */
+    write(chunk) {
+      value += String(chunk)
+      if (String(chunk).startsWith('select')) {
+        const answer = answers.shift()
+        if (answer !== undefined) input.write(answer)
+        if (answers.length === 0) input.end()
+      }
+      return true
+    },
+    text() { return value },
+  }
+}
+
+test('non-TTY: opening the menu and pressing enter keeps the defaults, not opt-everything-out', async () => {
+  const { env, stateDir } = await makeHome()
+  const input = new PassThrough()
+  // Gate: 2 = "Select what to sync"; menu: bare enter.
+  const stdout = promptDrivenOutput(input, ['2\n', '\n'])
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    stdin: input,
+    candidates: [descriptor('openclaw'), descriptor('hermes')],
+  }))
+
+  assert.deepEqual(result, { optedOut: [] })
+  assert.match(stdout.text(), /\[x\] capture openclaw/, 'the fallback shows the checked defaults')
+  assert.match(stdout.text(), /\[x\] capture hermes/)
+  assert.match(stdout.text(), /enter keeps \[x\]/, 'the prompt line says what enter does')
+  assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'everything still syncs')
+})
+
+test('non-TTY: a bare enter at the menu round-trips a standing opt-out instead of resetting it', async () => {
+  const { env, stateDir } = await makeHome()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
+  const input = new PassThrough()
+  const stdout = promptDrivenOutput(input, ['2\n', '\n'])
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    stdin: input,
+    candidates: [descriptor('openclaw'), descriptor('hermes')],
+  }))
+
+  assert.deepEqual(result, { optedOut: ['openclaw'] })
+  assert.match(stdout.text(), /\[ \] capture openclaw/, 'the standing opt-out renders unchecked')
+  assert.match(stdout.text(), /\[x\] capture hermes/)
+  assert.deepEqual(await readClientSyncEntries({ stateDir }), [
+    { source: 'openclaw', class: 'local-only' },
+  ], 'enter keeps the split it showed')
 })
 
 test('unchecking a source writes its opt-out and names the follow-up command', async () => {

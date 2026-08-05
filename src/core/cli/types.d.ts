@@ -86,8 +86,10 @@ export interface WalkthroughOption {
   plugin?: string
   /**
    * Initial checkbox state in the TUI multiselect. Used by the picker to
-   * pre-select autodetected sources and the default export. Ignored by
-   * the legacy numbered prompt, which has no preselection concept.
+   * pre-select autodetected sources and the default export. The legacy
+   * numbered prompt ignores it unless the question sets
+   * `enterKeepsChecked`, which renders the state and makes a bare enter
+   * keep it.
    */
   checked?: boolean
   /**
@@ -118,6 +120,16 @@ export interface WalkthroughQuestion {
    * to return to; `runPickerWalkthrough` never sets it.
    */
   allowBack?: boolean
+  /**
+   * When set, the legacy numbered fallback renders each row's checked
+   * state (`[x]`/`[ ]`) and a bare enter returns the checked values
+   * instead of none, matching the TUI multiselect's enter. Set by the
+   * wizard's sync menu, where checked means "syncs" and an invisible
+   * empty-selection default would invert it (LLP 0190 #sync-gate).
+   * Unset questions keep the historical semantics: no state rendered,
+   * bare enter selects nothing.
+   */
+  enterKeepsChecked?: boolean
 }
 
 export interface WalkthroughOptions {
