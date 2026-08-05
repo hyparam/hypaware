@@ -100,47 +100,33 @@ function legacyNumberedPromptFactory(opts) {
           output.write(`     ${opt.summary}\n`)
         }
       })
-      while (true) {
-        const answer = await rl.question(
-          question.allowBack
-            ? `select (e.g. 1,3, "all",${question.enterKeepsChecked ? ' enter keeps [x],' : ''} or b to go back): `
-            : question.enterKeepsChecked
-              ? 'select (e.g. 1,3, "all", or enter to keep [x]): '
-              : 'select (e.g. 1,3 or "all"): '
-        )
-        const trimmed = answer.trim().toLowerCase()
-        // The readline form of the TUI's escape (LLP 0191): same signal,
-        // same caller handling, so both paths step back identically.
-        if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
-        // A bare enter keeps the rendered checked set when the question
-        // opted in, mirroring the TUI multiselect's enter (checked rows,
-        // disabled included; callers filter locked rows regardless).
-        // Everywhere else it stays "select none", which scripted non-TTY
-        // runs of the picker rely on.
-        // @ref LLP 0190#sync-gate [implements]: the numbered fallback's enter keeps the checked defaults too
-        if (!trimmed) {
-          if (question.enterKeepsChecked) return question.options.filter((o) => o.checked).map((o) => o.value)
-          return []
-        }
-        if (trimmed === 'all') return question.options.map((o) => o.value)
-        // The explicit empty selection; without it, the re-ask below would
-        // leave no way to deliberately select nothing.
-        if (trimmed === 'none') return []
-        const indices = trimmed
-          .split(',')
-          .map((s) => Number.parseInt(s.trim(), 10))
-          .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length)
-        // An answer that names no row ("y", "0", "9" out of range) used to
-        // fall through to [] - in the sync menu that silently opted every
-        // candidate out. Say what happened and ask again; a partially valid
-        // answer still wins.
-        // @ref LLP 0190#sync-gate [implements]: a malformed answer re-asks instead of reading as "none"
-        if (indices.length === 0) {
-          output.write(`nothing matched '${answer.trim()}' - enter numbers like 1,3, "all", or "none"\n`)
-          continue
-        }
-        return indices.map((n) => question.options[n - 1].value)
+      const answer = await rl.question(
+        question.allowBack
+          ? `select (e.g. 1,3, "all",${question.enterKeepsChecked ? ' enter keeps [x],' : ''} or b to go back): `
+          : question.enterKeepsChecked
+            ? 'select (e.g. 1,3, "all", or enter to keep [x]): '
+            : 'select (e.g. 1,3 or "all"): '
+      )
+      const trimmed = answer.trim().toLowerCase()
+      // The readline form of the TUI's escape (LLP 0191): same signal,
+      // same caller handling, so both paths step back identically.
+      if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
+      // A bare enter keeps the rendered checked set when the question
+      // opted in, mirroring the TUI multiselect's enter (checked rows,
+      // disabled included; callers filter locked rows regardless).
+      // Everywhere else it stays "select none", which scripted non-TTY
+      // runs of the picker rely on.
+      // @ref LLP 0190#sync-gate [implements]: the numbered fallback's enter keeps the checked defaults too
+      if (!trimmed) {
+        if (question.enterKeepsChecked) return question.options.filter((o) => o.checked).map((o) => o.value)
+        return []
       }
+      if (trimmed === 'all') return question.options.map((o) => o.value)
+      const indices = trimmed
+        .split(',')
+        .map((s) => Number.parseInt(s.trim(), 10))
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length)
+      return indices.map((n) => question.options[n - 1].value)
     } finally {
       rl.close()
     }

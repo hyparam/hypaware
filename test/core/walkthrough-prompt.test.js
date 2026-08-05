@@ -67,13 +67,12 @@ function syncMenuQuestion(/** @type {Record<string, unknown>} */ extra = {}) {
 
 /**
  * Ask one question through the real legacy prompt (non-TTY streams force
- * the fallback), feeding one scripted answer line per prompt shown.
+ * the fallback) with a single scripted answer line.
  *
  * @param {any} question
- * @param {string | string[]} answer
+ * @param {string} answer
  */
 async function askLegacy(question, answer) {
-  const answers = Array.isArray(answer) ? [...answer] : [answer]
   const input = new PassThrough()
   let text = ''
   const stdout = {
@@ -81,9 +80,8 @@ async function askLegacy(question, answer) {
     write(chunk) {
       text += String(chunk)
       if (String(chunk).startsWith('select')) {
-        const next = answers.shift()
-        if (next !== undefined) input.write(next)
-        if (answers.length === 0) input.end()
+        input.write(answer)
+        input.end()
       }
       return true
     },
@@ -106,26 +104,6 @@ test('enterKeepsChecked: the fallback renders the checked state and a bare enter
 test('enterKeepsChecked: typed indices still replace the checked set', async () => {
   const { picked } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), '3\n')
   assert.deepEqual(picked, ['hermes'])
-})
-
-// A malformed answer used to fall through to [] - in the sync menu that
-// silently opted every candidate out. The fallback now says what happened
-// and asks again; "none" is the explicit empty selection.
-test('an answer naming no row re-asks instead of silently selecting nothing', async () => {
-  const { picked, text } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), ['y\n', '3\n'])
-  assert.match(text, /nothing matched 'y' - enter numbers like 1,3, "all", or "none"/)
-  assert.deepEqual(picked, ['hermes'], 'the re-asked answer wins')
-})
-
-test('"none" is the explicit empty selection, so deliberate opt-everything-out is still one word', async () => {
-  const { picked } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), 'none\n')
-  assert.deepEqual(picked, [])
-})
-
-test('a partially valid answer still wins without a re-ask', async () => {
-  const { picked, text } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), '0,3\n')
-  assert.deepEqual(picked, ['hermes'])
-  assert.doesNotMatch(text, /nothing matched/)
 })
 
 test('without enterKeepsChecked a bare enter still selects nothing and no state is rendered', async () => {

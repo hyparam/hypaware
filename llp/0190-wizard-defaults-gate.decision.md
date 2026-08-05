@@ -76,9 +76,10 @@ on the question, so the fallback renders each row's checked state
 enter-selects-none would have opted every candidate out - the exact
 inverse of the TUI default, with the defaults invisible. Other numbered
 questions (the pick menus, `runPickerWalkthrough`) keep the historical
-semantics untouched. The fallback also re-asks on an answer that names
-no row ("y", "0", an out-of-range index) instead of reading it as
-"select nothing"; the explicit empty selection is the word "none".
+semantics untouched. An answer that names no row ("y", "0", an
+out-of-range index) still reads as "select nothing" - a known papercut
+deferred to issue #634 (a first re-ask attempt looped forever on piped
+stdin and was reverted).
 This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over
