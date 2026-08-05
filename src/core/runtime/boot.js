@@ -326,12 +326,20 @@ export async function bootKernel(opts = {}) {
  * what "effective" means, so a reload can never silently drop the central
  * layer.
  *
+ * `centralConfig` is `null` for **two different** states: no central layer on
+ * disk, and a central layer that is there but does not load. Boot itself is
+ * right to collapse them (either way there is nothing to merge), but a caller
+ * deciding a *permission* on "is this machine enrolled" is not: it must be
+ * able to tell "not enrolled" from "cannot tell". `centralLoaded` is returned
+ * raw alongside for exactly that, the way `localLoaded` already is.
+ *
  * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string> }} args
  * @returns {Promise<{
  *   centralConfig: HypAwareV2Config | null,
  *   localConfig: HypAwareV2Config | null,
  *   centralConfigPath: string | null,
  *   localLoaded: LoadConfigResult | null,
+ *   centralLoaded: LoadConfigResult | null,
  *   effective: HypAwareV2Config | null,
  *   drops: ConfigLayerDrop[],
  *   centralQueryIgnored: boolean,
@@ -368,6 +376,7 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
     localConfig,
     centralConfigPath,
     localLoaded,
+    centralLoaded,
     effective: (centralConfig || localConfig) ? merged.effective : null,
     drops: merged.drops,
     centralQueryIgnored: merged.centralQueryIgnored,

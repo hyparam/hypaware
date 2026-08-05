@@ -21,7 +21,7 @@ import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
  * a server-pushed sink block seeds the same file a locally-configured one
  * does.
  *
- * @import { LoginGatewayCredential, SeededGateway } from '../../../src/core/remote/types.js'
+ * @import { CentralEnrollment, LoginGatewayCredential, SeededGateway } from '../../../src/core/remote/types.js'
  * @import { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
@@ -89,11 +89,25 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
 }
 
 /**
- * The URL origins that `@hypaware/central` sinks target in the **central
- * config layer**: i.e. which server(s) this machine is *enrolled* to. A
- * fresh, login-first box returns `[]`. Drives login's D4 exclusivity gate
- * (LLP 0063): already enrolled to this origin (re-login, idempotent), enrolled
- * to a different origin (reject), or not enrolled (may enroll).
+ * This machine's enrollment as the **central config layer** records it: the
+ * URL origins its `@hypaware/central` sinks target, plus whether that layer
+ * could be read at all. Drives login's D4 exclusivity gate (LLP 0063), which
+ * has *four* answers, not three: already enrolled to this origin (re-login,
+ * idempotent), enrolled to a different origin (reject), not enrolled (may
+ * enroll), and **cannot tell** (reject).
+ *
+ * That last state is the reason this returns a record instead of a bare list.
+ * A central layer that is on disk but does not parse is an enrollment by every
+ * other definition the codebase uses (`hyp leave` and the apply engine key on
+ * the file, not its contents), yet it yields no origins. Reporting it as `[]`
+ * reads as "not enrolled" and lets a second org enroll the machine: a gate
+ * that cannot read its own input must refuse, not permit (#623). `unreadable`
+ * carries the load failure so the caller can say what is actually wrong
+ * instead of the misleading "not connected".
+ *
+ * A load failure of `config_missing` is *not* unreadable: the layer path is
+ * resolved from an active-slot pointer that may name a file since removed, and
+ * "the file is gone" is the absent case, not the ambiguous one.
  *
  * Deliberately reads the central layer, **not** the effective (local+central)
  * config: a hand-authored `@hypaware/central` sink in the user-owned local
@@ -103,11 +117,14 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  * gate and `hyp leave` therefore agree that enrollment == the central layer.
  *
  * @param {{ stateDir: string, configPath: string | null }} args
- * @returns {Promise<string[]>}
+ * @returns {Promise<CentralEnrollment>}
  * @ref LLP 0063#d4 [implements]: one enrollment per machine; the central-layer sink origins are the gate, and a local sink is the user's own, not an enrollment
  */
-export async function readCentralSinkOrigins({ stateDir, configPath }) {
-  const { centralConfig } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+export async function readCentralEnrollment({ stateDir, configPath }) {
+  const { centralConfig, centralLoaded } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  const unreadable = centralLoaded && centralLoaded.ok === false && centralLoaded.errorKind !== 'config_missing'
+    ? { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
+    : null
   const sinks = centralConfig?.sinks ?? {}
   const origins = new Set()
   for (const entry of Object.values(sinks)) {
@@ -116,7 +133,23 @@ export async function readCentralSinkOrigins({ stateDir, configPath }) {
     const origin = typeof config.url === 'string' ? originOf(config.url) : null
     if (origin) origins.add(origin)
   }
-  return [...origins]
+  return { origins: [...origins], unreadable }
+}
+
+/**
+ * {@link readCentralEnrollment} reduced to its origin list, for callers that
+ * are *not* making a permission decision and have their own documented answer
+ * for an unreadable layer (the session-start classification hook, which is
+ * deliberately inert on anything it cannot read: LLP 0106 #interactive).
+ * Anything that gates an enrollment must call `readCentralEnrollment` and
+ * handle `unreadable` itself.
+ *
+ * @param {{ stateDir: string, configPath: string | null }} args
+ * @returns {Promise<string[]>}
+ */
+export async function readCentralSinkOrigins({ stateDir, configPath }) {
+  const { origins } = await readCentralEnrollment({ stateDir, configPath })
+  return origins
 }
 
 /**

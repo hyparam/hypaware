@@ -4,7 +4,28 @@
  * specifier so the published declaration build resolves them identically.
  */
 
+import type { ConfigLoadErrorKind } from '../../../src/core/config/types.js'
 import type { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
+
+/**
+ * What the central config layer says about this machine's enrollment
+ * (LLP 0063 D4). Keeps "not enrolled" and "cannot tell" apart: an empty
+ * `origins` with a non-null `unreadable` is a layer that is on disk but does
+ * not load, which the D4 gate must refuse rather than read as a free machine.
+ */
+export interface CentralEnrollment {
+  /** URL origins the central layer's `@hypaware/central` sinks target. */
+  origins: string[]
+  /**
+   * The load failure when the central layer exists but could not be read or
+   * parsed; `null` when the layer loaded, or when there is no layer at all.
+   */
+  unreadable: {
+    configPath: string
+    errorKind: ConfigLoadErrorKind
+    message: string
+  } | null
+}
 
 /**
  * One central forward sink seeded from a login-minted gateway credential

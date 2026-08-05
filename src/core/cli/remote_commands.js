@@ -17,7 +17,7 @@ import {
   writeToken,
 } from '../remote/credentials.js'
 import { Attr, getLogger } from '../observability/index.js'
-import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
@@ -582,7 +582,24 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // switching is 'hyp leave' then log in again, never one command.
   // @ref LLP 0063#d4 [implements]: pre-auth exclusivity gate, rejecting a login to a new server while enrolled elsewhere
   const targetOrigin = originOf(entry.url)
-  const connectedOrigins = await readCentralSinkOrigins({ stateDir, configPath: localConfigPath(ctx) })
+  const enrollment = await readCentralEnrollment({ stateDir, configPath: localConfigPath(ctx) })
+  // Fail the gate CLOSED when it cannot read its own input (#623). A central
+  // layer on disk that does not parse is an enrollment everywhere else in the
+  // codebase ('hyp leave' and the apply engine key on the file), so treating
+  // its zero origins as "not enrolled" would let a *second* org enroll a
+  // machine that is already enrolled - the one thing D4 exists to prevent.
+  // Refuse instead, and name the unreadable layer rather than claiming the
+  // machine is not connected, which is precisely what we cannot establish.
+  // Rejects a same-origin re-login too: without a parse there is no origin to
+  // compare against, and 'hyp leave' clears the layer by path, so the advice
+  // is actionable either way.
+  if (enrollment.unreadable) {
+    ctx.stderr.write(`hyp remote login: this machine's central config layer (${enrollment.unreadable.configPath}) cannot be read, so its enrollment cannot be verified\n`)
+    ctx.stderr.write(`  ${enrollment.unreadable.message}\n`)
+    ctx.stderr.write("  repair that file, or disconnect this machine ('hyp leave'), then log in again\n")
+    return 2
+  }
+  const connectedOrigins = enrollment.origins
   const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
     ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)

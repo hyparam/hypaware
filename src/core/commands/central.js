@@ -15,7 +15,7 @@ import {
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
-import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { originOf, readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -199,7 +199,16 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   // another server), abort rather than provision a second enrollment. This is
   // the non-locked flavor of D4's seed-time check: it closes the common race;
   // the cross-process credentials lock (LLP 0065) is a follow-up.
-  const connectedOrigins = await readCentralSinkOrigins({ stateDir: stateRoot, configPath: localPath })
+  //
+  // Same fail-closed reading as the pre-auth gate (#623): a central layer that
+  // appeared but does not parse leaves this check unable to say whether a
+  // second enrollment is being created, so it must abort. Throwing is the
+  // whole handling: nothing has been written yet, and the caller already
+  // reports a throw here as "signed in, but enrollment failed".
+  const { origins: connectedOrigins, unreadable } = await readCentralEnrollment({ stateDir: stateRoot, configPath: localPath })
+  if (unreadable) {
+    throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
+  }
   const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
   if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
 
