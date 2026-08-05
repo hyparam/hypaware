@@ -18,6 +18,7 @@ import {
   clearClientActionMarker,
   readClientActionStatus,
   readInstalledAssets,
+  rearmRefusedActionMarker,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
@@ -425,8 +426,8 @@ async function runClientLifecycle(action, argv, ctx) {
         json: parsed.json,
       })
       // A successful manual attach is the only re-arm a `refused` marker gets
-      // in this pass: drop it so the next reconcile pass sees no marker at this
-      // request key, treats it as a fresh target, and re-`perform()`s.
+      // in this pass: after it, the next reconcile pass must stop
+      // short-circuiting on the marker and re-`perform()` the request key.
       //
       // Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose.
       // A `done` marker is the only record naming the files an org-driven
@@ -437,20 +438,23 @@ async function runClientLifecycle(action, argv, ctx) {
       // must leave the marker store exactly as it found it, the same way the
       // detach path returns before its own clear under `--dry-run`.
       //
+      // The re-arm itself is a drop only when the marker records no
+      // `installed_assets`. One that carries them is the same undo record a
+      // `done` marker is (a refusal on a re-`perform()` carries the earlier
+      // successful attach's copies forward), so it is rewritten to `failed`
+      // rather than dropped: same re-arm, record intact. That branch lives in
+      // `rearmRefusedActionMarker` beside the store it rewrites.
+      //
       // Best-effort: a marker-store I/O failure must never fail the attach that
       // just succeeded.
-      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach clears a refused marker, and only that; the reconciler never re-arms one on its own
+      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
       if (parsed.dryRun !== true) {
         try {
-          const markerStateRoot = readObservabilityEnv(ctx.env).stateDir
-          const existingMarker = readClientActionStatus({ stateRoot: markerStateRoot }).byKind.attach?.[name]
-          if (existingMarker?.status === 'refused') {
-            clearClientActionMarker({
-              stateRoot: markerStateRoot,
-              kind: 'attach',
-              requestKey: name,
-            })
-          }
+          rearmRefusedActionMarker({
+            stateRoot: readObservabilityEnv(ctx.env).stateDir,
+            kind: 'attach',
+            requestKey: name,
+          })
         } catch (markerErr) {
           getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
             hyp_client: name,

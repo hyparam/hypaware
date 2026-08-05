@@ -11,6 +11,7 @@ import {
   createActionReconciler,
   readClientActionStatus,
   clearClientActionMarker,
+  rearmRefusedActionMarker,
 } from '../../src/core/config/action_reconciler.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
@@ -585,6 +586,102 @@ test('clearClientActionMarker drops an emptied bucket but preserves sibling buck
     // The sibling bucket and both its keys survive untouched.
     assert.equal(store.backfill['@hypaware/claude'].status, 'done', 'sibling backfill key survives')
     assert.equal(store.backfill['@hypaware/codex'].status, 'done', 'sibling backfill key survives')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// The re-arm's two shapes. `refused` is the only status it touches (a `done`
+// marker is a live undo record; a `failed` one is short-circuited by nothing
+// and needs no help), and it only *drops* a marker that records no effect: one
+// carrying `installed_assets` names files an earlier successful attach copied,
+// and that record has to outlive the re-arm or a later detach cannot remove
+// them.
+// @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [tests]: only a refused
+//   marker is re-armed, and an assetless one is the only one dropped
+// @ref LLP 0138#marker-undo [tests]: the re-arm never destroys the record of an
+//   applied effect
+test('rearmRefusedActionMarker only touches a refused marker, and drops it only when it records no assets', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // (a) Missing store file: nothing to re-arm, and none is created.
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'missing marker file returns false'
+    )
+    assert.equal(fs.existsSync(markerPath(stateRoot)), false, 'no marker file is written for a missing store')
+
+    // (b) A `done` marker is left exactly as it was: it is the only record
+    //     naming what an org-driven attach installed.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        claude: { status: 'done', request_key: 'claude', installed_assets: ['/home/u/.claude/skills/org'] },
+      },
+    })
+    const beforeDone = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'a done marker is not re-armed'
+    )
+    assert.equal(fs.readFileSync(markerPath(stateRoot), 'utf8'), beforeDone, 'a done marker is not rewritten')
+
+    // (c) A `failed` marker likewise: nothing short-circuits it already.
+    seedMarkerFile(stateRoot, {
+      attach: { claude: { status: 'failed', request_key: 'claude', reason: 'boom', attempts: 2 } },
+    })
+    const beforeFailed = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'a failed marker is not re-armed'
+    )
+    assert.equal(fs.readFileSync(markerPath(stateRoot), 'utf8'), beforeFailed, 'a failed marker is not rewritten')
+
+    // (d) An assetless `refused` marker records no effect, so it is dropped
+    //     outright (and its emptied bucket with it), leaving siblings alone.
+    seedMarkerFile(stateRoot, {
+      attach: { claude: { status: 'refused', request_key: 'claude', reason: 'JSONC settings file', at: 'T0' } },
+      backfill: { '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude' } },
+    })
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      true,
+      'an assetless refused marker is re-armed'
+    )
+    const dropped = readMarkerFile(stateRoot)
+    assert.equal('attach' in dropped, false, 'the assetless refused marker is dropped, emptied bucket and all')
+    assert.equal(dropped.backfill['@hypaware/claude'].status, 'done', 'sibling bucket survives')
+
+    // (e) A `refused` marker carrying `installed_assets` is re-armed WITHOUT
+    //     dropping the undo record: rewritten to `failed` (short-circuited by
+    //     nothing, so the next pass re-performs) with the paths intact.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        claude: {
+          status: 'refused',
+          request_key: 'claude',
+          reason: 'JSONC settings file',
+          at: 'T0',
+          endpoint: 'http://127.0.0.1:4388',
+          installed_assets: ['/home/u/.claude/skills/org'],
+        },
+      },
+    })
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      true,
+      'an asset-bearing refused marker is re-armed'
+    )
+    const kept = readMarkerFile(stateRoot).attach.claude
+    assert.equal(kept.status, 'failed', 'it is rewritten to failed, which nothing short-circuits')
+    assert.deepEqual(kept.installed_assets, ['/home/u/.claude/skills/org'], 'the undo record survives the re-arm')
+    assert.equal(kept.request_key, 'claude')
+    assert.equal(kept.endpoint, 'http://127.0.0.1:4388', 'unrelated detail is carried, not reconstructed')
+    assert.match(String(kept.reason), /re-armed by an explicit 'hyp attach claude'/)
+    assert.match(String(kept.reason), /previous refusal: JSONC settings file/)
+    assert.equal('attempts' in kept, false, 'no attempt counter is invented for a re-arm')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

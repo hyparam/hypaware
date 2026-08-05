@@ -340,6 +340,20 @@ export function createActionReconciler(opts) {
           } else {
             // Reverse failed: keep the marker so the next pass retries the
             // undo; surface but do not escalate.
+            //
+            // `refused` lands here too, deliberately. `ActionOutcome` is one
+            // type across both hooks, so widening it for `perform()` made the
+            // status expressible on `reverse()` as well, but no handler returns
+            // it there and this design does not settle what a terminal *undo*
+            // refusal would mean: dropping the marker would destroy the only
+            // record naming settings and files that are still on disk (the
+            // orphaning #212 and LLP 0138#marker-undo both refuse to accept),
+            // while keeping it is the retry-forever this document removes from
+            // the forward gap. Retrying is the safe half of that pair, so an
+            // unexpected `refused` reverse degrades to a visible retry rather
+            // than a silent drop. A reverse that genuinely needs to refuse
+            // needs its own branch, and its own decision about the marker,
+            // first (LLP 0186 §Explicitly out of scope).
             results.push({ kind, requestKey, outcome: 'failed', reason: outcome.reason ?? 'unknown' })
             log.error('client_action.reverse_failed', {
               [Attr.COMPONENT]: 'action-reconciler',
@@ -539,6 +553,70 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
   const markers = store[kind]
   if (!markers || !(requestKey in markers)) return false
   delete markers[requestKey]
+  // Drop an emptied bucket so a no-op namespace never lingers (mirrors reconcile).
+  if (Object.keys(markers).length > 0) {
+    store[kind] = markers
+  } else {
+    delete store[kind]
+  }
+  atomicWriteJsonSync(markerPath, store, { mode: 0o600, dirMode: 0o700 })
+  return true
+}
+
+/**
+ * Re-arm a `refused` marker after an explicit `hyp attach` fixed the
+ * precondition it refused on, without destroying anything the marker is the
+ * only record of. Called by the manual attach command path; a no-op returning
+ * `false` for a missing marker, or for one in any other state (a `done` marker
+ * is a live undo record, and a `failed` one is not short-circuited by anything,
+ * so neither needs or may get this).
+ *
+ * Two shapes, because "re-arm" and "retract" are only the same operation when
+ * the marker records no effect:
+ *
+ *  - **No `installed_assets`.** The marker records nothing that outlives it
+ *    (an attach refuses *before* touching the client's settings), so it is
+ *    dropped outright. The next reconcile pass's `existing` lookup returns
+ *    `undefined`, the request key is a fresh forward gap, and `perform()`
+ *    writes a correct `done` marker itself.
+ *  - **With `installed_assets`.** Those name files an *earlier* successful
+ *    org-driven attach copied, carried onto the marker across its rewrite to
+ *    `refused`; the marker is the only thing on disk naming them, and
+ *    `hyp detach` / `hyp leave` / `reverse()` all read exactly it to know what
+ *    to remove (LLP 0138#marker-undo). Dropping it would strand them, which is
+ *    the same harm the `refused` write branch's own carry-forward exists to
+ *    prevent. So the marker is rewritten to `failed` with the undo record
+ *    intact: `failed` is short-circuited by nothing, so it re-arms the forward
+ *    gap exactly as a cleared marker does, and the next successful
+ *    `perform()` unions the carried assets onto the fresh `done` marker.
+ *
+ * Atomic (tmp+rename, mode 0600), like {@link clearClientActionMarker}.
+ *
+ * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
+ * @returns {boolean} whether a `refused` marker was found and the store rewritten
+ * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only a refused one
+ * @ref LLP 0138#marker-undo [implements]: the re-arm keeps the record of an applied effect, so a later reversal can still remove what an org-driven attach installed
+ */
+export function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const markerPath = path.join(controlDir, CLIENT_ACTIONS_BASENAME)
+  const store = readMarkerStore(markerPath)
+  const markers = store[kind]
+  const marker = markers?.[requestKey]
+  if (!markers || !marker || marker.status !== 'refused') return false
+  const installedAssets = readInstalledAssets(marker)
+  if (installedAssets.length === 0) {
+    delete markers[requestKey]
+  } else {
+    const previous = typeof marker.reason === 'string' && marker.reason.length > 0 ? marker.reason : 'unknown'
+    markers[requestKey] = {
+      ...marker,
+      status: 'failed',
+      installed_assets: installedAssets,
+      reason: `re-armed by an explicit 'hyp attach ${requestKey}', awaiting the next reconcile pass (previous refusal: ${previous})`,
+      last_attempt: new Date(now()).toISOString(),
+    }
+  }
   // Drop an emptied bucket so a no-op namespace never lingers (mirrors reconcile).
   if (Object.keys(markers).length > 0) {
     store[kind] = markers

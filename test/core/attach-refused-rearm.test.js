@@ -17,11 +17,14 @@ import { createAttachHandler } from '../../src/core/config/action_attach.js'
 /**
  * T8 (LLP 0186/0187 re-arm): a successful manual `hyp attach <client>` is the
  * only re-arm a `refused` marker gets in this pass (LLP 0186 explicitly
- * rejects any automatic re-arm here). After a successful manual attach, the
- * marker is CLEARED (not rewritten to `done`), so the very next reconcile
- * pass sees no marker at that request key and re-`perform()`s on its own,
- * writing a fresh `done` marker itself. A failed manual attach must leave the
- * refused marker exactly as it found it.
+ * rejects any automatic re-arm here). After a successful manual attach, a
+ * marker that records no effect is CLEARED (not rewritten to `done`), so the
+ * very next reconcile pass sees no marker at that request key and
+ * re-`perform()`s on its own, writing a fresh `done` marker itself. One that
+ * carries `installed_assets` is re-armed by a rewrite to `failed` instead, so
+ * the undo record naming those files survives. A failed manual attach must
+ * leave the refused marker exactly as it found it, and a dry run must leave
+ * the store byte-identical.
  *
  * Mirrors test/core/detach-rejoin-recovery.test.js's pattern for the
  * detach-side `clearClientActionMarker` call this one is symmetric with.
@@ -305,6 +308,87 @@ test('a successful manual hyp attach leaves a done marker (and its installed_ass
       marker?.installed_assets,
       [path.join(home, '.claude', 'skills', 'org-helper')],
       'the undo record naming org-installed assets is not collateral of the re-arm'
+    )
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The other half of the same invariant the `done` case above protects, and the
+// one the re-arm nearly ate: `installed_assets` means the same thing on a
+// `refused` marker as on a `done` one, because a refusal on a re-`perform()`
+// carries the earlier successful attach's copies forward rather than
+// un-installing them. Clearing such a marker would strand exactly the files
+// that carry-forward exists to keep named, so the re-arm rewrites it to
+// `failed` (short-circuited by nothing, so still re-armed) with the record
+// intact.
+// @ref LLP 0138#marker-undo [tests]: the re-arm keeps the undo record of an
+//   effect an earlier reconciled attach applied
+test('a successful manual hyp attach re-arms an asset-bearing refused marker without dropping its undo record', async () => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-attach-rearm-assets-'))
+  const stateRoot = path.join(home, 'hypaware')
+  const asset = path.join(home, '.claude', 'skills', 'org-helper')
+  try {
+    seedMarker(stateRoot, 'claude', {
+      status: 'refused',
+      request_key: 'claude',
+      reason: 'settings.json is JSONC',
+      at: '2026-08-01T00:00:00.000Z',
+      installed_assets: [asset],
+    })
+
+    const { registry, kernel, calls } = fakeClientKernel()
+    const result = await attach('claude', {
+      hypHome: home,
+      env: { ...process.env, HOME: home, HYP_HOME: home },
+      // @ts-expect-error test-only kernel injection
+      registry,
+      kernel,
+    })
+    assert.equal(result.status, 'ok')
+    assert.deepEqual(calls, ['claude'])
+
+    const marker = readClientActionStatus({ stateRoot }).byKind.attach?.claude
+    assert.equal(marker?.status, 'failed', 'the re-arm rewrites it rather than dropping the undo record')
+    assert.deepEqual(marker?.installed_assets, [asset], 'the files an org-driven attach installed are still named')
+
+    // Still re-armed: `failed` short-circuits nothing, so the very next
+    // reconcile pass re-`perform()`s and its fresh `done` marker unions the
+    // carried assets forward - which is the whole reason keeping it is safe.
+    /** @type {string[]} */
+    const reconcileCalls = []
+    const reconcileClients = {
+      /** @param {string} name */
+      getClient(name) {
+        if (name !== 'claude') return undefined
+        return {
+          name: 'claude',
+          /** @param {any} ctx */
+          async attach(ctx) {
+            reconcileCalls.push('claude')
+            ctx.stdout.write(JSON.stringify({ status: 'ok', changed: true }) + '\n')
+          },
+        }
+      },
+      listClients() {
+        return []
+      },
+    }
+    const reconciler = createActionReconciler({
+      stateRoot,
+      handlers: [createAttachHandler()],
+      now: () => Date.parse('2026-08-04T00:00:00.000Z'),
+      log: NOOP_LOG,
+    })
+    const report = await reconciler.reconcile(reconcileInput({ home, clients: reconcileClients }))
+
+    assert.deepEqual(report.results.map((r) => r.outcome), ['done'])
+    assert.deepEqual(reconcileCalls, ['claude'], 'a rewritten marker re-arms the forward gap exactly as a cleared one does')
+    const after = readMarkers(stateRoot).attach.claude
+    assert.equal(after.status, 'done')
+    assert.ok(
+      after.installed_assets.includes(asset),
+      "the fresh done marker carries the re-armed marker's assets forward"
     )
   } finally {
     await fsp.rm(home, { recursive: true, force: true })

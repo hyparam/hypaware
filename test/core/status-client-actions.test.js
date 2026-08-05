@@ -334,6 +334,31 @@ test('text renderer prints the client actions section with per-state detail', as
   )
 })
 
+// The repair hint is what makes `refused` actionable rather than merely loud,
+// so it does not ride on the reason being present. A marker whose `reason` is
+// missing or empty (a hand edit, an adapter that threw an Error with no
+// message) must still say what to do.
+// @ref LLP 0186#hyp-status-attention-needed-surface [tests]: the concrete next
+//   step is part of the state's rendering, not part of its detail bits
+test('a refused marker with no reason still renders the repair hint, never a bare [refused]', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+  await writeMarkers(hypHome, {
+    attach: {
+      claude: { status: 'refused', request_key: 'claude', reason: '', at: '2026-06-25T02:00:00.000Z' },
+    },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const stdout = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+
+  assert.match(
+    stdout.text(),
+    /attach claude {2}\[refused\] {2}run 'hyp attach claude' after fixing the cause/
+  )
+})
+
 // T9: the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
 // backfill but keyed by *client* name (the attach handler's request key). Status
 // reads the marker file and never runs a pass; a failed/pending attach is loud

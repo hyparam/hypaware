@@ -326,10 +326,12 @@ successful reversal, at the call site around line 1164 today). Add the
 symmetric call on a successful manual attach: after
 `registration.attach(...)` (or the equivalent adapter call the command
 path uses) resolves without throwing, and the run was not a `--dry-run`,
-read the marker at that request key and, **only if it is `refused`**, call
-`clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })`.
+read the marker at that request key and, **only if it is `refused`**, re-arm
+it (`rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: name })`,
+beside `clearClientActionMarker` in `action_reconciler.js`).
 
-This is deliberately a **clear**, not a rewrite to `done`: it does not need
+For a marker that records no `installed_assets`, the re-arm is deliberately a
+**clear**, not a rewrite to `done`: it does not need
 to reconstruct the `endpoint`/`assets_key`/`installed_assets` detail the
 reconciler's own `perform()` computes, because dropping the marker entirely
 is enough. With no marker at that request key, the next reconcile pass's
@@ -354,7 +356,21 @@ a manual re-attach would strand those files with nothing naming them
 branches protect). The clear is therefore gated on the marker's prior status
 being `refused`, not applied blindly.
 
-For the same reason the clear is skipped entirely under `hyp attach
+And a `refused` marker that itself carries `installed_assets` is re-armed
+without being dropped. The field means the same thing on a `refused` marker as
+on a `done` one: an *earlier* successful attach at this request key copied
+those files, and the refusal on a later re-`perform()` carried the record
+forward rather than un-installing them (that carry-forward is
+[#writing-it](#writing-it)'s own branch). Clearing such a marker would strand
+exactly the files that branch exists to keep named. So the re-arm rewrites it
+to **`failed`** with `installed_assets` intact instead: `failed` is
+short-circuited by nothing, so it re-arms the forward gap exactly as a cleared
+marker does, the reverse gap and `hyp detach` keep reading the same undo
+record, and the next successful `perform()` unions the carried assets onto the
+fresh `done` marker. No new marker state is introduced for this: "re-armed" is
+adequately described by the state the reconciler already retries.
+
+For the same reason the re-arm is skipped entirely under `hyp attach
 --dry-run`: a dry run reports what an attach would do and writes nothing, and
 the marker store is state like any other. `hyp detach --dry-run` already
 returns before its own `clearClientActionMarker` call; the attach side matches
@@ -400,6 +416,20 @@ document only names it so the option is not lost.
   change set by accident.
 - **The `isCurrent`-style automatic re-arm** for `refused` markers (above):
   named as a follow-up candidate, not designed or built here.
+- **A terminal `refused` outcome from `reverse()`.** `ActionOutcome` is one
+  type across `perform()` and `reverse()`, so widening it makes `refused`
+  *expressible* on the reverse hook, but nothing produces it (no in-tree
+  handler's `reverse()` returns it) and this document does not settle what it
+  would mean. The reverse gap therefore has no branch for it: it falls into the
+  existing failure arm, logs `action_reverse_failed`, and keeps the marker for
+  the next pass. That is the safe half of the pair on purpose. The alternative
+  (drop the marker) would destroy the only record naming settings and files
+  that are still on disk, the orphaning both #212 and LLP 0138#marker-undo
+  refuse to accept, and a wrong terminal decision about an undo is much more
+  expensive than a retried one. A `reverse()` that genuinely needs to refuse
+  (a settings file that turned into JSONC *after* attach is the obvious
+  candidate) needs its own branch, and its own answer to "what happens to the
+  marker", in a request that extends this one.
 - **Any change to `hypaware-plugin-kernel-types.d.ts`'s `attach(): Promise<void>`
   contract.** Considered and rejected above in favor of the additive
   `markActionRefused`/`isActionRefused` convention.
@@ -433,14 +463,19 @@ Mirrors LLP 0041's own test strategy, extended for the new state:
   three correctly. `overall` stays `healthy` with a `refused` entry present
   (same fixture pattern LLP 0041's failure-surfacing test already uses for
   `failed`).
-- **Re-arm.** A `refused` marker, followed by a successful manual `hyp
-  attach <client>`, clears the marker (`readClientActionStatus` shows no
+- **Re-arm.** An assetless `refused` marker, followed by a successful manual
+  `hyp attach <client>`, clears the marker (`readClientActionStatus` shows no
   entry at that request key); the next `reconcile()` pass re-`perform()`s and
   writes a fresh `done` marker. A `hyp attach` that itself fails leaves the
   `refused` marker in place (nothing is cleared on a failed manual attach), a
   `done` marker carrying `installed_assets` survives a successful manual
   attach untouched (the undo record is not collateral of the re-arm), and
   `hyp attach --dry-run` clears nothing at all.
+- **Re-arm keeps the undo record.** A `refused` marker that carries
+  `installed_assets`, followed by a successful manual `hyp attach <client>`,
+  is rewritten to `failed` with those paths intact rather than dropped; the
+  next `reconcile()` pass still re-`perform()`s it (proving the re-arm), and
+  the fresh `done` marker it writes carries the same paths forward.
 - **Reverse-gap interaction.** A `refused` marker with no `installed_assets`
   for a request key the config stops naming is dropped, like an assetless
   `failed` one; a `refused` marker that carries `installed_assets` is routed
