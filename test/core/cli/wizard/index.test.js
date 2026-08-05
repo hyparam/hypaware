@@ -226,20 +226,30 @@ test('runInitWizard: a failed hyp leave returns to the fork still connected', as
   assert.match(stderr.text(), /still connected/)
 })
 
-test('runInitWizard: cancelling the disconnect question returns to the fork', async () => {
+// Ctrl+C at the disconnect question ends the run: it shares the prompt
+// with the escape that steps back, but not its handling. Re-presenting the
+// fork made "get me out" the first of two keystrokes, which is what
+// LLP 0191 #esc-back separates ctrl+c from escape to avoid. Nothing is
+// disconnected either way, which is all LLP 0190 #fork-disconnect asks of
+// a cancel.
+// @ref LLP 0191#esc-back [tests]: ctrl+c at the disconnect question cancels the run rather than stepping back
+test('runInitWizard: cancelling the disconnect question ends the run without disconnecting', async () => {
   const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
   const forkChoices = ['local', 'quit']
   let leaveRan = false
-  const { opts, calls } = wizardOpts(await tmpHome(), {
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
     fork: async () => forkChoices.shift(),
     confirm: async () => { throw new PromptCancelledError() },
     leave: async () => { leaveRan = true; return 0 },
   })
   const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 0)
-  assert.equal(leaveRan, false)
-  assert.equal(calls.filter((c) => c === 'fork').length, 2)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.equal(leaveRan, false, 'a cancel never disconnects')
+  assert.equal(calls.filter((c) => c === 'fork').length, 1, 'the fork is not re-presented')
+  assert.ok(!calls.includes('pick'), 'the cancel ended the run before any phase')
+  assert.match(stderr.text(), /hyp init: cancelled/)
 })
 
 test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {

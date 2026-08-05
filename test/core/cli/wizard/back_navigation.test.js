@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 
 import { reduce } from '../../../../src/core/cli/tui/keypress.js'
 import { render } from '../../../../src/core/cli/tui/render.js'
@@ -524,4 +524,142 @@ test('runInitWizard: disconnecting after a join that locked nothing drops the sy
     LOCAL_INSTALL_RETENTION_DAYS,
     'a true solo install keeps the longer local retention window'
   )
+})
+
+// Ctrl+C at the disconnect question is a cancel, not a back-step: sharing
+// the back arm's `continue` re-presented the fork, so "get me out" became
+// the first of two keystrokes - the exact shape LLP 0191 #esc-back says
+// ctrl+c exists to avoid. Nothing is disconnected either way, which is all
+// LLP 0190 #fork-disconnect requires of a cancel.
+// @ref LLP 0191#esc-back [tests]: ctrl+c at the disconnect question ends the run rather than stepping back
+test('runInitWizard: ctrl+c at the disconnect question cancels the run instead of re-presenting the fork', async () => {
+  const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
+  let forkCalls = 0
+  const { opts, stdout, stderr, calls } = await wizardOpts({
+    join: async () => ({ status: 'ok', lockedSources: [] }),
+    fork: async () => {
+      forkCalls += 1
+      if (forkCalls > 2) throw new Error('the fork must not be re-presented after a cancel')
+      return forkCalls === 1 ? 'team' : 'local'
+    },
+    pick: async () => /** @type {any} */ ({ ...pickResult(), back: true }),
+    confirm: async () => { throw new PromptCancelledError() },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.equal(forkCalls, 2, 'the fork ran once per pathway choice and never a third time')
+  assert.match(stderr.text(), /hyp init: cancelled/)
+  // The enrollment the cancel cannot undo is still narrated (LLP 0190
+  // #abort-narration), and nothing was disconnected.
+  assert.match(stdout.text(), /This machine is enrolled/)
+  assert.equal(calls.filter((c) => c === 'syncScope').length, 0)
+})
+
+// --- one run, no lane stubs: keystrokes in, config out ---
+//
+// Every test above (and in index.test.js) tests one layer against a fake
+// of the next: the orchestrator with `fork`/`pick`/`syncScope` scripted,
+// the lanes with `prompt`/`confirm` injected. That is a legitimate unit
+// scope, but it means no test ever executes the fork, pick and sync lanes
+// *inside* an orchestrator run, and both bugs that reached review sat in
+// exactly that gap - the enrolled-state divergence below, and a `runtime`
+// arm every caller was tested against a hand-built error for.
+//
+// So: one run with no lane stubs. Only the two phases that would leave
+// the machine (`join`'s browser login, `configure`/`firstLook`'s command
+// execution) are replaced; the fork, the pick lane, the disconnect
+// question, the sync lane and the config commit are the real ones, driven
+// through the real readline prompt factories by scripted answers.
+// @ref LLP 0191#back-edges [tests]: the back edges as the user meets them, from keystrokes to a written config
+
+/**
+ * A stdout that answers the wizard's own prompts: each time a readline
+ * prompt line is written, the next scripted answer is pushed into stdin.
+ * The prompt strings are the real ones (`fork.js`'s `Choose [...]`,
+ * `walkthrough.js`'s `select ...` and overwrite confirm), so a change to
+ * any of them fails here rather than hanging.
+ *
+ * @param {string[]} answers
+ */
+function scriptedIo(answers) {
+  const input = new PassThrough()
+  const pending = [...answers]
+  let value = ''
+  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [y/N]: ']
+  return {
+    stdin: input,
+    pending,
+    stdout: {
+      /** @param {string} chunk */
+      write(chunk) {
+        const text = String(chunk)
+        value += text
+        if (text.endsWith(': ') && PROMPTS.some((p) => text.includes(p))) {
+          const next = pending.shift()
+          if (next !== undefined) input.write(`${next}\n`)
+        }
+        return true
+      },
+      text() { return value },
+    },
+  }
+}
+
+test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled machine is still asked what syncs', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-wizard-e2e-'))
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
+  const io = scriptedIo([
+    '1',    // fork: Join a team
+    'b',    // pick menu: step back to the fork
+    '2',    // fork: Local install and configuration
+    '1',    // disconnect?: No, stay connected
+    'all',  // pick menu: record everything offered
+    '1',    // sync gate: Sync all
+  ])
+  const stderr = makeBuf()
+  let joinCalls = 0
+
+  const result = await runInitWizard(/** @type {any} */ ({
+    stdout: io.stdout,
+    stderr,
+    stdin: io.stdin,
+    env,
+    ctx: /** @type {any} */ ({ commands: { run: async () => 0 } }),
+    catalog: await realCatalog(),
+    // The one lane that would leave the machine, in the shape that made
+    // `managed` diverge from "enrolled": the sign-in completed, but the
+    // org-config converge timed out, so nothing landed to lock.
+    join: async () => { joinCalls += 1; return /** @type {any} */ ({ status: 'ok', lockedSources: [] }) },
+    gate: async () => /** @type {any} */ ({ action: 'first-run', managed: false, report: {} }),
+    configure: async () => ({ results: [] }),
+    // A fresh install has no cache, so the real first look would find no
+    // dataset and print nothing; the stub says exactly that.
+    firstLook: /** @type {any} */ ({ hasDataset: () => false }),
+  }))
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.pathway, 'local')
+  assert.equal(joinCalls, 1, 'the remembered join is reused, never re-run')
+  assert.equal(io.pending.length, 0, 'every scripted answer was consumed - no prompt was skipped')
+
+  const out = io.stdout.text()
+  // The back edge: the fork was presented twice, the second time after
+  // `b` at the pick menu.
+  assert.equal(out.split('Join a team, or set up HypAware locally?').length - 1, 2)
+  // Enrolled-state decisions survive the walk to the local pathway.
+  assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
+  assert.match(out, /These will sync to your server:/)
+  // The itinerary is the enrolled one (pick, sync, finish), not the solo
+  // two-step local one: the denominator is the same `enrolled()` read the
+  // sync lane is gated on, so a regression there shows up here too.
+  assert.match(out, /Step 1 of 3 · Choose what to collect/)
+  assert.match(out, /Step 2 of 3 · Choose what syncs/)
+
+  // The run ended in a real config on disk, written after the last question.
+  assert.match(String(result.configPath), /hypaware-config\.json$/)
+  const written = JSON.parse(await fs.readFile(String(result.configPath), 'utf8'))
+  assert.equal(written.version, 2)
+  assert.ok(Array.isArray(written.plugins) && written.plugins.length > 0)
+  assert.deepEqual(result.config, written)
 })

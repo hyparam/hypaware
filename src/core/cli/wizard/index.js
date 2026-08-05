@@ -201,8 +201,9 @@ export async function runInitWizard(opts) {
           // the org's config stays, or actually switch to local-only. One
           // yes/no at the moment of intent decides which; yes runs the real
           // `hyp leave` teardown, so disconnection stays a named act rather
-          // than a side effect. Declining or cancelling keeps the fleet
-          // connection and the org's rows locked, exactly as before.
+          // than a side effect. Declining keeps the fleet connection and
+          // the org's rows locked, exactly as before; escape steps back to
+          // the fork and ctrl+c ends the run, neither of them disconnecting.
           // @ref LLP 0190#fork-disconnect [implements]: local-on-managed asks "disconnect?" once; yes is hyp leave, no is the managed local pathway
           if (enrolled()) {
             const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
@@ -223,7 +224,19 @@ export async function runInitWizard(opts) {
             } catch (err) {
               if (isPromptBackError(err)) continue
               if (!isPromptCancelledError(err)) throw err
-              continue
+              // Ctrl+C ends the run; it does not step back. Sharing the
+              // back arm's `continue` re-presented the fork, which is
+              // exactly the "mouse-path through N back-steps" LLP 0191
+              // #esc-back says ctrl+c exists to avoid, and left the only
+              // way out of a two-screen loop as a second ctrl+c. Nothing
+              // is disconnected on this path, which is all LLP 0190
+              // #fork-disconnect asks of a cancel; the exit code and the
+              // narration are the wizard's standard cancel (LLP 0191
+              // #consequences: a cancelled run still exits 130).
+              // @ref LLP 0191#esc-back [implements]: ctrl+c cancels the run at the disconnect question rather than acting as a back-step
+              if (joined) await narrateEnrolledAbort(opts)
+              opts.stderr.write('hyp init: cancelled\n')
+              return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))

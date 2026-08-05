@@ -253,7 +253,6 @@ const BAR_WIDTH = 18
 /** Model names longer than this are ellipsized so the columns stay aligned. */
 const MAX_MODEL_WIDTH = 30
 
-
 /**
  * Build the query runner from a command context. Runs the same executor,
  * refresh mode and caller cwd `hyp query sql` uses, so the overview shows

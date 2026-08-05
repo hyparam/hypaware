@@ -91,9 +91,15 @@ with "No, stay connected" as the default (a bare enter never
 disconnects). Yes runs the real `hyp leave` (LLP 0063: central-layer
 removal, org-attach reversal, identity drop) and the run continues as a
 true solo install - no locked rows, no sync lane, the local 120-day
-retention default. No, or a cancel, keeps today's behavior: the org's
-rows stay locked and the machine stays enrolled. A failed `hyp leave`
-returns to the fork with the connection intact, never half-left.
+retention default. No keeps today's behavior: the org's rows stay
+locked, the machine stays enrolled, and the run continues down the local
+pathway. Escape and ctrl+c also leave the machine connected, and take
+their ordinary wizard meanings at this prompt like any other - escape
+steps back to the fork, ctrl+c cancels the run
+([LLP 0191 §esc-back](./0191-wizard-back-navigation.decision.md#esc-back));
+neither is a third answer to the disconnect question. A failed
+`hyp leave` returns to the fork with the connection intact, never
+half-left.
 Rejected: making the local choice disconnect implicitly (the routine
 "add OpenClaw on a managed machine" run would silently tear down
 enrollment an admin may have to re-admit), and a separate fourth fork
