@@ -87,6 +87,11 @@ test('a fresh enrolled run: the gate states what will sync and accepting opts no
   assert.deepEqual(state.question.items, ['  capture openclaw', '  capture hermes'], 'one source per line, not a crammed title')
   assert.equal(state.question.progress, 'Step 3 of 4 · Choose what syncs')
   assert.equal(state.question.default, 'accept')
+  // The gate branches on the option *value*, not the label, and the
+  // customize side has no other anchor: renaming it while the branch still
+  // reads 'customize' would silently turn "Select what to sync" into
+  // accept-the-defaults. Pin the values the branch depends on.
+  assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.value), ['accept', 'customize'])
   assert.equal(menuShown, false, 'accepting the defaults never opens the menu')
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'the store is stamped (empty), not left absent')
 })

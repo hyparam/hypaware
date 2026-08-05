@@ -361,7 +361,7 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
 })
 
 // --- managed machines: no local-only annotation (LLP 0188) ---
-// The pre-0181 '· stays on this machine' suffix is retired: an addition on
+// The pre-0188 '· stays on this machine' suffix is retired: an addition on
 // a managed machine now syncs by default, and the sync-scope step after the
 // picker is where local-only is offered.
 // @ref LLP 0188#never-silent [tests]:

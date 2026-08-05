@@ -66,10 +66,11 @@ test('renderConfigSummary: a local install reads as set up, not fleet-managed', 
   assert.match(text, /Cache:\s+65 MB · 30-day retention/)
 })
 
-// On a managed machine the client list carries the reach split (LLP 0132
-// #never-silent): centrally-managed clients sync to the org, local-layer
-// additions are collected but stay on this machine. The old "Saving to"
-// sink line is gone; the split on the clients themselves is the signal.
+// On a managed machine the client list carries the reach split (LLP 0188
+// #never-silent): centrally-managed clients sync to the org, and so do
+// local-layer additions unless the machine's opt-out store says otherwise,
+// which is what the (local only) marker reports. The old "Saving to" sink
+// line is gone; the split on the clients themselves is the signal.
 test('renderConfigSummary: a fleet-managed install marks each client synced vs local only', () => {
   const stdout = makeBuf()
   const report = makeReport({

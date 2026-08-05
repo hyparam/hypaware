@@ -176,9 +176,9 @@ export async function bootKernel(opts = {}) {
       // picker source's provenance (LLP 0188), and nothing before this
       // point reads `runtime`. The migration runs first: both the daemon
       // and the CLI boot through here, so the first invocation after the
-      // default-sync upgrade materializes the pre-0181 withheld set before
+      // default-sync upgrade materializes the pre-0188 withheld set before
       // any export can read the store.
-      // @ref LLP 0188#migration [implements]: boot materializes the pre-0181 derived withheld set before building the resolver
+      // @ref LLP 0188#migration [implements]: boot materializes the pre-0188 derived withheld set before building the resolver
       // @ref LLP 0188#opt-out [implements]: boot builds the resolver from the very catalog + merged config this boot just resolved, over the live opt-out store
       await ensureClientSyncMigration({ catalog, layered: merged, stateDir: stateRoot })
       const commandRegistry = opts.commandRegistry ?? createCommandRegistry()

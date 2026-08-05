@@ -53,7 +53,7 @@ The org's authored config remains the one part of the picture the machine
 owner cannot subtract from.
 
 <a id="migration"></a>**Upgrade materializes the old withheld set.**
-Pre-0181 the withheld set was derived, not stored: every picker id
+Pre-0188 the withheld set was derived, not stored: every picker id
 classified `'local'` on an enrolled machine. On the first boot where a
 central layer exists and `client-sync.json` does not, that derived set is
 written into the store, so data the machine was told "stays on this

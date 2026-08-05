@@ -52,9 +52,11 @@ knowing that `hyp leave` exists. Quit stays the default on a bare enter
 still reports `managed` from the on-disk central layer, and
 `runInitWizard` still calls `computeCentralLockedSources` off it before
 the fork runs. The picker therefore renders org rows checked and disabled
-(LLP 0031 provenance vocabulary) and every other row with its
-`stays on this machine` suffix (LLP 0132 #never-silent) on a managed
-machine, whichever fork branch the user took to get there. The
+(LLP 0031 provenance vocabulary) on a managed machine, whichever fork
+branch the user took to get there. Every other row is a plain editable
+row: LLP 0188 supersedes LLP 0132's local-only default, so the
+`stays on this machine` suffix is retired and the sync-scope step after
+the picker (LLP 0188 #never-silent) is where reach is stated. The
 `'scoped-reconfigure'` gate action and the `'scoped'` pathway are removed;
 `WizardPathway` is `'team' | 'local'`.
 

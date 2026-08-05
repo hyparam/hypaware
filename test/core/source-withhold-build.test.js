@@ -4,7 +4,7 @@
 // `buildSourceWithholdResolver` turns the opt-out store + provenance
 // classification + the catalog's attribution/ownership declarations into
 // the resolver `readRowsSince` consults, and `ensureClientSyncMigration`
-// materializes the pre-0181 derived withheld set on upgrade. This suite
+// materializes the pre-0188 derived withheld set on upgrade. This suite
 // exercises the build layer directly (it previously had no coverage at
 // all); the seam semantics live in source-withhold-export-drop.test.js.
 
@@ -195,6 +195,58 @@ test('datasetOwnedSourceIdsFromCatalog maps each dataset to its owning picker id
   const map = datasetOwnedSourceIdsFromCatalog(makeCatalog())
   assert.deepEqual(map.get('signals'), ['hermes'])
   assert.deepEqual(map.get('ai_gateway_messages'), ['claude'])
+})
+
+/**
+ * Two plugins contributing one attribution-column-less dataset name: the
+ * local `hermes` row and the org's `claude` row. Nothing in the manifest
+ * schema forbids it, and the ownership fold has to survive it.
+ *
+ * `hermes` is declared *first* on purpose: that is the order in which a
+ * first-manifest-wins fold picks the opted-out plugin as the dataset's
+ * sole owner and withholds the org's rows along with it.
+ * @returns {any}
+ */
+function makeSharedDatasetCatalog() {
+  const catalog = makeCatalog()
+  catalog.plugins = new Map([
+    ['@hypaware/hermes', {
+      name: '@hypaware/hermes',
+      contributes: { datasets: [{ name: 'signals' }] },
+    }],
+    ['@hypaware/claude', {
+      name: '@hypaware/claude',
+      contributes: { datasets: [{ name: 'signals' }] },
+    }],
+    ['@hypaware/openclaw', { name: '@hypaware/openclaw', contributes: {} }],
+  ])
+  return catalog
+}
+
+// "Every source that could have produced it" is a union, not the first
+// manifest's list: a first-wins fold would hand back only one plugin's
+// rows and withhold the whole dataset off it.
+test('datasetOwnedSourceIdsFromCatalog unions owners across every plugin contributing a dataset', () => {
+  const map = datasetOwnedSourceIdsFromCatalog(makeSharedDatasetCatalog())
+  assert.deepEqual([...(map.get('signals') ?? [])].sort(), ['claude', 'hermes'])
+})
+
+// @ref LLP 0188#locked [tests]: a locked source that co-owns a dataset keeps it exported, whatever the opted-out co-owner does
+test('a shared dataset is not withheld wholesale while a locked co-owner still syncs', async () => {
+  const stateDir = await makeTmpDir()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'hermes', class: 'local-only' }] })
+  const resolver = buildSourceWithholdResolver({
+    catalog: makeSharedDatasetCatalog(),
+    layered: makeLayered(ENROLLED),
+    stateDir,
+  })
+  assert.ok(resolver)
+  assert.equal(resolver.shouldWithhold('hermes'), true, 'the opt-out itself still stands')
+  assert.equal(
+    resolver.shouldWithholdDataset?.('signals'),
+    false,
+    'claude is org-configured and always syncs, so signals cannot be dropped wholesale'
+  )
 })
 
 // --- ensureClientSyncMigration ------------------------------------------------

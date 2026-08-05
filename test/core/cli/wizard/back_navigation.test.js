@@ -14,6 +14,7 @@ import { runWizardFork } from '../../../../src/core/cli/wizard/fork.js'
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { LOCAL_INSTALL_RETENTION_DAYS } from '../../../../src/core/cli/walkthrough.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { clientSyncListPath } from '../../../../src/core/usage-policy/client_sync.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
@@ -444,4 +445,83 @@ test('runInitWizard: interactive pick lanes are offered back; non-interactive ar
   })
   await runInitWizard(scripted)
   assert.equal(pickOpts[1].allowBack, undefined, 'back-navigation is attended-only')
+})
+
+// A join whose org-config converge timed out returns `status: 'ok'` with no
+// `managed` (nothing landed to lock), yet the sign-in completed and the
+// machine is enrolled. Keying the enrolled-state decisions on `managed`
+// let that run step back to the fork, choose Local, and finish with neither
+// the disconnect question nor the sync lane - silently default-syncing.
+// @ref LLP 0191#join-not-undone [tests]: choosing Local after a completed join keeps the disconnect offer and the sync lane even when the join locked nothing
+test('runInitWizard: a join that locked nothing still counts as enrolled when backing to local', async () => {
+  let forkCalls = 0
+  let pickCalls = 0
+  /** @type {any[]} */
+  const confirmed = []
+  /** @type {any[]} */
+  const pickOpts = []
+  const { opts, calls } = await wizardOpts({
+    // The converge-timeout return: ok, nothing locked, no `managed`.
+    join: async () => ({ status: 'ok', lockedSources: [] }),
+    fork: async () => {
+      forkCalls += 1
+      return forkCalls === 1 ? 'team' : 'local'
+    },
+    pick: async (/** @type {any} */ o) => {
+      pickOpts.push(o)
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+    confirm: async (/** @type {any} */ q) => { confirmed.push(q); return 'stay' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.pathway, 'local')
+  assert.equal(confirmed.length, 1, 'the disconnect question is asked once')
+  assert.match(confirmed[0].title, /Disconnect and go local-only\?/)
+  assert.equal(
+    calls.filter((c) => c === 'syncScope').length,
+    1,
+    'the enrolled machine is still asked what syncs'
+  )
+  assert.equal(
+    pickOpts[1].retentionDefault,
+    undefined,
+    'an enrolled machine keeps the team retention default, not the solo 120-day one'
+  )
+})
+
+// The same run, but the user takes the disconnect: `hyp leave` clears the
+// remembered join, so the rest of the run is a true solo install.
+// @ref LLP 0191#join-not-undone [tests]: the fork's explicit disconnect is the one exit, and it drops the sync lane with the enrollment
+test('runInitWizard: disconnecting after a join that locked nothing drops the sync lane', async () => {
+  let forkCalls = 0
+  let pickCalls = 0
+  /** @type {any[]} */
+  const pickOpts = []
+  const { opts, calls } = await wizardOpts({
+    join: async () => ({ status: 'ok', lockedSources: [] }),
+    fork: async () => {
+      forkCalls += 1
+      return forkCalls === 1 ? 'team' : 'local'
+    },
+    pick: async (/** @type {any} */ o) => {
+      pickOpts.push(o)
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+    confirm: async () => 'disconnect',
+    leave: async () => 0,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.pathway, 'local')
+  assert.equal(calls.filter((c) => c === 'syncScope').length, 0, 'a disconnected run has nothing to sync')
+  assert.equal(
+    pickOpts[1].retentionDefault,
+    LOCAL_INSTALL_RETENTION_DAYS,
+    'a true solo install keeps the longer local retention window'
+  )
 })

@@ -138,6 +138,25 @@ export async function runInitWizard(opts) {
   /** @type {string[]} */
   let sourcesOptedOut = []
 
+  /**
+   * Is this machine enrolled right now? The property every enrolled-state
+   * decision below actually needs, which `managed` alone is not: `managed`
+   * says "a central layer owns rows here", and the two diverge on a join
+   * whose org-config converge timed out. That join still returns
+   * `status: 'ok'` with no `managed` (`runWizardJoin`, the "didn't hear
+   * back from your org's config" return), because nothing landed to lock -
+   * but the sign-in completed, so the machine is enrolled and its export
+   * seam goes live as soon as the central layer arrives. Keying the
+   * disconnect offer and the sync lane on `managed` let that machine step
+   * back to the fork, pick Local, and finish with neither question asked.
+   * The remembered join is the enrollment record (cleared only by the
+   * fork's `hyp leave`), so it is what these decisions read.
+   *
+   * @ref LLP 0191#join-not-undone [implements]: choosing Local after a completed join keeps the disconnect offer and the sync lane, keyed on the remembered join rather than the final pathway
+   * @returns {boolean}
+   */
+  const enrolled = () => managed || joined !== undefined
+
   // The question lanes and their back edges (LLP 0191 #back-edges):
   // escape steps one screen back - sync to pick (`continue atPick`), pick
   // to the fork (`continue atFork`), the fork to the returning gate -
@@ -185,7 +204,7 @@ export async function runInitWizard(opts) {
           // than a side effect. Declining or cancelling keeps the fleet
           // connection and the org's rows locked, exactly as before.
           // @ref LLP 0190#fork-disconnect [implements]: local-on-managed asks "disconnect?" once; yes is hyp leave, no is the managed local pathway
-          if (managed) {
+          if (enrolled()) {
             const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
             /** @type {string | number} */
             let disconnect
@@ -264,8 +283,8 @@ export async function runInitWizard(opts) {
       // what it was before the breadcrumb existed (LLP 0131
       // #attended-only). `managed` is part of the itinerary: it adds the
       // sync lane to a managed machine's local-pathway run (LLP 0188).
-      const pickProgress = wizardStepProgress(pathway, 'pick', { managed })
-      const syncProgress = wizardStepProgress(pathway, 'sync', { managed })
+      const pickProgress = wizardStepProgress(pathway, 'pick', { managed: enrolled() })
+      const syncProgress = wizardStepProgress(pathway, 'sync', { managed: enrolled() })
 
       const pickFn = opts.pick ?? runWizardPick
       picked = await pickFn({
@@ -289,8 +308,8 @@ export async function runInitWizard(opts) {
         // through to the pick phase's 90-day default because the org server
         // holds the durable copy either way.
         // @ref LLP 0137#pathway-defaults [implements]: 90-day team / 120-day local retention defaults
-        // @ref LLP 0182#one-reconfigure [constrained-by]: a managed machine can now reach the local pathway, so `managed` and not the pathway label decides
-        ...(pathway === 'local' && !managed ? { retentionDefault: LOCAL_INSTALL_RETENTION_DAYS } : {}),
+        // @ref LLP 0182#one-reconfigure [constrained-by]: a managed machine can now reach the local pathway, so enrollment and not the pathway label decides
+        ...(pathway === 'local' && !enrolled() ? { retentionDefault: LOCAL_INSTALL_RETENTION_DAYS } : {}),
         ...(opts.detect ? { detect: opts.detect } : {}),
         ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
         // Back-navigation is attended-only by construction (it takes a
@@ -318,12 +337,15 @@ export async function runInitWizard(opts) {
       pickSeed = picked.sourcesPicked
 
       // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
-      // the team pathway, or a managed machine on any pathway - ask which of
-      // the picked, non-locked sources stay local-only. Default-sync means an
+      // the team pathway, or an already-enrolled machine on any pathway - ask
+      // which of the picked, non-locked sources stay local-only. Whether the
+      // run is enrolled is `enrolled()`, not `managed`: see its definition for
+      // the join whose org-config converge timed out, which is enrolled with
+      // no central layer yet. Default-sync means an
       // untouched prompt opts nothing out. Non-interactive runs skip it
       // (LLP 0131 #attended-only): default-sync is the correct scripted
       // outcome, and `hyp policy client` is the standing control.
-      if (interactive && (pathway === 'team' || managed)) {
+      if (interactive && (pathway === 'team' || enrolled())) {
         const syncFn = opts.syncScope ?? runWizardSyncScope
         // The locked descriptors ride along so the lane can state the whole
         // sync picture: org rows always sync and are shown read-only there.
@@ -360,7 +382,7 @@ export async function runInitWizard(opts) {
   // lanes above, other than returning, assigns `picked` first.
   if (!picked) throw new Error('hyp init: internal error: the pick lane did not run')
 
-  const finaleProgress = wizardStepProgress(pathway, 'finale', { managed })
+  const finaleProgress = wizardStepProgress(pathway, 'finale', { managed: enrolled() })
 
   // Every question lane has run; commit the composed config to disk before
   // the acting phases (configure and the finale both read/edit the file).
@@ -643,7 +665,7 @@ async function loadWizardCatalog() {
  * machine falls to when its merged config no longer validates), guarded:
  * a resolution failure renders an unlocked picker (additions still
  * compose; the export seam, not the picker, enforces the org boundary,
- * LLP 0132).
+ * LLP 0188 #locked - LLP 0132, which used to state this, is superseded).
  *
  * @param {PluginCatalog} catalog
  * @param {Pick<RunInitWizardOptions, 'env'>} opts

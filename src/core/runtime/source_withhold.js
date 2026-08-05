@@ -24,7 +24,7 @@ import { getLogger, Attr } from '../observability/index.js'
 const CACHE_TTL_MS = 5_000
 
 /**
- * One-time upgrade migration for the LLP 0188 default-sync flip. Pre-0181
+ * One-time upgrade migration for the LLP 0188 default-sync flip. Pre-0188
  * the withheld set was derived at boot, not stored: every picker id
  * classified `'local'` on a machine with a central layer. The store's
  * absence marks a machine that enrolled under that rule (enrollment now
@@ -36,7 +36,7 @@ const CACHE_TTL_MS = 5_000
  * A corrupt store is left untouched (never overwrite an uninterpretable
  * privacy signal); the export seam fails closed on it instead.
  *
- * @ref LLP 0188#migration [implements]: store absence + central layer materializes the pre-0181 derived withheld set as opt-out entries
+ * @ref LLP 0188#migration [implements]: store absence + central layer materializes the pre-0188 derived withheld set as opt-out entries
  * @param {{
  *   catalog: Pick<PluginCatalog, 'plugins' | 'pickerDescriptors' | 'clientDescriptors'>,
  *   layered: { centralConfig?: HypAwareV2Config | null, effective?: HypAwareV2Config | null },
@@ -240,6 +240,17 @@ export function datasetAttributionColumnsFromCatalog(catalog) {
  * A dataset contributed by a plugin with no picker row maps to an empty
  * owner list and is never withheld this way (the conservative default).
  *
+ * The owner list is the **union** across every plugin contributing the
+ * name, not the first manifest's (the first-wins rule its sibling
+ * `datasetAttributionColumnsFromCatalog` uses, which is right there
+ * because a dataset has one attribution column but wrong here). "Every
+ * source that could have produced it" is a union by construction, and
+ * first-wins understates it: two plugins contributing one dataset name,
+ * the first opted out and the second not, would withhold the whole
+ * dataset - dropping rows from a source the user never opted out, and,
+ * when that second plugin is the org's, withholding a locked source that
+ * LLP 0188 #locked guarantees always syncs.
+ *
  * @param {Pick<PluginCatalog, 'plugins' | 'pickerDescriptors'>} catalog
  * @returns {Map<string, string[]>}
  */
@@ -251,17 +262,21 @@ export function datasetOwnedSourceIdsFromCatalog(catalog) {
     ids.push(descriptor.id)
     pickerIdsByPlugin.set(descriptor.plugin, ids)
   }
-  /** @type {Map<string, string[]>} */
-  const out = new Map()
+  /** @type {Map<string, Set<string>>} */
+  const owners = new Map()
   for (const entry of catalog.plugins.values()) {
     const datasets = entry.contributes?.datasets
     if (!Array.isArray(datasets)) continue
-    const owners = pickerIdsByPlugin.get(entry.name) ?? []
+    const pluginOwners = pickerIdsByPlugin.get(entry.name) ?? []
     for (const ds of datasets) {
-      if (ds && typeof ds.name === 'string' && !out.has(ds.name)) {
-        out.set(ds.name, owners)
-      }
+      if (!ds || typeof ds.name !== 'string') continue
+      const set = owners.get(ds.name) ?? new Set()
+      for (const id of pluginOwners) set.add(id)
+      owners.set(ds.name, set)
     }
   }
+  /** @type {Map<string, string[]>} */
+  const out = new Map()
+  for (const [name, set] of owners) out.set(name, [...set])
   return out
 }
