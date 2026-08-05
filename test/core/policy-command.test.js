@@ -737,6 +737,40 @@ test('hyp policy client <name> local-only writes the opt-out; show and list refl
   })
 })
 
+// The two `--json` shapes (LLP 0188 #opt-out): the enumerate form
+// ({ entries, path }) and the single-client form ({ source, state, managed,
+// path }). Pinned as parsed whole objects, not substrings, so a field
+// rename breaks here instead of in a consumer.
+test('hyp policy client --json: both shapes are stable, before and after an opt-out', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const storePath = clientSyncListPath(stateDir)
+
+    const emptyList = await run('policy client', ['--json'], { cwd: root, hypHome })
+    assert.equal(emptyList.code, 0)
+    assert.deepEqual(JSON.parse(emptyList.stdout), { entries: [], path: storePath })
+
+    const showDefault = await run('policy client', ['openclaw', '--json'], { cwd: root, hypHome })
+    assert.equal(showDefault.code, 0)
+    assert.deepEqual(JSON.parse(showDefault.stdout), {
+      source: 'openclaw', state: 'sync', managed: false, path: storePath,
+    })
+
+    const set = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(set.code, 0, set.stderr)
+
+    const list = await run('policy client', ['--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(list.stdout), {
+      entries: [{ source: 'openclaw', class: 'local-only' }], path: storePath,
+    })
+
+    const show = await run('policy client', ['openclaw', '--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(show.stdout), {
+      source: 'openclaw', state: 'local-only', managed: false, path: storePath,
+    })
+  })
+})
+
 test('hyp policy client with an unknown name exits 2 and names known ids', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy client', ['not-a-client', 'local-only'], { cwd: root, hypHome })

@@ -204,6 +204,27 @@ test('runWizardPick: no gate when nothing is detected and nothing is locked', as
   assert.deepEqual(result.sourcesPicked, ['otel'])
 })
 
+// The menu's back arm without a gate (LLP 0191 #lane-loops): when the
+// orchestrator offered back (`opts.allowBack`) but the lane has no gate
+// (nothing detected, nothing locked), the menu IS the lane's first screen,
+// so its back must propagate to the caller. A regression that re-presents
+// the menu instead spins forever with no user-visible progress.
+test('runWizardPick: menu back with allowBack and no gate propagates to the caller, never loops', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { PromptBackRequestedError } = await import('../../../../src/core/cli/tui/runtime.js')
+  let asks = 0
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    allowBack: true,
+    prompt: async () => { asks += 1; throw new PromptBackRequestedError() },
+    confirm: async () => { throw new Error('no gate exists to show') },
+    detect: async () => new Set(),
+  }))
+  assert.equal(result.back, true)
+  assert.equal(asks, 1, 'one presentation, then propagate')
+})
+
 test('runWizardPick: a cancelled gate returns the deterministic cancel result', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()

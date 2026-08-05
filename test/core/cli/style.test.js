@@ -34,6 +34,29 @@ const YELLOW = ANSI.yellow
 const DIM = ANSI.dim
 const OFF = ANSI.reset
 
+// Literal escape codes, deliberately NOT bound from the module under test:
+// every other assertion here reads RED/YELLOW/DIM off `ANSI`, so swapping
+// two palette values would repaint the whole CLI while this file stayed
+// green. These three pin the actual bytes.
+// @ref LLP 0189#palette [tests]:
+test('the palette maps severities to the standard SGR codes, pinned as bytes', () => {
+  assert.equal(paintLine('error: x'), '\x1b[31merror:\x1b[0m x')
+  assert.equal(paintLine('warning: x'), '\x1b[33mwarning:\x1b[0m x')
+  assert.equal(paintLine('note: x'), '\x1b[2mnote:\x1b[0m x')
+})
+
+// @ref LLP 0189#rules [tests]: ordered first-match, not best-match
+test('the rules are ordered first-match: an error: prefix wins over a later failed: match on the same line', () => {
+  assert.equal(
+    paintLine('error: attach claude failed: boom'),
+    `${RED}error:${OFF} attach claude failed: boom`,
+    'the failed: rule must not repaint a line the error: rule already classified'
+  )
+  // The continuation rule is first for the same reason: an indented line
+  // that spells a severity word is still a continuation, never re-painted.
+  assert.equal(paintLine('  error: quoted from the config above'), '  error: quoted from the config above')
+})
+
 test('errors are red and warnings are yellow', () => {
   assert.equal(paintLine('error: could not write /tmp/x'), `${RED}error:${OFF} could not write /tmp/x`)
   assert.equal(paintLine('warning: sink not materialized'), `${YELLOW}warning:${OFF} sink not materialized`)
