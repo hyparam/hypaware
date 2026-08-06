@@ -395,12 +395,21 @@ that installed it before LLP 0142 stops advertising it.
 
 ## Open questions
 
-1. Does `hyp report render` keep pandoc as a hard dependency, or render
-   Markdown in-process? Pandoc is the reason the current script hard-fails on
-   a machine without `brew install pandoc`, and a hermetic smoke would need it
-   installed on CI. In-process rendering removes the dependency and the
-   `gfm`-passes-raw-HTML-through behaviour is the only pandoc property the
-   component vocabulary actually relies on, but it is real work to replace.
+1. **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
+   whether `hyp report render` should keep pandoc as a hard dependency or
+   render Markdown in-process. `.github/workflows/ci.yml` runs on
+   `ubuntu-latest` (Node 22 and 24), so adding pandoc is a one-line
+   `apt-get` step, and nothing currently forces the larger change. The only
+   pandoc property the component vocabulary relies on is `gfm` passing raw
+   HTML through untouched, so in-process rendering stays available if the
+   dependency ever becomes a problem.
+
+   **Checking this made T3 more urgent, not less.** CI is Linux-only and the
+   renderer is macOS-only (`sed -E -i ''`, `sips`). The renderer therefore has
+   **no automated coverage today and cannot have any until T3 lands**. The
+   framing elsewhere in these documents, that the port fixes the Linux half of
+   the release gate, understates it: until the port lands, any test written
+   against the renderer is unrunnable on the only platform CI has.
 2. Where do the three customization layers live? `theme.css` clearly belongs
    next to the reports it styles, in `~/hypaware-reports/assets/`. The house
    style document and the branding strings could go either there (travels with

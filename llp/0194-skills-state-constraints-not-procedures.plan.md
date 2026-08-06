@@ -176,8 +176,14 @@ depends on `build.sh` being absent from this repo.
   building a fixture reports tree in a temp directory and asserting the
   verification contract (no leftover `.md` hrefs in built pages, a copy action
   on every page, one `full.md` per report, a back-link on every report).
-  Complexity 3. **Blocks on a decision if CI lacks pandoc**, which is RFC open
-  question 1 arriving early.
+  Complexity 3. ~~Blocks on a decision if CI lacks pandoc.~~ **Resolved:** CI
+  is `ubuntu-latest`, so the smoke adds a one-line `apt-get install pandoc`
+  step (LLP 0193 open question 1).
+
+  **Pull the `rewrite_hrefs` table forward into T3.** The six-case table is
+  the specification T3 ports against, not a check written afterwards, and the
+  current script has no tests at all, so there is no existing coverage to port
+  against instead. Writing it second is how the cases get lost.
 
 ### Wave 4 (deps `[T5]`), three-wide
 
