@@ -7,7 +7,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { defaultPromptFactory, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import {
+  WALKTHROUGH_CANCEL_EXIT_CODE,
+  defaultPromptFactory,
+  runPickerWalkthrough,
+} from '../../src/core/cli/walkthrough.js'
+import { isPromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
 test('picker prompt prints context under source options and defaults export to local-parquet', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-prompt-'))
@@ -97,7 +102,7 @@ test('enterKeepsChecked: the fallback renders the checked state and a bare enter
   assert.match(text, /1\) \[x\] capture claude · managed by your fleet \(locked\)/)
   assert.match(text, /2\) \[x\] capture openclaw/)
   assert.match(text, /3\) \[ \] capture hermes/)
-  assert.match(text, /select \(e\.g\. 1,3, "all", enter keeps \[x\], or b to go back\): /)
+  assert.match(text, /select \(e\.g\. 1,3, "all", "none", enter keeps \[x\], or b to go back\): /)
   assert.deepEqual(picked, ['claude', 'openclaw'], 'enter returns the checked set, not none')
 })
 
@@ -186,7 +191,7 @@ test('enterKeepsChecked: endless invalid input stops after one re-ask instead of
   const { picked, prompts } = await askEndless(syncMenuQuestion({ enterKeepsChecked: true }), 'y\n')
 
   assert.equal(prompts, 2, 'one ask plus one re-ask, then the fallback')
-  assert.deepEqual(picked, [], 'the historical empty selection stands once the budget is spent')
+  assert.deepEqual(picked, ['claude', 'openclaw'], 'the spent budget lands on the same default enter takes')
 })
 
 test('enterKeepsChecked: an invalid answer then EOF resolves with the checked defaults instead of hanging', async () => {
@@ -195,12 +200,14 @@ test('enterKeepsChecked: an invalid answer then EOF resolves with the checked de
   assert.deepEqual(picked, ['claude', 'openclaw'], 'an unanswerable question takes the default, it does not wait')
 })
 
-test('EOF with no answer at all resolves on both paths', async () => {
+test('EOF with no answer at all settles rather than hanging, on both paths', async () => {
   const kept = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), '')
   assert.deepEqual(kept.picked, ['claude', 'openclaw'])
 
-  const none = await askPiped(syncMenuQuestion(), '')
-  assert.deepEqual(none.picked, [], 'without the opt-in an unanswerable question is still none')
+  // Without the opt-in there is no stated default to land on, so an
+  // unanswerable question is a cancel; see the dropped-terminal tests
+  // below for why it must not resolve as "picked nothing".
+  await assert.rejects(askPiped(syncMenuQuestion(), ''), isPromptCancelledError)
 })
 
 test('"none" is the explicit empty selection on both paths', async () => {
@@ -235,6 +242,81 @@ test('back and all survive on both paths', async () => {
 
   const plain = await askPiped(syncMenuQuestion(), 'all\n')
   assert.deepEqual(plain.picked, ['claude', 'openclaw', 'hermes'])
+})
+
+// Spending the re-ask budget is a fallback, not a decision. Falling
+// through to the empty selection here would re-create issue #634 one
+// answer later (in the sync menu it opts every candidate out), and
+// doing it silently is worse than the papercut it replaced. And a
+// closed stdin on a question that did NOT opt in is a dropped terminal,
+// not "the user chose nothing": it cancels, the way ctrl+c does, rather
+// than advancing the wizard into the daemon install with no sources.
+// @ref LLP 0190#sync-gate [tests]:
+
+test('enterKeepsChecked: a spent re-ask budget keeps the checked rows and says which', async () => {
+  const { picked, text } = await askPiped(syncMenuQuestion({ enterKeepsChecked: true }), 'y\ny\n')
+
+  assert.deepEqual(picked, ['claude', 'openclaw'], 'the spent budget falls back to the checked set, not to none')
+  assert.equal(
+    (text.match(/nothing matched/g) ?? []).length,
+    2,
+    'the last failure is announced too; the fallback is never silent'
+  )
+  assert.match(text, /keeping the checked rows: claude, openclaw/, 'the fallback names what it fell back to')
+})
+
+test('enterKeepsChecked: a spent budget with nothing checked says the selection is empty', async () => {
+  const question = syncMenuQuestion({ enterKeepsChecked: true })
+  for (const opt of question.options) delete opt.checked
+  const { picked, text } = await askPiped(question, 'y\ny\n')
+
+  assert.deepEqual(picked, [])
+  assert.match(text, /nothing was checked, so nothing is selected/)
+})
+
+test('without enterKeepsChecked a closed stdin cancels instead of selecting nothing', async () => {
+  await assert.rejects(askPiped(syncMenuQuestion(), ''), isPromptCancelledError)
+})
+
+test('a dropped terminal at the source picker cancels the run instead of installing with no sources', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-eof-'))
+  const input = new PassThrough()
+  input.end()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const result = await runPickerWalkthrough({
+    capabilities: /** @type {any} */ ({}),
+    stdout,
+    stderr,
+    stdin: /** @type {any} */ (input),
+    env: { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp') },
+  })
+
+  assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE, 'EOF aborts the run, it does not complete it')
+  assert.equal(result.configPath, '')
+  assert.match(stderr.text(), /cancelled/)
+  await assert.rejects(
+    fs.access(path.join(tmp, '.hyp', 'hypaware-config.json')),
+    'a cancelled run writes no config'
+  )
+})
+
+test('every later ask on a spent stdin settles instead of hanging', { timeout: 20_000 }, async () => {
+  const input = new PassThrough()
+  input.write('3\n')
+  input.end()
+  const stdout = { write() { return true } }
+  const ask = defaultPromptFactory({ stdin: /** @type {any} */ (input), stdout: /** @type {any} */ (stdout), env: {} })
+  const question = syncMenuQuestion({ enterKeepsChecked: true })
+
+  assert.deepEqual(await ask(question), ['hermes'], 'the one queued answer is read')
+  // Readline registers its `end` listener on construction, so an
+  // interface built over an already-ended stream never fires `close` and
+  // the ask would wait forever. Each of these is a separate interface.
+  for (let i = 0; i < 3; i += 1) {
+    assert.deepEqual(await ask(question), ['claude', 'openclaw'], `ask ${i + 2} settles on the default`)
+  }
 })
 
 test('without enterKeepsChecked a bare enter still selects nothing and no state is rendered', async () => {

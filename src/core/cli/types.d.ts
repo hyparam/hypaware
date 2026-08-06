@@ -127,8 +127,12 @@ export interface WalkthroughQuestion {
    * wizard's sync menu, where checked means "syncs" and an invisible
    * empty-selection default would invert it (LLP 0190 #sync-gate). It
    * also buys one re-ask on an answer that names no row, for the same
-   * reason. Unset questions keep the historical semantics: no state
-   * rendered, bare enter selects nothing, one ask only.
+   * reason, and makes the checked set what the question falls back to
+   * when the re-ask is spent or stdin closes. Unset questions keep the
+   * historical semantics: no state rendered, bare enter selects nothing,
+   * one ask only - and, having no stated default to fall back to, a
+   * closed stdin cancels them (`PromptCancelledError`) rather than
+   * answering them with an empty selection.
    */
   enterKeepsChecked?: boolean
 }

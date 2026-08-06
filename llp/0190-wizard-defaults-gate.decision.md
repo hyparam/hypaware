@@ -78,22 +78,46 @@ inverse of the TUI default, with the defaults invisible. Other numbered
 questions (the pick menus, `runPickerWalkthrough`) keep the historical
 semantics untouched. An answer that names no row ("y", "0", an
 out-of-range index) is a typo rather than a selection, so the opted-in
-question prints what did not match and asks once more, and "none" is
-the word for a deliberate empty selection. The re-ask rides the same
-opt-in because the danger is specific to this menu's inverse default:
+question prints what did not match and asks once more, and "none",
+named in its prompt line rather than only in that message, is the word
+for a deliberate empty selection. The re-ask rides the same opt-in
+because the danger is specific to this menu's inverse default:
 questions without the flag never re-ask, and their prompt bytes and
 answers are unchanged. Two bounds hold it, both owed to a first attempt
 that shipped an ungated `while (true)` over the shared factory and was
 reverted (issue #634): the fallback asks a fixed number of times - one
-ask plus one re-ask - and then takes the historical empty selection, so
-no input can hold a scripted run at the prompt; and readline's `close`
-resolves the pending ask with the same default a bare enter takes (the
-checked set here, none elsewhere) instead of leaving it unsettled,
-which is the EOF hang `rl.question` has always had and the loop turned
-into a crash. Because readline emits every line of a chunk
-synchronously, the fallback also queues answer lines from the moment
-the interface opens rather than listening per question, so a correction
-arriving in the same pipe write as the typo is still read.
+ask plus one re-ask - so no input can hold a scripted run at the
+prompt; and readline's `close` resolves the pending ask instead of
+leaving it unsettled, which is the EOF hang `rl.question` has always
+had and the loop turned into a crash.
+
+Where the fallback lands when it runs out of answers is the question's
+*stated* default, never a different one. A spent budget takes what a
+bare enter takes - the checked rows here, the empty selection elsewhere
+- and says which, because falling through to an empty selection would
+opt every candidate out one answer later, silently: issue #634 again,
+inside the loop that exists to close it. A closed stdin takes that same
+default where enter has one. Where it does not (every question without
+the opt-in) it is a cancel rather than an answer: an empty selection
+there is indistinguishable from "the user picked nothing", so a dropped
+terminal would carry the wizard on into the daemon install with no
+sources. Cancel is the signal the TUI already raises on ctrl+c and
+every caller already handles (exit 130), so a dropped terminal aborts
+the run the way it always did, without the unsettled-await crash it
+used to abort with.
+
+Because readline emits every line of a chunk synchronously, the
+fallback also queues answer lines from the moment the interface opens
+rather than listening per question, so a correction arriving in the
+same pipe write as the typo is still read; and because readline
+registers its `end` listener at construction, an interface built over
+an already-ended stream never emits `close` at all, so the asker seeds
+its spent flag from the stream's own `readableEnded` and a second
+question on a spent stdin settles like the first. This covers the
+numbered prompt. The file's other readline prompts (the overwrite
+confirm, the gate's numbered fallback, the backfill consent) still call
+`rl.question` directly and still hang at EOF; closing that class is a
+separate change.
 This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over
