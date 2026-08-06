@@ -705,7 +705,11 @@ function expandMessageParts(ctx) {
     session_id: ctx.sessionId,
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
-    provider: ctx.projection.provider,
+    // @ref LLP 0194#decision [implements]: per-message provider wins over the
+    // exchange provider, the LLP 0026 model precedence extended to the column
+    // it skipped; a mixed-provider backfilled session stops reading as its
+    // first projected turn's vendor.
+    provider: stringValue(ctx.message.provider) ?? ctx.projection.provider,
     // @ref LLP 0026#consequences [implements]: the message envelope (incl.
     // model) mirrors the transcript: backfill records the per-line model on
     // assistant messages only, so the per-message value wins where present and

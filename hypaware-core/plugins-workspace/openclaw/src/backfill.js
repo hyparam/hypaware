@@ -6,7 +6,6 @@ import path from 'node:path'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   errMessage,
-  filterByWindow,
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
@@ -94,48 +93,33 @@ const DEFAULT_SWEEP_CRON = '*/5 * * * *'
 const DEFAULT_QUIESCE_MS = 180_000
 
 /**
- * The CLI-backend exclusion (R10), as an explicit ALLOWLIST rather than a
- * denylist: a record projects only when the backend that served its turn is
- * one of the two HypAware actually steers and captures live.
+ * The `api` value OpenClaw stamps on a turn driven through an embedded CLI
+ * (`claude`, `codex`): the mechanism marker, as opposed to the wire-shape
+ * values (`anthropic-messages`, `openai-responses`, `ollama`, ...) a direct
+ * API call carries. Verified live against session `.jsonl` records on
+ * OpenClaw 2026.7.1-2; the sibling `.trajectory.jsonl` files stamp the same
+ * turns with their wire shape instead, which is why this marker is one rung
+ * of the exclusion and never the whole decision (LLP 0193).
  *
- * The direction matters more than the contents. An OpenClaw turn delegated to
- * the `claude` or `codex` binary is a child process that never touches
- * OpenClaw's provider layer; it belongs to the sibling Claude/Codex transcript
- * adapters permanently (LLP 0147), and re-projecting it here would double-count
- * it under the wrong `client_name`. The exact `provider`/`api` strings such a
- * turn writes into the session file are OpenClaw surface this repo does not own
- * and could not be verified at implementation time (no live OpenClaw install
- * was reachable; LLP 0161 Section 10 anticipates exactly this and says not to
- * block on it). A denylist would have to guess them and would fail OPEN on
- * every value it guessed wrong. This allowlist fails CLOSED instead: an
- * unrecognized or future `provider` is excluded and reported, never silently
- * mis-attributed.
- *
- * This is one of the two "living lists" LLP 0161 Section 11 names. Its first
- * addition (the obvious candidate: whatever a steered turn records once the
- * steering plugin has rewritten the model's provider, which may be a
- * `hypaware-*` shadow id rather than the canonical vendor id) should land as
- * its own short decision LLP citing LLP 0161/0162, not a silent diff here.
- *
- * @ref LLP 0147 [constrained-by]: CLI-backend turns are the sibling adapters'
- * territory, so backfill excludes them from projection
- * @type {ReadonlySet<string>}
+ * @type {string}
  */
-export const PROJECTABLE_PROVIDERS = new Set(['anthropic', 'openai'])
+const CLI_BACKEND_API = 'cli'
 
 /**
  * Which HypAware route still captures an excluded turn, keyed on the prefix of
- * the `provider` value the session file recorded. Used ONLY to label the
- * exclusion event, never to decide whether a record projects: that decision is
- * {@link PROJECTABLE_PROVIDERS} alone, so an unrecognized provider is excluded
- * whether or not it appears here (and its event simply carries no `covered_by`,
- * which is the honest answer for a value nothing is known about).
- *
- * Mirrors the Codex desktop precedent's `covered_by` attribute: a boundary that
- * names the route still covering it reads as scope, not as a gap.
+ * the `provider` value the session file recorded. Since LLP 0193 this list is
+ * load-bearing for the exclusion itself, not just its labeling: a provider
+ * matching a prefix here is a CLI backend whether or not its record carries
+ * the `api: "cli"` marker, which is what keeps pre-verification stamping
+ * conventions (and any future drift in the marker) excluded. It doubles as
+ * the `covered_by` label on the exclusion event, mirroring the Codex desktop
+ * precedent: a boundary that names the route still covering it reads as
+ * scope, not as a gap.
  *
  * @ref LLP 0157#backfill [implements]: surface the CLI-backend boundary as a
  * structured `covered_by` event
+ * @ref LLP 0193#decision [implements]: the provider-prefix rung of the
+ * CLI-backend denylist
  * @type {ReadonlyArray<{ prefix: string, coveredBy: string }>}
  */
 const SIBLING_ADAPTER_COVERAGE = [
@@ -235,7 +219,7 @@ async function* runOpenclawBackfill(args) {
   // Lane B's quiesce window (LLP 0172#45-the-quiesce-window): computed once
   // per run, not once per file, so every file in the same run is judged
   // against the same instant. This composes with, rather than replaces, the
-  // effectiveProviders/partitionByBackend forward/backward-fill logic below
+  // effectiveBackends/partitionByBackend turn-scoped fill logic below
   // (R10): it is a pre-filter on which files this run even reads, entirely
   // orthogonal to which records within a read file project.
   const quiesceMs = resolveQuiesceMs(config)
@@ -323,12 +307,20 @@ async function* runOpenclawBackfill(args) {
       continue
     }
 
-    const windowed = filterByWindow(records, window)
-    const { projectable, excludedByProvider } = partitionByBackend(windowed)
+    // Resolution before windowing: partitionByBackend sees the full record
+    // list so a window cut can never sever a record from its own turn's
+    // anchor; the window only bounds what projects and counts.
+    const { projectable, excludedByProvider } = partitionByBackend(records, window)
     for (const [provider, count] of excludedByProvider) {
       recordsExcluded += count
       const coveredBy = siblingCoverageFor(provider)
-      log.info('openclaw.backfill.cli_backend_excluded', {
+      // A CLI backend nothing covers is the LLP 0167 coverage-gap failure on
+      // the other axis: dropped here AND recorded nowhere else. Loud, so an
+      // operator sees the gap instead of a clean "0 rows". `unknown`
+      // (unresolvable turn) stays info: routinely transient (a turn in
+      // flight at sweep time) and re-evaluated every sweep.
+      const level = coveredBy || provider === 'unknown' ? 'info' : 'warn'
+      log[level]('openclaw.backfill.cli_backend_excluded', {
         component: COMPONENT,
         operation: 'backfill.scan',
         session_id: sessionId,
@@ -385,85 +377,197 @@ async function* runOpenclawBackfill(args) {
 }
 
 /**
- * Split a session's records into the ones the allowlist projects and a count
- * per excluded backend.
+ * Split a session's records into the ones that project and a count per
+ * excluded backend.
  *
- * The allowlist reads a record's EFFECTIVE provider, which is the record's own
- * `provider` when it states one and otherwise the nearest one that does,
- * preferring the record that follows. Only an assistant record carries
- * `provider` (LLP 0158 Context); a user prompt and a tool result do not. Read
- * literally against the record's own field, the allowlist would exclude every
- * user prompt in every session, including the prompts of the very turns
- * HypAware does capture. Reading forward attributes an unstated record to the
- * turn it belongs to: the user prompt of a `claude-cli` turn is excluded with
- * that turn (the Claude transcript already holds it, LLP 0147), and a tool
- * result mid-loop takes the same backend as the assistant record that consumes
- * it. A file where no record ever states a provider projects nothing, which is
- * the fail-closed direction {@link PROJECTABLE_PROVIDERS} exists to hold.
+ * The exclusion (LLP 0157 R10) is a DENYLIST of CLI backends, not a vendor
+ * allowlist: a record projects unless its effective backend was an embedded
+ * CLI whose own transcript is the authoritative record (LLP 0147), or states
+ * no provider at all. That is what lets a provider this repo has never heard
+ * of (`ollama` was the first) land at transcript fidelity from birth, the
+ * coverage LLP 0167 promised, while attributable sibling-owned turns stay
+ * out.
  *
+ * The decision reads a record's EFFECTIVE backend, resolved from the
+ * record's OWN TURN only. Only an assistant record carries `provider`/`api`
+ * (LLP 0158 Context); a user prompt and a tool result do not. Read literally
+ * against the record's own fields, the denylist would project every user
+ * prompt in every session, including the prompts of `claude-cli` turns the
+ * Claude transcript already holds, so unstated records borrow the nearest
+ * stated `(provider, api)` pair. The borrow is fenced at turn boundaries (a
+ * `user` record opens a turn): a turn whose anchor never got written (a CLI
+ * abort, a crash mid-write, a turn still in flight) must not inherit the
+ * NEXT turn's backend, which either projects a sibling-owned prompt as a
+ * duplicate row no `part_id` can collapse or silently drops a direct-API
+ * one. Within the fence the borrow prefers the record that follows (a
+ * prompt's own reply is ahead of it) and falls back to the record before it
+ * (the trailing tool results of a turn that aborted mid-loop). A turn that
+ * states nothing in either direction resolves to no backend and is excluded
+ * as `unknown`: visible, counted, and rewritten by nothing, so a turn that
+ * was merely in flight imports intact on the sweep after its reply lands.
+ * The pair smears as a unit, never per field: independent smearing could
+ * stitch one neighbor's `provider` to a different neighbor's `api`,
+ * fabricating a backend no record stated.
+ *
+ * What this guarantees, stated carefully: a sibling-owned turn whose records
+ * are attributable is excluded here, and a turn that cannot be attributed is
+ * excluded rather than guessed about. It does NOT make cross-adapter
+ * duplication impossible in principle: a sibling-captured turn that a future
+ * OpenClaw stamps as neither `api: "cli"` nor a known provider prefix would
+ * still project (the accepted LLP 0193 residual).
+ *
+ * Windowing is the caller's concern and happens AFTER resolution: `window`
+ * limits which records project and count, but resolution always sees the
+ * whole file, so a `--since`/`--until` cut can never sever a record from its
+ * own turn's anchor and change its attribution.
+ *
+ * @ref LLP 0193#decision [implements]: two-rung CLI-backend denylist over the
+ * turn-scoped `(provider, api)` pair; unknown still fails closed
+ * @ref LLP 0147 [constrained-by]: CLI-backend turns are the sibling adapters'
+ * territory, so backfill excludes them from projection
  * @param {OpenclawSessionMessage[]} records
+ * @param {{ sinceMs?: number, untilMs?: number }} [window]
  * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string }>, excludedByProvider: Map<string, number> }}
  */
-function partitionByBackend(records) {
+function partitionByBackend(records, window = {}) {
   /** @type {Array<{ record: OpenclawSessionMessage, provider: string }>} */
   const projectable = []
   /** @type {Map<string, number>} */
   const excludedByProvider = new Map()
-  const effective = effectiveProviders(records)
+  const effective = effectiveBackends(records)
 
   for (let i = 0; i < records.length; i++) {
-    const provider = effective[i]
-    if (provider !== undefined && PROJECTABLE_PROVIDERS.has(provider)) {
-      projectable.push({ record: records[i], provider })
+    // Same keep-if-unstamped rule as scan_util's `filterByWindow`: a record
+    // with no parseable timestamp is kept rather than silently dropped.
+    const ts = records[i].timestampMs
+    if (ts !== undefined) {
+      if (window.sinceMs !== undefined && ts < window.sinceMs) continue
+      if (window.untilMs !== undefined && ts > window.untilMs) continue
+    }
+    const backend = effective[i]
+    if (backend?.provider !== undefined && !isCliBackend(backend)) {
+      projectable.push({ record: records[i], provider: backend.provider })
       continue
     }
     // `unknown` keeps a record with no attributable backend at all countable
     // and queryable rather than invisible; it is excluded either way.
-    const key = provider ?? 'unknown'
+    const key = backend?.provider ?? 'unknown'
     excludedByProvider.set(key, (excludedByProvider.get(key) ?? 0) + 1)
   }
   return { projectable, excludedByProvider }
 }
 
 /**
- * The effective provider of each record, in file order: its own when stated,
- * else the next stated one, else the previous stated one.
+ * Whether an effective backend is a CLI backend, on either rung of the
+ * LLP 0193 denylist: the `api: "cli"` mechanism marker, or a `provider`
+ * matching a known sibling-adapter prefix. Two rungs because neither signal
+ * is owned by this repo: the marker is the verified current convention, the
+ * prefixes cover the conventions that predate verification and any future
+ * drift in the marker. Both must fail before a sibling-captured turn
+ * double-counts.
  *
- * @param {OpenclawSessionMessage[]} records
- * @returns {Array<string | undefined>}
+ * @param {{ provider?: string, api?: string }} backend
+ * @returns {boolean}
  */
-function effectiveProviders(records) {
-  /** @type {Array<string | undefined>} */
-  const effective = records.map((record) => record.provider)
-  /** @type {string | undefined} */
-  let next
-  for (let i = effective.length - 1; i >= 0; i--) {
-    if (effective[i] !== undefined) next = effective[i]
-    else effective[i] = next
-  }
-  /** @type {string | undefined} */
-  let previous
-  for (let i = 0; i < effective.length; i++) {
-    if (effective[i] !== undefined) previous = effective[i]
-    else effective[i] = previous
+function isCliBackend(backend) {
+  // Trim before folding: the values are user-visible strings from a file this
+  // repo does not write, and `"cli "` must not slip the gate that `"cli"`
+  // closes (case is normalized for the same reason).
+  if (backend.api !== undefined && backend.api.trim().toLowerCase() === CLI_BACKEND_API) return true
+  return backend.provider !== undefined && siblingCoverageFor(backend.provider) !== undefined
+}
+
+/**
+ * The effective backend of each record, resolved WITHIN ITS OWN TURN: its
+ * own `(provider, api)` pair when it states either field, else the nearest
+ * anchor (a provider-stating record, see {@link fillSegment}) after it
+ * before the turn ends, else the nearest one back to the turn's start.
+ * `undefined` when the record's turn anchors nothing, however the rest of
+ * the file is stamped.
+ *
+ * A turn starts at every `user` record; records before the file's first
+ * `user` record form a leading segment of their own. Every `user` record
+ * opens a turn, including one directly after another user record: merging
+ * consecutive prompts into one turn would reintroduce the cross-turn borrow
+ * for exactly the demonstrated failure (the reader drops a CLI abort's
+ * non-`message` line, LLP 0158, leaving the orphaned prompt adjacent to the
+ * next turn's), so a queued prompt whose turn never answered IT resolves to
+ * `unknown` rather than guessing, the fail-closed direction.
+ *
+ * @ref LLP 0193#decision [implements]: resolution never crosses a turn
+ * boundary; a turn with no stated backend resolves to none
+ * @param {OpenclawSessionMessage[]} records
+ * @returns {Array<{ provider?: string, api?: string } | undefined>}
+ */
+function effectiveBackends(records) {
+  /** @type {Array<{ provider?: string, api?: string } | undefined>} */
+  const effective = records.map((record) =>
+    record.provider !== undefined || record.api !== undefined
+      ? { provider: record.provider, api: record.api }
+      : undefined
+  )
+  let start = 0
+  for (let i = 1; i <= records.length; i++) {
+    if (i === records.length || stringValue(records[i].role)?.toLowerCase() === 'user') {
+      fillSegment(records, effective, start, i)
+      start = i
+    }
   }
   return effective
 }
 
 /**
+ * Two borrow passes, fenced to `[start, end)`: unstated entries take the
+ * nearest ANCHOR after them within the segment, then anything still empty
+ * takes the nearest anchor before it. An anchor is a record that states
+ * `provider`; a record stating only `api` keeps its own pair for itself
+ * (excluded as `unknown`, since the denylist needs a provider) but neither
+ * feeds the borrow nor blocks the search past it, because letting it shadow
+ * the turn's real anchor would drop every preceding unstated record along
+ * with it. The borrowed value is always one record's own atomic pair.
+ * Mutates `effective` in place.
+ *
+ * @param {OpenclawSessionMessage[]} records
+ * @param {Array<{ provider?: string, api?: string } | undefined>} effective
+ * @param {number} start
+ * @param {number} end
+ */
+function fillSegment(records, effective, start, end) {
+  /** @type {{ provider?: string, api?: string } | undefined} */
+  let next
+  for (let i = end - 1; i >= start; i--) {
+    if (records[i].provider !== undefined) next = effective[i]
+    else if (effective[i] === undefined) effective[i] = next
+  }
+  /** @type {{ provider?: string, api?: string } | undefined} */
+  let previous
+  for (let i = start; i < end; i++) {
+    if (records[i].provider !== undefined) previous = effective[i]
+    else if (effective[i] === undefined) effective[i] = previous
+  }
+}
+
+/**
  * The `covered_by` token for an excluded provider value, or `undefined` when
- * nothing is known to cover it.
+ * nothing is known to cover it. The prefix must end at a word boundary: the
+ * value is the prefix exactly, or the prefix followed by a non-alphanumeric
+ * delimiter (`codex`, `codex-mini`), so an unrelated vendor that merely
+ * shares the spelling (`codexcloud`) is neither denied nor mislabeled.
  *
  * @param {string} provider
  * @returns {string | undefined}
  */
 function siblingCoverageFor(provider) {
-  const lowered = provider.toLowerCase()
-  return SIBLING_ADAPTER_COVERAGE.find((entry) => lowered.startsWith(entry.prefix))?.coveredBy
+  const lowered = provider.trim().toLowerCase()
+  return SIBLING_ADAPTER_COVERAGE.find((entry) => {
+    if (!lowered.startsWith(entry.prefix)) return false
+    const rest = lowered.slice(entry.prefix.length)
+    return rest === '' || /^[^a-z0-9]/.test(rest)
+  })?.coveredBy
 }
 
 /**
- * Project one session file's allowlisted records into a single
+ * Project one session file's non-excluded records into a single
  * `AiGatewayProjectedExchange`, or `undefined` when nothing projectable
  * survived (an empty file, a whole session of CLI-backend turns, or a window
  * that excluded every record).
@@ -486,11 +590,17 @@ function projectedExchangeFromSession(args) {
   for (const { record, provider: recordProvider } of projectable) {
     const message = projectedMessageFromRecord(record)
     if (!message) continue
-    // The exchange carries one `provider`, so a session that mixed both wire
-    // shapes records the first projected turn's. Identity does not depend on
-    // it (`part_id` is `<message_id>#<part_index>`), so a mixed session still
-    // dedupes against live rows correctly; only the `provider` column of the
-    // minority turns reads as the majority's.
+    // Every row carries its own turn's provider: `recordProvider` is the
+    // smeared effective backend (partitionByBackend), so the user prompt and
+    // tool results of an `ollama` turn stamp `ollama` too, not just the
+    // assistant reply. The exchange-level `provider` below stays the first
+    // projected turn's, as the fallback for exchange-level consumers;
+    // identity does not depend on either (`part_id` is
+    // `<message_id>#<part_index>`), so a mixed session still dedupes against
+    // live rows correctly.
+    // @ref LLP 0194#decision [implements]: the projector stamps the per-turn
+    // provider on every row it emits, prompts and tool results included
+    message.provider = recordProvider
     provider ??= recordProvider
     messages.push(message)
   }

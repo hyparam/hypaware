@@ -314,8 +314,8 @@ function parseOpenclawSessionMessage(line) {
  * `content`, and for an assistant turn `model`, `provider`, `api`,
  * `stopReason`, `usage` - is one level down under `message`. Read at the top
  * level every one of those fields is absent, which is not a loud failure:
- * `provider` reads `undefined`, the backfill allowlist resolves the record to
- * `unknown`, and the run reports a clean "0 rows" for a session it simply
+ * `provider` reads `undefined`, the backfill's backend exclusion resolves the
+ * record to `unknown`, and the run reports a clean "0 rows" for a session it simply
  * failed to read (#543). Fail-closed exclusion and a parse miss are
  * indistinguishable at that seam, so the address has to be right here.
  *
@@ -350,8 +350,8 @@ function openclawMessageEnvelope(row) {
  * line, which would make that value absent (rule 3) and load-bearing at the
  * same time: a nested `provider: "  "` beside a line-level
  * `provider: "anthropic"` would resolve the record to `unknown` and the
- * backfill allowlist would exclude it fail-closed, the same silent drop
- * #543 was. If a level does not state the field, it does not get a vote.
+ * backfill's backend exclusion would drop it fail-closed, the same silent
+ * drop #543 was. If a level does not state the field, it does not get a vote.
  *
  * @template T
  * @param {Record<string, unknown>} envelope
