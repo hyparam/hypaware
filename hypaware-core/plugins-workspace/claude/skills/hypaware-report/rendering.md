@@ -147,10 +147,17 @@ judgment, and it is what this skill is for.
    card means that report needs enriching in step 3. Card stat labels are the report's
    own metric labels verbatim: to change what a card says, change the metric.
 
-6. **Verify what the command cannot.** The renderer already enforces the structural
-   contract (every page built, no leftover `.md` links, a copy action and back-link on
-   every page, a `full.md` per report) and fails if any of it breaks. What is left is
-   the judgment half:
+6. **Verify what the command does not check at runtime.** The structural contract
+   (every page built, no leftover `.md` links, a copy action and back-link on every page,
+   a `full.md` per report) is covered by tests over a synthetic fixture, not enforced
+   against your actual built output, so check it here:
+   ```bash
+   grep -rlo --include='*.html' 'href="[^"]*\.md"' html/   # nothing: no leftover .md links
+   grep -L 'class="copy-md"' html/*/*.html                 # nothing: every page has the copy action
+   ls html/*/full.md                                       # one per report
+   grep -L 'All reports' html/*/index.html                 # nothing: every page back-links
+   ```
+   Then the judgment half:
    ```bash
    grep -L 'class="rec"' html/*/index.html   # nothing: findings/changes are carded
    grep -c 'rec-stat' index.html             # >= number of reports: cards carry stats

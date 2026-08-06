@@ -12,7 +12,7 @@ wordmark, and a `doc-label` saying what the document is and that it is generated
 ("Internal report · generated <report date> from HypAware data" on report pages,
 "Internal reports · generated from HypAware data" on the landing page; the "generated
 … from" wording is deliberate: it stops readers mistaking the pages for the HypAware
-product interface). `build.sh` injects it on report pages; the landing template below
+product interface). `hyp report render` injects it on report pages; the landing template below
 carries its own. It exists so a page is recognizably a Hyperparam internal report
 rather than a generic dashboard or app: keep it to that one quiet row, never a logo
 hero.

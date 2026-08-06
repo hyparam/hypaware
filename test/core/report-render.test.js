@@ -19,12 +19,44 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { hasPandoc, renderReports } from '../../src/core/reports/render.js'
+import { discoverSections, docLabel, hasPandoc, masthead, pageTitle, renderReports } from '../../src/core/reports/render.js'
 
 const skip = hasPandoc() ? false : 'pandoc not installed'
 
 const SLUG = '2026-08-02-usage-review'
 const OTHER = '2026-07-21-usage-review'
+
+test('docLabel states the slug\'s date, else the generic wording', () => {
+  assert.equal(docLabel(SLUG), 'Internal report · generated 2026-08-02 from HypAware data')
+  assert.equal(docLabel('usage-review'), 'Internal report · generated from HypAware data')
+})
+
+test('pageTitle takes the first heading, trimmed, else the fallback', () => {
+  assert.equal(pageTitle('# Team AI Usage Review\n\nBody.\n', 'fallback'), 'Team AI Usage Review')
+  // Trailing spaces on the heading line must not reach the rendered <title>.
+  assert.equal(pageTitle('# Padded heading   \n', 'fallback'), 'Padded heading')
+  assert.equal(pageTitle('No heading here.\n', 'fallback'), 'fallback')
+})
+
+test('masthead carries the brand, the doc label, and the nav slot', () => {
+  const html = masthead('<a href="../../index.html">All reports</a>', docLabel(SLUG))
+  assert.match(html, /<span class="brand"><span class="brand-mark"><\/span>Hyperparam<\/span>/)
+  assert.match(html, /<span class="doc-label">Internal report · generated 2026-08-02 from HypAware data<\/span>/)
+  assert.match(html, /<nav class="topnav"><a href="\.\.\/\.\.\/index\.html">All reports<\/a><\/nav>/)
+})
+
+test('discoverSections lists a report\'s section files sorted, and nothing without a section dir', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-render-sections-'))
+  fs.mkdirSync(path.join(dir, SLUG))
+  fs.writeFileSync(path.join(dir, SLUG, 'trends.md'), '# Trends\n')
+  fs.writeFileSync(path.join(dir, SLUG, 'proposed-changes.md'), '# Proposed changes\n')
+  fs.writeFileSync(path.join(dir, SLUG, 'notes.txt'), 'not a section')
+
+  assert.deepEqual(discoverSections(dir, SLUG), ['proposed-changes.md', 'trends.md'])
+  assert.deepEqual(discoverSections(dir, OTHER), [], 'a report with no section dir has no sections')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
 
 /** A reports tree with one sectioned report, one flat report, and cross-report links. */
 function fixtureTree() {

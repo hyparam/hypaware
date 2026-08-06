@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Load-bearing constraints that must survive any skill reorganisation (LLP 0194 T12).",
+    "Load-bearing constraints that must survive any skill reorganisation (LLP 0197 T12).",
     "Each entry is matched against the CONCATENATED skill corpus of a host, never against a",
     "named file, so skills can be merged, split, or renamed freely. What may not happen is a",
     "constraint quietly disappearing during a merge.",
@@ -59,7 +59,7 @@
     {
       "id": "confirm-before-source-edit",
       "pattern": "it edits the user's source files|Confirm before this step",
-      "harm": "Enrichment rewrites report .md files in place. These skills are model-invocable (LLP 0193 #gate-moves-to-the-command), so without this a model can rewrite a user's reports off a prompt that never asked for it."
+      "harm": "Enrichment rewrites report .md files in place. These skills are model-invocable (LLP 0196 #gate-moves-to-the-command), so without this a model can rewrite a user's reports off a prompt that never asked for it."
     },
     {
       "id": "privacy-per-item-confirmation",

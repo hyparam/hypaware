@@ -64,8 +64,9 @@ report, back-links, theme survival). For a change to the rendering pipeline
 itself, the strongest check is an A/B against a real tree: copy
 `~/hypaware-reports` twice, render one with the current code and one with the
 change, and diff `html/`. That is how the Node port was accepted against the
-shell original (`git show 0f3dce1^:src/core/reports/build.sh` if you need it
-back for a comparison), and it came out byte-identical across five reports.
+shell original (the former `src/core/reports/build.sh`, deleted when this
+module replaced it: see PR #668 if you need it back for a comparison), and it
+came out byte-identical across five reports.
 
 ## The landing page is derived, not authored
 

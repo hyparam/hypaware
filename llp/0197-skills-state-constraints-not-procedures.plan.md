@@ -306,7 +306,7 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 6 (deps `[T12]`)
 
-- **T14, LLP bookkeeping.** Accept 0193 and append `Superseded-by: LLP 0196`
+- **T14, LLP bookkeeping.** Accept 0196 and append `Superseded-by: LLP 0196`
   to LLP 0142 #user-invoked-only, which the RFC deliberately left off while it
   was a Draft. Extend LLP 0155 with the render command, or split it out if T5
   decides render is not a member of the `report` group. Add `@ref` annotations

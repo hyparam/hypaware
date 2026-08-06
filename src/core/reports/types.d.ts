@@ -3,7 +3,7 @@ export interface RenderOptions {
   dir: string
   /**
    * Overwrite the command-owned assets from the shipped copies. Default true.
-   * Never covers `assets/theme.css`, which is the user's (LLP 0193 #theme-layer).
+   * Never covers `assets/theme.css`, which is the user's (LLP 0196 #theme-layer).
    */
   refreshAssets?: boolean
 }

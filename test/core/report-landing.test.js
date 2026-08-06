@@ -168,8 +168,26 @@ test('renderLandingPage is reproducible across runs', () => {
 
 test('report titles and labels are HTML-escaped', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-landing-esc-'))
-  fs.writeFileSync(path.join(dir, '2026-08-02-x.md'), '# Tokens & <Costs>\n\n**Thesis.**\n')
+  fs.writeFileSync(
+    path.join(dir, '2026-08-02-x.md'),
+    [
+      '# Tokens & <Costs>',
+      '',
+      '**Thesis.**',
+      '',
+      '<div class="metric-grid">',
+      '  <div class="metric">',
+      '    <p class="label">Cost & Fees</p>',
+      '    <div class="value">5</div>',
+      '  </div>',
+      '</div>',
+      '',
+    ].join('\n'),
+  )
   const html = renderLandingPage(dir, ['2026-08-02-x'])
   assert.match(html, /<h3>Tokens &amp; &lt;Costs&gt;<\/h3>/)
+  // A stat's label reaches the card raw from the report; renderCard must escape it same
+  // as the title, or a `&` in a metric label breaks the card markup.
+  assert.match(html, /<span>Cost &amp; Fees<\/span>/)
   fs.rmSync(dir, { recursive: true, force: true })
 })

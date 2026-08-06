@@ -81,8 +81,8 @@ assumptions, and model re-tiering lowers cost per token, not token volume.
 
 Every number below appears in the BEFORE text. Note what moved where:
 subtitle → eyebrow; `---` deleted; key-numbers table → metric grid; each `###` finding +
-link → one `rec` card (link target moves onto the card, `.md` stays; build.sh rewrites
-it); caveat → `callout warn` keeping its link.
+link → one `rec` card (link target moves onto the card, `.md` stays; `hyp report render`
+rewrites it); caveat → `callout warn` keeping its link.
 
 ```markdown
 <p class="eyebrow">HYP_CENTRAL fleet · 2026-06-02 → 2026-07-02</p>
