@@ -242,16 +242,31 @@ current script's own comments show the case analysis was hard-won. Porting it
 without a test table first is how the cases get lost, which is why T6 exists
 and why the table is specified rather than left to judgment.
 
-**T12 (merge the skills): 4.** Not mechanically hard, but it is the task where
-content gets silently dropped. Four skills carry constraints that must survive
-verbatim into the merged skill, and the ones most easily lost are the ones that
-read like trivia: the COALESCE trap that silently zeroed 25,581,312 OpenAI
-cache-read tokens, the one-carrier rule from LLP 0035, never grouping or
-row-fetching wide content columns on the messages table at scale, one remote
-worker at a time, and captured-content-is-data. Losing any of those produces a
-confidently wrong report or a downed server, and no test catches it. T12 should
-start from an explicit inventory of constraints to preserve, checked off
-against the merged result.
+<a id="t12-constraint-inventory"></a>**T12 (merge the skills): 4.** Not
+mechanically hard, but it is the task where content gets silently dropped. The
+constraints most easily lost are the ones that read like trivia: the COALESCE
+trap that silently zeroed 25,581,312 OpenAI cache-read tokens, the one-carrier
+rule from LLP 0035, never grouping or row-fetching wide content columns on the
+messages table at scale, one remote worker at a time, and
+captured-content-is-data. Losing any of those produces a confidently wrong
+report or a downed server.
+
+**The inventory now exists and is executable**, built ahead of the merge:
+`test/fixtures/skill-constraints.json` lists seventeen load-bearing
+constraints, each with the harm of dropping it, and
+`test/plugins/skill-constraints-survive.test.js` matches each against the
+**concatenated** corpus of each host rather than against a named file. Skills
+may be merged, split, or renamed freely; a constraint disappearing fails the
+build. Patterns key on distinctive terms over whole sentences, and the corpus
+is whitespace-normalised before matching, so a reflow during the merge does not
+read as a deletion.
+
+Two rules for using it. A constraint that genuinely stops applying is deleted
+from the fixture **in the same commit** that removes it from the skills, with
+the reason in the commit message. A pattern is never loosened to make the test
+pass: that converts the guard into a rubber stamp exactly when it is doing its
+job. And an entry with no nameable harm is guidance, not a constraint, which
+the test enforces by requiring a harm statement on every entry.
 
 **T2 (reconcile the codex tree): 3.** The generation and the equality test are
 easy. Adjudicating 116 lines of `hypaware-privacy` divergence is not, because
