@@ -290,11 +290,19 @@ depends on `build.sh` being absent from this repo.
 
   Complexity 4 as estimated. Nothing was lost: all 36 constraint assertions pass
   unchanged. Complexity 4.
-- **T13, make retirement remove the surface.** `hypaware-sensitive-scan` is
-  still installed at `~/.claude/skills/` and still advertising itself despite
-  LLP 0142 retiring it. Renaming and merging skills in T12 creates more of
-  these, so attach or reconfigure needs a removal path before T12 lands, not
-  after. Complexity 3.
+- **T13, make retirement remove the surface. DEFERRED to
+  [hyparam/hypaware#660](https://github.com/hyparam/hypaware/issues/660)**
+  (maintainer decision, 2026-08-06: out of scope for the T12 PR).
+
+  `hypaware-sensitive-scan` is still installed at `~/.claude/skills/` and still
+  advertising itself despite LLP 0142 retiring it. T12 creates five more of
+  these, so an upgraded machine gets `hypaware-report` **without** losing the
+  four skills it replaces: two skills offering to render, two to publish, and
+  the old ones still describing a `build.sh` that no longer exists.
+
+  **This is a known gap in the T12 PR, not an oversight.** The plan originally
+  said it should land before T12; it does not, so the merge ships with stale
+  installs unaddressed and the issue carries the detail. Complexity 3.
 
 ### Wave 6 (deps `[T12]`)
 
