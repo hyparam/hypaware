@@ -701,7 +701,8 @@ export async function collectHypAwareStatus(opts = {}) {
     // upstream (hermes-only) drops nothing and never reaches this branch, so
     // it stays healthy and silent.
     // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway proxies what the config asked for" is readable from status.json steadily, not only from a boot-time log line
-    // @ref LLP 0195#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one, and neither flips overall
+    // @ref LLP 0195#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one
+    // @ref LLP 0195#consequences [constrained-by]: the warning stays loud in diagnostics and does not flip overall's health verdict
     const { idle, configured, dropped, names } = droppedGatewayUpstreams
     // Counts first, names in parentheses when there are any: `name` is itself
     // one of the two keys that drops an entry, so the config that most needs
@@ -713,7 +714,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // `hyp status` against a dead gateway needs that sentence, not a
       // count of what a working one is missing.
       ? `the gateway is running but listening on nothing: ${configured} ${configured === 1 ? 'upstream' : 'upstreams'}${named} ${configured === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`
-      : `the gateway is listening, but ${dropped} of its ${configured} configured upstreams${named} did not compile to a route (each needs both a 'name' and a 'base_url') - traffic for ${dropped === 1 ? 'that upstream' : 'those upstreams'} is not proxied and nothing is captured for it`
+      : `the gateway is listening, but ${dropped} of its ${configured} configured ${configured === 1 ? 'upstream' : 'upstreams'}${named} did not compile to a route (each needs both a 'name' and a 'base_url') - ${dropped === 1 ? 'that entry is' : 'those entries are'} not in the routing table, so unless an adapter preset already covers the same name, traffic meant for ${dropped === 1 ? 'it' : 'them'} is not proxied and nothing is captured`
     diagnostics.push({
       severity: 'warning',
       // Two kinds, one check. They cannot both fire (a gateway is either

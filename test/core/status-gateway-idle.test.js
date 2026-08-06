@@ -9,10 +9,11 @@ import path from 'node:path'
 import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
-import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
+/** @import { GatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js' */
 
 // The `gateway_idle_no_upstreams` diagnostic. Letting an upstream-less gateway
 // idle rather than fail its start (#649, LLP 0120) is right for the config
@@ -251,9 +252,13 @@ const VALID_UPSTREAM = { name: 'anthropic', base_url: 'http://127.0.0.1:1', path
  * start/status/stop cycle.
  *
  * @param {unknown[]} upstreams
+ * @param {GatewayState} [state]
+ *   Defaults to a fresh state with no registered presets, matching every
+ *   other caller here. Pass one already carrying a preset to exercise the
+ *   backfill path in `mergeUpstreams`.
  * @returns {Promise<Record<string, unknown>>}
  */
-async function realGatewayDetails(upstreams) {
+async function realGatewayDetails(upstreams, state = createGatewayState()) {
   const ctx = /** @type {any} */ ({
     config: { listen: '127.0.0.1:0', upstreams },
     storage: {
@@ -262,7 +267,7 @@ async function realGatewayDetails(upstreams) {
     },
     log: { debug() {}, info() {}, warn() {}, error() {} },
   })
-  const source = await createStartSource(createGatewayState())(ctx)
+  const source = await createStartSource(state)(ctx)
   try {
     assert.ok(source.status, 'source exposes status()')
     const status = await source.status()
@@ -307,6 +312,62 @@ test('a gateway that lost one of two configured upstreams warns while listening'
     undefined,
     'and the idle kind does not double-report: the gateway is bound',
   )
+})
+
+// `readConfiguredUpstreams` compares the raw config entry count against
+// `compileUpstreams`'s output, and knows nothing about `state.presets`. But
+// `mergeUpstreams` (what actually builds the routing table) backfills any
+// registered adapter preset whose name is not already in the *compiled*
+// config table - so a config entry that drops for shape reasons can still be
+// proxied, just via the preset's default endpoint instead of the user's
+// override. The count-based warning still has to fire (the override silently
+// did not take effect), but its message must not claim the name is entirely
+// uncaptured when a preset is quietly covering it.
+test('a dropped upstream whose name matches a registered adapter preset is still proxied, so the warning does not claim silence', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  // Stands in for what `@hypaware/claude` registers at activation: a preset
+  // named `anthropic` with its own default endpoint.
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'anthropic',
+    base_url: 'http://127.0.0.1:1',
+    path_prefix: '/anthropic',
+  })
+  const details = await realGatewayDetails(
+    // `url` where `base_url` was meant: this entry never compiles, but its
+    // name collides with the preset above, so the preset backfills the same
+    // slot and the gateway still binds.
+    [{ name: 'anthropic', url: 'https://api.anthropic.com', path_prefix: '/anthropic' }],
+    state,
+  )
+  assert.equal(details.upstreams_configured, 1, 'one entry was configured')
+  assert.equal(details.upstreams_dropped, 1, 'and it never compiled to a route')
+  assert.ok(details.port, 'the preset backfilled the slot, so the gateway still binds')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'the override silently not taking effect is still worth a warning')
+  assert.equal(
+    report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'),
+    undefined,
+    'the gateway is bound, via the preset, so this is not the total-loss kind',
+  )
+  // `dropped === configured === 1` here, unlike the two-upstream case above:
+  // reachable only through this preset-backfill path, which is exactly what
+  // exercises the singular branch the idle message already had.
+  assert.match(diag.message, /1 of its 1 configured upstream[^s]/, 'singular reads correctly')
+  assert.doesNotMatch(
+    diag.message,
+    /not proxied and nothing is captured for it/,
+    'wrong: an adapter preset is still proxying this name, just not to the address the user configured',
+  )
+  assert.match(
+    diag.message,
+    /unless an adapter preset already covers the same name/,
+    'the message hedges instead of asserting total silence',
+  )
+  assert.equal(report.overall, 'healthy')
 })
 
 test('a partial loss with no usable name still warns off the count', async () => {

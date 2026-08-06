@@ -439,8 +439,10 @@ function readConfiguredUpstreams(ctx) {
     // Two entries sharing a name where only one compiles leave that name in
     // `kept`, so the loss shows up in `dropped` with no name to print. That is
     // the right way round: the count triggers the warning, the names only make
-    // it concrete.
-    droppedNames: out.filter((n) => !kept.has(n)),
+    // it concrete. The dedupe below handles the opposite duplicate: two
+    // entries sharing a name where *neither* compiles would otherwise print
+    // that one name twice.
+    droppedNames: [...new Set(out.filter((n) => !kept.has(n)))],
   }
 }
 
