@@ -209,40 +209,16 @@ Work relative to the repo root `~/hypaware-reports`.
    none of it should be re-derived here: it is code, with tests, in
    `src/core/reports/`.
 
-5. **Regenerate the top-level `index.html` as an at-a-glance dashboard, not a table of
-   contents.** Write a fresh landing page (template in [`components.md`](components.md) →
-   *Landing-page template*). One card per built report, newest first (slugs are
-   `YYYY-MM-DD-…`), and each card carries the report's own headline numbers instead of a
-   summary sentence. For each `html/<slug>/`, pull from the source `<slug>.md`:
-   - **Title** - the first `# ` heading.
-   - **Kicker** - the report's scope line (the italic `*Source: … · Window: … *` line for
-     adoption profiles, or the `## <server> · <window>` subtitle for the others), trimmed
-     to a short phrase, as the card's `rec-kind` eyebrow.
-   - **Stats** - the report's top 3-4 headline numbers as `rec-stat`s on the card: from
-     its `metric-grid` tiles where it has one, otherwise (legacy change-list reports
-     like the standalone improvement review) from the `rec` cards' stat rows, same values, same
-     crit/warn/good judgments, labels compressed to 2-4 plain words (no coined
-     shorthand), notes dropped. Rules in components.md. This hoists each report's key
-     results and progress onto the landing page, so a reader gets the fleet's state
-     without opening a report.
+5. **The landing page builds itself.** `hyp report render` regenerates the top-level
+   `index.html` from the report set on every run: one card per report newest-first, each
+   carrying that report's own headline numbers hoisted from its `metric-grid` with the
+   values and crit/warn/good judgments kept exactly, plus a companion card for any report
+   with a `proposed-changes.md` page. You do not write it, and hand-edits do not survive.
 
-   **Proposed-changes companion card** (user decision 2026-07-16): when a report has a
-   `<slug>/proposed-changes.md` section page, the landing page gets a **second card
-   directly below that report's card**, linking `html/<slug>/proposed-changes.html`,
-   the ranked changes are a first-class landing-page destination, not reachable only
-   through the report. Title "Proposed changes"; kicker = the report's scope phrase with
-   `· ranked changes` appended; stats = the change count (from the page's thesis) plus
-   that page's 2-3 strongest stat-row figures hoisted from its `rec` cards: same
-   values, same judgments, labels compressed to 2-4 plain words; `rec-go` reads
-   "open changes →". Snippet in components.md.
-
-   Link each report by its explicit `html/<slug>/index.html`, **not** a bare
-   `html/<slug>/` directory URL. A trailing-slash directory link relies on server-side
-   index resolution: it works on GitHub Pages but silently breaks when the page is opened
-   from disk (`file://`). The explicit path works in both.
-
-   List **every** built report, newest first, so nothing is orphaned. Keep the
-   internal-data note: it's a standing warning on this repo.
+   Two consequences worth knowing. A report with no `metric-grid` gets a card with no
+   figures rather than invented ones, so if a card looks bare the fix is to enrich that
+   report in step 3, not to edit the landing page. And the card's stat labels are the
+   report's own metric labels verbatim: to change what a card says, change the metric.
 
 6. **Verify what the command cannot.** `hyp report render` already enforces the
    structural contract (every page built, no leftover `.md` links, a copy action and

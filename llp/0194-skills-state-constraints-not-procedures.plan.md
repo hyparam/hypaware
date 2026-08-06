@@ -153,15 +153,26 @@ depends on `build.sh` being absent from this repo.
   pandoc's `-H` and was never one of them, and the shell interpolated `$slug`
   into a regex unescaped. Complexity 4 as estimated, and the risk was where
   predicted.
-- **T4, generate the landing page.** Same module. `build.sh` deliberately does
-  not build `index.html`, so today the model transcribes it from
-  `components.md` every run. **This turns out to be fully deterministic**: the
-  metric-grid is regular HTML, and the skill's own rule is to take the first
-  three or four figures in source order keeping each value and judgment exactly.
-  The one judgment-flavoured instruction, compressing labels to two to four
-  words, is dropped in favour of using the metric's own label verbatim, which
-  is already model-authored display copy. No manifest input is needed and no
-  model involvement remains. Complexity 3.
+- **T4, generate the landing page. LANDED 2026-08-06.**
+  `src/core/reports/landing.js`. Fully deterministic as predicted: stats come
+  from each report's `metric-grid` in source order with values and judgments
+  kept exactly, and label compression is dropped in favour of the metric's own
+  label verbatim. Verified reproducible (two runs over unchanged reports emit
+  identical HTML) and complete (all five reports listed, every link resolves).
+
+  **One rule the plan did not anticipate: it must not invent.** The
+  hand-written landing page carried stats for the proposed-changes companion
+  cards, but those pages have no `metric-grid` and no `rec` cards at all, so
+  those figures came from a model reading prose. A card whose page has no
+  metrics now gets no stat row. That is the same constraint the report skills
+  carry ("never invents, recomputes, or reinterprets"), applied to the command.
+
+  Two bugs worth recording, both found by running it rather than by reading it.
+  A lazy regex over `metric` blocks stopped at the nested `<div class="value">`
+  and yielded one stat per card instead of four. And `extractTitle` originally
+  ran the heading through the tag-stripper, which truncated a literal title like
+  `Tokens & <Costs>` to `Tokens &`; headings are Markdown, so they are collapsed
+  and escaped, never stripped. Complexity 3 as estimated.
 
 ### Wave 3 (deps `[T3, T4]`), two-wide
 

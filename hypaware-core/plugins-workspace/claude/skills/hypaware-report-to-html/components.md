@@ -197,7 +197,12 @@ small at the right margin.
 
 ## Landing-page (`index.html`) template
 
-Regenerated from the report set on every run (SKILL.md step 4). Uses the shared stylesheet
+> **Superseded.** `hyp report render` generates the landing page now (LLP 0194 T4). It
+> is derived output: rebuilt from the report set every run, with hand-edits overwritten.
+> The card shape below is kept as a reference for what the renderer emits and what the
+> stylesheet styles, not as something to transcribe.
+
+Regenerated from the report set on every run by `hyp report render`. Uses the shared stylesheet
 and the `rec` entry vocabulary so it matches the reports. List **every** built report,
 newest first; link each by explicit `html/<slug>/index.html` (a bare directory URL breaks
 under `file://`).

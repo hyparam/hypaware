@@ -516,6 +516,9 @@ a.rec:hover h3 { text-decoration: underline; text-underline-offset: 2px; }
 .rec .rec-stat { display: inline; line-height: 1.5; }
 .rec .rec-stat::before { content: " - "; color: var(--faint); }
 .rec .rec-stat + .rec-stat::before { content: " · "; }
+/* A stat hoisted onto a card keeps the metric grid's unit spacing, so a worded
+   unit ("20 days") does not render flush against its figure. */
+.rec .rec-stat b small { font-size: 0.82em; font-weight: 600; color: var(--muted); margin-left: 0.25em; }
 .rec .rec-stat b {
   display: inline;
   font-weight: 680;

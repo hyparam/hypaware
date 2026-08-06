@@ -12,3 +12,22 @@ export interface RenderResult {
   reports: number
   slugs: string[]
 }
+
+export interface LandingStat {
+  /** The figure's authored markup, e.g. `9.01<small>B</small>`. Rendered as-is. */
+  valueHtml: string
+  /** The same figure flattened to text, e.g. "9.01B". */
+  value: string
+  /** The metric's own label, used verbatim: rewriting it would be writing copy. */
+  label: string
+  /** "crit" | "warn" | "good", or "" for a neutral figure. */
+  judgment: string
+}
+
+export interface LandingCard {
+  href: string
+  kicker: string
+  title: string
+  stats: LandingStat[]
+  go: string
+}

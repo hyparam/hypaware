@@ -26,6 +26,7 @@ cut the skill from 28 KB to 23 KB by deleting the prose account.
 | Path | Role |
 | --- | --- |
 | `render.js` | **The renderer.** Cross-platform Node port (T3, landed). |
+| `landing.js` | The top-level `index.html`, derived from the report set (T4, landed). |
 | `types.d.ts` | `RenderOptions` / `RenderResult`. |
 | `assets/style.css` | The data-report stylesheet, custom-property driven. Copied into every built page. |
 | `assets/copy-md.js` | The "Copy as Markdown" masthead action. |
@@ -64,10 +65,16 @@ change, and diff `html/`. That is how the Node port was accepted against the
 shell original (`git show 0f3dce1^:src/core/reports/build.sh` if you need it
 back for a comparison), and it came out byte-identical across five reports.
 
-## Not yet moved
+## The landing page is derived, not authored
 
-The renderer does not generate the top-level `index.html` landing page; today
-the skill regenerates it from a template on every run, which is why it is not
-reproducible between runs. LLP 0194 T4 moves it here, where it is fully
-deterministic: the per-card stats come from each report's `metric-grid`, which
-is regular parseable markup.
+`index.html` is rebuilt from the report set on every run: one card per report
+newest-first, stats hoisted from each report's `metric-grid` with values and
+judgments kept exactly, plus a companion card for any `proposed-changes.md`
+page. Hand-edits do not survive, which is the point: it used to be transcribed
+by a model from a template, so two runs over unchanged reports produced
+different HTML and a deleted landing page was simply gone.
+
+**Nothing is invented.** A report with no `metric-grid` gets a card with no stat
+row rather than figures nobody computed, and labels are the report's own metric
+labels verbatim. Compressing a label is editorial judgment, and a renderer that
+did it would be writing copy rather than deriving it.

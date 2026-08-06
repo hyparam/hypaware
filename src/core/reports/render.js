@@ -18,6 +18,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import url from 'node:url'
 
+import { renderLandingPage } from './landing.js'
+
 /**
  * @import { RenderOptions, RenderResult } from '../../../src/core/reports/types.js'
  */
@@ -198,6 +200,11 @@ export function renderReports(options) {
   for (const slug of slugs) {
     buildReport(dir, htmlDir, slug)
   }
+
+  // @ref LLP 0193#the-inversion [implements]: the landing page is derived output, so it
+  // is rebuilt from the report set every run rather than hand-maintained
+  fs.writeFileSync(path.join(dir, 'index.html'), renderLandingPage(dir, slugs))
+
   return { reports: slugs.length, slugs }
 }
 
