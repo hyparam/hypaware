@@ -645,8 +645,11 @@ test('a mixed real-shape session partially projects: anthropic turns land, claud
 })
 
 // @ref LLP 0193#decision [tests]: the flip from allowlist to denylist. A
-// provider this repo has never heard of projects from birth, provided its
-// records carry a wire-shape api and not the CLI mechanism marker.
+// provider this repo has never heard of projects from birth. Note the gate
+// does NOT require an api: a provider-stating record with no api at all is
+// not CLI-denied and projects, the widest fail-open cell of the denylist,
+// pinned here deliberately so a change to it is a decision rather than a
+// drive-by.
 test('an unrecognized direct-API provider projects, no release needed', async () => {
   const env = await stageEnv()
   try {
@@ -655,12 +658,17 @@ test('an unrecognized direct-API provider projects, no release needed', async ()
       records: [
         USER_RECORD,
         { ...ASSISTANT_RECORD, id: 'msg-x', provider: 'some-future-vendor', api: 'some-future-shape' },
+        { id: 'msg-user-2', timestamp: '2026-07-30T10:01:00.000Z', role: 'user', content: [{ type: 'text', text: 'and with no api stated?' }] },
+        { ...ASSISTANT_RECORD, id: 'msg-no-api', timestamp: '2026-07-30T10:01:05.000Z', provider: 'apiless-vendor', api: undefined },
       ],
     })
     const { items, events } = await collect(provider(env).run(runContext().ctx))
     assert.equal(items.length, 1)
     assert.equal(value(items[0]).provider, 'some-future-vendor')
-    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-1', 'msg-x'])
+    assert.deepEqual(
+      value(items[0]).messages.map((/** @type {any} */ m) => m.message_id),
+      ['msg-user-1', 'msg-x', 'msg-user-2', 'msg-no-api']
+    )
     assert.equal(events.filter((e) => e.event === 'excluded_backend').length, 0)
   } finally {
     await env.cleanup()
@@ -890,8 +898,11 @@ test('a record stating only provider does not inherit a neighbor\'s api', async 
 })
 
 // Pins the `codex` denylist entry (a mutant deleting it survived the first
-// cut's suite) and the delimiter boundary on the prefix match.
-test('codex is denied by prefix with its covering route; codexcloud is neither denied nor mislabeled', async () => {
+// cut's suite) and the boundary semantics of the prefix match: the exact
+// prefix and a delimiter-prefixed form (`codex-mini`) are covered, so a
+// mutant narrowing `startsWith` to `===` fails here, while a lookalike
+// sharing only the spelling (`codexcloud`) is neither denied nor mislabeled.
+test('codex and codex-mini are denied by prefix with their covering route; codexcloud is neither denied nor mislabeled', async () => {
   const env = await stageEnv()
   try {
     await writeSession(env, {
@@ -899,15 +910,73 @@ test('codex is denied by prefix with its covering route; codexcloud is neither d
       records: [
         USER_RECORD,
         { ...ASSISTANT_RECORD, id: 'msg-codex', provider: 'codex', api: 'openai-responses' },
-        { id: 'msg-user-2', timestamp: '2026-07-30T10:01:00.000Z', role: 'user', content: [{ type: 'text', text: 'and via the lookalike?' }] },
-        { ...ASSISTANT_RECORD, id: 'msg-lookalike', timestamp: '2026-07-30T10:01:05.000Z', provider: 'codexcloud', api: 'openai-responses' },
+        { id: 'msg-user-2', timestamp: '2026-07-30T10:01:00.000Z', role: 'user', content: [{ type: 'text', text: 'and via the delimited form?' }] },
+        { ...ASSISTANT_RECORD, id: 'msg-codex-mini', timestamp: '2026-07-30T10:01:05.000Z', provider: 'codex-mini', api: 'openai-responses' },
+        { id: 'msg-user-3', timestamp: '2026-07-30T10:02:00.000Z', role: 'user', content: [{ type: 'text', text: 'and via the lookalike?' }] },
+        { ...ASSISTANT_RECORD, id: 'msg-lookalike', timestamp: '2026-07-30T10:02:05.000Z', provider: 'codexcloud', api: 'openai-responses' },
       ],
     })
     const { items, events } = await collect(provider(env).run(runContext().ctx))
-    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-2', 'msg-lookalike'])
+    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-3', 'msg-lookalike'])
     assert.equal(value(items[0]).provider, 'codexcloud')
     const excluded = events.filter((e) => e.event === 'excluded_backend')
-    assert.deepEqual(excluded.map((e) => [e.attributes?.provider, e.attributes?.covered_by]), [['codex', 'codex_sessions_rollout']])
+    assert.deepEqual(
+      excluded.map((e) => [e.attributes?.provider, e.attributes?.covered_by]).sort(),
+      [['codex', 'codex_sessions_rollout'], ['codex-mini', 'codex_sessions_rollout']]
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// Normalization is load-bearing on both rungs: the values come from a file
+// this repo does not write. ` CLI` must be denied (kills dropping either the
+// trim or the case fold on the api rung), and ` claude-cli` must still find
+// its covering route (kills dropping the trim on the provider rung).
+test('whitespace and case on api or provider do not slip the denylist', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        { ...ASSISTANT_RECORD, id: 'msg-shouty', provider: 'mystery-cli', api: ' CLI' },
+        { id: 'msg-user-2', timestamp: '2026-07-30T10:01:00.000Z', role: 'user', content: [{ type: 'text', text: 'and padded?' }] },
+        { ...ASSISTANT_RECORD, id: 'msg-padded', timestamp: '2026-07-30T10:01:05.000Z', provider: ' claude-cli', api: 'anthropic-messages' },
+      ],
+    })
+    const { items, events } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 0)
+    const excluded = events.filter((e) => e.event === 'excluded_backend')
+    assert.deepEqual(
+      excluded.map((e) => [e.attributes?.provider, e.attributes?.covered_by]).sort(),
+      [[' claude-cli', 'claude_transcript'], ['mystery-cli', undefined]]
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// A record stating `api` but no `provider` is itself unresolvable (excluded
+// as unknown), but it must not shadow the turn's real anchor: the preceding
+// prompt still resolves past it to the provider-stating record and projects.
+test('an api-only record does not block the borrow to the turn\'s real anchor', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        { ...ASSISTANT_RECORD, id: 'msg-blank', provider: undefined, api: 'ollama' },
+        { ...ASSISTANT_RECORD, id: 'msg-real', timestamp: '2026-07-30T10:00:04.000Z', model: 'gemma4:12b', provider: 'ollama', api: 'ollama' },
+      ],
+    })
+    const { items, events } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).provider, 'ollama')
+    assert.deepEqual(value(items[0]).messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-1', 'msg-real'])
+    const excluded = events.filter((e) => e.event === 'excluded_backend')
+    assert.deepEqual(excluded.map((e) => [e.attributes?.provider, e.attributes?.record_count]), [['unknown', 1]])
   } finally {
     await env.cleanup()
   }

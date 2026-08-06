@@ -219,7 +219,7 @@ async function* runOpenclawBackfill(args) {
   // Lane B's quiesce window (LLP 0172#45-the-quiesce-window): computed once
   // per run, not once per file, so every file in the same run is judged
   // against the same instant. This composes with, rather than replaces, the
-  // effectiveProviders/partitionByBackend forward/backward-fill logic below
+  // effectiveBackends/partitionByBackend turn-scoped fill logic below
   // (R10): it is a pre-filter on which files this run even reads, entirely
   // orthogonal to which records within a read file project.
   const quiesceMs = resolveQuiesceMs(config)
@@ -314,7 +314,13 @@ async function* runOpenclawBackfill(args) {
     for (const [provider, count] of excludedByProvider) {
       recordsExcluded += count
       const coveredBy = siblingCoverageFor(provider)
-      log.info('openclaw.backfill.cli_backend_excluded', {
+      // A CLI backend nothing covers is the LLP 0167 coverage-gap failure on
+      // the other axis: dropped here AND recorded nowhere else. Loud, so an
+      // operator sees the gap instead of a clean "0 rows". `unknown`
+      // (unresolvable turn) stays info: routinely transient (a turn in
+      // flight at sweep time) and re-evaluated every sweep.
+      const level = coveredBy || provider === 'unknown' ? 'info' : 'warn'
+      log[level]('openclaw.backfill.cli_backend_excluded', {
         component: COMPONENT,
         operation: 'backfill.scan',
         session_id: sessionId,
@@ -464,16 +470,20 @@ function partitionByBackend(records, window = {}) {
  * @returns {boolean}
  */
 function isCliBackend(backend) {
-  if (backend.api !== undefined && backend.api.toLowerCase() === CLI_BACKEND_API) return true
+  // Trim before folding: the values are user-visible strings from a file this
+  // repo does not write, and `"cli "` must not slip the gate that `"cli"`
+  // closes (case is normalized for the same reason).
+  if (backend.api !== undefined && backend.api.trim().toLowerCase() === CLI_BACKEND_API) return true
   return backend.provider !== undefined && siblingCoverageFor(backend.provider) !== undefined
 }
 
 /**
  * The effective backend of each record, resolved WITHIN ITS OWN TURN: its
- * own `(provider, api)` pair when it states either field, else the next
- * stated pair before the turn ends, else the previous stated one back to
- * the turn's start. `undefined` when the record's turn states no backend at
- * all, however the rest of the file is stamped.
+ * own `(provider, api)` pair when it states either field, else the nearest
+ * anchor (a provider-stating record, see {@link fillSegment}) after it
+ * before the turn ends, else the nearest one back to the turn's start.
+ * `undefined` when the record's turn anchors nothing, however the rest of
+ * the file is stamped.
  *
  * A turn starts at every `user` record; records before the file's first
  * `user` record form a leading segment of their own. Every `user` record
@@ -499,7 +509,7 @@ function effectiveBackends(records) {
   let start = 0
   for (let i = 1; i <= records.length; i++) {
     if (i === records.length || stringValue(records[i].role)?.toLowerCase() === 'user') {
-      fillSegment(effective, start, i)
+      fillSegment(records, effective, start, i)
       start = i
     }
   }
@@ -507,27 +517,33 @@ function effectiveBackends(records) {
 }
 
 /**
- * Today's two borrow passes, fenced to `effective[start, end)`: unstated
- * entries take the nearest stated pair after them within the segment, then
- * anything still empty takes the nearest stated pair before it within the
- * segment. Mutates `effective` in place.
+ * Two borrow passes, fenced to `[start, end)`: unstated entries take the
+ * nearest ANCHOR after them within the segment, then anything still empty
+ * takes the nearest anchor before it. An anchor is a record that states
+ * `provider`; a record stating only `api` keeps its own pair for itself
+ * (excluded as `unknown`, since the denylist needs a provider) but neither
+ * feeds the borrow nor blocks the search past it, because letting it shadow
+ * the turn's real anchor would drop every preceding unstated record along
+ * with it. The borrowed value is always one record's own atomic pair.
+ * Mutates `effective` in place.
  *
+ * @param {OpenclawSessionMessage[]} records
  * @param {Array<{ provider?: string, api?: string } | undefined>} effective
  * @param {number} start
  * @param {number} end
  */
-function fillSegment(effective, start, end) {
+function fillSegment(records, effective, start, end) {
   /** @type {{ provider?: string, api?: string } | undefined} */
   let next
   for (let i = end - 1; i >= start; i--) {
-    if (effective[i] !== undefined) next = effective[i]
-    else effective[i] = next
+    if (records[i].provider !== undefined) next = effective[i]
+    else if (effective[i] === undefined) effective[i] = next
   }
   /** @type {{ provider?: string, api?: string } | undefined} */
   let previous
   for (let i = start; i < end; i++) {
-    if (effective[i] !== undefined) previous = effective[i]
-    else effective[i] = previous
+    if (records[i].provider !== undefined) previous = effective[i]
+    else if (effective[i] === undefined) effective[i] = previous
   }
 }
 
@@ -542,7 +558,7 @@ function fillSegment(effective, start, end) {
  * @returns {string | undefined}
  */
 function siblingCoverageFor(provider) {
-  const lowered = provider.toLowerCase()
+  const lowered = provider.trim().toLowerCase()
   return SIBLING_ADAPTER_COVERAGE.find((entry) => {
     if (!lowered.startsWith(entry.prefix)) return false
     const rest = lowered.slice(entry.prefix.length)

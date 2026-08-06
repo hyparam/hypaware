@@ -64,6 +64,13 @@ that precedence skipped.
   rows imported in the LLP 0193-to-0194 window.
 - The kernel contract change is additive; no projector or materializer
   outside the OpenClaw backfill needs to change.
+- **The `provider` message-field name is now semantically reserved.** A
+  projector that copies or spreads a wire body into a projected message
+  could always leak stray keys, but a top-level `provider` (OpenRouter-style
+  responses carry one) was previously ignored and now silently wins on
+  every row of that message. No in-repo projector spreads wire bodies (all
+  build messages field-by-field), so this is a release-note obligation for
+  out-of-tree projector authors, not a code change.
 
 ## References
 
