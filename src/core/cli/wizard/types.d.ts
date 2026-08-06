@@ -402,7 +402,7 @@ export type FirstLookResult =
 /**
  * A client this run can actually start on a question: picked by the
  * user, and with its `contributes.client.launch` binary resolved on
- * `$PATH` (LLP 0195#path-probe). `args` still carries the `{prompt}`
+ * `$PATH` (LLP 0198#path-probe). `args` still carries the `{prompt}`
  * placeholder; substitution happens at spawn.
  */
 export interface FirstAskLauncher {
@@ -415,11 +415,11 @@ export interface FirstAskLauncher {
 
 /**
  * What the first ask did. Every `launched: false` value is a normal
- * outcome, never a failed install (LLP 0195#real-launch): `no-launcher`
+ * outcome, never a failed install (LLP 0198#real-launch): `no-launcher`
  * when nothing picked resolves on `$PATH`, `not-interactive` on a piped
  * stream, `declined` on "Not now" or a cancelled prompt, `spawn-failed`
  * when the binary resolved but would not start, `no-rows` when the cache
- * has nothing for the questions to be about (LLP 0195#empty-cache),
+ * has nothing for the questions to be about (LLP 0198#empty-cache),
  * `error` for anything unforeseen. All six print the question list
  * instead.
  */
@@ -440,7 +440,7 @@ export interface RunWizardFirstAskOptions {
   /**
    * Whether the cache holds anything the suggested questions could be
    * answered from. `false` suppresses the launch entirely
-   * (LLP 0195#empty-cache); `undefined` means the caller could not tell,
+   * (LLP 0198#empty-cache); `undefined` means the caller could not tell,
    * which never withholds the offer.
    */
   hasRows?: boolean
