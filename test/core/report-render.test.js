@@ -132,19 +132,40 @@ test('one-pagers link back to the landing page, sections back to their report', 
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('a user theme.css is copied beside pages and never overwritten', { skip }, () => {
+test('theme.css is created once, never overwritten, and reaches every page', { skip }, () => {
+  // @ref LLP 0193#theme-layer [tests]: the base sheet is the command's and the theme is
+  // the user's, which is what removes the "customization or rot?" guess
   const dir = fixtureTree()
   renderReports({ dir })
 
   const theme = path.join(dir, 'assets', 'theme.css')
+  assert.ok(fs.existsSync(theme), 'a starting theme.css is created so the link never dangles')
+  assert.match(fs.readFileSync(theme, 'utf8'), /never\s+overwrites it/, 'the stub says whose file it is')
+
   fs.writeFileSync(theme, ':root { --accent: #ff0000 }')
   renderReports({ dir })
 
-  assert.equal(fs.readFileSync(theme, 'utf8'), ':root { --accent: #ff0000 }', 'theme.css is the user\'s')
-  assert.ok(
-    fs.existsSync(path.join(dir, 'html', SLUG, 'assets', 'theme.css')),
-    'theme.css must ship beside the built pages',
-  )
+  assert.equal(fs.readFileSync(theme, 'utf8'), ':root { --accent: #ff0000 }', "theme.css is the user's")
+
+  // Every page, not just the landing page: shipping it without linking it is the bug
+  // this test exists to catch.
+  for (const file of builtPages(path.join(dir, 'html'))) {
+    const html = fs.readFileSync(file, 'utf8')
+    assert.match(html, /href="assets\/theme\.css"/, `${path.basename(file)} does not link the theme`)
+    const base = html.indexOf('assets/style.css')
+    assert.ok(base !== -1 && base < html.indexOf('assets/theme.css'), 'the theme must load after the base sheet')
+    assert.equal(
+      fs.readFileSync(path.join(path.dirname(file), 'assets', 'theme.css'), 'utf8'),
+      ':root { --accent: #ff0000 }',
+      'the theme must ship beside the page that links it',
+    )
+  }
+
+  // The base sheet is the command's, so a local edit to it is replaced.
+  const base = path.join(dir, 'assets', 'style.css')
+  fs.writeFileSync(base, '/* hand-edited */')
+  renderReports({ dir })
+  assert.ok(fs.readFileSync(base, 'utf8').length > 1000, 'style.css is refreshed from the shipped copy')
 
   fs.rmSync(dir, { recursive: true, force: true })
 })

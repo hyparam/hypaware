@@ -214,10 +214,17 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 4 (deps `[T5]`), three-wide
 
-- **T7, the theme layer.** `assets/theme.css`, user-owned, never overwritten,
-  linked after the base sheet so the cascade resolves it. The base stays
-  command-owned and is refreshed every run. Cheap because `style.css` is
-  already custom-property driven. Complexity 2.
+- **T7, the theme layer. LANDED 2026-08-06.** `assets/theme.css` is created
+  once with a commented stub naming the overridable custom properties, never
+  written again, and linked from `head.html` after the base sheet on every page.
+  The base stays command-owned and is refreshed every run, which is what
+  removes the undecidable "customization or rot?" call.
+
+  **T4 had left this half-done**: the theme was copied beside each page but
+  linked only from the landing page, so a user theme would have styled the
+  index and nothing else. The test now asserts the link on every built page and
+  the cascade order, which is the assertion that would have caught it.
+  Complexity 2.
 - **T8, branding config.** Extract the hardcoded strings: the brand name in
   `masthead()`, the doc-label wording, and the landing page's title,
   standfirst, and confidentiality notice. Defaults preserve today's output

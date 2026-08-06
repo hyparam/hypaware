@@ -66,10 +66,17 @@ Work relative to the repo root `~/hypaware-reports`.
    the user before building: see Notes.
 
 2. **Assets are the command's job now.** `hyp report render` installs and refreshes the
-   shared stylesheet and favicons itself, from the copies shipped with HypAware. Do not
-   hand-copy them and do not hand-tune per-page CSS. A user's own
-   `assets/theme.css`, if present, is layered after the base sheet and is never
-   overwritten: that is the supported way to restyle a tree.
+   base stylesheet and favicons itself. Do not hand-copy them, and do not hand-tune
+   per-page CSS: `assets/style.css` is overwritten on every run, so an edit there is
+   lost.
+
+   **To restyle a tree, edit `assets/theme.css`.** The command creates it once, never
+   touches it again, and links it after the base sheet on every page, so anything set
+   there wins. Most restyling is a few custom properties (`--accent`, `--fg`, the
+   `--good`/`--warn`/`--crit` judgment colours, the `--s1`..`--s4` chart ramp, the type
+   stacks, `--max`); the file ships with them listed. That split is deliberate: the base
+   sheet is HypAware's and the theme is the user's, so neither has to guess whether a
+   change to the other was a customization or something stale.
 
 3. **Enrich the report Markdown (the step that makes it a data report).**
 

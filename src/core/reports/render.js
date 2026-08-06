@@ -208,14 +208,61 @@ export function renderReports(options) {
   return { reports: slugs.length, slugs }
 }
 
-/** @param {string} assetsDir @param {boolean} refresh */
+/**
+ * @ref LLP 0193#theme-layer [implements]: the base sheet is the command's and always
+ * refreshed; theme.css is the user's and never touched after it is created
+ *
+ * Splitting ownership this way removes an undecidable call. The skill used to guess
+ * whether a modified `style.css` was a customization or a stale sheet, by looking for a
+ * webfont import or a missing rule, which misclassified the most obvious customization
+ * (wanting a webfont) as rot. Now the base is unambiguously ours and the theme is
+ * unambiguously theirs.
+ *
+ * @param {string} assetsDir
+ * @param {boolean} refresh
+ */
 function installAssets(assetsDir, refresh) {
   for (const asset of TREE_ASSETS) {
     const dest = path.join(assetsDir, asset)
-    // theme.css is the user's (LLP 0193 #theme-layer); these five are the command's.
     if (refresh || !fs.existsSync(dest)) fs.copyFileSync(path.join(ASSET_DIR, asset), dest)
   }
+
+  // Created once, then never written again. It exists even when empty so the stylesheet
+  // link in head.html never dangles, and so the extension point is discoverable: a user
+  // finds the file rather than having to know overrides are supported.
+  const theme = path.join(assetsDir, 'theme.css')
+  if (!fs.existsSync(theme)) fs.writeFileSync(theme, THEME_STUB)
 }
+
+/**
+ * The starting `theme.css`. Comments only, so it changes nothing until edited.
+ * Names real custom properties, because a blank file does not tell you what is
+ * overridable and the base sheet is 15 KB to read.
+ */
+const THEME_STUB = `/* Your theme. This file is yours: HypAware creates it once and never
+   overwrites it. It loads after the base stylesheet, so anything set here wins.
+
+   Most restyling is a handful of custom properties. The base sheet defines these
+   (and more) on :root, with a parallel dark-mode block:
+
+   :root {
+     --fg: #191817;          ink
+     --bg: #fcfcfb;          page
+     --accent: #33465c;      wayfinding, neutral chart fill
+     --good: #16691e;        judgment colours, used ONLY on numbers that carry one
+     --warn: #8a5a00;
+     --crit: #a53125;
+     --s1 .. --s4:           chart identity ramp, dark to light
+     --body / --display / --mono:  type stacks
+     --max: 860px;           content width
+   }
+
+   Example:
+
+   :root { --accent: #6b4fa0; --max: 960px; }
+   @media (prefers-color-scheme: dark) { :root { --accent: #b9a3e3; } }
+*/
+`
 
 /** @param {string} dir @param {string} htmlDir @param {string} slug */
 function buildReport(dir, htmlDir, slug) {
@@ -224,8 +271,8 @@ function buildReport(dir, htmlDir, slug) {
   for (const asset of PAGE_ASSETS) {
     fs.copyFileSync(path.join(dir, 'assets', asset), path.join(out, 'assets', asset))
   }
-  const theme = path.join(dir, 'assets', 'theme.css')
-  if (fs.existsSync(theme)) fs.copyFileSync(theme, path.join(out, 'assets', 'theme.css'))
+  // Always present after installAssets, and linked from every page by head.html.
+  fs.copyFileSync(path.join(dir, 'assets', 'theme.css'), path.join(out, 'assets', 'theme.css'))
   fs.writeFileSync(path.join(out, '.nojekyll'), '')
 
   const label = docLabel(slug)
