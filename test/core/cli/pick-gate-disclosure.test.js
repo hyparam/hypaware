@@ -61,6 +61,7 @@ function gateQuestion() {
 /** @returns {Promise<any>} */
 async function captureGateQuestion() {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-pick-gate-disclosure-'))
+  test.after(() => fs.rm(tmp, { recursive: true, force: true }))
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   /** @type {{ question: any }} */
