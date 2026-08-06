@@ -26,7 +26,9 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *
  * - `hyp attach --client claude` patches `~/.claude/settings.json`
  *   with the HypAware marker, `env.ANTHROPIC_BASE_URL`, and the
- *   managed session-context hook entries (golden compare).
+ *   managed hook entries (golden compare): `session-context` on every
+ *   managed event, plus `classify-cwd` on the two fresh-cwd events
+ *   (LLP 0106).
  * - A `client.attach` span exists with `hyp_plugin=@hypaware/claude`,
  *   `client_name=claude`, `status=ok`, `restored=false`.
  * - `hyp detach --client claude` removes the managed keys and the
@@ -181,23 +183,46 @@ export async function run({ harness, expect }) {
         typeof v.state_file === 'string' &&
         v.state_file.endsWith('session-context.jsonl')
     )
+    // LLP 0106 split what attach installs on the session-start events:
+    // `session-context` still rides every managed event, and `classify-cwd`
+    // rides only the two events where a *fresh* working directory appears
+    // (SessionStart, CwdChanged). Both sides of the split are asserted here so
+    // dropping either kind, or leaking `classify-cwd` onto the per-prompt and
+    // per-tool events, fails the golden compare instead of passing quietly.
+    // @ref LLP 0106#decision [tests]: the classification hook rides the fresh-cwd events beside session-context, and only those
     expect.that(
-      'settings: SessionStart hook installed with --state-file pointing at the plugin state dir',
-      attached?.hooks?.SessionStart,
+      'settings: SessionStart carries session-context (with --state-file) then classify-cwd',
+      hookCommands(attached?.hooks?.SessionStart),
+      (v) =>
+        v.length === 2 &&
+        v[0].includes('claude-hook session-context') &&
+        v[0].includes('--state-file ') &&
+        v[0].includes('session-context.jsonl') &&
+        v[1].endsWith('claude-hook classify-cwd')
+    )
+    expect.that(
+      'settings: CwdChanged carries the same pair (the other fresh-cwd event)',
+      hookCommands(attached?.hooks?.CwdChanged),
+      (v) =>
+        v.length === 2 &&
+        v[0].includes('claude-hook session-context') &&
+        v[0].includes('session-context.jsonl') &&
+        v[1].endsWith('claude-hook classify-cwd')
+    )
+    expect.that(
+      'settings: UserPromptSubmit carries session-context only (no re-ask per prompt)',
+      hookCommands(attached?.hooks?.UserPromptSubmit),
+      (v) => v.length === 1 && v[0].includes('claude-hook session-context')
+    )
+    expect.that(
+      'settings: PostToolUse carries session-context only, scoped to the Bash matcher',
+      attached?.hooks?.PostToolUse,
       (v) =>
         Array.isArray(v) &&
         v.length === 1 &&
-        Array.isArray(v[0].hooks) &&
-        v[0].hooks[0]?.type === 'command' &&
-        typeof v[0].hooks[0]?.command === 'string' &&
-        v[0].hooks[0].command.includes('claude-hook session-context') &&
-        v[0].hooks[0].command.includes('--state-file ') &&
-        v[0].hooks[0].command.includes('session-context.jsonl')
-    )
-    expect.that(
-      'settings: PostToolUse hook scoped to Bash matcher',
-      attached?.hooks?.PostToolUse?.[0]?.matcher,
-      (v) => v === 'Bash'
+        v[0]?.matcher === 'Bash' &&
+        hookCommands(v).length === 1 &&
+        hookCommands(v)[0].includes('claude-hook session-context')
     )
 
     // Drive `hyp detach --client claude` through the dispatcher.
@@ -293,6 +318,25 @@ export async function run({ harness, expect }) {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
   }
+}
+
+/**
+ * Flatten a `hooks.<event>` block into its command strings, in install order.
+ * Each element of the block is a `{ matcher?, hooks: [{ type, command }] }`
+ * group, and attach pushes one group per command kind the event carries.
+ *
+ * @param {unknown} groups
+ * @returns {string[]}
+ */
+function hookCommands(groups) {
+  if (!Array.isArray(groups)) return []
+  return groups.flatMap((group) => {
+    const handlers = group?.hooks
+    if (!Array.isArray(handlers)) return []
+    return handlers
+      .filter((/** @type {any} */ h) => h?.type === 'command' && typeof h.command === 'string')
+      .map((/** @type {any} */ h) => /** @type {string} */ (h.command))
+  })
 }
 
 /**
