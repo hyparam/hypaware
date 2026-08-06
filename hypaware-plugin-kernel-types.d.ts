@@ -1911,6 +1911,20 @@ export interface AiGatewayProjectedMessage {
    * otherwise.
    */
   model?: string
+  /**
+   * Per-message provider id, for exchanges that span turns served by
+   * different providers (an OpenClaw session can switch its model, and with
+   * it the provider, mid-session; the backfilled exchange is the whole
+   * session). The gateway prefers this value over the exchange `provider`
+   * when present and falls back to the exchange provider otherwise, the same
+   * precedence `model` carries. Unlike `model`, projectors that supply it
+   * are expected to stamp it on every row of the turn (prompts and tool
+   * results included, via their turn's resolved backend): `provider` is
+   * non-nullable per row, so an unstamped minority-turn prompt would fall
+   * back to the exchange value and misattribute, which is the exact defect
+   * the field exists to fix (LLP 0194).
+   */
+  provider?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string

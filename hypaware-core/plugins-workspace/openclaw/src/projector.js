@@ -905,7 +905,8 @@ function leadingResponsesSystemCount(items) {
  * One request-side Responses `input` item as a message, or `undefined`
  * for the item kinds that project nothing (reasoning replays, item
  * references, unrecognized future kinds - skipped rather than guessed,
- * the same fail-closed posture the backfill's provider allowlist takes).
+ * the same fail-closed posture the backfill takes for a record whose
+ * backend is unresolvable).
  *
  * @param {Record<string, unknown>} item
  * @returns {Record<string, unknown> | undefined}
