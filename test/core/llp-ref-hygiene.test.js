@@ -389,16 +389,21 @@ test('every @ref resolves to a live LLP document and one of its anchors', () => 
 
 // Issue #639 read the tolerance list as a list of live defects and asked for
 // repairs PR #461 had already made. A tolerance is invisible from the outside
-// once it stops being spent: the suite is green either way, so the entry
-// survives as the only remaining claim that the reference is broken. The entry
-// has to expire with the defect, and nothing but a check notices when it does
-// not.
-test('every tolerated reference is one that is still broken', () => {
+// once it stops being fully spent: the suite is green either way, so the
+// unspent balance survives as a standing claim that the reference is broken
+// by more than it is. Repairs land one reference at a time, not all at once,
+// so a budget of five against one remaining break is the exact shape that
+// produced the stale list this test exists to catch: it has to expire with
+// the defect, at the same rate the defect shrinks, and nothing but a check
+// notices when it does not.
+test('every tolerated reference forgives no more than is still broken', () => {
   /** @type {Map<string, number>} */
   const spent = new Map()
   brokenRefs(TOLERATED_BROKEN, spent)
-  const stale = [...TOLERATED_BROKEN.keys()].filter(id => (spent.get(id) ?? 0) === 0)
-  assert.deepEqual(stale, [], `${stale.length} tolerances no longer forgive anything:\n  ${stale.join('\n  ')}`)
+  const stale = [...TOLERATED_BROKEN.entries()]
+    .filter(([id, budget]) => (spent.get(id) ?? 0) < budget)
+    .map(([id, budget]) => `${id}  tolerance forgives ${budget} but only ${spent.get(id) ?? 0} are broken`)
+  assert.deepEqual(stale, [], `${stale.length} tolerances forgive more than is still broken:\n  ${stale.join('\n  ')}`)
 })
 
 test('a tolerated reference is tolerated only as often as it is listed', () => {
