@@ -451,7 +451,7 @@ export function hasRenderableOverview(rows) {
  * `collectOverview` for. Without it a caller running a subset would be
  * told its unrequested sections "did not finish", which is a false claim
  * about work nobody started - and the one thing the partial-block
- * narration exists to avoid (LLP 0195#wizard-sections).
+ * narration exists to avoid (LLP 0198#wizard-sections).
  *
  * @param {OverviewRows} rows
  * @param {readonly ('models'|'daily'|'repos'|'tools')[]} [sections]

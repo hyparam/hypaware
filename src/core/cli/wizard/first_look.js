@@ -86,7 +86,7 @@ const FIRST_LOOK_TITLE = 'First look at what HypAware has recorded'
  * and interesting is what `hyp query overview` is for - it still runs all
  * four, with no deadline, because there the user asked.
  *
- * @ref LLP 0195#wizard-sections [implements]: setup runs the two sections that prove capture, not all four
+ * @ref LLP 0198#wizard-sections [implements]: setup runs the two sections that prove capture, not all four
  */
 const FIRST_LOOK_SECTIONS = /** @type {const} */ (['models', 'daily'])
 

@@ -24,29 +24,31 @@ import {
  * "See this again anytime: hyp query overview"); a question menu reachable
  * only by re-running `hyp init` would be the exception.
  *
- * With no argument it renders the same five questions and starts the
+ * With no argument it renders the same four questions and starts the
  * chosen client on the pick. With a question it skips the menu entirely,
  * which is the shape a user reaches for once they know what they want:
  * `hyp ask "which sessions touched the auth module"`.
  *
- * @ref LLP 0195#re-runnable [implements]: the closing list is a verb, not a one-off screen
+ * @ref LLP 0198#re-runnable [implements]: the closing list is a verb, not a one-off screen
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
 export async function runAsk(argv, ctx) {
+  const clients = await askableClients(ctx)
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+
   if (argv.includes('--list')) {
-    writeSuggestedPrompts({ stdout: ctx.stdout, launchable: true })
+    const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
+    writeSuggestedPrompts({ stdout: ctx.stdout, launchable: launchers.length > 0 })
     return 0
   }
   const question = argv.filter((a) => !a.startsWith('-')).join(' ').trim()
-  const clients = await askableClients(ctx)
-  const descriptors = await buildWalkthroughClientDescriptorMap()
 
   if (question.length > 0) {
     // A named question wants a launch, not a menu: resolve directly and
     // say plainly when nothing can answer it, rather than falling back to
-    // a list of five questions the user did not ask for.
+    // a list of four questions the user did not ask for.
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
@@ -89,7 +91,7 @@ export async function runAsk(argv, ctx) {
  * the cheapest statement that answers the question, and already the
  * thing the block itself opens with. An unavailable dataset is a
  * definite no; a failed query is unknown, which never withholds the
- * offer (`@ref LLP 0195#empty-cache`).
+ * offer (`@ref LLP 0198#empty-cache`).
  *
  * @param {CommandRunContext} ctx
  * @returns {Promise<boolean | undefined>}
@@ -110,18 +112,22 @@ async function cacheHasRows(ctx) {
  * The clients `hyp ask` may start: those HypAware is actually recording.
  *
  * Attachment is this command's analogue of the wizard's "picked" list
- * (`@ref LLP 0195#path-probe`): starting an unattached client would open
+ * (`@ref LLP 0198#path-probe`): starting an unattached client would open
  * a session nothing captures, so the question it was started on would be
  * answered against data that excludes the asking. A status failure
  * degrades to every launchable client rather than to none, because a
  * probe that cannot read a settings file is not evidence of detachment.
  *
+ * `collectStatus` defaults to the real status collector; tests inject a
+ * stub to exercise the throw path without faking a filesystem failure.
+ *
  * @param {CommandRunContext} ctx
+ * @param {{ collectStatus?: typeof collectHypAwareStatus }} [options]
  * @returns {Promise<string[]>}
  */
-async function askableClients(ctx) {
+export async function askableClients(ctx, { collectStatus = collectHypAwareStatus } = {}) {
   try {
-    const report = await collectHypAwareStatus({
+    const report = await collectStatus({
       env: ctx.env,
       runtime: {
         sources: /** @type {any} */ (ctx.sources),
@@ -131,8 +137,11 @@ async function askableClients(ctx) {
         storage: ctx.storage,
       },
     })
-    const attached = report.clients.filter((c) => c.attached).map((c) => c.name)
-    if (attached.length > 0) return attached
+    // A successful probe reporting zero attached clients is still
+    // evidence of detachment, not grounds to fall through: only a
+    // thrown probe (one that could not read a settings file) is unknown
+    // rather than a "no".
+    return report.clients.filter((c) => c.attached).map((c) => c.name)
   } catch {
     // fall through to the unfiltered list
   }

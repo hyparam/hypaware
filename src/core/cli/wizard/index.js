@@ -490,7 +490,7 @@ export async function runInitWizard(opts) {
   // Attended, non-dry-run, non-cancelled, same as the first look - and it
   // may take the terminal for good, so nothing may follow it but the
   // return.
-  // @ref LLP 0195#first-ask [implements]: the closing question list, after the narration, last of all
+  // @ref LLP 0198#first-ask [implements]: the closing question list, after the narration, last of all
   /** @type {FirstAskResult | undefined} */
   let firstAsk
   if (interactive && !cancelled && opts.finale?.dryRun !== true) {
@@ -549,12 +549,13 @@ export async function runInitWizard(opts) {
  *
  * A shown block with zero rows in both counted sections is an empty
  * cache: the dataset exists and holds nothing yet, which is exactly the
- * fresh-install case (LLP 0195#empty-cache).
+ * fresh-install case (LLP 0198#empty-cache).
  *
+ * @ref LLP 0198#empty-cache [tests]: `no-dataset`, `slow`, and `error` each resolve to a distinct answer; collapsing any two is the bug
  * @param {FirstLookResult | undefined} result
  * @returns {boolean | undefined}
  */
-function firstLookHadRows(result) {
+export function firstLookHadRows(result) {
   if (!result) return undefined
   if (result.shown) return result.providerRows > 0 || result.dayRows > 0
   if (result.reason === 'no-dataset') return false

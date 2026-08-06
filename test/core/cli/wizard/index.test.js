@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 
-import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
@@ -649,7 +649,7 @@ test('runInitWizard: an attended run ends on the first look, before the privacy 
   await runInitWizard(opts)
   const text = stdout.text()
   // The window probe, then the two sections setup runs. Repos and tools
-  // are `hyp query overview`'s half (LLP 0195#wizard-sections).
+  // are `hyp query overview`'s half (LLP 0198#wizard-sections).
   assert.equal(stub.seen[0], OVERVIEW_PROBE_SQL)
   assert.equal(stub.seen.length, 3)
   // Every number in the block is scoped to the window the probe chose.
@@ -686,7 +686,7 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
  */
 /**
  * A first look that finds something, so the closing first ask has data
- * for its questions to be about (LLP 0195#empty-cache).
+ * for its questions to be about (LLP 0198#empty-cache).
  */
 function firstLookWithRows() {
   return firstLookStub(
@@ -707,7 +707,7 @@ function launchableCatalog() {
 }
 
 test('runInitWizard: the first ask comes last, after the privacy narration', async () => {
-  // @ref LLP 0195#first-ask [tests]: placed after the narration, which stays the wizard's last words
+  // @ref LLP 0198#first-ask [tests]: placed after the narration, which stays the wizard's last words
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
   /** @type {any[]} */
@@ -738,7 +738,7 @@ test('runInitWizard: the first ask comes last, after the privacy narration', asy
 })
 
 test('runInitWizard: a first look with no rows suppresses the launch', async () => {
-  // @ref LLP 0195#empty-cache [tests]: a fresh install with nothing backfilled
+  // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
   // is offered no question it has no data to answer
   /** @type {any[]} */
   const spawned = []
@@ -779,8 +779,28 @@ test('runInitWizard: a first look with no gateway dataset suppresses the launch 
   assert.match(stdout.text(), /Nothing recorded yet/)
 })
 
+// --- firstLookHadRows ---
+
+// The mapping from a first-look outcome to the first ask's `hasRows` has
+// three genuinely different answers (`no-dataset` -> false, `slow` -> true,
+// `error`/absent -> undefined, which never withholds the offer). Two of
+// those were reachable by a mutant that still passed the suite: flipping
+// `slow`'s `true` to `false`, and flipping the no-result guard's
+// `undefined` to `false`. Both would wrongly suppress the closing first
+// ask (`hasRows === false` is the one value `runWizardFirstAsk` treats as
+// "skip the launch", per the empty-cache tests above).
+// @ref LLP 0198#empty-cache [tests]: no-dataset, slow, and error/absent each resolve to a distinct hasRows value
+test('firstLookHadRows: a slow first look still reports hasRows true, so the launch is not suppressed', () => {
+  assert.equal(firstLookHadRows({ shown: false, reason: 'slow' }), true)
+})
+
+test('firstLookHadRows: an absent or errored first look reports hasRows undefined, not false, so the offer is never withheld', () => {
+  assert.equal(firstLookHadRows(undefined), undefined)
+  assert.equal(firstLookHadRows({ shown: false, reason: 'error' }), undefined)
+})
+
 test('runInitWizard: a launched client does not change the wizard exit code', async () => {
-  // @ref LLP 0195#real-launch [tests]: the child's exit code is not the install's
+  // @ref LLP 0198#real-launch [tests]: the child's exit code is not the install's
   const { opts } = wizardOpts(await tmpHome(), {
     catalog: launchableCatalog(),
     firstLook: firstLookWithRows(),

@@ -61,7 +61,7 @@ test('runWizardFirstLook: writes the two setup sections, names the fuller comman
   // Probe, then models and daily. Repos and tools are not run at all:
   // setup pays for the two sections that prove capture worked, and
   // `hyp query overview` is where the other two live.
-  // @ref LLP 0195#wizard-sections [tests]:
+  // @ref LLP 0198#wizard-sections [tests]:
   assert.deepEqual(seen, [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily])
   assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1 })
   const text = stdout.text()

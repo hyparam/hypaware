@@ -86,7 +86,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           // A launch spec that cannot carry the question is dropped here
           // rather than downstream: an accepted-but-mute spec starts the
           // client with no prompt, which reads as the feature working.
-          // @ref LLP 0195#split [implements]: the manifest owns how to start a client; a spec missing `{prompt}` is not a launch spec
+          // @ref LLP 0198#split [implements]: the manifest owns how to start a client; a spec missing `{prompt}` is not a launch spec
           const launch = client.launch
           if (
             launch && typeof launch.bin === 'string' && launch.bin.length > 0 &&

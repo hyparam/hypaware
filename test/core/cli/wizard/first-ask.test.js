@@ -15,10 +15,10 @@ import {
 } from '../../../../src/core/cli/wizard/first_ask.js'
 import { PromptCancelledError } from '../../../../src/core/cli/tui/index.js'
 
-// The wizard's closing first ask (LLP 0195): which clients it will offer,
+// The wizard's closing first ask (LLP 0198): which clients it will offer,
 // that a pick becomes a real spawn carrying the question, and that no
 // failure mode of any of it can fail a finished install.
-// @ref LLP 0195#first-ask [tests]:
+// @ref LLP 0198#first-ask [tests]:
 
 function makeBuf() {
   let value = ''
@@ -93,7 +93,7 @@ test('resolveOnPath: finds an executable on PATH, ignores a non-executable match
 })
 
 test('resolveLaunchers: picked and resolvable only; a launch-less client is never offered', async () => {
-  // @ref LLP 0195#path-probe [tests]: detection is not launchability
+  // @ref LLP 0198#path-probe [tests]: detection is not launchability
   const launchers = await resolveLaunchers({
     clients: ['claude', 'codex', 'claude-desktop'],
     descriptors: descriptors(),
@@ -117,7 +117,7 @@ test('resolveLaunchers: an unpicked client is not offered even when it resolves'
 })
 
 test('runWizardFirstAsk: a pick spawns the client with the question as argv', async () => {
-  // @ref LLP 0195#real-launch [tests]: the launch is real, inherits the terminal, and carries the prompt
+  // @ref LLP 0198#real-launch [tests]: the launch is real, inherits the terminal, and carries the prompt
   const stdout = makeBuf()
   const spawner = recordingSpawn()
   const chooser = selectReturning(FIRST.id)
@@ -191,7 +191,7 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
 })
 
 test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as more output', async () => {
-  // @ref LLP 0195#frame [tests]: the closing ask is drawn as its own screen
+  // @ref LLP 0198#frame [tests]: the closing ask is drawn as its own screen
   const stdout = makeBuf()
   const chooser = selectReturning(FIRST.id)
   await runWizardFirstAsk({
@@ -210,7 +210,7 @@ test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as m
 })
 
 test('runWizardFirstAsk: an empty cache suppresses the launch and says why', async () => {
-  // @ref LLP 0195#empty-cache [tests]: no rows means no launch, whatever is on PATH
+  // @ref LLP 0198#empty-cache [tests]: no rows means no launch, whatever is on PATH
   const stdout = makeBuf()
   const spawner = recordingSpawn()
   const chooser = selectReturning(FIRST.id)
@@ -239,7 +239,7 @@ test('runWizardFirstAsk: an empty cache suppresses the launch and says why', asy
 })
 
 test('runWizardFirstAsk: an unknown row count never withholds the offer', async () => {
-  // @ref LLP 0195#empty-cache [tests]: only a definite no suppresses
+  // @ref LLP 0198#empty-cache [tests]: only a definite no suppresses
   const spawner = recordingSpawn()
   const result = await runWizardFirstAsk({
     clients: ['claude'],
@@ -297,7 +297,7 @@ test('runWizardFirstAsk: a non-interactive run prints the list and never prompts
 })
 
 test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', async () => {
-  // @ref LLP 0195#real-launch [tests]: nothing here may fail a finished install
+  // @ref LLP 0198#real-launch [tests]: nothing here may fail a finished install
   const stdout = makeBuf()
   const stderr = makeBuf()
   /** @type {any} */
@@ -363,7 +363,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
 })
 
 test('the suggested prompts are a short list of distinct, routable questions', async () => {
-  // @ref LLP 0195#split [tests]: core owns the questions, and they name no machinery
+  // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
   // The exact count is editable content, not a contract. What is pinned is
   // that the list stays short enough to scan and long enough to teach: a
   // menu of one is not a curriculum, and one of ten is a wall.

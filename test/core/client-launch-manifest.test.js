@@ -6,10 +6,10 @@ import assert from 'node:assert/strict'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
-// The manifest half of the first ask (LLP 0195#split): a client declares
+// The manifest half of the first ask (LLP 0198#split): a client declares
 // how to start it on a question, and a spec that cannot carry the
 // question is not a launch spec.
-// @ref LLP 0195#split [tests]:
+// @ref LLP 0198#split [tests]:
 
 /**
  * @param {unknown} launch
@@ -65,4 +65,22 @@ test('a client with no launch spec stays unlaunchable (Claude Desktop has no pro
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   const desktop = catalog.clientDescriptors.get('claude-desktop')
   if (desktop) assert.equal(desktop.launch, undefined)
+})
+
+// The launched session gets no more permission than the user would grant
+// it by hand: HypAware never widens what the client may do just because
+// it started the session. Asserted as literal string absence, not as a
+// claim about what the flags do.
+// @ref LLP 0198#no-preauth [tests]: the bundled launch specs never carry a permission-widening flag
+test('the bundled CLI clients\' launch args never carry a permission-widening flag', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const PREAUTH_FLAGS = ['--allowedTools', '--dangerously-skip-permissions']
+  for (const name of ['claude', 'codex']) {
+    const launch = catalog.clientDescriptors.get(name)?.launch
+    assert.ok(launch, `${name} should be launchable`)
+    for (const flag of PREAUTH_FLAGS) {
+      assert.ok(!launch.args.includes(flag), `${name} launch args must not carry ${flag}`)
+    }
+  }
 })

@@ -10,7 +10,7 @@
  * recorded" to having asked their first question without opening a second
  * terminal or retyping anything.
  *
- * @ref LLP 0195#first-ask [implements]: setup closes on a live question list, not a printed hint
+ * @ref LLP 0198#first-ask [implements]: setup closes on a live question list, not a printed hint
  *
  * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
@@ -54,7 +54,7 @@ import { isPromptBackError } from '../tui/runtime.js'
  * as four choices. Each row now differentiates on its own axis: spend,
  * friction, repetition, delegation.
  *
- * @ref LLP 0195#split [implements]: the questions are core's, because they are about core's datasets
+ * @ref LLP 0198#split [implements]: the questions are core's, because they are about core's datasets
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
@@ -94,7 +94,7 @@ const NOT_NOW = '__not_now__'
  * Best-effort in the same sense as the picker's detection probes: any
  * failure means "not found", never a throw.
  *
- * @ref LLP 0195#path-probe [implements]: launchability is a PATH question, distinct from the picker's presence probe
+ * @ref LLP 0198#path-probe [implements]: launchability is a PATH question, distinct from the picker's presence probe
  * @param {string} bin
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [platform]
@@ -134,7 +134,7 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
  * attachable but carries no `launch` block because it has no prompt
  * argument to carry one for.
  *
- * @ref LLP 0195#path-probe [implements]: offer only what was picked and resolves
+ * @ref LLP 0198#path-probe [implements]: offer only what was picked and resolves
  * @param {{
  *   clients: string[],
  *   descriptors: Map<string, ClientDescriptor>,
@@ -211,7 +211,7 @@ export function writeSuggestedPrompts({ stdout, launchable }) {
  * one fact that makes the emptiness make sense: capture starts now, not
  * retroactively.
  *
- * @ref LLP 0195#empty-cache [implements]: no rows means no launch, and the reason is stated
+ * @ref LLP 0198#empty-cache [implements]: no rows means no launch, and the reason is stated
  * @param {{ stdout: { write(chunk: string): unknown } }} args
  */
 export function writeEmptyCacheNote({ stdout }) {
@@ -238,7 +238,7 @@ export function writeEmptyCacheNote({ stdout }) {
  * whether *setup* succeeded, and a user who quits the client with ctrl+c
  * has not failed an install that finished minutes earlier.
  *
- * @ref LLP 0195#real-launch [implements]: inherit the terminal, keep the wizard's own exit code
+ * @ref LLP 0198#real-launch [implements]: inherit the terminal, keep the wizard's own exit code
  * @param {{
  *   launcher: FirstAskLauncher,
  *   prompt: string,
@@ -273,7 +273,7 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
  * the time this runs, so a missing binary, a spawn failure, a cancelled
  * prompt, or an unforeseen error all degrade to the printed list.
  *
- * @ref LLP 0195#first-ask [implements]: the closing step, and that it can never fail a finished install
+ * @ref LLP 0198#first-ask [implements]: the closing step, and that it can never fail a finished install
  * @param {RunWizardFirstAskOptions} opts
  * @returns {Promise<FirstAskResult>}
  */
@@ -293,7 +293,7 @@ export async function runWizardFirstAsk(opts) {
         // been started, and "nothing recorded yet" is the more useful
         // half of it. `undefined` means the caller could not tell, which
         // is never a reason to withhold the offer.
-        // @ref LLP 0195#empty-cache [implements]: an empty cache suppresses the launch, not just the menu
+        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the menu
         if (opts.hasRows === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
@@ -410,7 +410,7 @@ async function chooseQuestion(opts, launchers) {
       // look's tables and rules, at the end of a long scroll, and an
       // unframed list of sentences there reads as more output rather than
       // as the thing still waiting for a keypress.
-      // @ref LLP 0195#frame [implements]: the closing ask is drawn as its own screen
+      // @ref LLP 0198#frame [implements]: the closing ask is drawn as its own screen
       box: true,
       title: 'Ask your first question',
       items: launchers.length === 1

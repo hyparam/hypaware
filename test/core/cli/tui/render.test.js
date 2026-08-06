@@ -291,7 +291,7 @@ test('render: items render verbatim between the title and the hint', () => {
   assert.match(lines[3], /enter pick/)
 })
 
-// The frame (LLP 0195 #frame): the closing ask draws as its own screen.
+// The frame (LLP 0198 #frame): the closing ask draws as its own screen.
 test('box: frame is wrapped in a border, every row padded to one width', () => {
   /** @type {any} */
   const state = {
