@@ -65,6 +65,7 @@ export function createStartSource(state) {
 
     return {
       async status() {
+        const configured = readConfiguredUpstreams(activeCtx)
         /** @type {SourceStatus} */
         const status = {
           state: 'ready',
@@ -79,7 +80,16 @@ export function createStartSource(state) {
             // appears here, which is what lets core see the difference
             // between a gateway with nothing to proxy and a gateway whose
             // upstream fell out of the routing table.
-            upstreams: readConfiguredUpstreamNames(activeCtx),
+            upstreams: configured.names,
+            // The names cannot carry the whole signal, because `name` is one
+            // of the two keys whose absence drops an entry: an upstream
+            // written with a `provider` and a `base_url` but no `name` leaves
+            // `upstreams: []`, indistinguishable from hermes-only. The count
+            // is the wider question ("did this config ask for any upstream at
+            // all?") and it is the one core's `gateway_idle_no_upstreams`
+            // diagnostic gates on; the names only decide how the warning
+            // reads.
+            upstreams_configured: configured.count,
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
             // @ref LLP 0066#ephemeral: surface the live opt-out count so an
@@ -359,23 +369,14 @@ export function mergeUpstreams(configUpstreams, state) {
 }
 
 /**
- * Read the names of configured upstreams from the activation config.
- * Defensive: if config has been mutated to a degenerate shape, returns
- * an empty list so status() never throws.
- *
- * @param {PluginActivationContext} ctx
- * @returns {string[]}
- */
-function readConfiguredUpstreamNames(ctx) {
-  return readConfiguredUpstreams(ctx).names
-}
-
-/**
  * Both halves of "what did the config ask for?": how many upstream entries it
  * listed at all, and the names among them. The count is the wider signal (an
- * entry with no `name` still counts), so the idle log can be loud about a
- * config that listed upstreams and compiled to none even when the names are
- * unusable.
+ * entry with no `name` still counts), so the idle log and `hyp status` can be
+ * loud about a config that listed upstreams and compiled to none even when the
+ * names are unusable.
+ *
+ * Defensive: if config has been mutated to a degenerate shape, returns a zero
+ * count and an empty list so `status()` never throws.
  *
  * @param {PluginActivationContext} ctx
  * @returns {{ count: number, names: string[] }}

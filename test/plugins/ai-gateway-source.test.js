@@ -275,6 +275,44 @@ test('status() reports the reloaded config upstreams, not the boot-time ones', a
     const status = await source.status()
     assert.equal(status.details?.listening, false, 'a dropped upstream leaves the source idle')
     assert.deepEqual(status.details?.upstreams, ['anthropic'], 'and status names what the config asked for')
+    assert.equal(status.details?.upstreams_configured, 1, 'and counts it')
+  } finally {
+    await source.stop()
+  }
+})
+
+// `name` is the other key `compileUpstreams` drops an entry over, and an entry
+// with no name puts nothing in `details.upstreams` at all. Without the count
+// beside it, this config is indistinguishable from hermes-only and core cannot
+// warn about it.
+test('status() counts a configured upstream it cannot name', async () => {
+  const state = createGatewayState()
+  const source = await createStartSource(state)(fakeCtx({
+    listen: '127.0.0.1:0',
+    // No `name`: the v1 config diagnoser is satisfied by `provider`, the
+    // compiler drops it, and the source idles.
+    upstreams: [{ provider: 'anthropic', base_url: 'https://api.anthropic.com' }],
+  }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'nothing compiled, so nothing is bound')
+    assert.deepEqual(status.details?.upstreams, [], 'there is no name to publish')
+    assert.equal(status.details?.upstreams_configured, 1, 'but the config did ask for one upstream')
+  } finally {
+    await source.stop()
+  }
+})
+
+// The hermes-only shape must stay distinguishable from the above: a config
+// that asked for no upstream counts zero, which is what keeps `hyp status`
+// quiet and healthy for it.
+test('status() counts zero upstreams for a config that named none', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.upstreams_configured, 0)
   } finally {
     await source.stop()
   }

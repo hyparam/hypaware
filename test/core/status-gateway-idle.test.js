@@ -17,11 +17,13 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 // that wants it - hermes composes the gateway plugin for its materializer and
 // contributes no upstream - but the same idle path swallows a real
 // misconfiguration: upstreams that were configured and then dropped whole by
-// `compileUpstreams` (a `url =` where `base_url` was meant) leave the source
-// `started`, the daemon `healthy`, and the user's client with ECONNREFUSED.
-// `details.upstreams` carries the *raw* configured names, so it tells the two
-// apart. The diagnostic is non-degrading: a correct hermes-only install must
-// stay healthy and quiet.
+// `compileUpstreams` (an entry missing either `name` or `base_url`) leave the
+// source `started`, the daemon `healthy`, and the user's client with
+// ECONNREFUSED. `details.upstreams_configured` counts what the config asked
+// for whatever shape it was in, so it tells the two apart even when there is
+// no name left to print; `details.upstreams` carries the raw names alongside
+// it, to make the warning concrete when they exist. The diagnostic is
+// non-degrading: a correct hermes-only install must stay healthy and quiet.
 // @ref LLP 0114#fallback-is-visible [tests]: an idle gateway that was meant to be listening is readable from hyp status, not only from a log line
 
 async function makeHome() {
@@ -76,17 +78,118 @@ test('an idle gateway that was configured with upstreams warns', async () => {
   assert.equal(diag.severity, 'warning')
   assert.match(diag.message, /anthropic/, 'the message names the upstream that went missing')
   assert.match(diag.message, /base_url/, 'and points at the field that drops an entry')
+  // The repair has to be one that changes something. `hyp config validate`
+  // prints `config ok` for exactly this config: `@hypaware/ai-gateway`
+  // registers no config section, so nothing checks upstream shape, and the
+  // v1 diagnoser matches an anthropic upstream by its `provider` field.
+  assert.ok(
+    !diag.repair.some((r) => /^\s*hyp config validate/.test(r)),
+    'no repair step tells the user to run a command that calls this config fine',
+  )
+  assert.ok(
+    diag.repair.some((r) => r.includes(path.join(hypHome, 'hypaware-config.json'))),
+    'it names the file to edit',
+  )
+})
+
+// `name` drops an entry exactly as silently as `base_url` does, and an entry
+// with no usable name contributes nothing to `details.upstreams`, so the names
+// alone cannot see this config at all. `upstreams_configured` counts the
+// entries the config listed, whatever shape they were in, which is the only
+// signal that separates "one upstream asked for, none survived" from
+// "hermes-only". `hyp config validate` affirms this config, because its
+// `gateway_missing_*_upstream` check matches on the `provider` field the entry
+// still has.
+test('an idle gateway whose configured upstream has no name warns', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `provider = "anthropic", base_url = "..."` and no `name`: one upstream was
+  // configured, `compileUpstreams` dropped it, and no name reaches status.
+  writeRunningDaemon(stateRoot, {
+    listening: false,
+    upstreams: [],
+    upstreams_configured: 1,
+    registered_presets: [],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag, 'gateway_idle_no_upstreams diagnostic is emitted with no names to print')
+  assert.equal(diag.severity, 'warning')
+  assert.match(diag.message, /1 upstream/, 'the message falls back to the count it does have')
+  assert.match(diag.message, /name/, "and names the field that made it nameless")
+  assert.equal(report.overall, 'healthy', 'still non-degrading')
+})
+
+test('an idle gateway whose configured upstream has an empty name warns', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `name = ""` reaches core the same way a missing `name` does: counted, not
+  // named.
+  writeRunningDaemon(stateRoot, {
+    listening: false,
+    upstreams: [],
+    upstreams_configured: 2,
+    registered_presets: [],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag)
+  assert.match(diag.message, /2 upstreams are configured/, 'plural reads correctly')
 })
 
 test('an idle gateway with no configured upstreams stays quiet and healthy', async () => {
   const { hypHome, stateRoot } = await makeHome()
   // The hermes-only shape: the config asked for no upstream, so idling is the
   // outcome it wanted and there is nothing to report.
-  writeRunningDaemon(stateRoot, { listening: false, upstreams: [], registered_presets: [] })
+  writeRunningDaemon(stateRoot, {
+    listening: false,
+    upstreams: [],
+    upstreams_configured: 0,
+    registered_presets: [],
+  })
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
   assert.equal(report.overall, 'healthy', 'a deliberately idle gateway is a working install')
+})
+
+// No `upstreams` key at all is the other hermes-only shape (the source omits
+// nothing, but a status file written by another build might), and a `upstreams`
+// that is not a list at all is a config someone mangled. Neither is evidence
+// that an upstream was lost, so both stay quiet rather than guessing.
+test('an idle gateway with no upstreams key at all stays quiet and healthy', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, { listening: false, registered_presets: [] })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a degenerate upstreams detail does not crash or warn', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    listening: false,
+    upstreams: 'anthropic',
+    upstreams_configured: 'lots',
+    registered_presets: [],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
+  assert.equal(report.overall, 'healthy')
+})
+
+// A status file written by a build from before `upstreams_configured` existed
+// still carries the names, and a dropped `base_url` is still visible in them.
+test('a status file with names but no count still warns', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, { listening: false, upstreams: ['anthropic'], registered_presets: [] })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag, 'the names carry the signal on their own')
+  assert.match(diag.message, /anthropic/)
 })
 
 test('a listening gateway never warns, however many upstreams it has', async () => {

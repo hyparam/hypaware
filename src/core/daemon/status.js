@@ -146,33 +146,49 @@ function gatewaySourceRawDetails(sources) {
 }
 
 /**
- * Names of the upstreams a *deliberately idle* gateway was nonetheless
- * configured with, or `undefined` when the gateway is bound, absent, or idle
- * for the reason it is allowed to be idle.
+ * How many upstreams a *deliberately idle* gateway was nonetheless configured
+ * with, and which of them it can name, or `undefined` when the gateway is
+ * bound, absent, or idle for the reason it is allowed to be idle.
  *
  * An upstream-less gateway is a legitimate config (LLP 0120: hermes composes
  * the plugin for its materializer alone and contributes no upstream), so the
  * source idles instead of failing to start. That trade turns one class of
  * misconfiguration silent: a config that *did* list upstreams and lost them
- * all to `compileUpstreams` (a `url =` where `base_url` was meant is dropped
+ * all to `compileUpstreams` (an entry missing either required key is dropped
  * without complaint, and `diagnoseV1Config`'s `gateway_missing_*_upstream`
- * check does not fire for that shape) also idles, reporting `started` and
- * `healthy` while the user's client gets ECONNREFUSED.
+ * check does not fire for that shape, since it matches on `provider` too) also
+ * idles, reporting `started` and `healthy` while the user's client gets
+ * ECONNREFUSED.
  *
- * `details.upstreams` is what separates them: the gateway publishes the *raw*
- * configured names, pre-compile, so hermes-only yields `[]` and a dropped
- * upstream yields the name that vanished.
+ * The *count* is what separates them, not the names. `compileUpstreams` drops
+ * an entry for a missing `name` exactly as silently as for a missing
+ * `base_url`, and a nameless entry contributes nothing to `details.upstreams`,
+ * so a config of `provider = "anthropic", base_url = "..."` looks identical to
+ * hermes-only through the names alone. `details.upstreams_configured` counts
+ * the entries the config listed whatever shape they were in, so hermes-only
+ * yields 0 and any dropped upstream yields at least 1. The names still ride
+ * along, pre-compile, because they make the warning concrete when they exist.
+ *
+ * A status file written before `upstreams_configured` existed carries names
+ * only; those still count for themselves, so an older daemon's dropped
+ * `base_url` stays visible.
  *
  * @param {SourceSnapshot[] | undefined} sources
- * @returns {string[] | undefined}
+ * @returns {{ count: number, names: string[] } | undefined}
  */
 function gatewayIdleWithConfiguredUpstreams(sources) {
   const details = gatewaySourceRawDetails(sources)
   if (!details || details.listening !== false) return undefined
   const upstreams = details.upstreams
-  if (!Array.isArray(upstreams)) return undefined
-  const names = upstreams.filter((u) => typeof u === 'string' && u.length > 0)
-  return names.length > 0 ? /** @type {string[]} */ (names) : undefined
+  const names = Array.isArray(upstreams)
+    ? /** @type {string[]} */ (upstreams.filter((u) => typeof u === 'string' && u.length > 0))
+    : []
+  const rawCount = details.upstreams_configured
+  const count =
+    typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
+      ? rawCount
+      : names.length
+  return count > 0 ? { count, names } : undefined
 }
 
 /**
@@ -646,7 +662,7 @@ export async function collectHypAwareStatus(opts = {}) {
     ? gatewayIdleWithConfiguredUpstreams(daemonStatusFile?.sources)
     : undefined
   if (idleGatewayUpstreams) {
-    // The gateway bound nothing while the config named upstreams it wanted
+    // The gateway bound nothing while the config listed upstreams it wanted
     // proxied: every one was dropped at compile, so there is no listener and
     // no error either. Before the source was allowed to idle this was a source
     // start failure and `hyp status` said `[failed]`; the same install must not
@@ -655,14 +671,26 @@ export async function collectHypAwareStatus(opts = {}) {
     // *wanted* no upstream (hermes-only) reports no configured upstreams here
     // and never reaches this branch, so it stays healthy and silent.
     // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway is listening" is readable from status.json steadily, not only from a boot-time log line
-    const list = idleGatewayUpstreams.join(', ')
+    const { count, names } = idleGatewayUpstreams
+    // Count first, names in parentheses when there are any: `name` is itself
+    // one of the two keys that drops an entry, so the config that most needs
+    // this warning is exactly the one that can supply no name to print.
+    const named = names.length > 0 ? ` (${names.join(', ')})` : ''
     diagnostics.push({
       severity: 'warning',
       kind: 'gateway_idle_no_upstreams',
-      message: `the gateway is running but listening on nothing: ${idleGatewayUpstreams.length === 1 ? 'upstream' : 'upstreams'} ${list} ${idleGatewayUpstreams.length === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs a 'base_url') - clients will get connection refused`,
+      message: `the gateway is running but listening on nothing: ${count} ${count === 1 ? 'upstream' : 'upstreams'}${named} ${count === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`,
+      // Not `hyp config validate`: it prints `config ok` for this config and
+      // exits 0. `@hypaware/ai-gateway` registers no config section, so
+      // nothing validates upstream shape, and `diagnoseV1Config` matches an
+      // upstream by its `provider` field, so a nameless anthropic entry
+      // satisfies the one check that does look. A repair line that sends the
+      // user to a command which affirms the broken config is worse than no
+      // repair line, so point at the file and the two required keys instead.
+      // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
       repair: [
-        `hyp config validate  # every upstream needs a name and a base_url`,
-        `hyp daemon restart`,
+        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        `hyp daemon restart  # the daemon reads the file only at boot`,
       ],
     })
   }
