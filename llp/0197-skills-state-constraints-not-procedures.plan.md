@@ -1,13 +1,13 @@
-# LLP 0194: Skills state constraints, not procedures, implementation plan
+# LLP 0197: Skills state constraints, not procedures, implementation plan
 
 **Type:** plan
 **Status:** Active
 **Systems:** Plugins, Reports, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
-**Related:** LLP 0142, LLP 0155, LLP 0193
+**Related:** LLP 0142, LLP 0155, LLP 0196
 
-> [LLP 0193](./0193-skills-state-constraints-not-procedures.rfc.md) proposes
+> [LLP 0196](./0196-skills-state-constraints-not-procedures.rfc.md) proposes
 > shipping the report renderer as code, reorganising the skill surface by
 > question rather than pipeline stage, splitting taste into three owned layers,
 > and generating the codex tree. This turns that into a fourteen-task graph
@@ -25,7 +25,7 @@ to carry, so the mechanics move first and the merge becomes cheap.
 The other ordering constraint is the RFC's open questions. Waves 1 to 3 are
 correct under every resolution of all four, so they can start now. Only T12
 is genuinely blocked, on the LLP 0142 gate decision
-([LLP 0193 #gate-moves-to-the-command](./0193-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)).
+([LLP 0196 #gate-moves-to-the-command](./0196-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)).
 
 ## What was verified against the tree, and what was not
 
@@ -90,7 +90,7 @@ depends on `build.sh` being absent from this repo.
   the other would delete tested privacy logic.
 
   **Update, same day: removing `disable-model-invocation` shrank this.** Once
-  the gate went (LLP 0193 #gate-moves-to-the-command, decided by the
+  the gate went (LLP 0196 #gate-moves-to-the-command, decided by the
   maintainer), the terse-vs-trigger-rich description split went with it, since
   it existed only because the claude copies were gated. `hypaware-publish-report`
   and `hypaware-report-to-html` are now **byte-identical** across hosts, and
@@ -205,7 +205,7 @@ depends on `build.sh` being absent from this repo.
   on every page, one `full.md` per report, a back-link on every report).
   Complexity 3. ~~Blocks on a decision if CI lacks pandoc.~~ **Resolved:** CI
   is `ubuntu-latest`, so the smoke adds a one-line `apt-get install pandoc`
-  step (LLP 0193 open question 1).
+  step (LLP 0196 open question 1).
 
   **Pull the `rewrite_hrefs` table forward into T3.** The six-case table is
   the specification T3 ports against, not a check written afterwards, and the
@@ -306,7 +306,7 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 6 (deps `[T12]`)
 
-- **T14, LLP bookkeeping.** Accept 0193 and append `Superseded-by: LLP 0193`
+- **T14, LLP bookkeeping.** Accept 0193 and append `Superseded-by: LLP 0196`
   to LLP 0142 #user-invoked-only, which the RFC deliberately left off while it
   was a Draft. Extend LLP 0155 with the render command, or split it out if T5
   decides render is not a member of the `report` group. Add `@ref` annotations

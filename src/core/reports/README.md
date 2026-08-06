@@ -1,6 +1,6 @@
 # Report renderer (canonical source)
 
-<!-- @ref LLP 0193#mechanics-as-code [implements]: deterministic steps ship as code the
+<!-- @ref LLP 0196#mechanics-as-code [implements]: deterministic steps ship as code the
      skill can call, not as prose the skill has to re-derive -->
 
 This directory owns the static-site renderer for `~/hypaware-reports`: the
@@ -16,8 +16,8 @@ carried the script's logic as prose plus conditional repair instructions for
 copies that predated a feature (`grep -q masthead build.sh`). Roughly 110 of
 that skill's 399 lines were a second, prose copy of code that already existed.
 
-Vendoring the script is the fix ([LLP 0193](../../../llp/0193-skills-state-constraints-not-procedures.rfc.md),
-[LLP 0194](../../../llp/0194-skills-state-constraints-not-procedures.plan.md) T1).
+Vendoring the script is the fix ([LLP 0196](../../../llp/0196-skills-state-constraints-not-procedures.rfc.md),
+[LLP 0197](../../../llp/0197-skills-state-constraints-not-procedures.plan.md) T1).
 Both landed: T3 ported it to `render.js`, T5 wired `hyp report render` and
 cut the skill from 28 KB to 13 KB (T10 finished the trim).
 
@@ -47,7 +47,7 @@ cut the skill from 28 KB to 13 KB (T10 finished the trim).
   rendering misbehaves, fix `render.js` and its tests. Restoring `build.sh`
   restores a macOS-only, untested path that CI cannot run, and a test now
   asserts it stays gone.
-- **pandoc is still a hard dependency** (LLP 0193 open question 1, resolved:
+- **pandoc is still a hard dependency** (LLP 0196 open question 1, resolved:
   keep it, install it in CI). Nothing else shells out: the port dropped the
   BSD-only `sed -E -i ''` and the macOS-only `sips`, which is what let the
   renderer be covered by tests at all, since CI is `ubuntu-latest`.

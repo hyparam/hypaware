@@ -3,7 +3,7 @@
 /**
  * The top-level `index.html` landing page.
  *
- * @ref LLP 0193#the-inversion [implements]: page scaffolding is deterministic and
+ * @ref LLP 0196#the-inversion [implements]: page scaffolding is deterministic and
  * belongs in code; it was the one part of the site a model rebuilt by hand every run
  *
  * `build.sh` never generated this, so the skill transcribed a 50-line template out of

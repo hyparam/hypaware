@@ -3,7 +3,7 @@
 /**
  * The renderer's assets live in exactly one place.
  *
- * @ref LLP 0193#mechanics-as-code [tests]: the renderer is repo-owned code, and so are
+ * @ref LLP 0196#mechanics-as-code [tests]: the renderer is repo-owned code, and so are
  * the assets it installs
  *
  * They used to ship three times: the canonical copy under `src/core/reports/assets/`
@@ -40,7 +40,7 @@ test('the renderer is repo-owned code, not a script in a user working tree', () 
   const renderer = path.join(repoRoot, 'src/core/reports/render.js')
   assert.ok(fs.existsSync(renderer), 'src/core/reports/render.js must exist: the repo owns the renderer')
 
-  // The shell original was deleted once `hyp report render` replaced it (LLP 0194 T5).
+  // The shell original was deleted once `hyp report render` replaced it (LLP 0197 T5).
   // A reappearing build.sh means someone restored the macOS-only, untested path that
   // CI cannot run at all.
   assert.ok(

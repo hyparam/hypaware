@@ -197,7 +197,7 @@ small at the right margin.
 
 ## Landing-page (`index.html`) template
 
-> **Superseded.** `hyp report render` generates the landing page now (LLP 0194 T4). It
+> **Superseded.** `hyp report render` generates the landing page now (LLP 0197 T4). It
 > is derived output: rebuilt from the report set every run, with hand-edits overwritten.
 > The card shape below is kept as a reference for what the renderer emits and what the
 > stylesheet styles, not as something to transcribe.

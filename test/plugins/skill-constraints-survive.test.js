@@ -3,10 +3,10 @@
 /**
  * Constraint-survival guard for the skill corpus.
  *
- * @ref LLP 0194#t12-constraint-inventory [tests]: the merge is where load-bearing
+ * @ref LLP 0197#t12-constraint-inventory [tests]: the merge is where load-bearing
  * constraints get silently dropped, and the ones most easily lost read like trivia
  *
- * LLP 0194 T12 merges ten skills into six. The risk there is not that the merge fails
+ * LLP 0197 T12 merges ten skills into six. The risk there is not that the merge fails
  * loudly; it is that a constraint like "COALESCE every token sum" gets dropped as
  * incidental detail during a rewrite, and nothing notices until a report is confidently
  * wrong or a query takes the production server down.

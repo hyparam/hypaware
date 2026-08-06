@@ -3,7 +3,7 @@
 /**
  * Shared computation for the claude/codex skill parity guard.
  *
- * @ref LLP 0194#t2-premise-corrected [implements]: records the host-specific surface
+ * @ref LLP 0197#t2-premise-corrected [implements]: records the host-specific surface
  * between the two skill trees rather than trying to eliminate it
  *
  * `@hypaware/claude` and `@hypaware/codex` ship separate skill trees to separate

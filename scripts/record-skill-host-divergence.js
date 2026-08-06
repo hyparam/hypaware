@@ -3,7 +3,7 @@
 /**
  * Regenerate test/fixtures/skill-host-divergence.json.
  *
- * @ref LLP 0194#t2-premise-corrected [implements]: the codex tree is not derivable from
+ * @ref LLP 0197#t2-premise-corrected [implements]: the codex tree is not derivable from
  * the claude tree, so the guard records the host-specific surface instead of removing it
  *
  * Run this ONLY after deliberately adding or changing host-specific content in a skill

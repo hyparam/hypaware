@@ -3,7 +3,7 @@
 /**
  * Parity guard for the skills that ship to both Claude Code and Codex.
  *
- * @ref LLP 0194#t2-premise-corrected [tests]: new divergence between the two skill
+ * @ref LLP 0197#t2-premise-corrected [tests]: new divergence between the two skill
  * trees has to be recorded deliberately, because accidental drift looks identical to
  * intentional host-specific content until someone reads both files
  *
@@ -75,9 +75,9 @@ for (const skill of sharedSkills(repoRoot)) {
 
 test('skills recorded as fully shared stay identical across hosts', () => {
   // A skill at 0/0 carries nothing host-specific, so it is a candidate for a future
-  // "one source, two outputs" step (LLP 0194 T2 part 2). Derived from the fixture
+  // "one source, two outputs" step (LLP 0197 T2 part 2). Derived from the fixture
   // rather than listed here, so the set grows on its own as skills converge: removing
-  // disable-model-invocation (LLP 0193 #gate-moves-to-the-command) took it from two to
+  // disable-model-invocation (LLP 0196 #gate-moves-to-the-command) took it from two to
   // four by making the frontmatter identical.
   const fullyShared = Object.keys(expected).filter(
     (skill) => expected[skill].claudeOnly + expected[skill].codexOnly === 0,

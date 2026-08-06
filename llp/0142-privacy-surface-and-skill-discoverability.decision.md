@@ -68,7 +68,7 @@ pipeline steps: `hypaware-publish-report` (makes a report org-visible),
 user takes on purpose after reading something; none is an answer to a
 question.
 
-**Superseded-by: [LLP 0193 #gate-moves-to-the-command](./0193-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)**
+**Superseded-by: [LLP 0196 #gate-moves-to-the-command](./0196-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)**
 (2026-08-06), for this paragraph only. The three report skills are now
 model-invocable: reports are meant to be asked for in the user's own words,
 and the control moved onto the consequential act itself (each confirms before

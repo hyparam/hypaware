@@ -2,7 +2,7 @@
 
 <!-- Stage file for the hypaware-report skill: publishing to a server, and listing/getting/deleting. -->
 
-<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the explicit confirmation before publishing, not the skill being hard to reach -->
+<!-- @ref LLP 0196#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the explicit confirmation before publishing, not the skill being hard to reach -->
 
 `hyp report publish` sends a finished report to a HypAware server's
 org-scoped reports plane. Artifacts land under the org's archive prefix;

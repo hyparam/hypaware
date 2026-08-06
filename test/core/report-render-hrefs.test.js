@@ -3,7 +3,7 @@
 /**
  * The `rewrite_hrefs` case table: the specification the Node renderer is ported against.
  *
- * @ref LLP 0194#t12-constraint-inventory [tests]: written before the port, because the
+ * @ref LLP 0197#t12-constraint-inventory [tests]: written before the port, because the
  * shell original has no tests and its failure mode is silent
  *
  * `build.sh` rewrites `.md` hrefs to `.html` on the EMITTED HTML rather than on the

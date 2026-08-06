@@ -5,8 +5,8 @@ description: The HypAware reporting workflow end to end: generate a Team AI Usag
 
 # HypAware reports
 
-<!-- @ref LLP 0193#one-skill-per-question [implements]: one skill for the whole report workflow; a user arrives wanting a report, not a pipeline stage -->
-<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; each consequential step confirms, which is where the control belongs -->
+<!-- @ref LLP 0196#one-skill-per-question [implements]: one skill for the whole report workflow; a user arrives wanting a report, not a pipeline stage -->
+<!-- @ref LLP 0196#gate-moves-to-the-command [implements]: model-invocable on purpose; each consequential step confirms, which is where the control belongs -->
 
 Four stages of one workflow. Enter at the one the request implies, and carry on to the
 next only when the user asks: none of them runs automatically as a consequence of

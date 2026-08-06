@@ -3,13 +3,13 @@
 /**
  * The HypAware report renderer, ported from `build.sh`.
  *
- * @ref LLP 0193#mechanics-as-code [implements]: rendering is repo-owned, testable code
+ * @ref LLP 0196#mechanics-as-code [implements]: rendering is repo-owned, testable code
  * the skill calls, not prose the skill re-derives on every run
  *
  * The shell original is macOS-only (`sed -E -i ''` is the BSD spelling, and `sips`
  * regenerates the PNG favicon), which meant the renderer could not run in CI at all:
  * `.github/workflows/ci.yml` is `ubuntu-latest`. Nothing here shells out to either.
- * pandoc is still a hard dependency (LLP 0193 open question 1, resolved: keep it, and
+ * pandoc is still a hard dependency (LLP 0196 open question 1, resolved: keep it, and
  * install it in CI).
  */
 
@@ -44,7 +44,7 @@ function escapeRegExp(literal) {
 /**
  * Rewrite `.md` hrefs to `.html` for the flattened `html/<slug>/` layout.
  *
- * @ref LLP 0194#t12-constraint-inventory [implements]: pinned by the case table in
+ * @ref LLP 0197#t12-constraint-inventory [implements]: pinned by the case table in
  * test/core/report-render-hrefs.test.js before this was written
  *
  * Operates on emitted HTML, not Markdown, so Markdown-syntax links and raw-HTML
@@ -201,7 +201,7 @@ export function renderReports(options) {
     buildReport(dir, htmlDir, slug)
   }
 
-  // @ref LLP 0193#the-inversion [implements]: the landing page is derived output, so it
+  // @ref LLP 0196#the-inversion [implements]: the landing page is derived output, so it
   // is rebuilt from the report set every run rather than hand-maintained
   fs.writeFileSync(path.join(dir, 'index.html'), renderLandingPage(dir, slugs))
 
@@ -209,7 +209,7 @@ export function renderReports(options) {
 }
 
 /**
- * @ref LLP 0193#theme-layer [implements]: the base sheet is the command's and always
+ * @ref LLP 0196#theme-layer [implements]: the base sheet is the command's and always
  * refreshed; theme.css is the user's and never touched after it is created
  *
  * Splitting ownership this way removes an undecidable call. The skill used to guess

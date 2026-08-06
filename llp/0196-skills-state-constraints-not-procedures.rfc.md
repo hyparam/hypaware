@@ -1,4 +1,4 @@
-# LLP 0193: Skills state constraints, not procedures
+# LLP 0196: Skills state constraints, not procedures
 
 **Type:** RFC
 **Status:** Accepted
@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
 **Related:** LLP 0074, LLP 0075, LLP 0102, LLP 0107, LLP 0142, LLP 0155
-**Planned-by:** LLP 0194
+**Planned-by:** LLP 0197
 
 > The bundled skill surface has grown to 18 `SKILL.md` files across two
 > hand-synced trees, ~290 KB of prose, with the two largest skills at 25 KB
@@ -306,7 +306,7 @@ most scrutiny.
 > would have let a model rewrite a user's reports off an unrelated prompt.
 > The gate is therefore removed *with* a confirmation added to the step that
 > mutates sources, which is precisely the "the gate belongs on the act" claim
-> being honoured rather than asserted. LLP 0194 T3 and T5 move that check into
+> being honoured rather than asserted. LLP 0197 T3 and T5 move that check into
 > `hyp report render`, where it can be tested.
 
 LLP 0142 marked render, publish, and apply `disable-model-invocation` because
@@ -379,7 +379,7 @@ that installed it before LLP 0142 stops advertising it.
   default house style, not as deletions.
 - LLP 0142 #user-invoked-only is superseded in part (see
   [#gate-moves-to-the-command](#gate-moves-to-the-command)). On acceptance,
-  append `Superseded-by: LLP 0193` to that section. It is deliberately not
+  append `Superseded-by: LLP 0196` to that section. It is deliberately not
   appended while this document is a Draft, so an Accepted decision is not
   marked superseded by an unaccepted proposal.
 - LLP 0155 is still a Draft; the render command extends it rather than needing

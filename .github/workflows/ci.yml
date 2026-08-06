@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      # The report renderer shells out to pandoc (LLP 0193 open question 1: keep the
+      # The report renderer shells out to pandoc (LLP 0196 open question 1: keep the
       # dependency, install it here). Without this the render tests skip rather than
       # fail, which would silently leave the renderer uncovered on the only platform
       # CI has.

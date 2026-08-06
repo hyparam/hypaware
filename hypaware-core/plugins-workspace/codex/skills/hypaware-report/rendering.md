@@ -2,8 +2,8 @@
 
 <!-- Stage file for the hypaware-report skill: enriching report Markdown and rendering the HTML site. -->
 
-<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the confirmation before step 3 edits report sources, not the skill being hard to reach -->
-<!-- @ref LLP 0193#constraints-not-layout [constrained-by]: this skill carries the judgment half of rendering; every mechanical step is `hyp report render` -->
+<!-- @ref LLP 0196#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the confirmation before step 3 edits report sources, not the skill being hard to reach -->
+<!-- @ref LLP 0196#constraints-not-layout [constrained-by]: this skill carries the judgment half of rendering; every mechanical step is `hyp report render` -->
 
 `~/hypaware-reports/` holds the outputs of the report skills: a dated one-pager
 `<slug>.md` per report, optionally with a sibling `<slug>/` folder of section files.

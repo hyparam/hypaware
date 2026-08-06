@@ -3,13 +3,13 @@
 /**
  * End-to-end contract for the report renderer, built in a temp tree.
  *
- * @ref LLP 0193#mechanics-as-code [tests]: the verification the skill used to perform as
+ * @ref LLP 0196#mechanics-as-code [tests]: the verification the skill used to perform as
  * a list of greps is now the renderer's own contract, so it runs every time
  *
  * The shell original could not be covered at all: it is macOS-only and CI is
  * `ubuntu-latest`. These assertions are the skill's step-6 checklist, promoted to code.
  *
- * pandoc is a hard dependency (LLP 0193 open question 1). CI installs it, so these run
+ * pandoc is a hard dependency (LLP 0196 open question 1). CI installs it, so these run
  * there; a contributor without it gets a skip rather than a failure.
  */
 
@@ -133,7 +133,7 @@ test('one-pagers link back to the landing page, sections back to their report', 
 })
 
 test('theme.css is created once, never overwritten, and reaches every page', { skip }, () => {
-  // @ref LLP 0193#theme-layer [tests]: the base sheet is the command's and the theme is
+  // @ref LLP 0196#theme-layer [tests]: the base sheet is the command's and the theme is
   // the user's, which is what removes the "customization or rot?" guess
   const dir = fixtureTree()
   renderReports({ dir })

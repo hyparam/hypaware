@@ -566,7 +566,7 @@ function buildCoreCommands(registry) {
         "stored via 'hyp remote login <target> --token-file <path>').",
     }),
     {
-      // @ref LLP 0193#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
+      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
       name: 'report render',
       summary: 'Build the static HTML site for a local reports tree (no server involved)',
       usage: 'hyp report render [<dir>] [--no-refresh-assets]',

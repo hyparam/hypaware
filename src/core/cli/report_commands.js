@@ -52,7 +52,7 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
 /**
  * `hyp report render [<dir>]`: build the static HTML site for a local reports tree.
  *
- * @ref LLP 0193#mechanics-as-code [implements]: the deterministic half of rendering is a
+ * @ref LLP 0196#mechanics-as-code [implements]: the deterministic half of rendering is a
  * command, so the skill calls it instead of narrating a shell script it cannot version
  *
  * The one subcommand in this group that is NOT a call to the server's reports plane.
@@ -65,7 +65,7 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
  * Not destructive in the way `delete` is, so it does not prompt: it rebuilds `html/`
  * (derived output, wiped and regenerated every run) and refreshes the command-owned
  * assets. It never touches the report `.md` sources, and never `assets/theme.css`,
- * which is the user's (LLP 0193 #theme-layer).
+ * which is the user's (LLP 0196 #theme-layer).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx

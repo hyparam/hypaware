@@ -4,7 +4,7 @@
  * The manifest, the registration code, and the directories on disk must name the same
  * skills.
  *
- * @ref LLP 0194#t12-graph-was-already-owned [tests]: a skill set is stated in three
+ * @ref LLP 0197#t12-graph-was-already-owned [tests]: a skill set is stated in three
  * places, and nothing checked they agreed
  *
  * A client plugin declares its skills three times: `contributes.skills` in
@@ -12,7 +12,7 @@
  * `ctx.skills.register` (what actually gets installed), and the directories under
  * `skills/` (what exists to install). Any one can be edited without the others.
  *
- * The T12 merge (LLP 0194) proved that costs real breakage. It replaced five skill
+ * The T12 merge (LLP 0197) proved that costs real breakage. It replaced five skill
  * directories with one and updated neither the manifests nor the registration lists, so
  * both plugins would have tried to install five skills that no longer existed and would
  * never have installed `hypaware-report`. Nothing in the suite noticed, because nothing
