@@ -1,23 +1,21 @@
 // @ts-check
 
 /**
- * Drift guard for the vendored report renderer.
+ * The renderer's assets live in exactly one place.
  *
- * @ref LLP 0193#mechanics-as-code [tests]: "canonical" is only meaningful if a copy
- * cannot silently drift from it, and this set already drifted once.
+ * @ref LLP 0193#mechanics-as-code [tests]: the renderer is repo-owned code, and so are
+ * the assets it installs
  *
- * The renderer's assets ship three times: once as the repo-owned canonical copy under
- * src/core/reports/assets/, and once inside each host's bundled
- * hypaware-report skill (claude and codex), because an installed skill is
- * self-contained and cannot reach back into this repo at runtime. That is three copies
- * of the same bytes, which is exactly the shape that drifted before: on 2026-08-06 the
- * canonical stylesheet and the one in the user's live reports tree had diverged, and
- * the skill's own "is this an older sheet?" heuristic could not tell a customization
- * from rot.
+ * They used to ship three times: the canonical copy under `src/core/reports/assets/`
+ * and one inside each host's bundled report skill, because the skill copied the
+ * stylesheet into the reports tree itself. That copy step is gone. `hyp report render`
+ * installs assets from its own directory, so the skill needs none of them, and the two
+ * bundled copies were 64 KB of dead weight in the published package.
  *
- * LLP 0194 T7 removes the reason for the skill copies (the theme layer makes the base
- * sheet command-owned and always refreshed). Until then, this test holds the three
- * copies together.
+ * Three copies of the same bytes is also the shape that drifts, and this set did: on
+ * 2026-08-06 the canonical stylesheet and the one in a user's live reports tree had
+ * diverged, and the skill's own "is this an older sheet?" heuristic could not tell a
+ * customization from rot. One copy makes the question unanswerable-by-construction.
  */
 
 import test from 'node:test'
@@ -30,15 +28,10 @@ const repoRoot = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), 
 
 const CANONICAL_DIR = path.join(repoRoot, 'src/core/reports/assets')
 
-const SKILL_ASSET_DIRS = [
-  'hypaware-core/plugins-workspace/claude/skills/hypaware-report/assets',
-  'hypaware-core/plugins-workspace/codex/skills/hypaware-report/assets',
-]
-
-/** Every asset the renderer installs into a built page. */
+/** Every asset the renderer installs into a reports tree. */
 const ASSETS = ['style.css', 'copy-md.js', 'head.html', 'favicon.svg', 'favicon.png']
 
-test('the canonical asset set is complete', () => {
+test('the canonical asset set is complete and lives with the renderer', () => {
   const present = fs.readdirSync(CANONICAL_DIR).sort()
   assert.deepEqual(present, [...ASSETS].sort(), 'src/core/reports/assets/ must hold exactly the renderer asset set')
 })
@@ -56,16 +49,28 @@ test('the renderer is repo-owned code, not a script in a user working tree', () 
   )
 })
 
-for (const skillDir of SKILL_ASSET_DIRS) {
-  for (const asset of ASSETS) {
-    test(`${skillDir}/${asset} matches the canonical copy`, () => {
-      const canonical = fs.readFileSync(path.join(CANONICAL_DIR, asset))
-      const bundled = fs.readFileSync(path.join(repoRoot, skillDir, asset))
-      assert.ok(
-        canonical.equals(bundled),
-        `${asset} has drifted from src/core/reports/assets/${asset}. ` +
-          'Edit the canonical copy and re-sync the bundled ones; never edit a bundled copy directly.',
+test('no bundled skill ships its own copy of the renderer assets', () => {
+  // The copy step that justified them is gone. A reappearing skill-side copy is a
+  // second source of truth for the stylesheet, and the drift it causes is invisible
+  // until someone compares a rendered page against another machine's.
+  const workspace = path.join(repoRoot, 'hypaware-core/plugins-workspace')
+  for (const client of fs.readdirSync(workspace, { withFileTypes: true })) {
+    if (!client.isDirectory()) continue
+    const skillsDir = path.join(workspace, client.name, 'skills')
+    if (!fs.existsSync(skillsDir)) continue
+
+    for (const skill of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+      if (!skill.isDirectory()) continue
+      const assetsDir = path.join(skillsDir, skill.name, 'assets')
+      if (!fs.existsSync(assetsDir)) continue
+
+      const duplicated = fs.readdirSync(assetsDir).filter((name) => ASSETS.includes(name))
+      assert.deepEqual(
+        duplicated,
+        [],
+        `${client.name}/skills/${skill.name}/assets/ duplicates renderer assets (${duplicated.join(', ')}). ` +
+          'The renderer installs them from src/core/reports/assets/; a skill-side copy is dead weight and drifts.',
       )
-    })
+    }
   }
-}
+})

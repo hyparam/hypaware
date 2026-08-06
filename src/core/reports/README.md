@@ -19,7 +19,7 @@ that skill's 399 lines were a second, prose copy of code that already existed.
 Vendoring the script is the fix ([LLP 0193](../../../llp/0193-skills-state-constraints-not-procedures.rfc.md),
 [LLP 0194](../../../llp/0194-skills-state-constraints-not-procedures.plan.md) T1).
 Both landed: T3 ported it to `render.js`, T5 wired `hyp report render` and
-cut the skill from 28 KB to 23 KB by deleting the prose account.
+cut the skill from 28 KB to 13 KB (T10 finished the trim).
 
 ## Contents
 
@@ -36,11 +36,13 @@ cut the skill from 28 KB to 23 KB by deleting the prose account.
 
 ## Rules
 
-- **Edit the canonical copy, never a bundled one.** These assets also ship
-  inside the claude and codex `hypaware-report-to-html` skills, because an
-  installed skill is self-contained and cannot reach back into this repo at
-  runtime. `test/core/report-assets-canonical.test.js` holds all three copies
-  byte-identical. LLP 0194 T7 removes the need for the skill copies.
+- **These assets live here and nowhere else.** They used to ship a second and
+  third time inside the bundled report skills, back when the skill copied the
+  stylesheet into the reports tree itself. `hyp report render` installs them
+  from this directory, so the skill needs none of them; both copies were
+  deleted (64 KB of dead weight in the published package), and
+  `test/core/report-assets-canonical.test.js` fails if one comes back. Three
+  copies of the same bytes is the shape that drifts, and this set did.
 - **The shell original is gone** (deleted in T5, preserved in git history). If
   rendering misbehaves, fix `render.js` and its tests. Restoring `build.sh`
   restores a macOS-only, untested path that CI cannot run, and a test now
