@@ -6,10 +6,14 @@ import test from 'node:test'
 
 import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
+import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
-// startProxy requires at least one configured upstream even when a test only
-// exercises the control path (never proxies through it), so the R3 tests
-// below carry this unreachable-but-well-formed one.
+// A source with an empty routing table binds no listener at all, so a test
+// that needs a live port must give it something to route even when it only
+// exercises the control path (and never proxies through it). Hence this
+// unreachable-but-well-formed upstream on the R3 tests below.
 const ARBITRARY_UPSTREAM = { name: 'unused', base_url: 'http://127.0.0.1:1', path_prefix: '/' }
 
 test('source starts with only adapter-registered upstream presets', async () => {
@@ -146,6 +150,79 @@ test('restart-drops-state: a fresh GatewayState never carries a previous run\'s 
     assert.equal(status.details.ignored_sessions, 0)
   } finally {
     await source.stop()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// An upstream-less gateway is a valid config, not a misconfiguration.
+// `@hypaware/hermes` reads Hermes's own state.db and is "never modified,
+// configured, or proxied" (LLP 0119), but the shared
+// `ai_gateway.projected_exchange` materializer is a hard `requires.plugins`
+// dependency (LLP 0120), so its picker row composes the gateway plugin while
+// contributing no `gateway_upstream`. Picked alone that wrote a gateway slice
+// with `upstreams: []` whose source start threw, i.e. a reachable first-run
+// choice that produced a broken install rather than a working one (#649).
+// ---------------------------------------------------------------------------
+
+/** @param {string[]} sources */
+async function composePicked(sources) {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  return composePickerConfig({
+    sources: /** @type {any} */ (sources),
+    descriptors: catalog.pickerDescriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: 30,
+    hypHome: '/home/tester/.hyp',
+  })
+}
+
+// @ref LLP 0120#consequences [tests]: hermes composes the gateway plugin for the materializer alone, so the config a hermes-only picker run writes must yield a source that starts
+test('the gateway source a hermes-only picker run composes starts, idle', async () => {
+  const config = await composePicked(['hermes'])
+  const gateway = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway, 'hermes composes the gateway plugin: its materializer is a hard dependency')
+  assert.deepEqual(gateway.config?.upstreams, [], 'and hermes contributes no upstream of its own')
+
+  // Before the fix this rejected with
+  // "ai-gateway: at least one upstream must be configured before start".
+  const source = await createStartSource(createGatewayState())(fakeCtx(/** @type {any} */ (gateway.config)))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.state, 'ready', 'an idle gateway is not an error state')
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, false, 'no listener was bound')
+    assert.equal(status.details.port, undefined, 'and no port is advertised for one')
+    assert.match(String(status.message ?? ''), /no upstreams/, 'status says why it is idle')
+  } finally {
+    await source.stop()
+  }
+})
+
+// Idling must be recoverable, not a dead end: the daemon reloads the source
+// in place when config changes, so adding an upstream has to bind a listener
+// without a restart.
+test('an idle gateway binds once a reload brings an upstream', async () => {
+  // Idle source first, echo upstream second: if starting it ever regresses to
+  // throwing, this fails without leaking a listening server into the run.
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  const upstream = await startEchoUpstream('reloaded-ok')
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    await source.reload(fakeCtx({
+      listen: '127.0.0.1:0',
+      upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+    }))
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, undefined, 'the reloaded source is no longer idle')
+    const body = await fetchText(`http://${status.details.host}:${status.details.port}/anything`)
+    assert.equal(body.status, 200)
+    assert.equal(body.text, 'reloaded-ok')
+  } finally {
+    await source.stop()
+    await upstream.close()
   }
 })
 

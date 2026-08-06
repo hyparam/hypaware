@@ -13,9 +13,12 @@ export const FALLBACK_LISTEN = '127.0.0.1:0'
 
 /**
  * Validate and normalize the ai-gateway config slice. Returns the
- * compiled shape used by the source/listener. Validation is strict:
- * missing or malformed `upstreams` is rejected loudly because the
- * gateway has nothing useful to do without at least one upstream.
+ * compiled shape used by the source/listener. Missing or malformed
+ * `upstreams` compiles to an empty list rather than an error: adapter
+ * plugins contribute the rest of the routing table as presets after this
+ * runs, and a config that wants the gateway plugin only for its dataset and
+ * materializer (`@hypaware/hermes`) legitimately names no upstream at all.
+ * The source decides what an empty table means, not this function.
  *
  * @param {unknown} raw
  * @returns {AiGatewayConfig}

@@ -49,6 +49,9 @@ export function createStartSource(state) {
       entrypoints: createEntrypointActivity(),
     }
 
+    // `undefined` when the compiled routing table is empty: the source idles
+    // instead of binding a listener that could route nothing. See
+    // {@link launchListener}.
     let proxy = await launchListener(ctx, state, liveState)
 
     return {
@@ -58,8 +61,10 @@ export function createStartSource(state) {
           state: 'ready',
           rowsWritten: liveState.rowsWritten,
           details: {
-            host: proxy.host,
-            port: proxy.port,
+            // Omitted while idle, which is already how `gatewaySourceDetails`
+            // (core `daemon/status.js`) reads "no reachable gateway here" off
+            // the status file for a bind that never happened.
+            ...(proxy ? { host: proxy.host, port: proxy.port } : { listening: false }),
             upstreams: readConfiguredUpstreamNames(ctx),
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
@@ -80,6 +85,7 @@ export function createStartSource(state) {
             recent_entrypoints: liveState.entrypoints.snapshot(),
           },
         }
+        if (!proxy) status.message = 'idle: no upstreams configured, nothing to proxy'
         if (liveState.lastError) status.lastError = liveState.lastError
         return status
       },
@@ -89,13 +95,13 @@ export function createStartSource(state) {
         // new config. Connections in flight finish through the
         // recorder's drain (called inside stop()) so their rows are not
         // lost across the reload.
-        await proxy.stop()
+        await proxy?.stop()
         state.listen = undefined
         proxy = await launchListener(nextCtx, state, liveState)
       },
 
       async stop() {
-        await proxy.stop()
+        await proxy?.stop()
         state.listen = undefined
       },
     }
@@ -108,13 +114,45 @@ export function createStartSource(state) {
  * `AiGatewayCapability.localEndpoint()` returns the bound URL; clears
  * it on stop/reload.
  *
+ * Returns `undefined` when the compiled routing table is empty, leaving the
+ * source idle with no listener at all.
+ *
+ * The gateway plugin does two separable jobs, and a config can legitimately
+ * want only one. At activation it contributes the `ai_gateway_messages`
+ * dataset and the shared `ai_gateway.projected_exchange` materializer; at
+ * source start it runs the proxy. `@hypaware/hermes` wants the first alone:
+ * it reads Hermes's own `state.db` and is "never modified, configured, or
+ * proxied" (LLP 0119), yet the materializer is a hard `requires.plugins`
+ * dependency (LLP 0120), so its picker row composes the gateway plugin while
+ * contributing no upstream. A hermes-only picker run therefore produces
+ * `upstreams: []` with no adapter presets either, and failing the source
+ * start there would take a correct install down over a dataset-only
+ * dependency. Idling instead leaves `state.listen` unset, so
+ * `localEndpoint()` keeps throwing rather than handing an attach a URL
+ * nothing is listening on.
+ *
+ * @ref LLP 0120#consequences [constrained-by]: hermes composes the gateway plugin for the materializer alone, so an upstream-less gateway is a valid config rather than a misconfiguration
+ *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
  * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
- * @returns {Promise<StartedProxy>}
+ * @returns {Promise<StartedProxy | undefined>}
  */
 async function launchListener(ctx, state, liveState) {
   const config = compileConfig(ctx.config)
+  // Hoisted out of `bind` below (which runs twice on the EADDRINUSE fallback
+  // path) because the answer decides whether we bind at all. Pure over
+  // `config.upstreams` and `state.presets`, neither of which moves between
+  // the two binds.
+  const upstreams = mergeUpstreams(config.upstreams, state)
+  if (upstreams.length === 0) {
+    liveState.listenFallbackFrom = undefined
+    ctx.log.info('aigw.idle_no_upstreams', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      registered_presets: state.presets.size,
+    })
+    return undefined
+  }
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
@@ -188,7 +226,7 @@ async function launchListener(ctx, state, liveState) {
   /** @param {string} listen */
   const bind = (listen) => startProxy({
     listen,
-    upstreams: mergeUpstreams(config.upstreams, state),
+    upstreams,
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
     // Serve `/_hypaware/*` control requests locally over the gateway's
