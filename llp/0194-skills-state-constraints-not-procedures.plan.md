@@ -65,17 +65,59 @@ depends on `build.sh` being absent from this repo.
   `src/core/reports/`. No behaviour change and no porting yet: this only
   establishes that the repo owns the renderer, which every later task depends
   on. Complexity 1.
-- **T2, reconcile and generate the codex skill tree.** Independent of the
-  entire report pipeline and the largest immediate maintenance win, so it does
-  not wait. Three parts: decide the correct side of each divergence
-  (`hypaware-privacy` 116 lines, `hypaware-apply-report-changes` 11,
-  `hypaware-query` 6, `hypaware-publish-report` 6, `hypaware-report-to-html` 6,
-  `hypaware-reference` 2), add a pack-time generation step from the claude
-  sources, and add a test asserting the trees match after generation. The
-  known-legitimate deltas are `disable-model-invocation` (no codex equivalent,
-  LLP 0142) and the claude-only `hypaware-ignore` / `hypaware-unignore`.
-  Complexity 3, entirely because the privacy divergence needs a human call
-  about which behaviour is correct, not because the generation is hard.
+- **T2, hold the two skill trees together.** Independent of the entire report
+  pipeline, so it does not wait.
+
+  <a id="t2-premise-corrected"></a>**Correction, 2026-08-06: this task was
+  scoped on a false premise and is rewritten here.** The original text called
+  the claude/codex divergence "drift" and asked someone to "decide the correct
+  side of each divergence". Reading all six diffs shows there is no wrong side.
+  Essentially every diverging line is legitimate host-specific content:
+
+  | Divergence | Why it is correct |
+  | --- | --- |
+  | `disable-model-invocation` on three report skills | No Codex equivalent (LLP 0142) |
+  | Terse claude descriptions vs trigger-rich codex ones | Consequent to the above: a gated skill is chosen by a human from a menu, an ungated one has to be routed to by a model |
+  | `@ref LLP 0142#user-invoked-only` comments | They annotate the frontmatter key only claude has |
+  | `mcp__hypaware__*` vs generic MCP tool naming | Host MCP tool-naming conventions |
+  | `AskUserQuestion` vs "reply with the numbers" | Host tool availability |
+  | `/hypaware-ignore` cross-references | That skill is claude-only |
+  | `claude --fork-session` vs `codex fork` | Different clients |
+  | 90 codex-only lines in `hypaware-privacy` | Claude Code exposes `CLAUDE_CODE_SESSION_ID`; Codex does not, so the codex skill must resolve the session *container* from `~/.codex/sessions` rollouts with explicit refusal-on-ambiguity semantics. It cites issue #453 and is guarded by its own 132-line test, `test/plugins/codex-privacy-skill-session-id.test.js`. |
+
+  **So the codex tree is not derivable from the claude tree.** It contains
+  knowledge the claude tree does not have. A generator that emitted one from
+  the other would delete tested privacy logic. The two byte-identical skills
+  (`hypaware-ai-usage-report`, `hypaware-graph`, ~43 KB) are the only ones
+  where "one source, two outputs" is straightforwardly true.
+
+  **Revised scope, in three parts, order deliberate:**
+
+  1. **A parity guard that records the host-specific surface** rather than
+     eliminating it: per skill, the count and hash of lines unique to each
+     side, checked against a committed fixture. New divergence fails the test
+     and forces whoever added it to re-record, which is reviewable in the diff.
+     This is correct under every option below, so it lands first and alone.
+  2. **Dedup only what is genuinely shared.** The two byte-identical skills,
+     and later the shared *bodies* of the small-divergence skills, whose
+     differences are mostly frontmatter plus one to three body lines.
+  3. **Leave `hypaware-privacy` forked, deliberately**, with a note in both
+     copies saying why. Ninety lines of host-specific, separately-tested
+     privacy logic is not duplication to be eliminated.
+
+  **This does not reduce to one shipped tree.** `@hypaware/claude` and
+  `@hypaware/codex` are separate plugin packages contributing different
+  `skill_dir` values (`.claude/skills`, `.codex/skills`), so both trees must
+  exist on disk at install time. T2 changes how many places a human *edits*.
+
+  **Open: where any shared source lives**, and whether the generated tree is
+  committed or built at pack time and gitignored. Pack-time generation leaves
+  one copy in the repo and no decoy to edit by mistake. A host-neutral source
+  directory is more honest than generating codex content from under `claude/`.
+  Decide before writing a generator, not after.
+
+  Complexity 2 for part 1, which is mechanical. Parts 2 and 3 are a design
+  decision, not a coding task, and should not start until part 1 has run.
 
 ### Wave 2 (deps `[T1]`), two-wide
 
