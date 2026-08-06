@@ -238,12 +238,23 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 5 (deps `[T7, T8]`), four-wide
 
-- **T10, rewrite `hypaware-report-to-html` down to judgment.** With mechanics,
-  landing page, and verification all in code, what remains is the enrichment
-  contract: the Phase A inventory, the design bar, the hard rules about numbers
-  tracing to the report's own text, judgment colours never attaching to a named
-  person, and artifacts rendering verbatim. Expect roughly 27 KB to under 8 KB.
-  Complexity 3.
+- **T10, rewrite `hypaware-report-to-html` down to judgment. LANDED
+  2026-08-06.** 28,405 bytes to **13,002**. What remains is the enrichment
+  contract: the confirmation before source edits, Phase A inventory, Phase B
+  design rules, the design bar, the contamination warning, and the hard rules
+  (numbers trace to the report's own text, judgment never attaches to a person,
+  artifacts render verbatim).
+
+  Cut: the prose renderer (already gone in T5), the landing-page template
+  (T4), and the version-dated layout trivia ("usage review 2026-07-16+",
+  "2026-07-15 predates the split", "legacy standalone improvement review"),
+  which is per-report shape and belongs in `authoring.md`, not in the skill
+  every render loads. The estimate of "under 8 KB" was optimistic: the
+  judgment content is genuinely ~13 KB, and cutting further would start
+  removing design rules rather than mechanics.
+
+  `test/plugins/skill-constraints-survive.test.js` passed unchanged across the
+  rewrite, which is exactly the check it was built for. Complexity 3.
 - **T11, the house style document.** Move block order, heading vocabulary,
   length budget, bullet shape, and whether ranked changes get their own page
   out of `hypaware-ai-usage-report` and into a shipped, editable default.
