@@ -130,7 +130,7 @@ export function gatewaySourceDetails(sources) {
  * The gateway source's `status()` details as the daemon captured them, before
  * any "is it bound?" filtering. `gatewaySourceDetails` above answers "where do
  * I send traffic?" and so returns nothing for a gateway that never bound; the
- * idle checks below need the details of exactly that case.
+ * dropped-upstream check below needs the details of exactly that case.
  *
  * @param {SourceSnapshot[] | undefined} sources
  * @returns {Record<string, unknown> | undefined}
@@ -146,49 +146,77 @@ function gatewaySourceRawDetails(sources) {
 }
 
 /**
- * How many upstreams a *deliberately idle* gateway was nonetheless configured
- * with, and which of them it can name, or `undefined` when the gateway is
- * bound, absent, or idle for the reason it is allowed to be idle.
+ * The upstreams the gateway's config asked for and did not get, or `undefined`
+ * when it got everything it asked for (which includes asking for nothing).
  *
- * An upstream-less gateway is a legitimate config (LLP 0120: hermes composes
- * the plugin for its materializer alone and contributes no upstream), so the
- * source idles instead of failing to start. That trade turns one class of
- * misconfiguration silent: a config that *did* list upstreams and lost them
- * all to `compileUpstreams` (an entry missing either required key is dropped
- * without complaint, and `diagnoseV1Config`'s `gateway_missing_*_upstream`
- * check does not fire for that shape, since it matches on `provider` too) also
- * idles, reporting `started` and `healthy` while the user's client gets
- * ECONNREFUSED.
+ * `compileUpstreams` drops an upstream entry missing either `name` or
+ * `base_url`, per entry and without complaint. Nothing downstream can see
+ * that from the routing table alone, so the gateway source reports the raw
+ * configured count next to the number that fell out, and this reads the
+ * difference. One comparison covers both shapes of the fault:
  *
- * The *count* is what separates them, not the names. `compileUpstreams` drops
- * an entry for a missing `name` exactly as silently as for a missing
- * `base_url`, and a nameless entry contributes nothing to `details.upstreams`,
- * so a config of `provider = "anthropic", base_url = "..."` looks identical to
- * hermes-only through the names alone. `details.upstreams_configured` counts
- * the entries the config listed whatever shape they were in, so hermes-only
- * yields 0 and any dropped upstream yields at least 1. The names still ride
- * along, pre-compile, because they make the warning concrete when they exist.
+ * - **Every entry dropped.** The routing table is empty, so the source binds
+ *   no listener at all (`listening: false`). An upstream-less gateway is a
+ *   legitimate config (LLP 0120: hermes composes the plugin for its
+ *   materializer alone and contributes no upstream), so this cannot be a start
+ *   failure any more; without a diagnostic it reports `started` and `healthy`
+ *   while every client gets ECONNREFUSED.
+ * - **Some entries dropped.** The table is non-empty, the proxy binds, and
+ *   `listening` is never set. Nothing about that install looks wrong, and the
+ *   traffic for the typo'd provider is simply never proxied or captured.
  *
- * A status file written before `upstreams_configured` existed carries names
- * only; those still count for themselves, so an older daemon's dropped
- * `base_url` stays visible.
+ * `idle` distinguishes them so the caller can say which one happened; the two
+ * are mutually exclusive by construction, so they never double-report.
+ *
+ * Neither shape is caught anywhere else: `@hypaware/ai-gateway` registers no
+ * config section, so nothing validates upstream shape, and `diagnoseV1Config`'s
+ * `gateway_missing_*_upstream` check matches an upstream by its `provider`
+ * field, which a nameless entry still has.
+ *
+ * Counts lead, names follow, because `name` is one of the two keys whose
+ * absence drops an entry: `provider = "anthropic", base_url = "..."` yields no
+ * name at all yet is exactly the config that needs the warning.
+ *
+ * A status file written before `upstreams_dropped` existed answers only the
+ * all-dropped question, from `listening: false` plus whatever it did record of
+ * the configured entries. A partial loss recorded by such a build stays
+ * invisible rather than being guessed at.
  *
  * @param {SourceSnapshot[] | undefined} sources
- * @returns {{ count: number, names: string[] } | undefined}
+ * @returns {{ idle: boolean, configured: number, dropped: number, names: string[] } | undefined}
  */
-function gatewayIdleWithConfiguredUpstreams(sources) {
+function gatewayDroppedUpstreams(sources) {
   const details = gatewaySourceRawDetails(sources)
-  if (!details || details.listening !== false) return undefined
-  const upstreams = details.upstreams
-  const names = Array.isArray(upstreams)
-    ? /** @type {string[]} */ (upstreams.filter((u) => typeof u === 'string' && u.length > 0))
-    : []
-  const rawCount = details.upstreams_configured
-  const count =
-    typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
-      ? rawCount
-      : names.length
-  return count > 0 ? { count, names } : undefined
+  if (!details) return undefined
+  const idle = details.listening === false
+  const names = stringList(details.upstreams)
+  const configured = nonNegativeInt(details.upstreams_configured) ?? names.length
+  const rawDropped = nonNegativeInt(details.upstreams_dropped)
+  // Older status file: an idle gateway lost every entry it had by definition,
+  // which is what that build's own check inferred. A bound one tells us
+  // nothing, so claim nothing.
+  const dropped = rawDropped ?? (idle ? configured : 0)
+  if (dropped <= 0) return undefined
+  const droppedNames = stringList(details.upstreams_dropped_names)
+  return {
+    idle,
+    configured,
+    dropped,
+    // On the older status file the dropped names are exactly the configured
+    // ones, since none survived.
+    names: droppedNames.length > 0 ? droppedNames : idle ? names : [],
+  }
+}
+
+/** @param {unknown} v @returns {string[]} */
+function stringList(v) {
+  if (!Array.isArray(v)) return []
+  return /** @type {string[]} */ (v.filter((s) => typeof s === 'string' && s.length > 0))
+}
+
+/** @param {unknown} v @returns {number | undefined} */
+function nonNegativeInt(v) {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined
 }
 
 /**
@@ -658,28 +686,44 @@ export async function collectHypAwareStatus(opts = {}) {
       repair: [`free ${from} and restart the daemon - attached clients re-point automatically`],
     })
   }
-  const idleGatewayUpstreams = daemon.running
-    ? gatewayIdleWithConfiguredUpstreams(daemonStatusFile?.sources)
+  const droppedGatewayUpstreams = daemon.running
+    ? gatewayDroppedUpstreams(daemonStatusFile?.sources)
     : undefined
-  if (idleGatewayUpstreams) {
-    // The gateway bound nothing while the config listed upstreams it wanted
-    // proxied: every one was dropped at compile, so there is no listener and
-    // no error either. Before the source was allowed to idle this was a source
-    // start failure and `hyp status` said `[failed]`; the same install must not
-    // now read `[started]` / `healthy` with the reason living only in a log
-    // line. Non-degrading like `gateway_port_fallback`: an install that
-    // *wanted* no upstream (hermes-only) reports no configured upstreams here
-    // and never reaches this branch, so it stays healthy and silent.
-    // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway is listening" is readable from status.json steadily, not only from a boot-time log line
-    const { count, names } = idleGatewayUpstreams
-    // Count first, names in parentheses when there are any: `name` is itself
+  if (droppedGatewayUpstreams) {
+    // The config named upstreams the gateway is not proxying, because
+    // `compileUpstreams` dropped them one by one and said nothing. Neither
+    // half of that produces an error: the total loss idles the source (before
+    // it was allowed to idle, this was a start failure and `hyp status` said
+    // `[failed]`), and the partial loss binds a listener that looks entirely
+    // healthy. Either way the reason must not live only in a boot log line.
+    //
+    // Non-degrading like `gateway_port_fallback`. An install that *wanted* no
+    // upstream (hermes-only) drops nothing and never reaches this branch, so
+    // it stays healthy and silent.
+    // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway proxies what the config asked for" is readable from status.json steadily, not only from a boot-time log line
+    // @ref LLP 0193#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one, and neither flips overall
+    const { idle, configured, dropped, names } = droppedGatewayUpstreams
+    // Counts first, names in parentheses when there are any: `name` is itself
     // one of the two keys that drops an entry, so the config that most needs
     // this warning is exactly the one that can supply no name to print.
     const named = names.length > 0 ? ` (${names.join(', ')})` : ''
+    const message = idle
+      // Kept verbatim for the total loss. "Listening on nothing" and
+      // "connection refused" are true only here, and an operator reading
+      // `hyp status` against a dead gateway needs that sentence, not a
+      // count of what a working one is missing.
+      ? `the gateway is running but listening on nothing: ${configured} ${configured === 1 ? 'upstream' : 'upstreams'}${named} ${configured === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`
+      : `the gateway is listening, but ${dropped} of its ${configured} configured upstreams${named} did not compile to a route (each needs both a 'name' and a 'base_url') - traffic for ${dropped === 1 ? 'that upstream' : 'those upstreams'} is not proxied and nothing is captured for it`
     diagnostics.push({
       severity: 'warning',
-      kind: 'gateway_idle_no_upstreams',
-      message: `the gateway is running but listening on nothing: ${count} ${count === 1 ? 'upstream' : 'upstreams'}${named} ${count === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`,
+      // Two kinds, one check. They cannot both fire (a gateway is either
+      // bound or it is not), and consumers gate on `kind`: calling a
+      // listening gateway `idle` to save a name would make the kind a lie
+      // about the one thing its name asserts, and would merge an install
+      // that refuses every connection with one that quietly misroutes a
+      // single provider.
+      kind: idle ? 'gateway_idle_no_upstreams' : 'gateway_upstreams_dropped',
+      message,
       // Not `hyp config validate`: it prints `config ok` for this config and
       // exits 0. `@hypaware/ai-gateway` registers no config section, so
       // nothing validates upstream shape, and `diagnoseV1Config` matches an
