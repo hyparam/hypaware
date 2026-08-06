@@ -447,10 +447,17 @@ export function hasRenderableOverview(rows) {
  * Which of the requested sections have landed. Lets a caller that stopped
  * early say what is missing rather than presenting a short block as whole.
  *
+ * `sections` scopes the answer to what the caller actually asked
+ * `collectOverview` for. Without it a caller running a subset would be
+ * told its unrequested sections "did not finish", which is a false claim
+ * about work nobody started - and the one thing the partial-block
+ * narration exists to avoid (LLP 0195#wizard-sections).
+ *
  * @param {OverviewRows} rows
+ * @param {readonly ('models'|'daily'|'repos'|'tools')[]} [sections]
  * @returns {('models'|'daily'|'repos'|'tools')[]}
  */
-export function missingSections(rows) {
+export function missingSections(rows, sections = OVERVIEW_SECTIONS) {
   /** @type {Record<string, Record<string, unknown>[]>} */
   const byName = {
     models: rows.providerRows,
@@ -458,7 +465,7 @@ export function missingSections(rows) {
     repos: rows.repoRows,
     tools: rows.toolRows,
   }
-  return OVERVIEW_SECTIONS.filter((s) => byName[s].length === 0)
+  return OVERVIEW_SECTIONS.filter((s) => sections.includes(s) && byName[s].length === 0)
 }
 
 /**

@@ -5,6 +5,8 @@
  * @import { FinaleSummary, PickerSource } from '../../../../src/core/cli/types.js'
  * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import {
+ *   FirstAskResult,
+ *   FirstLookResult,
  *   InitWizardResult,
  *   RunInitWizardOptions,
  *   WizardJoinResult,
@@ -19,11 +21,12 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { LOCAL_INSTALL_RETENTION_DAYS, defaultConfirmSelectPromptFactory, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
+import { LOCAL_INSTALL_RETENTION_DAYS, buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
+import { runWizardFirstAsk } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, runWizardPick } from './pick.js'
@@ -458,9 +461,11 @@ export async function runInitWizard(opts) {
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
+  /** @type {FirstLookResult | undefined} */
+  let firstLookResult
   if (interactive && !cancelled && opts.finale?.dryRun !== true) {
     const notices = firstLookNoticeSink(opts.stderr)
-    await runWizardFirstLook({
+    firstLookResult = await runWizardFirstLook({
       runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
@@ -479,6 +484,31 @@ export async function runInitWizard(opts) {
   // survives a back through the fork (LLP 0191 #join-not-undone).
   if (joined) await narratePrivacyIfTeamPath(opts)
 
+  // The exit door. Placed after the privacy narration on purpose: the
+  // narration stays the wizard's last *words* (LLP 0135 #privacy), and
+  // this is what the user does next rather than one more thing to read.
+  // Attended, non-dry-run, non-cancelled, same as the first look - and it
+  // may take the terminal for good, so nothing may follow it but the
+  // return.
+  // @ref LLP 0195#first-ask [implements]: the closing question list, after the narration, last of all
+  /** @type {FirstAskResult | undefined} */
+  let firstAsk
+  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+    firstAsk = await runWizardFirstAsk({
+      clients: picked.clientsPicked,
+      descriptors: opts.catalog
+        ? opts.catalog.clientDescriptors
+        : await buildWalkthroughClientDescriptorMap(),
+      stdout: opts.stdout,
+      stderr: opts.stderr,
+      env: opts.env,
+      interactive: true,
+      hasRows: firstLookHadRows(firstLookResult),
+      ...(opts.stdin ? { stdin: opts.stdin } : {}),
+      ...(opts.firstAsk ?? {}),
+    })
+  }
+
   log.info('wizard.finish', {
     [Attr.COMPONENT]: 'wizard',
     pathway: pathway ?? 'non-interactive',
@@ -486,6 +516,7 @@ export async function runInitWizard(opts) {
     locked_count: picked.lockedSources.length,
     sources_opted_out: sourcesOptedOut.length,
     cancelled,
+    first_ask: firstAsk ? (firstAsk.launched ? `launched:${firstAsk.client}` : firstAsk.reason) : 'skipped',
   })
 
   return {
@@ -500,6 +531,35 @@ export async function runInitWizard(opts) {
     configureResults: configured.results,
     ...(finaleSummary ? { finale: finaleSummary } : {}),
   }
+}
+
+/**
+ * Whether the first look found anything, as the first ask's `hasRows`.
+ *
+ * The two "did not show" reasons are not the same answer, and collapsing
+ * them would be the bug:
+ *
+ * - `no-dataset` is a definite no. No gateway source is configured, so
+ *   there is nothing for a question about recorded sessions to read.
+ * - `slow` is a definite *yes*: the block was abandoned precisely because
+ *   summarizing this much history would have held up setup.
+ * - `error` is unknown, and unknown must not withhold the offer: a
+ *   launch against a cache that turns out to be full is fine, while
+ *   suppressing one against a cache that was merely unreadable is not.
+ *
+ * A shown block with zero rows in both counted sections is an empty
+ * cache: the dataset exists and holds nothing yet, which is exactly the
+ * fresh-install case (LLP 0195#empty-cache).
+ *
+ * @param {FirstLookResult | undefined} result
+ * @returns {boolean | undefined}
+ */
+function firstLookHadRows(result) {
+  if (!result) return undefined
+  if (result.shown) return result.providerRows > 0 || result.dayRows > 0
+  if (result.reason === 'no-dataset') return false
+  if (result.reason === 'slow') return true
+  return undefined
 }
 
 /**

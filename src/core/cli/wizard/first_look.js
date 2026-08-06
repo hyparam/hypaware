@@ -2,12 +2,15 @@
 
 /**
  * The wizard's closing "first look": the shared gateway overview
- * (`query/overview.js`, the same block `hyp query overview` prints),
- * placed at the end of an attended setup so the run ends on the user's own
- * rows rather than on a command they still have to type.
+ * (`query/overview.js`), placed at the end of an attended setup so the run
+ * ends on the user's own rows rather than on a command they still have to
+ * type.
  *
- * This module owns only the wizard's half of the contract: when the step
- * runs, and that it can never fail a finished install.
+ * Setup renders two of the block's four sections
+ * ({@link FIRST_LOOK_SECTIONS}); `hyp query overview` renders all four.
+ *
+ * This module owns only the wizard's half of the contract: which sections
+ * run, when the step runs, and that it can never fail a finished install.
  *
  * @import { FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
  * @import { OverviewNotice, OverviewQueryRunner } from '../../../../src/core/query/types.js'
@@ -62,6 +65,30 @@ export function firstLookNoticeSink(stderr) {
 
 /** The wizard's heading for the shared block: this is a setup milestone. */
 const FIRST_LOOK_TITLE = 'First look at what HypAware has recorded'
+
+/**
+ * The sections setup runs. Two of the four, and the seam LLP 0135 kept
+ * open for exactly this ("the seam for a shorter variant remains if setup
+ * output ever needs trimming").
+ *
+ * Both halves of the cost were real on a working cache. **Space:** all
+ * four run ~60 lines, which is a wall of tables to scroll past at the
+ * moment the user is finally being handed something to do. **Time:** the
+ * sections run sequentially, so four of them on a 91k-row cache took ~5s
+ * against a section budget that assumed ~2s, and setup regularly printed
+ * "Stopped here to keep setup moving - the repos and tools sections did
+ * not finish". A block that routinely announces its own truncation is
+ * worse than a shorter block that finishes.
+ *
+ * Models and daily are the pair that survives, because they are the two
+ * that answer "did it work": which models this machine talks to, and that
+ * traffic landed on real days. Repos and tools are the interesting half,
+ * and interesting is what `hyp query overview` is for - it still runs all
+ * four, with no deadline, because there the user asked.
+ *
+ * @ref LLP 0195#wizard-sections [implements]: setup runs the two sections that prove capture, not all four
+ */
+const FIRST_LOOK_SECTIONS = /** @type {const} */ (['models', 'daily'])
 
 /**
  * How long the closing look may take before setup gives up on it.
@@ -139,8 +166,8 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       }
 
       // Sections land in `partial` as they complete, so an expired deadline
-      // keeps finished work rather than discarding it: three sections done
-      // and a fourth in flight is a shorter block, not a blank one.
+      // keeps finished work rather than discarding it: one section done and
+      // the other in flight is a shorter block, not a blank one.
       const partial = emptyOverview()
       // The whole step is inside one try, not just the queries: rendering
       // and writing can fail too (an unforeseen row shape, or a stream that
@@ -156,11 +183,10 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       // (`cli/stream_errors.js`), which is where it belongs: it is a
       // property of the process's streams, not of any one command.
       try {
-        // Every section, the same block `hyp query overview` prints. The
-        // run is longer for it (~60 lines against ~35), which the privacy
-        // narration survives because it is written after this and stays the
-        // last thing on screen (`@ref LLP 0135#privacy`).
-        const overview = await withDeadline(collectOverview(runner, { into: partial }), budgetMs)
+        const overview = await withDeadline(
+          collectOverview(runner, { into: partial, sections: FIRST_LOOK_SECTIONS }),
+          budgetMs
+        )
 
         const expired = overview === null
         const rows = overview ?? partial
@@ -183,7 +209,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
         if (expired) {
           span.setAttribute('partial', true)
           span.setAttribute('budget_ms', budgetMs)
-          span.setAttribute('missing_sections', missingSections(rows).join(','))
+          span.setAttribute('missing_sections', missingSections(rows, FIRST_LOOK_SECTIONS).join(','))
         }
         // `footer: false` because the closing line below is this run's single
         // pointer: setup should teach one command, not two dim lines naming
@@ -200,7 +226,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
           // repos" and "the repos section did not finish" are different
           // claims, and only one of them is true - the same never-silent rule
           // the block follows for the rows it omits.
-          const missing = missingSections(rows)
+          const missing = missingSections(rows, FIRST_LOOK_SECTIONS)
           const which = missing.length > 1
             ? `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} sections`
             : `${missing[0]} section`
@@ -210,9 +236,11 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
               : '\nStopped here to keep setup moving.\n'
           )
         }
-        // The block is re-runnable: name the command that reprints it, so the
-        // setup teaches one durable entry point instead of a one-off view.
-        stdout.write(`\nSee this again anytime: hyp query overview (--sql shows the queries)\n`)
+        // The block is re-runnable, and the full one is *bigger* than what
+        // setup just printed: naming the two sections it adds is what stops
+        // the trim from reading as all there is. One durable entry point,
+        // stated as an upgrade rather than a repeat.
+        stdout.write(`\nSee more anytime: hyp query overview (adds repos and tools; --sql shows the queries)\n`)
         return {
           shown: true,
           providerRows: rows.providerRows.length,

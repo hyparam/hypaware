@@ -34,6 +34,7 @@ import {
   runDaemonStop,
   runDaemonUninstall,
 } from '../commands/daemon.js'
+import { runAsk } from '../commands/ask.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkMaintain } from '../commands/sink.js'
@@ -255,6 +256,26 @@ function buildCoreCommands(registry) {
         '  --bin <path>           hyp binary to record in the daemon unit',
       ].join('\n'),
       run: runInit,
+    },
+    {
+      name: 'ask',
+      summary: 'Start your AI client on a question about your recorded sessions',
+      usage: 'hyp ask ["question"] [--list]',
+      help: [
+        'With no argument, offers a short list of questions worth asking of what',
+        'HypAware has recorded, and starts an attached client on the one you',
+        'pick: the client takes over the terminal and opens on that question.',
+        '',
+        'With a question, skips the menu and starts straight on it:',
+        '  hyp ask "which sessions touched the auth module last week"',
+        '',
+        '  --list   print the suggested questions and exit, launching nothing',
+        '',
+        'Only clients that are attached (hyp status) and whose CLI is on your',
+        'PATH can be started. Claude Desktop has no prompt argument, so it is',
+        'never offered here.',
+      ].join('\n'),
+      run: runAsk,
     },
     {
       name: 'join',

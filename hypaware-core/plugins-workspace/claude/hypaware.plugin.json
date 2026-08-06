@@ -30,7 +30,8 @@
         "marker_key": "_hypaware"
       },
       "required_upstreams": ["anthropic"],
-      "transcript_entrypoints": ["cli", "sdk-cli"]
+      "transcript_entrypoints": ["cli", "sdk-cli"],
+      "launch": { "bin": "claude", "args": ["{prompt}"], "label": "Claude Code" }
     },
     "picker": [
       {

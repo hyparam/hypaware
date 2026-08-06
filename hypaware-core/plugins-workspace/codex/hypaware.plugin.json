@@ -27,7 +27,8 @@
         "settings_file": ".codex/config.toml",
         "marker_header": "[model_providers.hypaware]"
       },
-      "required_upstreams": ["openai", "chatgpt"]
+      "required_upstreams": ["openai", "chatgpt"],
+      "launch": { "bin": "codex", "args": ["{prompt}"], "label": "Codex" }
     },
     "picker": [
       {

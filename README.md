@@ -70,6 +70,10 @@ On a TTY this launches the interactive walkthrough:
    per-client attach results, and a first look at what was captured: token
    volume per model, activity per day, which repos the sessions ran in, and
    which tools got called. Reprint it any time with `hyp query overview`.
+6. Last, it offers a few questions worth asking of that data and starts your
+   AI client on the one you pick, opening straight into the answer. Pick it
+   up again any time with `hyp ask`, or skip the menu with
+   `hyp ask "which sessions touched the auth module"`.
 
 For unattended installs (CI, scripted bootstraps, dotfiles) use the
 non-interactive flags:

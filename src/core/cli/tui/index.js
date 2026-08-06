@@ -36,6 +36,7 @@ export async function multiselect(spec) {
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
     ...(spec.allowBack ? { allowBack: true } : {}),
+    ...(spec.box ? { box: true } : {}),
     ...(spec.bounds !== undefined ? { bounds: spec.bounds } : {}),
   }
   const io = resolveIo(spec)
@@ -71,6 +72,7 @@ export async function select(spec) {
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
     ...(spec.allowBack ? { allowBack: true } : {}),
+    ...(spec.box ? { box: true } : {}),
   }
   const io = resolveIo(spec)
   const final = /** @type {SelectState} */ (await run(initial, io))
@@ -97,6 +99,7 @@ export async function text(spec) {
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
     ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
     ...(spec.allowBack ? { allowBack: true } : {}),
+    ...(spec.box ? { box: true } : {}),
     ...(spec.default !== undefined ? { default: spec.default } : {}),
     ...(spec.validate !== undefined ? { validate: spec.validate } : {}),
   }

@@ -83,6 +83,23 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
               (v) => typeof v === 'string' && v.length > 0
             )
           }
+          // A launch spec that cannot carry the question is dropped here
+          // rather than downstream: an accepted-but-mute spec starts the
+          // client with no prompt, which reads as the feature working.
+          // @ref LLP 0195#split [implements]: the manifest owns how to start a client; a spec missing `{prompt}` is not a launch spec
+          const launch = client.launch
+          if (
+            launch && typeof launch.bin === 'string' && launch.bin.length > 0 &&
+            Array.isArray(launch.args) &&
+            launch.args.every((a) => typeof a === 'string') &&
+            launch.args.some((a) => a.includes('{prompt}'))
+          ) {
+            descriptor.launch = {
+              bin: launch.bin,
+              args: [...launch.args],
+              ...(typeof launch.label === 'string' && launch.label.length > 0 ? { label: launch.label } : {}),
+            }
+          }
           clientDescriptors.set(client.name, descriptor)
         }
       }
