@@ -141,12 +141,18 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 2 (deps `[T1]`), two-wide
 
-- **T3, port the renderer to Node.** `src/core/reports/render.js`. The
-  substance of the RFC's §1. Drop `sips` by shipping the already-existing
-  `favicon.png` as a static asset rather than regenerating it. Replace the four
-  BSD `sed` expressions in `rewrite_hrefs` with explicit rewriting. Keep pandoc
-  as a child process for now, deferring RFC open question 1. Complexity 4, see
-  below.
+- **T3, port the renderer to Node. LANDED 2026-08-06.**
+  `src/core/reports/render.js`, with `sips` dropped (the PNG ships prebuilt),
+  the four BSD `sed` expressions replaced, and pandoc kept as a child process.
+  Accepted by A/B against `build.sh` on the real reports tree: **byte-identical
+  output across five reports**. The case table
+  (`test/core/report-render-hrefs.test.js`, 18 cases) was written first and the
+  port written against it. `build.sh` is frozen in place until T5 removes the
+  skill's call to it. Two things the port fixed that the plan had not named: the
+  shell copied four assets beside each page but `head.html` is inlined by
+  pandoc's `-H` and was never one of them, and the shell interpolated `$slug`
+  into a regex unescaped. Complexity 4 as estimated, and the risk was where
+  predicted.
 - **T4, generate the landing page.** Same module. `build.sh` deliberately does
   not build `index.html`, so today the model transcribes it from
   `components.md` every run. **This turns out to be fully deterministic**: the

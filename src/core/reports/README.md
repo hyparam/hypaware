@@ -24,12 +24,14 @@ The prose copy goes away once T3 and T5 land.
 
 | Path | Role |
 | --- | --- |
-| `build.sh` | The renderer. Still the shell original: T3 ports it to Node. |
+| `render.js` | **The renderer.** Cross-platform Node port (T3, landed). |
+| `types.d.ts` | `RenderOptions` / `RenderResult`. |
+| `build.sh` | The superseded shell original. Kept only until T5 wires `hyp report render`, because the skill still calls it by name. |
 | `assets/style.css` | The data-report stylesheet, custom-property driven. Copied into every built page. |
 | `assets/copy-md.js` | The "Copy as Markdown" masthead action. |
-| `assets/head.html` | Favicon links plus the copy-script tag, injected into every `<head>`. |
+| `assets/head.html` | Favicon links plus the copy-script tag, inlined into every `<head>` by pandoc's `-H`. Not a page asset. |
 | `assets/favicon.svg` | Theme-aware mark. |
-| `assets/favicon.png` | 64px fallback. Safari does not render SVG favicons. |
+| `assets/favicon.png` | 64px fallback, shipped prebuilt so nothing needs `sips`. Safari does not render SVG favicons. |
 
 ## Rules
 
@@ -38,15 +40,26 @@ The prose copy goes away once T3 and T5 land.
   installed skill is self-contained and cannot reach back into this repo at
   runtime. `test/core/report-assets-canonical.test.js` holds all three copies
   byte-identical. LLP 0194 T7 removes the need for the skill copies.
-- **Do not add features to `build.sh`.** T3 ports it to
-  `src/core/reports/render.js`; anything added here has to be ported twice.
-- **It is macOS-only today.** `sed -E -i ''` is the BSD spelling and fails on
-  GNU sed, and the PNG favicon is regenerated with `sips`. T3 drops both, which
-  is what makes the Linux half of the release gate in `CLAUDE.md` pass. T3 can
-  drop `sips` outright by shipping `assets/favicon.png` as a static file, which
-  is already the case here.
-- **pandoc is a hard dependency** and the script exits 1 without it. Whether
-  the port keeps it is LLP 0193 open question 1.
+- **`build.sh` is frozen.** Fix `render.js` instead. The two are not kept in
+  sync, and the shell copy goes away with T5.
+- **pandoc is still a hard dependency** (LLP 0193 open question 1, resolved:
+  keep it, install it in CI). Nothing else shells out: the port dropped the
+  BSD-only `sed -E -i ''` and the macOS-only `sips`, which is what let the
+  renderer be covered by tests at all, since CI is `ubuntu-latest`.
+- **`rewriteHrefs` rule order is load-bearing**, and pinned by
+  `test/core/report-render-hrefs.test.js`. Its failure mode is silent: a missed
+  case ships a dead link that renders fine and breaks only when clicked. Change
+  it against the case table, never by inspection.
+
+## Verifying a change
+
+`test/core/report-render.test.js` builds a fixture tree and asserts the
+contract (no leftover `.md` hrefs, a copy action on every page, a `full.md` per
+report, back-links, theme survival). For a change to the rendering pipeline
+itself, the strongest check is still an A/B against a real tree: copy
+`~/hypaware-reports` twice, build one with `build.sh` and one with
+`renderReports`, and diff `html/`. That is how the port was accepted, and it
+came out byte-identical across five reports.
 
 ## Not yet moved
 

@@ -8,10 +8,13 @@
 # hypaware-report-to-html skill, which regenerates it from the built report set.
 # LLP 0194 T4 moves that generation in here, where it is deterministic.
 #
-# CANONICAL COPY. This file is the source of truth; the copy in a user's reports tree
-# is installed from here. It is still the shell original: LLP 0194 T3 ports it to Node
-# (src/core/reports/render.js) to drop the BSD-only `sed -i ''` and `sips` calls below,
-# which fail on Linux. Do not add features here that T3 would have to port twice.
+# SUPERSEDED, AND FROZEN. src/core/reports/render.js is the renderer now (LLP 0194 T3):
+# a cross-platform Node port, accepted by diffing its output against this script's on a
+# real reports tree, byte-identical across five reports. This copy survives only because
+# the hypaware-report-to-html skill still calls `./build.sh` by name; T5 replaces that
+# with `hyp report render` and this file goes away. Fix render.js, not this. The two are
+# NOT kept in sync, and this one cannot run on Linux (`sed -E -i ''` is the BSD spelling,
+# `sips` is macOS-only), which is why it was never covered by a test.
 set -euo pipefail
 cd "$(dirname "$0")"
 
