@@ -364,6 +364,23 @@ siblings (T5), a stylesheet link and a strings table (T7, T8), a one-time diff
 review (T9), and prose reduction against a contract that already exists in
 `authoring.md` (T10, T11).
 
+## Tracked follow-ups
+
+The tasks not done in the T12 PR each have an issue, so the plan is not the only
+record of what is outstanding:
+
+| Task | Issue |
+| --- | --- |
+| T13, retirement removes the installed surface | [#660](https://github.com/hyparam/hypaware/issues/660) |
+| T8, report branding is hardcoded to Hyperparam | [#662](https://github.com/hyparam/hypaware/issues/662) |
+| T11, report layout moves to an editable house style | [#663](https://github.com/hyparam/hypaware/issues/663) |
+| T2 part 2, deduplicate the shared skill content | [#664](https://github.com/hyparam/hypaware/issues/664) |
+
+Unrelated to this plan, found while running the suite:
+[#661](https://github.com/hyparam/hypaware/issues/661), a usage-policy fold test
+that has never passed since it was written, which is why `npm test` reports one
+failure throughout this work.
+
 ## Suggested first cut
 
 If the whole graph is too much to commit to, T1, T3, T5, and T6 alone deliver
