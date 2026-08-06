@@ -1,7 +1,7 @@
 # LLP 0194: Skills state constraints, not procedures, implementation plan
 
 **Type:** plan
-**Status:** Draft
+**Status:** Active
 **Systems:** Plugins, Reports, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
