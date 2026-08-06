@@ -5,6 +5,8 @@ description: Read the most recent HypAware usage/improvement report, work out wh
 
 # Apply a report's proposed changes locally
 
+<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is per-change approval, not the skill being hard to reach -->
+
 The usage-report skill ends every report with a `proposed-changes.md` page (a
 ranked, numbered list) and one `change-<slug>.md` file per change whose final
 section is a ready-to-apply artifact: an AGENTS.md/CLAUDE.md diff, a complete

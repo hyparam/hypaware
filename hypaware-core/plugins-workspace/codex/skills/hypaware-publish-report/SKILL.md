@@ -5,6 +5,8 @@ description: Publish a generated HypAware report (a Markdown/HTML one-pager or a
 
 # Publish a HypAware report to the server
 
+<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the explicit confirmation before publishing, not the skill being hard to reach -->
+
 `hyp report publish` sends a finished report to a HypAware server's
 org-scoped reports plane. Artifacts land under the org's archive prefix;
 every admitted member of that org sees them (visibility is uniform within an

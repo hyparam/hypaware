@@ -5,9 +5,9 @@
     "hash": "d8156bae0c4243d3"
   },
   "hypaware-apply-report-changes": {
-    "claudeOnly": 6,
-    "codexOnly": 3,
-    "hash": "cfdc3972e166dc0f"
+    "claudeOnly": 3,
+    "codexOnly": 2,
+    "hash": "25714fe0e194461e"
   },
   "hypaware-graph": {
     "claudeOnly": 0,
@@ -20,9 +20,9 @@
     "hash": "8c87a1d3e96d1766"
   },
   "hypaware-publish-report": {
-    "claudeOnly": 3,
-    "codexOnly": 1,
-    "hash": "cc3eb4a043f8ceed"
+    "claudeOnly": 0,
+    "codexOnly": 0,
+    "hash": "d8156bae0c4243d3"
   },
   "hypaware-query": {
     "claudeOnly": 3,
@@ -35,8 +35,8 @@
     "hash": "9ca7f1a1ec59e0a2"
   },
   "hypaware-report-to-html": {
-    "claudeOnly": 3,
-    "codexOnly": 1,
-    "hash": "e575c06ff3fe0ffb"
+    "claudeOnly": 0,
+    "codexOnly": 0,
+    "hash": "d8156bae0c4243d3"
   }
 }

@@ -291,6 +291,24 @@ A test asserts the trees match after generation, so the 116-line divergence in
 for the three report skills, and it is the part of this RFC that needs the
 most scrutiny.
 
+> **Decided 2026-08-06 (maintainer):** remove `disable-model-invocation` from
+> the three report skills. The product is moving toward reports being asked
+> for in the user's own words rather than by invoking a skill by name, and a
+> skill the model cannot reach cannot serve that. The fallback below is not
+> taken.
+>
+> **One precondition found while implementing it.** The claim "each is a step
+> a user takes on purpose" holds for publishing and applying, which both
+> confirm explicitly today. It did **not** hold for rendering:
+> `hypaware-report-to-html` confirms before *pushing*, but its enrichment step
+> edits the report source Markdown in place with no confirmation at all, and
+> those are source-file edits, not derived output. Ungating it as it stood
+> would have let a model rewrite a user's reports off an unrelated prompt.
+> The gate is therefore removed *with* a confirmation added to the step that
+> mutates sources, which is precisely the "the gate belongs on the act" claim
+> being honoured rather than asserted. LLP 0194 T3 and T5 move that check into
+> `hyp report render`, where it can be tested.
+
 LLP 0142 marked render, publish, and apply `disable-model-invocation` because
 each "is itself a consequential act the user should choose deliberately".
 Under this RFC they are no longer separate skills, so the key has nothing to

@@ -1,13 +1,11 @@
 ---
 name: hypaware-publish-report
-description: Publish a report to the org's HypAware server (also list, get, delete)
-disable-model-invocation: true
+description: Publish a generated HypAware report (a Markdown/HTML one-pager or a rendered folder) to a HypAware server's org-scoped reports plane with `hyp report publish`, where every admitted member of the org can read it. Use when the user says "upload the report", "publish the report to the server", "push this report to the hypaware server", "share this report with the org/team", or after a report skill finishes and the user wants it hosted centrally. Requires a server with the reports plane plus a write-capable credential (a publisher-role login or an operator-minted publish token). Also covers `hyp report list`, `hyp report get`, and `hyp report delete`. Does NOT generate reports (use hypaware-ai-usage-report), does NOT build the HTML site (use hypaware-report-to-html), and never publishes without explicit confirmation - publishing makes the report visible to the whole org.
 ---
 
 # Publish a HypAware report to the server
 
-<!-- @ref LLP 0142#user-invoked-only [implements]: user-invoked only because invoking it makes a report org-visible -->
-
+<!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the explicit confirmation before publishing, not the skill being hard to reach -->
 
 `hyp report publish` sends a finished report to a HypAware server's
 org-scoped reports plane. Artifacts land under the org's archive prefix;

@@ -73,16 +73,24 @@ for (const skill of sharedSkills(repoRoot)) {
   })
 }
 
-test('the two skills with no host-specific content stay identical', () => {
-  // These carry nothing host-specific today, so they are the ones a future "one source,
-  // two outputs" step can dedup without losing anything (LLP 0194 T2 part 2).
-  for (const skill of ['hypaware-ai-usage-report', 'hypaware-graph']) {
+test('skills recorded as fully shared stay identical across hosts', () => {
+  // A skill at 0/0 carries nothing host-specific, so it is a candidate for a future
+  // "one source, two outputs" step (LLP 0194 T2 part 2). Derived from the fixture
+  // rather than listed here, so the set grows on its own as skills converge: removing
+  // disable-model-invocation (LLP 0193 #gate-moves-to-the-command) took it from two to
+  // four by making the frontmatter identical.
+  const fullyShared = Object.keys(expected).filter(
+    (skill) => expected[skill].claudeOnly + expected[skill].codexOnly === 0,
+  )
+  assert.ok(fullyShared.length > 0, 'expected at least one fully shared skill')
+
+  for (const skill of fullyShared) {
     const record = actual[skill]
     assert.equal(
       record.claudeOnly + record.codexOnly,
       0,
-      `${skill} gained host-specific content, so it is no longer a candidate for ` +
-        `deduplication. If that is intended, update this test and re-record with: ${RERECORD}`,
+      `${skill} was fully shared and gained host-specific content, so it is no longer a ` +
+        `candidate for deduplication. If that is intended, re-record with: ${RERECORD}`,
     )
   }
 })

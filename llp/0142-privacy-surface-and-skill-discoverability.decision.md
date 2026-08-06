@@ -68,6 +68,14 @@ pipeline steps: `hypaware-publish-report` (makes a report org-visible),
 user takes on purpose after reading something; none is an answer to a
 question.
 
+**Superseded-by: [LLP 0193 #gate-moves-to-the-command](./0193-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)**
+(2026-08-06), for this paragraph only. The three report skills are now
+model-invocable: reports are meant to be asked for in the user's own words,
+and the control moved onto the consequential act itself (each confirms before
+publishing, applying, or editing report sources) rather than onto the skill's
+discoverability. The rest of this document, including the reasoning for why
+`hypaware-ignore` / `hypaware-unignore` were never in this set, stands.
+
 It does **not** cover `hypaware-ignore` / `hypaware-unignore`. For the
 session opt-out, being reachable in the user's own words *is* the feature:
 [LLP 0066](./0066-session-opt-out.spec.md) is written around the utterance

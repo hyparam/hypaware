@@ -87,9 +87,18 @@ depends on `build.sh` being absent from this repo.
 
   **So the codex tree is not derivable from the claude tree.** It contains
   knowledge the claude tree does not have. A generator that emitted one from
-  the other would delete tested privacy logic. The two byte-identical skills
-  (`hypaware-ai-usage-report`, `hypaware-graph`, ~43 KB) are the only ones
-  where "one source, two outputs" is straightforwardly true.
+  the other would delete tested privacy logic.
+
+  **Update, same day: removing `disable-model-invocation` shrank this.** Once
+  the gate went (LLP 0193 #gate-moves-to-the-command, decided by the
+  maintainer), the terse-vs-trigger-rich description split went with it, since
+  it existed only because the claude copies were gated. `hypaware-publish-report`
+  and `hypaware-report-to-html` are now **byte-identical** across hosts, and
+  `hypaware-apply-report-changes` fell from 6/3 diverging lines to 3/2 (just
+  `AskUserQuestion` vs a numbered reply). Four of the eight shared skills now
+  carry nothing host-specific, up from two, which is where "one source, two
+  outputs" is straightforwardly true. `hypaware-privacy` (11/88) remains the
+  one deliberate fork.
 
   **Revised scope, in three parts, order deliberate:**
 
@@ -191,9 +200,10 @@ depends on `build.sh` being absent from this repo.
   beats the shipped default. Complexity 3.
 - **T12, merge the skills.** `hypaware-graph` into `hypaware-query`; the four
   report skills into `hypaware-report`, with stage detail in sibling reference
-  files loaded on entry. **Blocked on the LLP 0142 gate decision.** If §5 is
-  rejected, this becomes the seven-skill fallback with a gated
-  `hypaware-report-publish`. Complexity 4.
+  files loaded on entry. **Unblocked 2026-08-06:** the maintainer decided to
+  remove `disable-model-invocation` entirely, so all four report skills are
+  model-invocable and the merged skill has no conflicting frontmatter to
+  reconcile. The seven-skill fallback is not taken. Complexity 4.
 - **T13, make retirement remove the surface.** `hypaware-sensitive-scan` is
   still installed at `~/.claude/skills/` and still advertising itself despite
   LLP 0142 retiring it. Renaming and merging skills in T12 creates more of
