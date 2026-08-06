@@ -116,26 +116,28 @@ const MARKED_FILES = new Set([
 
 /**
  * Broken references this test tolerates because a held pull request already owns
- * them: PR #461 (issue #457) names the `cli` and `reporting` anchors in LLP 0103
- * and rewraps the LLP 0135 line that split `#interactive-walkthrough` across a
- * line break. Entries are tolerated, never required, so pruning them once #461
- * lands is a cleanup and not a failure.
+ * the repair. **Empty, and the empty state is the point**: every reference in the
+ * corpus resolves, so the gate has no exceptions to read past. The last entries
+ * covered the `cli` and `reporting` anchors in LLP 0103 and the LLP 0135 line that
+ * split `#interactive-walkthrough` across a line break; PR #461 (issue #457)
+ * landed both repairs and left the entries behind, and issue #639 later read
+ * them back out as live breakage. A tolerance outlives its defect
+ * silently, so an entry is worth adding only while the pull request that removes
+ * it is open, and an entry that has stopped forgiving anything now fails the
+ * suite rather than sitting here as the last claim that a live reference is
+ * broken.
  *
  * Keyed on the file and what the annotation cites, with how many of them are
  * known, rather than on `file:line`: a line number is not a property of the
  * defect, so an unrelated edit anywhere above one of these sites used to turn a
- * tolerated reference into a suite failure, and `clients.js` and `policy.js` are
- * both edited routinely. The count is what keeps that from being a loosening. It
- * is a ceiling, so a seventh broken `LLP 0103#cli` in `clients.js` is new
+ * tolerated reference into a suite failure, and the files that carried them were
+ * edited routinely. The count is what keeps that from being a loosening. It is a
+ * ceiling, so a sixth broken `LLP 0103#cli` under a budget of five is new
  * breakage and still fails.
+ *
+ * @type {Map<string, number>}
  */
-const TOLERATED_BROKEN = new Map([
-  ['llp/0111-hyp-policy-verb.design.md  LLP 0103#cli', 2],
-  ['llp/0112-hyp-policy-verb.plan.md  LLP 0103#cli', 2],
-  ['llp/0135-install-experience-overhaul.design.md  LLP 0011#interactive-', 1],
-  ['src/core/commands/clients.js  LLP 0103#cli', 6],
-  ['src/core/commands/policy.js  LLP 0103#cli', 5],
-])
+const TOLERATED_BROKEN = new Map()
 
 /**
  * The line-independent identity of an annotation: the file it sits in and the
@@ -154,12 +156,15 @@ function refIdentity(ref) {
  * with a given identity are tolerated and every later one is not, so a new
  * occurrence cannot hide behind the known ones.
  *
+ * The ledger is the caller's, so a run can be asked afterwards which tolerances
+ * it actually needed: an entry nobody spent is a defect that healed without
+ * anyone noticing, and the stale entry left behind reads as live breakage.
+ *
  * @param {Map<string, number>} budgets
+ * @param {Map<string, number>} spent filled in with how much of each budget was used
  * @returns {(ref: { file: string, llp: string | null, docPath: string | null, anchor: string | null }) => boolean}
  */
-function toleranceSpender(budgets) {
-  /** @type {Map<string, number>} */
-  const spent = new Map()
+function toleranceSpender(budgets, spent = new Map()) {
   return ref => {
     const id = refIdentity(ref)
     const used = spent.get(id) ?? 0
@@ -336,10 +341,19 @@ test('the scan finds the corpus and its annotations', () => {
   assert.ok(INDEX.size > 100, `expected the LLP corpus, found ${INDEX.size} numbers`)
 })
 
-test('every @ref resolves to a live LLP document and one of its anchors', () => {
+/**
+ * Resolve every annotation against the corpus, spending the tolerance budget on
+ * the way. Shared so that what the gate reports and what the staleness check
+ * reads are the same pass over the same references.
+ *
+ * @param {Map<string, number>} budgets
+ * @param {Map<string, number>} spent filled in with how much of each budget was used
+ * @returns {string[]} the unforgiven breakage, formatted for a failure message
+ */
+function brokenRefs(budgets, spent) {
   /** @type {string[]} */
   const broken = []
-  const tolerated = toleranceSpender(TOLERATED_BROKEN)
+  const tolerated = toleranceSpender(budgets, spent)
   for (const ref of REFS) {
     const site = `${ref.file}:${ref.line}`
     /** @param {string} why */
@@ -365,7 +379,26 @@ test('every @ref resolves to a live LLP document and one of its anchors', () => 
     ]
     if (!candidates.some(c => fs.existsSync(c))) fail(`no such file ${ref.docPath}`)
   }
+  return broken
+}
+
+test('every @ref resolves to a live LLP document and one of its anchors', () => {
+  const broken = brokenRefs(TOLERATED_BROKEN, new Map())
   assert.deepEqual(broken, [], `${broken.length} broken @ref annotations:\n  ${broken.join('\n  ')}`)
+})
+
+// Issue #639 read the tolerance list as a list of live defects and asked for
+// repairs PR #461 had already made. A tolerance is invisible from the outside
+// once it stops being spent: the suite is green either way, so the entry
+// survives as the only remaining claim that the reference is broken. The entry
+// has to expire with the defect, and nothing but a check notices when it does
+// not.
+test('every tolerated reference is one that is still broken', () => {
+  /** @type {Map<string, number>} */
+  const spent = new Map()
+  brokenRefs(TOLERATED_BROKEN, spent)
+  const stale = [...TOLERATED_BROKEN.keys()].filter(id => (spent.get(id) ?? 0) === 0)
+  assert.deepEqual(stale, [], `${stale.length} tolerances no longer forgive anything:\n  ${stale.join('\n  ')}`)
 })
 
 test('a tolerated reference is tolerated only as often as it is listed', () => {
