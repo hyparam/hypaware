@@ -82,7 +82,9 @@ test('skills recorded as fully shared stay identical across hosts', () => {
   const fullyShared = Object.keys(expected).filter(
     (skill) => expected[skill].claudeOnly + expected[skill].codexOnly === 0,
   )
-  assert.ok(fullyShared.length > 0, 'expected at least one fully shared skill')
+  // May legitimately be empty. The T12 merge folded the four byte-identical report
+  // skills into hypaware-report, which also absorbed applying.md's host-specific
+  // AskUserQuestion line, so the merged skill diverges by 3/2 and nothing is 0/0 today.
 
   for (const skill of fullyShared) {
     const record = actual[skill]

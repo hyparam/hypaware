@@ -41,26 +41,33 @@ const { constraints } = JSON.parse(
 )
 
 /**
- * Every SKILL.md a host ships, concatenated, with whitespace runs collapsed.
+ * Every Markdown file a host's skills ship, concatenated, whitespace collapsed.
  *
- * Deliberately file-agnostic, and deliberately newline-agnostic: skill prose is
- * hard-wrapped at ~90 columns, so a constraint sentence routinely straddles a line
- * break with leading indentation on the continuation. Matching raw text would make
- * every multi-word pattern hostage to where the wrap happens to fall, and a reflow
- * during the merge would look identical to a deletion.
+ * **Not just `SKILL.md`.** A skill is its entry file plus the reference files it loads
+ * on demand, and the T12 merge moved most of the report constraints out of four
+ * `SKILL.md`s into `reviewing.md` / `rendering.md` / `publishing.md` / `applying.md`
+ * under one skill. Reading only entry files reported eight constraints as dropped when
+ * every one of them had simply moved, which is a false alarm of the worst kind: it
+ * trains people to loosen patterns during exactly the refactor the guard exists for.
+ * What must hold is that a constraint is still stated somewhere a reader reaches.
+ *
+ * Deliberately newline-agnostic too: skill prose is hard-wrapped at ~90 columns, so a
+ * constraint routinely straddles a line break, and matching raw text would make every
+ * multi-word pattern hostage to where the wrap falls.
  *
  * @param {string} skillsDir
  */
 function hostCorpus(skillsDir) {
   const dir = path.join(repoRoot, skillsDir)
-  return fs
-    .readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => path.join(dir, entry.name, 'SKILL.md'))
-    .filter((file) => fs.existsSync(file))
-    .map((file) => fs.readFileSync(file, 'utf8'))
-    .join('\n\n')
-    .replace(/\s+/g, ' ')
+  /** @type {string[]} */
+  const texts = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    for (const file of fs.readdirSync(path.join(dir, entry.name))) {
+      if (file.endsWith('.md')) texts.push(fs.readFileSync(path.join(dir, entry.name, file), 'utf8'))
+    }
+  }
+  return texts.join('\n\n').replace(/\s+/g, ' ')
 }
 
 const corpora = Object.fromEntries(

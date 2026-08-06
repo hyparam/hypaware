@@ -1,9 +1,6 @@
----
-name: hypaware-publish-report
-description: Publish a generated HypAware report (a Markdown/HTML one-pager or a rendered folder) to a HypAware server's org-scoped reports plane with `hyp report publish`, where every admitted member of the org can read it. Use when the user says "upload the report", "publish the report to the server", "push this report to the hypaware server", "share this report with the org/team", or after a report skill finishes and the user wants it hosted centrally. Requires a server with the reports plane plus a write-capable credential (a publisher-role login or an operator-minted publish token). Also covers `hyp report list`, `hyp report get`, and `hyp report delete`. Does NOT generate reports (use hypaware-ai-usage-report), does NOT build the HTML site (use hypaware-report-to-html), and never publishes without explicit confirmation - publishing makes the report visible to the whole org.
----
-
 # Publish a HypAware report to the server
+
+<!-- Stage file for the hypaware-report skill: publishing to a server, and listing/getting/deleting. -->
 
 <!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the explicit confirmation before publishing, not the skill being hard to reach -->
 
@@ -52,7 +49,7 @@ Publishing is an org-visible, durable act. Before sending anything:
   file): publish the single file. Only `.md` and `.html` are accepted as
   single files; the server stores it as `report.md` / `report.html`, no
   renaming needed on your side.
-- **A rendered folder** (e.g. `html/<slug>/` from hypaware-report-to-html):
+- **A rendered folder** (e.g. `html/<slug>/` from hypaware-report):
   publish the folder; the CLI builds the bundle itself (correct tar format,
   hashing, retry safety), so never hand-roll a tarball. The folder root MUST
   contain `report.html` or `report.md` (the entry document the server serves

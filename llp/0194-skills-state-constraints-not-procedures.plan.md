@@ -260,12 +260,36 @@ depends on `build.sh` being absent from this repo.
   out of `hypaware-ai-usage-report` and into a shipped, editable default.
   Encode the precedence rule: this run's request beats the house style, which
   beats the shipped default. Complexity 3.
-- **T12, merge the skills.** `hypaware-graph` into `hypaware-query`; the four
-  report skills into `hypaware-report`, with stage detail in sibling reference
-  files loaded on entry. **Unblocked 2026-08-06:** the maintainer decided to
-  remove `disable-model-invocation` entirely, so all four report skills are
-  model-invocable and the merged skill has no conflicting frontmatter to
-  reconcile. The seven-skill fallback is not taken. Complexity 4.
+- **T12, merge the skills. LANDED 2026-08-06.** Ten skills to **six**:
+  `hypaware-ignore`, `hypaware-privacy`, `hypaware-query`, `hypaware-reference`,
+  `hypaware-report`, `hypaware-unignore`.
+
+  The four report skills became one `hypaware-report`: a short router `SKILL.md`
+  that names the four stages and carries the rules holding across all of them,
+  with the detail in `reviewing.md`, `rendering.md`, `publishing.md`, and
+  `applying.md` loaded on entry.
+
+  <a id="t12-graph-was-already-owned"></a>**`hypaware-graph` was not merged into
+  `hypaware-query`, and should not have been.** The plan assumed claude and codex
+  owned that skill. They did not: `@hypaware/context-graph` ships it, and the
+  claude and codex copies were byte-identical duplicates carried unconditionally.
+  Folding it into `hypaware-query` would have made a fourth copy and, worse,
+  shipped graph guidance to installs with no graph plugin. The correct move was
+  to delete the two duplicates and let the plugin that provides the feature own
+  the skill that documents it, which `hypaware-query` now points at. Skill count
+  is six on an install without the graph plugin and seven with it, which is right:
+  the skill appears exactly when the feature does.
+
+  **Both guards earned their keep, and both needed their corpus widened.**
+  `skill-constraints-survive` reported eight constraints dropped; every one had
+  simply moved from a `SKILL.md` into a stage file. `skill-host-parity` reported
+  the merged skill as perfectly in sync while `applying.md` diverged freely
+  underneath it. In both cases the guard was reading entry files only, and a
+  skill is its entry file plus the reference files it loads. Widened, both are
+  green and the divergence is correctly reported as 3/2.
+
+  Complexity 4 as estimated. Nothing was lost: all 36 constraint assertions pass
+  unchanged. Complexity 4.
 - **T13, make retirement remove the surface.** `hypaware-sensitive-scan` is
   still installed at `~/.claude/skills/` and still advertising itself despite
   LLP 0142 retiring it. Renaming and merging skills in T12 creates more of

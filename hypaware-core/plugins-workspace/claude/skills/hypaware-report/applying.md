@@ -1,9 +1,6 @@
----
-name: hypaware-apply-report-changes
-description: Read the most recent HypAware usage/improvement report, work out which of its proposed changes apply to THIS machine (new/updated skills, subagents, AGENTS.md/CLAUDE.md edits, config text), present them as a numbered list for explicit approval, then implement only the approved ones from the report's ready-to-apply artifacts. Use when the user says "apply the report's recommendations", "implement the proposed changes", "act on the latest report", "what does the report say I should change here", or after a report run when the user wants the changes made. Reads reports from ~/hypaware-reports or a server's reports plane via `hyp report list` / `hyp report get`. Does NOT generate reports (hypaware-ai-usage-report), does NOT publish them (hypaware-publish-report), and NEVER applies anything without per-change approval.
----
-
 # Apply a report's proposed changes locally
+
+<!-- Stage file for the hypaware-report skill: applying a report's proposed changes to this machine. -->
 
 <!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is per-change approval, not the skill being hard to reach -->
 

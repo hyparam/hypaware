@@ -95,7 +95,27 @@ export function divergenceReport(repoRoot) {
  * @param {string} skill
  */
 export function skillLineSets(repoRoot, skill) {
-  const claude = fs.readFileSync(path.join(repoRoot, CLAUDE_SKILLS, skill, 'SKILL.md'), 'utf8')
-  const codex = fs.readFileSync(path.join(repoRoot, CODEX_SKILLS, skill, 'SKILL.md'), 'utf8')
+  const claude = skillText(path.join(repoRoot, CLAUDE_SKILLS, skill))
+  const codex = skillText(path.join(repoRoot, CODEX_SKILLS, skill))
   return { claudeLines: linesOnlyIn(claude, codex), codexLines: linesOnlyIn(codex, claude) }
+}
+
+/**
+ * A skill's whole Markdown surface, not just its entry file.
+ *
+ * The T12 merge moved most report content into stage files (`reviewing.md`,
+ * `rendering.md`, `publishing.md`, `applying.md`) under one skill. Comparing only
+ * `SKILL.md` would have reported the merged skill as perfectly in sync while its stage
+ * files drifted freely, which is the exact failure this guard exists to prevent.
+ *
+ * @param {string} skillDir
+ * @returns {string}
+ */
+function skillText(skillDir) {
+  return fs
+    .readdirSync(skillDir)
+    .filter((name) => name.endsWith('.md'))
+    .sort()
+    .map((name) => fs.readFileSync(path.join(skillDir, name), 'utf8'))
+    .join('\n\n')
 }

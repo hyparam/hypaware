@@ -8,7 +8,7 @@
  *
  * The renderer's assets ship three times: once as the repo-owned canonical copy under
  * src/core/reports/assets/, and once inside each host's bundled
- * hypaware-report-to-html skill (claude and codex), because an installed skill is
+ * hypaware-report skill (claude and codex), because an installed skill is
  * self-contained and cannot reach back into this repo at runtime. That is three copies
  * of the same bytes, which is exactly the shape that drifted before: on 2026-08-06 the
  * canonical stylesheet and the one in the user's live reports tree had diverged, and
@@ -31,8 +31,8 @@ const repoRoot = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), 
 const CANONICAL_DIR = path.join(repoRoot, 'src/core/reports/assets')
 
 const SKILL_ASSET_DIRS = [
-  'hypaware-core/plugins-workspace/claude/skills/hypaware-report-to-html/assets',
-  'hypaware-core/plugins-workspace/codex/skills/hypaware-report-to-html/assets',
+  'hypaware-core/plugins-workspace/claude/skills/hypaware-report/assets',
+  'hypaware-core/plugins-workspace/codex/skills/hypaware-report/assets',
 ]
 
 /** Every asset the renderer installs into a built page. */

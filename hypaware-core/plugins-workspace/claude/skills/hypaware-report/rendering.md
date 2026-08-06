@@ -1,9 +1,6 @@
----
-name: hypaware-report-to-html
-description: Render the Markdown HypAware reports under hypaware-reports/ into a static HTML site: enrich the report Markdown with the data-report component vocabulary (metric cards, charts, callouts), run `hyp report render`, and regenerate the top-level landing page. Use when the user says "convert the reports to HTML", "build/render the report site", "rebuild the HTML", "publish the reports", "update the reports landing page / index", or wants to preview or GitHub-Pages the reports. Operates on the ~/hypaware-reports git repo only. Does NOT run any report skill, does NOT touch local HypAware recordings, and does NOT push to the remote unless the user explicitly asks.
----
-
 # Render HypAware reports to HTML
+
+<!-- Stage file for the hypaware-report skill: enriching report Markdown and rendering the HTML site. -->
 
 <!-- @ref LLP 0193#gate-moves-to-the-command [implements]: model-invocable on purpose; the control is the confirmation before step 3 edits report sources, not the skill being hard to reach -->
 <!-- @ref LLP 0193#constraints-not-layout [constrained-by]: this skill carries the judgment half of rendering; every mechanical step is `hyp report render` -->

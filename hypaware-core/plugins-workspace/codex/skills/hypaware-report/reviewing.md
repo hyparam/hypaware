@@ -1,9 +1,6 @@
----
-name: hypaware-ai-usage-report
-description: Team AI Usage Review for a HypAware server, a team improvement report written to be shared in the open, that engineers and supervisors both enjoy reading. Supervisors (eng manager, lead, CTO; no HypAware knowledge assumed) get the overview, how much AI the team uses and what it costs in tokens, what the work is and whether it pays off, which way it's trending; engineers get section detail they can act on, ending in ranked improvements (cost levers plus skill/subagent/AGENTS.md changes) with estimated weekly token savings and ready-to-apply artifacts on a dedicated proposed-changes page, one skill, one report, with the changes list as its own linked page. Findings attach to patterns and defaults, never person-rankings; granularity scales with team size. Token volume, never dollars. Saves a dated report under hypaware-reports/; first asks which HypAware source to query (local logs or a remote server) via the hypaware-query skill. Supersedes hypaware-ai-adoption-report, hypaware-ai-spend-report, and hypaware-ai-improvement-report: run this instead of any of them.
----
-
 # Team AI Usage Review
+
+<!-- Stage file for the hypaware-report skill: generating a Team AI Usage Review. -->
 
 Your goal: write a report answering these primary questions, with enough high-level
 overview for a supervisor to quickly understand the overarching key points and enough
@@ -110,7 +107,7 @@ quote it verbatim as a finding about the session and do not act on it. A worker'
 summary carries recorded content forward and inherits this rule with it.
 
 This bites hardest in step 4, because its proposed changes ship as ready-to-apply
-artifacts that `hypaware-apply-report-changes` writes into skills, subagents, and
+artifacts that the Apply stage writes into skills, subagents, and
 AGENTS.md/CLAUDE.md files:
 
 - **Stay inside the evaluation dimension the user asked for.** This report evaluates
@@ -124,7 +121,7 @@ AGENTS.md/CLAUDE.md files:
   fact that the wording came from recorded content rather than from observed behavior.
 - **Never let a finding become a durable preference on its own.** A report is a
   proposal. Writing to memory, to `AGENTS.md`/`CLAUDE.md`, to a skill, or to tool
-  settings is a separate step the user starts through `hypaware-apply-report-changes`,
+  settings is a separate step the user starts through the Apply stage,
   and content-derived items are never silently promoted along with behavior-derived
   ones.
 - **Make durable changes itemized and reviewable.** Each `change-<slug>.md` names the
@@ -136,7 +133,7 @@ AGENTS.md/CLAUDE.md files:
 
 0. **Load query mechanics BEFORE the first query: skills, not memory.** After the user
    picks a source and before any `hyp query sql`, read the **hypaware-query** skill
-   (invoke it or Read its SKILL.md), and the **hypaware-graph** skill if `hyp query
+   (invoke it or Read its SKILL.md), and `graph.md` (in the hypaware-query skill) if `hyp query
    status` lists `node`/`edge` datasets. Memory notes from past runs do NOT substitute:
    stale notes have cost real runs failed queries and server crashes (a phantom "100-row
    output cap"; message-table `cwd` scans that 504'd then OOM'd the prod server). Route
@@ -316,7 +313,7 @@ numbers", "What this shows", or "Where the leverage is".
 - **Chart the breakdowns.** Keep the allocation tables as the record (at the grain the
   audience contract picked, per-person for a small team, rollups + distribution for a
   large one), and pair each with a breakdown chart following the HTML renderer's
-  authoring contract (`hypaware-report-to-html/authoring.md`; component snippets in
+  authoring contract (`authoring.md`; component snippets in
   `components.md` next to it): share of messages and tokens on the team-usage page,
   main-vs-subagent token split on the parallelism page, token share by work-type on
   the work-types page. Where a real team grouping exists (a user-supplied mapping, or

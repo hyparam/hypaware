@@ -1,6 +1,6 @@
 # Visual system & component vocabulary
 
-Reference for `hypaware-report-to-html`. The look of every rendered report is carried by
+Reference for the Render stage. The look of every rendered report is carried by
 `assets/style.css` (a self-contained **data-report** system: system type, hairline rules,
 ink-first color, tabular figures, `prefers-color-scheme` dark mode, and a print
 stylesheet) plus the raw-HTML components below. No build-time tokens: just reference

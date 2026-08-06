@@ -1,9 +1,9 @@
 # Authoring reports for the data-report renderer
 
-**Audience: the report-GENERATING skills** (`hypaware-ai-usage-report`, the merged
+**Audience: the report-GENERATING skills** (the Review stage, the merged
 team review, and `-security-report`; legacy adoption/spend/improvement one-pagers
 follow the same rules), follow this while writing
-the report Markdown. The renderer (`hypaware-report-to-html`) ships a stylesheet that
+the report Markdown. The renderer (the Render stage) ships a stylesheet that
 styles two kinds of content: standard Markdown (automatic) and a raw-HTML component
 vocabulary (opt-in, catalog in [`components.md`](components.md)). A report written
 without the patterns below renders as a plain text document; one written with them
