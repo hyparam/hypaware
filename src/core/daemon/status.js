@@ -112,13 +112,8 @@ const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
  * @ref LLP 0086#endpoint-discovery [implements]: the daemon's live bound port is read from status.json sources[].details, not guessed
  */
 export function gatewaySourceDetails(sources) {
-  const list = Array.isArray(sources) ? sources : []
-  const source =
-    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
-    list.find((s) => s && s.name === 'ai-gateway')
-  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
-  if (!rawDetails) return undefined
-  const details = /** @type {Record<string, unknown>} */ (rawDetails)
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return undefined
   const port = details.port
   if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
@@ -129,6 +124,55 @@ export function gatewaySourceDetails(sources) {
       ? details.listen_fallback_from
       : undefined
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
+}
+
+/**
+ * The gateway source's `status()` details as the daemon captured them, before
+ * any "is it bound?" filtering. `gatewaySourceDetails` above answers "where do
+ * I send traffic?" and so returns nothing for a gateway that never bound; the
+ * idle checks below need the details of exactly that case.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {Record<string, unknown> | undefined}
+ */
+function gatewaySourceRawDetails(sources) {
+  const list = Array.isArray(sources) ? sources : []
+  const source =
+    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
+    list.find((s) => s && s.name === 'ai-gateway')
+  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
+  if (!rawDetails) return undefined
+  return /** @type {Record<string, unknown>} */ (rawDetails)
+}
+
+/**
+ * Names of the upstreams a *deliberately idle* gateway was nonetheless
+ * configured with, or `undefined` when the gateway is bound, absent, or idle
+ * for the reason it is allowed to be idle.
+ *
+ * An upstream-less gateway is a legitimate config (LLP 0120: hermes composes
+ * the plugin for its materializer alone and contributes no upstream), so the
+ * source idles instead of failing to start. That trade turns one class of
+ * misconfiguration silent: a config that *did* list upstreams and lost them
+ * all to `compileUpstreams` (a `url =` where `base_url` was meant is dropped
+ * without complaint, and `diagnoseV1Config`'s `gateway_missing_*_upstream`
+ * check does not fire for that shape) also idles, reporting `started` and
+ * `healthy` while the user's client gets ECONNREFUSED.
+ *
+ * `details.upstreams` is what separates them: the gateway publishes the *raw*
+ * configured names, pre-compile, so hermes-only yields `[]` and a dropped
+ * upstream yields the name that vanished.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {string[] | undefined}
+ */
+function gatewayIdleWithConfiguredUpstreams(sources) {
+  const details = gatewaySourceRawDetails(sources)
+  if (!details || details.listening !== false) return undefined
+  const upstreams = details.upstreams
+  if (!Array.isArray(upstreams)) return undefined
+  const names = upstreams.filter((u) => typeof u === 'string' && u.length > 0)
+  return names.length > 0 ? /** @type {string[]} */ (names) : undefined
 }
 
 /**
@@ -596,6 +640,30 @@ export async function collectHypAwareStatus(opts = {}) {
       kind: 'gateway_port_fallback',
       message: `the gateway's default listen ${from} was taken at boot - it fell back to an ephemeral bind on port ${liveGatewayPort}; anything pointed at the default port is talking to the process that holds it`,
       repair: [`free ${from} and restart the daemon - attached clients re-point automatically`],
+    })
+  }
+  const idleGatewayUpstreams = daemon.running
+    ? gatewayIdleWithConfiguredUpstreams(daemonStatusFile?.sources)
+    : undefined
+  if (idleGatewayUpstreams) {
+    // The gateway bound nothing while the config named upstreams it wanted
+    // proxied: every one was dropped at compile, so there is no listener and
+    // no error either. Before the source was allowed to idle this was a source
+    // start failure and `hyp status` said `[failed]`; the same install must not
+    // now read `[started]` / `healthy` with the reason living only in a log
+    // line. Non-degrading like `gateway_port_fallback`: an install that
+    // *wanted* no upstream (hermes-only) reports no configured upstreams here
+    // and never reaches this branch, so it stays healthy and silent.
+    // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway is listening" is readable from status.json steadily, not only from a boot-time log line
+    const list = idleGatewayUpstreams.join(', ')
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'gateway_idle_no_upstreams',
+      message: `the gateway is running but listening on nothing: ${idleGatewayUpstreams.length === 1 ? 'upstream' : 'upstreams'} ${list} ${idleGatewayUpstreams.length === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs a 'base_url') - clients will get connection refused`,
+      repair: [
+        `hyp config validate  # every upstream needs a name and a base_url`,
+        `hyp daemon restart`,
+      ],
     })
   }
   /** @type {ClientAttachReport[]} */

@@ -99,6 +99,7 @@ export type StatusDiagnosticKind =
   | 'client_attach_stale'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
+  | 'gateway_idle_no_upstreams'
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'

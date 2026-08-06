@@ -226,8 +226,93 @@ test('an idle gateway binds once a reload brings an upstream', async () => {
   }
 })
 
-/** @param {Record<string, unknown>} config */
-function fakeCtx(config) {
+// The reverse direction, pinned deliberately: a reload that removes every
+// upstream tears a live listener down and idles, which silently ends capture
+// for clients already attached to that port. It is the same trade #649 made
+// on the way in (an upstream-less gateway is a config, not a failure), and it
+// is why core warns when the config named upstreams and none survived.
+test('a reload that removes every upstream tears the listener down and idles', async () => {
+  const upstream = await startEchoUpstream('still-here')
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    const bound = await source.status()
+    assert.ok(bound.details?.port, 'the source bound a port before the reload')
+    const port = bound.details.port
+
+    // No throw: dropping to zero upstreams is the same valid state a
+    // hermes-only install boots into.
+    assert.equal(await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] })), undefined)
+
+    const idle = await source.status()
+    assert.equal(idle.state, 'ready', 'idling after a reload is not an error state')
+    assert.equal(idle.details?.listening, false, 'the listener is gone')
+    assert.equal(idle.details?.port, undefined, 'and no port is advertised for it')
+    assert.match(String(idle.message ?? ''), /no upstreams/)
+    // The teardown is real, not just unadvertised: an attached client pointed
+    // at the old port now gets a connection error, with nothing proxied.
+    await assert.rejects(fetchText(`http://127.0.0.1:${port}/anything`))
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// `details.upstreams` is what core's `gateway_idle_no_upstreams` diagnostic
+// reads to tell "configured with nothing" from "configured and dropped", so it
+// has to describe the config in force, not the one the source booted with.
+test('status() reports the reloaded config upstreams, not the boot-time ones', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    assert.deepEqual((await source.status()).details?.upstreams, [])
+    // `url` where `base_url` was meant: `compileUpstreams` drops the entry, so
+    // the source stays idle, but the name the user wrote must still show up.
+    await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'anthropic', url: 'https://x' }] }))
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'a dropped upstream leaves the source idle')
+    assert.deepEqual(status.details?.upstreams, ['anthropic'], 'and status names what the config asked for')
+  } finally {
+    await source.stop()
+  }
+})
+
+// Two configs reach the same empty routing table and they are not the same
+// event, so they must not log at the same volume: one is what hermes asked
+// for, the other lost every upstream it named.
+test('the idle log is a warning only when configured upstreams were dropped', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const hermesOnly = await createStartSource(createGatewayState())(fakeCtx({ upstreams: [] }, logged))
+  await hermesOnly.stop()
+  const idleLog = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(idleLog, 'the idle boot is logged')
+  assert.equal(idleLog.level, 'info', 'a config that wanted no upstream is not a problem')
+
+  logged.length = 0
+  const dropped = await createStartSource(createGatewayState())(fakeCtx({
+    upstreams: [{ name: 'anthropic', url: 'https://api.anthropic.com' }],
+  }, logged))
+  await dropped.stop()
+  const warned = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(warned, 'the idle boot is logged')
+  assert.equal(warned.level, 'warn', 'losing every configured upstream is a problem')
+  assert.equal(warned.attrs.configured_upstreams, 1)
+  assert.deepEqual(warned.attrs.configured_upstream_names, ['anthropic'])
+})
+
+/**
+ * @param {Record<string, unknown>} config
+ * @param {{ level: string, event: string, attrs: any }[]} [logged]
+ */
+function fakeCtx(config, logged) {
+  /** @param {string} level */
+  const record = (level) => (/** @type {string} */ event, /** @type {any} */ attrs) => {
+    logged?.push({ level, event, attrs })
+  }
   return /** @type {any} */ ({
     config,
     storage: {
@@ -237,10 +322,10 @@ function fakeCtx(config) {
       async appendRows() {},
     },
     log: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
     },
   })
 }

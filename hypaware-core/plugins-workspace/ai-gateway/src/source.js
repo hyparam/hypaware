@@ -54,6 +54,15 @@ export function createStartSource(state) {
     // {@link launchListener}.
     let proxy = await launchListener(ctx, state, liveState)
 
+    // The config `status()` reports on, not the one this source booted with.
+    // `reload()` hands the daemon's new context to the listener but the
+    // closure above keeps the boot-time `ctx` forever, so reading it would
+    // publish a stale `details.upstreams` after every reload. Core's
+    // `gateway_idle_no_upstreams` diagnostic reads exactly that field to
+    // tell "hermes-only, correctly idle" from "an upstream was dropped", so
+    // it has to describe the config in force now.
+    let activeCtx = ctx
+
     return {
       async status() {
         /** @type {SourceStatus} */
@@ -65,7 +74,12 @@ export function createStartSource(state) {
             // (core `daemon/status.js`) reads "no reachable gateway here" off
             // the status file for a bind that never happened.
             ...(proxy ? { host: proxy.host, port: proxy.port } : { listening: false }),
-            upstreams: readConfiguredUpstreamNames(ctx),
+            // Raw configured names, pre-compile, deliberately: an entry the
+            // compiler dropped (a `url =` where `base_url` was meant) still
+            // appears here, which is what lets core see the difference
+            // between a gateway with nothing to proxy and a gateway whose
+            // upstream fell out of the routing table.
+            upstreams: readConfiguredUpstreamNames(activeCtx),
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
             // @ref LLP 0066#ephemeral: surface the live opt-out count so an
@@ -98,6 +112,7 @@ export function createStartSource(state) {
         await proxy?.stop()
         state.listen = undefined
         proxy = await launchListener(nextCtx, state, liveState)
+        activeCtx = nextCtx
       },
 
       async stop() {
@@ -147,10 +162,28 @@ async function launchListener(ctx, state, liveState) {
   const upstreams = mergeUpstreams(config.upstreams, state)
   if (upstreams.length === 0) {
     liveState.listenFallbackFrom = undefined
-    ctx.log.info('aigw.idle_no_upstreams', {
-      [Attr.PLUGIN]: PLUGIN_NAME,
-      registered_presets: state.presets.size,
-    })
+    // Two configs reach an empty routing table and they are not the same
+    // event. A hermes-only install asked for no upstream at all: idle is the
+    // outcome it wanted, and `info` is the right volume. A config that listed
+    // upstreams and still compiled to none lost every one of them to
+    // `compileUpstreams` (a missing or misspelled `base_url` is dropped
+    // silently), so the operator is going to get ECONNREFUSED from a gateway
+    // that reports itself started. Name the entries that vanished, at `warn`.
+    const configured = readConfiguredUpstreams(ctx)
+    if (configured.count > 0) {
+      ctx.log.warn('aigw.idle_no_upstreams', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        registered_presets: state.presets.size,
+        configured_upstreams: configured.count,
+        configured_upstream_names: configured.names,
+        reason: 'every configured upstream was dropped at compile: check base_url on each entry',
+      })
+    } else {
+      ctx.log.info('aigw.idle_no_upstreams', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        registered_presets: state.presets.size,
+      })
+    }
     return undefined
   }
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
@@ -334,8 +367,22 @@ export function mergeUpstreams(configUpstreams, state) {
  * @returns {string[]}
  */
 function readConfiguredUpstreamNames(ctx) {
+  return readConfiguredUpstreams(ctx).names
+}
+
+/**
+ * Both halves of "what did the config ask for?": how many upstream entries it
+ * listed at all, and the names among them. The count is the wider signal (an
+ * entry with no `name` still counts), so the idle log can be loud about a
+ * config that listed upstreams and compiled to none even when the names are
+ * unusable.
+ *
+ * @param {PluginActivationContext} ctx
+ * @returns {{ count: number, names: string[] }}
+ */
+function readConfiguredUpstreams(ctx) {
   const raw = /** @type {Record<string, unknown>} */ (ctx.config ?? {}).upstreams
-  if (!Array.isArray(raw)) return []
+  if (!Array.isArray(raw)) return { count: 0, names: [] }
   /** @type {string[]} */
   const out = []
   for (const entry of raw) {
@@ -344,7 +391,7 @@ function readConfiguredUpstreamNames(ctx) {
       if (typeof name === 'string' && name.length > 0) out.push(name)
     }
   }
-  return out
+  return { count: raw.length, names: out }
 }
 
 /**
