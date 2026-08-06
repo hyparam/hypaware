@@ -125,6 +125,17 @@ depends on `build.sh` being absent from this repo.
   directory is more honest than generating codex content from under `claude/`.
   Decide before writing a generator, not after.
 
+  <a id="t2-part-2-waits-for-t12"></a>**Part 2 should follow T12, not precede
+  it.** The gate removal doubled the deduplicable surface to ~80 KB, but every
+  one of the four fully-shared skills is slated to stop existing in its current
+  form: `hypaware-graph` merges into `hypaware-query`, and
+  `hypaware-ai-usage-report`, `hypaware-publish-report`, and
+  `hypaware-report-to-html` all merge into `hypaware-report` (the last after
+  T10 cuts it to roughly 8 KB). A generator built now would target files that
+  T12 deletes, and its host-specific transform table would be written against
+  a file set about to change. Part 1's parity guard is what carries the value
+  in the meantime: it makes drift visible without betting on the file layout.
+
   Complexity 2 for part 1, which is mechanical. Parts 2 and 3 are a design
   decision, not a coding task, and should not start until part 1 has run.
 
