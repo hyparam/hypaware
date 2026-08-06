@@ -232,11 +232,7 @@ export async function activate(ctx) {
     'hypaware-query',
     'hypaware-reference',
     'hypaware-privacy',
-    'hypaware-graph',
-    'hypaware-ai-usage-report',
-    'hypaware-report-to-html',
-    'hypaware-publish-report',
-    'hypaware-apply-report-changes',
+    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,
