@@ -1,0 +1,213 @@
+# LLP 0194: Skills state constraints, not procedures, implementation plan
+
+**Type:** plan
+**Status:** Draft
+**Systems:** Plugins, Reports, CLI
+**Author:** Brendan / Claude
+**Date:** 2026-08-06
+**Related:** LLP 0142, LLP 0155, LLP 0193
+
+> [LLP 0193](./0193-skills-state-constraints-not-procedures.rfc.md) proposes
+> shipping the report renderer as code, reorganising the skill surface by
+> question rather than pipeline stage, splitting taste into three owned layers,
+> and generating the codex tree. This turns that into a fourteen-task graph
+> ordered so the RFC's unresolved open questions block as little work as
+> possible.
+
+## Sequencing principle
+
+**The skill merge is what the complaint was about, and it comes last on
+purpose.** Merging four 25 KB skills before removing their mechanical content
+produces one 60 KB skill, which is the same problem with fewer files. Every
+kilobyte the renderer stops narrating is a kilobyte the merged skill never has
+to carry, so the mechanics move first and the merge becomes cheap.
+
+The other ordering constraint is the RFC's open questions. Waves 1 to 3 are
+correct under every resolution of all four, so they can start now. Only T12
+is genuinely blocked, on the LLP 0142 gate decision
+([LLP 0193 #gate-moves-to-the-command](./0193-skills-state-constraints-not-procedures.rfc.md#gate-moves-to-the-command)).
+
+## What was verified against the tree, and what was not
+
+Verified on 2026-08-06:
+
+- **The renderer to be ported is 158 lines** at `~/hypaware-reports/build.sh`,
+  untracked by this repo, and implements every mechanism the skill narrates.
+- **Every asset it needs is already shipped** in
+  `hypaware-core/plugins-workspace/claude/skills/hypaware-report-to-html/assets/`:
+  `style.css`, `favicon.svg`, `favicon.png`, `copy-md.js`, `head.html`.
+  `build.sh` is the only missing piece.
+- **The command seam exists.** `src/core/cli/report_commands.js` is 505 lines
+  with four `runReport*` exports; `src/core/cli/core_commands.js:552-600`
+  registers the `report` group and its four subcommands.
+- **There is already a test file to extend**,
+  `test/core/report-commands.test.js`. Smoke flows are flat modules in
+  `hypaware-core/smoke/flows/`.
+- **The metric-grid is regular and machine-parseable**, which is what makes T4
+  possible: `<div class="metric is-warn">` wrapping `<p class="label">`,
+  `<div class="value">9.01<small>B</small></div>`, `<p class="note">`.
+- **Portability blockers are two**: `sed -E -i ''` (BSD spelling, fails on GNU
+  sed) and `sips` (macOS-only, used once to regenerate the PNG favicon).
+- **pandoc is installed on this machine** (`/opt/homebrew/bin/pandoc`), so
+  keeping it is not blocked locally. Whether CI has it is not verified.
+
+Not verified, and therefore not assumed by any task below: which side of the
+116-line `hypaware-privacy` claude/codex divergence is correct, where branding
+strings should live in the config schema, and whether any existing smoke
+depends on `build.sh` being absent from this repo.
+
+## The task graph
+
+### Wave 1 (deps `[]`), two-wide
+
+- **T1, vendor the renderer and its assets.** Move `build.sh` and the five
+  assets into this repo as the canonical copies, under a new
+  `src/core/reports/`. No behaviour change and no porting yet: this only
+  establishes that the repo owns the renderer, which every later task depends
+  on. Complexity 1.
+- **T2, reconcile and generate the codex skill tree.** Independent of the
+  entire report pipeline and the largest immediate maintenance win, so it does
+  not wait. Three parts: decide the correct side of each divergence
+  (`hypaware-privacy` 116 lines, `hypaware-apply-report-changes` 11,
+  `hypaware-query` 6, `hypaware-publish-report` 6, `hypaware-report-to-html` 6,
+  `hypaware-reference` 2), add a pack-time generation step from the claude
+  sources, and add a test asserting the trees match after generation. The
+  known-legitimate deltas are `disable-model-invocation` (no codex equivalent,
+  LLP 0142) and the claude-only `hypaware-ignore` / `hypaware-unignore`.
+  Complexity 3, entirely because the privacy divergence needs a human call
+  about which behaviour is correct, not because the generation is hard.
+
+### Wave 2 (deps `[T1]`), two-wide
+
+- **T3, port the renderer to Node.** `src/core/reports/render.js`. The
+  substance of the RFC's §1. Drop `sips` by shipping the already-existing
+  `favicon.png` as a static asset rather than regenerating it. Replace the four
+  BSD `sed` expressions in `rewrite_hrefs` with explicit rewriting. Keep pandoc
+  as a child process for now, deferring RFC open question 1. Complexity 4, see
+  below.
+- **T4, generate the landing page.** Same module. `build.sh` deliberately does
+  not build `index.html`, so today the model transcribes it from
+  `components.md` every run. **This turns out to be fully deterministic**: the
+  metric-grid is regular HTML, and the skill's own rule is to take the first
+  three or four figures in source order keeping each value and judgment exactly.
+  The one judgment-flavoured instruction, compressing labels to two to four
+  words, is dropped in favour of using the metric's own label verbatim, which
+  is already model-authored display copy. No manifest input is needed and no
+  model involvement remains. Complexity 3.
+
+### Wave 3 (deps `[T3, T4]`), two-wide
+
+- **T5, wire up `hyp report render`.** Add `runReportRender` to
+  `report_commands.js` and register it in `core_commands.js` beside its four
+  siblings. **Note an asymmetry worth deciding explicitly:** LLP 0155 built the
+  `report` group around "there is no local reports plane; `--remote` selects a
+  server". `render` is purely local and takes no `--remote`, so it is the first
+  member of that group that is not a REST call. Either it joins the group as a
+  documented local build step, or it becomes a sibling top-level command.
+  Complexity 2, plus one decision.
+- **T6, tests.** Traditional tests for the deterministic logic, which is
+  exactly what `CLAUDE.md` asks for: a table-driven test over `rewrite_hrefs`
+  covering own-section, cross-report one-pager, cross-report section, and
+  fragment-bearing links in both index and section modes; metric-grid
+  extraction; doc-label derivation from a slug. Extend
+  `test/core/report-commands.test.js`. Add a hermetic smoke `report_render`
+  building a fixture reports tree in a temp directory and asserting the
+  verification contract (no leftover `.md` hrefs in built pages, a copy action
+  on every page, one `full.md` per report, a back-link on every report).
+  Complexity 3. **Blocks on a decision if CI lacks pandoc**, which is RFC open
+  question 1 arriving early.
+
+### Wave 4 (deps `[T5]`), three-wide
+
+- **T7, the theme layer.** `assets/theme.css`, user-owned, never overwritten,
+  linked after the base sheet so the cascade resolves it. The base stays
+  command-owned and is refreshed every run. Cheap because `style.css` is
+  already custom-property driven. Complexity 2.
+- **T8, branding config.** Extract the hardcoded strings: the brand name in
+  `masthead()`, the doc-label wording, and the landing page's title,
+  standfirst, and confidentiality notice. Defaults preserve today's output
+  exactly. Complexity 2, plus RFC open question 2 on where they live.
+- **T9, migrate the live tree.** `~/hypaware-reports/assets/style.css` has
+  already drifted from the skill's canonical copy. Someone has to look at the
+  diff and decide whether it is a customization (move it to `theme.css`) or
+  rot (discard it). This is a one-time judgment call that cannot be automated,
+  and it is the concrete instance of the undecidable overwrite problem the RFC
+  describes. Complexity 2.
+
+### Wave 5 (deps `[T7, T8]`), four-wide
+
+- **T10, rewrite `hypaware-report-to-html` down to judgment.** With mechanics,
+  landing page, and verification all in code, what remains is the enrichment
+  contract: the Phase A inventory, the design bar, the hard rules about numbers
+  tracing to the report's own text, judgment colours never attaching to a named
+  person, and artifacts rendering verbatim. Expect roughly 27 KB to under 8 KB.
+  Complexity 3.
+- **T11, the house style document.** Move block order, heading vocabulary,
+  length budget, bullet shape, and whether ranked changes get their own page
+  out of `hypaware-ai-usage-report` and into a shipped, editable default.
+  Encode the precedence rule: this run's request beats the house style, which
+  beats the shipped default. Complexity 3.
+- **T12, merge the skills.** `hypaware-graph` into `hypaware-query`; the four
+  report skills into `hypaware-report`, with stage detail in sibling reference
+  files loaded on entry. **Blocked on the LLP 0142 gate decision.** If §5 is
+  rejected, this becomes the seven-skill fallback with a gated
+  `hypaware-report-publish`. Complexity 4.
+- **T13, make retirement remove the surface.** `hypaware-sensitive-scan` is
+  still installed at `~/.claude/skills/` and still advertising itself despite
+  LLP 0142 retiring it. Renaming and merging skills in T12 creates more of
+  these, so attach or reconfigure needs a removal path before T12 lands, not
+  after. Complexity 3.
+
+### Wave 6 (deps `[T12]`)
+
+- **T14, LLP bookkeeping.** Accept 0193 and append `Superseded-by: LLP 0193`
+  to LLP 0142 #user-invoked-only, which the RFC deliberately left off while it
+  was a Draft. Extend LLP 0155 with the render command, or split it out if T5
+  decides render is not a member of the `report` group. Add `@ref` annotations
+  to the new code. Check LLP 0102 and LLP 0107 still describe attach correctly
+  after T13. Run `/ref-check`.
+
+## The hard parts, by name
+
+**T3 (port the renderer): 4.** The risk is concentrated in `rewrite_hrefs`,
+not in the pandoc plumbing. It is four regexes over emitted HTML handling six
+distinct link shapes across two page kinds (own section, sibling one-pager,
+other report's section, back-reference to own one-pager, fragment-bearing
+variants of each), and its failure mode is silent: a missed case ships a page
+with a dead `.md` link that renders fine and only breaks when clicked. The
+current script's own comments show the case analysis was hard-won. Porting it
+without a test table first is how the cases get lost, which is why T6 exists
+and why the table is specified rather than left to judgment.
+
+**T12 (merge the skills): 4.** Not mechanically hard, but it is the task where
+content gets silently dropped. Four skills carry constraints that must survive
+verbatim into the merged skill, and the ones most easily lost are the ones that
+read like trivia: the COALESCE trap that silently zeroed 25,581,312 OpenAI
+cache-read tokens, the one-carrier rule from LLP 0035, never grouping or
+row-fetching wide content columns on the messages table at scale, one remote
+worker at a time, and captured-content-is-data. Losing any of those produces a
+confidently wrong report or a downed server, and no test catches it. T12 should
+start from an explicit inventory of constraints to preserve, checked off
+against the merged result.
+
+**T2 (reconcile the codex tree): 3.** The generation and the equality test are
+easy. Adjudicating 116 lines of `hypaware-privacy` divergence is not, because
+that skill implements a spec (LLP 0100) with real privacy consequences, and the
+drift may mean the two hosts have been giving users different answers about
+whether their recorded data can be purged. Read LLP 0100 and LLP 0142 before
+picking a side.
+
+Everything else is mechanical: vendoring files (T1), deterministic extraction
+from regular markup (T4), a command registration mirroring four existing
+siblings (T5), a stylesheet link and a strings table (T7, T8), a one-time diff
+review (T9), and prose reduction against a contract that already exists in
+`authoring.md` (T10, T11).
+
+## Suggested first cut
+
+If the whole graph is too much to commit to, T1, T3, T5, and T6 alone deliver
+the RFC's core claim: the renderer becomes tested, cross-platform code, the
+skill stops carrying repair instructions for a script it cannot version, and
+the Linux half of the `CLAUDE.md` release gate starts passing. T2 is worth
+pairing with them because it is unrelated, low-risk, and halves the ongoing
+maintenance cost of every skill edit.

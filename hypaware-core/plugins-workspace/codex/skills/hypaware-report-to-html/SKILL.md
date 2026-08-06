@@ -48,6 +48,12 @@ Both are specified under **Visual system** below.
   **canonical data-report stylesheet** shipped with this skill (see step 2 below): it's
   the shared stylesheet every built page and the landing page reference.
 
+> **Upstream source.** `build.sh` and this skill's `assets/` are now owned by the
+> hypaware repo at `src/core/reports/`, and the bundled copies here are held
+> byte-identical to it by a test. Edit the canonical copy, never these. This skill's
+> prose account of what `build.sh` does (step 4) is scheduled to be replaced by a
+> `hyp report render` call: see LLP 0193 and LLP 0194.
+
 ## Procedure
 
 Work relative to the repo root `~/hypaware-reports`.
