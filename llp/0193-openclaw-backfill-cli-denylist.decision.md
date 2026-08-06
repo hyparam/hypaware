@@ -93,12 +93,26 @@ fail-closed treatment the allowlist was right about. Every other record
 projects, whatever its provider string is (`anthropic`, `openai`, `ollama`,
 and any api value OpenClaw invents next).
 
-The effective backend is resolved with the same adjacency smearing the
-allowlist used for provider, but over the `(provider, api)` pair as a unit
-(own pair when the record states either field, else the nearest following
-stated record's pair, else the nearest preceding). Smearing the fields
+The effective backend is resolved over the `(provider, api)` pair as a
+unit, WITHIN THE RECORD'S OWN TURN only (review finding on the first cut,
+which smeared file-wide and could borrow a neighboring turn's backend when
+a turn's anchor record was missing, projecting a sibling-owned prompt as an
+unmergeable duplicate or silently dropping a direct-API one). A `user`
+record opens a turn, every `user` record, including one adjacent to
+another, since the reader drops a CLI abort's non-`message` line and merging
+consecutive prompts would recreate the cross-turn borrow. Within the turn:
+own pair when the record states either field, else the nearest following
+stated pair, else the nearest preceding one; a turn that states nothing
+resolves to no backend and is excluded as `unknown`. Exclusion writes
+nothing, so a turn that was merely in flight at sweep time imports intact
+on the sweep after its reply lands; a permanently anchorless turn stays a
+visible exclusion rather than a guessed row (the trajectory join, issue
+#659, can attribute those definitively later). Smearing the fields
 independently could stitch one neighbor's `provider` to a different
-neighbor's `api`, fabricating a backend no record stated.
+neighbor's `api`, fabricating a backend no record stated. Resolution runs
+BEFORE the date window is applied, so a `--since`/`--until` cut bounds what
+projects but can never sever a record from its turn's anchor. The sibling
+prefix match is delimiter-bounded (`codex`, `codex-mini`; not `codexcloud`).
 
 `excluded_backend` events and the `openclaw.backfill.cli_backend_excluded`
 log are unchanged in shape: both exclusion classes stay visible and
@@ -111,13 +125,21 @@ countable, with `covered_by` naming the sibling route when one is known.
 - Ollama turns, and every future direct-API provider, are captured at
   transcript fidelity within the sweep interval with no HypAware release.
   LLP 0167's sweep-lane coverage statement becomes true as written.
-- **Accepted residual risk (fail-open):** a future OpenClaw mechanism whose
-  turns are sibling-captured but stamped neither `api: "cli"` nor a
-  known provider prefix would project here and double-count. The reverse
-  risk (every new legitimate provider silently dropped) has materialized in
-  practice; this one is speculative, and the two-rung key requires both
-  conventions to change before it bites. If it bites, the fix is a prefix
-  added to `SIBLING_ADAPTER_COVERAGE`, plus a purge of the doubled rows.
+- **Accepted residual risk (fail-open):** a sibling-captured turn stamped
+  neither `api: "cli"` nor a known provider prefix would project here and
+  double-count. This is not purely hypothetical: the codex backend's
+  session-file stamping is UNVERIFIED (see {#verify}), so until the probe
+  runs, codex coverage rests on the provider-prefix rung alone, and a codex
+  turn stamped with an unexpected provider string would slip both rungs.
+  The reverse risk (every new legitimate provider silently dropped) has
+  materialized in practice, which is why the flip is still right. If the
+  residual bites, the fix is a prefix added to `SIBLING_ADAPTER_COVERAGE`,
+  plus a purge of the doubled rows.
+- **Accepted residual (fail-closed):** a queued prompt (two `user` records
+  answered by one assistant) attributes only the prompt adjacent to the
+  reply; the earlier one is excluded as `unknown`. Queuing is unverified in
+  session files, and the ambiguity against the abort case is unresolvable
+  positionally; the trajectory join (#659) is the clean fix.
 - The pre-verification test fixtures (`provider: 'claude-cli'` with
   `api: 'anthropic-messages'`) remain excluded via the prefix rung, so the
   suite's existing R10 assertions hold without edits.

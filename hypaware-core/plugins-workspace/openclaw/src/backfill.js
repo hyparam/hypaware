@@ -6,7 +6,6 @@ import path from 'node:path'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   errMessage,
-  filterByWindow,
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
@@ -308,8 +307,10 @@ async function* runOpenclawBackfill(args) {
       continue
     }
 
-    const windowed = filterByWindow(records, window)
-    const { projectable, excludedByProvider } = partitionByBackend(windowed)
+    // Resolution before windowing: partitionByBackend sees the full record
+    // list so a window cut can never sever a record from its own turn's
+    // anchor; the window only bounds what projects and counts.
+    const { projectable, excludedByProvider } = partitionByBackend(records, window)
     for (const [provider, count] of excludedByProvider) {
       recordsExcluded += count
       const coveredBy = siblingCoverageFor(provider)
@@ -378,31 +379,51 @@ async function* runOpenclawBackfill(args) {
  * CLI whose own transcript is the authoritative record (LLP 0147), or states
  * no provider at all. That is what lets a provider this repo has never heard
  * of (`ollama` was the first) land at transcript fidelity from birth, the
- * coverage LLP 0167 promised, while the turns the sibling adapters own stay
- * out and never double-count.
+ * coverage LLP 0167 promised, while attributable sibling-owned turns stay
+ * out.
  *
- * The decision reads a record's EFFECTIVE backend, which is the record's own
- * `(provider, api)` pair when it states either field and otherwise the
- * nearest stated pair, preferring the record that follows. Only an assistant
- * record carries `provider`/`api` (LLP 0158 Context); a user prompt and a
- * tool result do not. Read literally against the record's own fields, the
- * denylist would project every user prompt in every session, including the
- * prompts of `claude-cli` turns the Claude transcript already holds. Reading
- * forward attributes an unstated record to the turn it belongs to. The pair
- * smears as a unit, never per field: independent smearing could stitch one
- * neighbor's `provider` to a different neighbor's `api`, fabricating a
- * backend no record stated. A file where no record ever states a backend
- * projects nothing: "we cannot tell what served this" keeps the fail-closed
- * treatment (LLP 0193).
+ * The decision reads a record's EFFECTIVE backend, resolved from the
+ * record's OWN TURN only. Only an assistant record carries `provider`/`api`
+ * (LLP 0158 Context); a user prompt and a tool result do not. Read literally
+ * against the record's own fields, the denylist would project every user
+ * prompt in every session, including the prompts of `claude-cli` turns the
+ * Claude transcript already holds, so unstated records borrow the nearest
+ * stated `(provider, api)` pair. The borrow is fenced at turn boundaries (a
+ * `user` record opens a turn): a turn whose anchor never got written (a CLI
+ * abort, a crash mid-write, a turn still in flight) must not inherit the
+ * NEXT turn's backend, which either projects a sibling-owned prompt as a
+ * duplicate row no `part_id` can collapse or silently drops a direct-API
+ * one. Within the fence the borrow prefers the record that follows (a
+ * prompt's own reply is ahead of it) and falls back to the record before it
+ * (the trailing tool results of a turn that aborted mid-loop). A turn that
+ * states nothing in either direction resolves to no backend and is excluded
+ * as `unknown`: visible, counted, and rewritten by nothing, so a turn that
+ * was merely in flight imports intact on the sweep after its reply lands.
+ * The pair smears as a unit, never per field: independent smearing could
+ * stitch one neighbor's `provider` to a different neighbor's `api`,
+ * fabricating a backend no record stated.
+ *
+ * What this guarantees, stated carefully: a sibling-owned turn whose records
+ * are attributable is excluded here, and a turn that cannot be attributed is
+ * excluded rather than guessed about. It does NOT make cross-adapter
+ * duplication impossible in principle: a sibling-captured turn that a future
+ * OpenClaw stamps as neither `api: "cli"` nor a known provider prefix would
+ * still project (the accepted LLP 0193 residual).
+ *
+ * Windowing is the caller's concern and happens AFTER resolution: `window`
+ * limits which records project and count, but resolution always sees the
+ * whole file, so a `--since`/`--until` cut can never sever a record from its
+ * own turn's anchor and change its attribution.
  *
  * @ref LLP 0193#decision [implements]: two-rung CLI-backend denylist over the
- * smeared `(provider, api)` pair; unknown still fails closed
+ * turn-scoped `(provider, api)` pair; unknown still fails closed
  * @ref LLP 0147 [constrained-by]: CLI-backend turns are the sibling adapters'
  * territory, so backfill excludes them from projection
  * @param {OpenclawSessionMessage[]} records
+ * @param {{ sinceMs?: number, untilMs?: number }} [window]
  * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string }>, excludedByProvider: Map<string, number> }}
  */
-function partitionByBackend(records) {
+function partitionByBackend(records, window = {}) {
   /** @type {Array<{ record: OpenclawSessionMessage, provider: string }>} */
   const projectable = []
   /** @type {Map<string, number>} */
@@ -410,6 +431,13 @@ function partitionByBackend(records) {
   const effective = effectiveBackends(records)
 
   for (let i = 0; i < records.length; i++) {
+    // Same keep-if-unstamped rule as scan_util's `filterByWindow`: a record
+    // with no parseable timestamp is kept rather than silently dropped.
+    const ts = records[i].timestampMs
+    if (ts !== undefined) {
+      if (window.sinceMs !== undefined && ts < window.sinceMs) continue
+      if (window.untilMs !== undefined && ts > window.untilMs) continue
+    }
     const backend = effective[i]
     if (backend?.provider !== undefined && !isCliBackend(backend)) {
       projectable.push({ record: records[i], provider: backend.provider })
@@ -441,11 +469,23 @@ function isCliBackend(backend) {
 }
 
 /**
- * The effective backend of each record, in file order: its own
- * `(provider, api)` pair when it states either field, else the next stated
- * pair, else the previous stated one. `undefined` when no record in the file
- * states a backend at all.
+ * The effective backend of each record, resolved WITHIN ITS OWN TURN: its
+ * own `(provider, api)` pair when it states either field, else the next
+ * stated pair before the turn ends, else the previous stated one back to
+ * the turn's start. `undefined` when the record's turn states no backend at
+ * all, however the rest of the file is stamped.
  *
+ * A turn starts at every `user` record; records before the file's first
+ * `user` record form a leading segment of their own. Every `user` record
+ * opens a turn, including one directly after another user record: merging
+ * consecutive prompts into one turn would reintroduce the cross-turn borrow
+ * for exactly the demonstrated failure (the reader drops a CLI abort's
+ * non-`message` line, LLP 0158, leaving the orphaned prompt adjacent to the
+ * next turn's), so a queued prompt whose turn never answered IT resolves to
+ * `unknown` rather than guessing, the fail-closed direction.
+ *
+ * @ref LLP 0193#decision [implements]: resolution never crosses a turn
+ * boundary; a turn with no stated backend resolves to none
  * @param {OpenclawSessionMessage[]} records
  * @returns {Array<{ provider?: string, api?: string } | undefined>}
  */
@@ -456,31 +496,58 @@ function effectiveBackends(records) {
       ? { provider: record.provider, api: record.api }
       : undefined
   )
-  /** @type {{ provider?: string, api?: string } | undefined} */
-  let next
-  for (let i = effective.length - 1; i >= 0; i--) {
-    if (effective[i] !== undefined) next = effective[i]
-    else effective[i] = next
-  }
-  /** @type {{ provider?: string, api?: string } | undefined} */
-  let previous
-  for (let i = 0; i < effective.length; i++) {
-    if (effective[i] !== undefined) previous = effective[i]
-    else effective[i] = previous
+  let start = 0
+  for (let i = 1; i <= records.length; i++) {
+    if (i === records.length || stringValue(records[i].role)?.toLowerCase() === 'user') {
+      fillSegment(effective, start, i)
+      start = i
+    }
   }
   return effective
 }
 
 /**
+ * Today's two borrow passes, fenced to `effective[start, end)`: unstated
+ * entries take the nearest stated pair after them within the segment, then
+ * anything still empty takes the nearest stated pair before it within the
+ * segment. Mutates `effective` in place.
+ *
+ * @param {Array<{ provider?: string, api?: string } | undefined>} effective
+ * @param {number} start
+ * @param {number} end
+ */
+function fillSegment(effective, start, end) {
+  /** @type {{ provider?: string, api?: string } | undefined} */
+  let next
+  for (let i = end - 1; i >= start; i--) {
+    if (effective[i] !== undefined) next = effective[i]
+    else effective[i] = next
+  }
+  /** @type {{ provider?: string, api?: string } | undefined} */
+  let previous
+  for (let i = start; i < end; i++) {
+    if (effective[i] !== undefined) previous = effective[i]
+    else effective[i] = previous
+  }
+}
+
+/**
  * The `covered_by` token for an excluded provider value, or `undefined` when
- * nothing is known to cover it.
+ * nothing is known to cover it. The prefix must end at a word boundary: the
+ * value is the prefix exactly, or the prefix followed by a non-alphanumeric
+ * delimiter (`codex`, `codex-mini`), so an unrelated vendor that merely
+ * shares the spelling (`codexcloud`) is neither denied nor mislabeled.
  *
  * @param {string} provider
  * @returns {string | undefined}
  */
 function siblingCoverageFor(provider) {
   const lowered = provider.toLowerCase()
-  return SIBLING_ADAPTER_COVERAGE.find((entry) => lowered.startsWith(entry.prefix))?.coveredBy
+  return SIBLING_ADAPTER_COVERAGE.find((entry) => {
+    if (!lowered.startsWith(entry.prefix)) return false
+    const rest = lowered.slice(entry.prefix.length)
+    return rest === '' || /^[^a-z0-9]/.test(rest)
+  })?.coveredBy
 }
 
 /**
