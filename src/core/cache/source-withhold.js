@@ -53,7 +53,7 @@ export function createSourceWithholdResolver({
         resolveWithheld().has(attributionValue)
       )
     },
-    // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every source that could have produced it is withheld
+    // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every picker source whose plugin declares it is withheld
     shouldWithholdDataset(dataset) {
       if (!datasetOwnedSourceIds) return false
       if (datasetAttributionColumns.has(dataset)) return false

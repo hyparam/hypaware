@@ -326,11 +326,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           // withheld once any of this dataset's declared owners (the picker
           // sources whose plugin lists the dataset in `contributes.datasets`)
           // is opted out, instead of shipped (pre-0192, every unattributed
-          // row escaped both withhold rules). Declared owners, not every
-          // writer: the client plugins project rows into
-          // `ai_gateway_messages` without declaring it, so opting out
-          // `codex` alone leaves this branch disarmed and only an opt-out on
-          // a raw gateway row (`raw-anthropic`/`raw-openai`) arms it.
+          // row escaped both withhold rules). Opting out `codex` alone
+          // leaves the unattributed path disarmed. For the bundled catalog,
+          // only an opt-out on a raw gateway row (`raw-anthropic`/
+          // `raw-openai`) arms it.
           const attributed = typeof attributionValue === 'string' && attributionValue !== ''
           const withholdRow = attributed
             ? sourceWithholdResolver.shouldWithhold(attributionValue)

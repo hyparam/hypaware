@@ -233,23 +233,25 @@ export function datasetAttributionColumnsFromCatalog(catalog) {
 
 /**
  * Fold the catalog into a dataset-name-keyed map of the picker source ids
- * whose owning plugin contributes that dataset. Feeds the dataset-scoped
- * withholding rule (LLP 0188 #enforcement-scope): a dataset with no
- * attribution column cannot be filtered per row, but when every source
- * that could have produced it is opted out, the whole dataset is withheld.
- * A dataset contributed by a plugin with no picker row maps to an empty
- * owner list and is never withheld this way (the conservative default).
+ * whose owning plugin declares that dataset in `contributes.datasets`.
+ * Feeds two withholding rules: the dataset-scoped rule (LLP 0188
+ * #enforcement-scope), where a dataset with no attribution column cannot
+ * be filtered per row, but when every declared owner is opted out, the
+ * whole dataset is withheld, and the fail-closed unattributed-row rule
+ * (LLP 0192 #fail-closed), which reads the same owner list. A dataset
+ * contributed by a plugin with no picker row maps to an empty owner list
+ * and is never withheld this way (the conservative default).
  *
  * The owner list is the **union** across every plugin contributing the
  * name, not the first manifest's (the first-wins rule its sibling
  * `datasetAttributionColumnsFromCatalog` uses, which is right there
  * because a dataset has one attribution column but wrong here). "Every
- * source that could have produced it" is a union by construction, and
- * first-wins understates it: two plugins contributing one dataset name,
- * the first opted out and the second not, would withhold the whole
- * dataset - dropping rows from a source the user never opted out, and,
- * when that second plugin is the org's, withholding a locked source that
- * LLP 0188 #locked guarantees always syncs.
+ * declared owner" is a union by construction, and first-wins understates
+ * it: two plugins contributing one dataset name, the first opted out and
+ * the second not, would withhold the whole dataset - dropping rows from a
+ * source the user never opted out, and, when that second plugin is the
+ * org's, withholding a locked source that LLP 0188 #locked guarantees
+ * always syncs.
  *
  * @param {Pick<PluginCatalog, 'plugins' | 'pickerDescriptors'>} catalog
  * @returns {Map<string, string[]>}

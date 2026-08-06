@@ -312,10 +312,12 @@ export interface SourceWithholdResolver {
   /**
    * Fail-closed rule for rows whose attribution value is unusable (not a
    * non-empty string) in a dataset that DOES declare an attribution
-   * column: true when any contributing picker source is withheld, since
-   * an unlabeled row cannot be proven to belong to a synced source
-   * (LLP 0192 #fail-closed). Optional for the same hand-built-resolver
-   * reason as `shouldWithholdDataset`.
+   * column: true when any picker source whose plugin declares this dataset
+   * (`contributes.datasets`) is withheld, since an unlabeled row cannot be
+   * proven to belong to a synced source (LLP 0192 #fail-closed). A plugin
+   * that only projects rows into the dataset, without declaring it, is not
+   * in that set. Optional for the same hand-built-resolver reason as
+   * `shouldWithholdDataset`.
    */
   shouldWithholdUnattributed?(dataset: string): boolean
 }
