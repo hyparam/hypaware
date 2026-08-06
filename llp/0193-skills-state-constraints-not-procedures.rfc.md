@@ -1,7 +1,7 @@
 # LLP 0193: Skills state constraints, not procedures
 
 **Type:** RFC
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Reports, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
