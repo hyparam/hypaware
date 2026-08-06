@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadManifests } from '../../src/core/manifest.js'
+import { RESTART_COMMAND } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
 
 // Picking a row changes the machine, and the picker summary is the one
 // disclosure of that the wizard makes (PR #629 review, finding 2). This
@@ -39,6 +40,18 @@ test('claude picker summary discloses the attach and the skill install', async (
   assert.match(summary, /skills/i)
 })
 
+// `claude`'s row sets `requires_gateway` *with* a `gateway_upstream`
+// (`claude/hypaware.plugin.json` compose), so picked alone it binds a real
+// listener, unlike `hermes`'s row, which sets `requires_gateway` with no
+// upstream and starts no listener on its own (`test/core/
+// compose-picker-config.test.js` "hermes alone composes the gateway (no
+// upstreams)"). Same side-effect class as `otel` and
+// `raw-anthropic`/`raw-openai` above.
+test('claude picker summary discloses that a local gateway listener is started', async () => {
+  const summary = await pickerSummary('claude', 'claude')
+  assert.match(summary, /starts a local gateway listener/i)
+})
+
 test('codex picker summary discloses the gateway config write and the skill install', async () => {
   const summary = await pickerSummary('codex', 'codex')
   assert.match(summary, /local gateway/i)
@@ -59,10 +72,16 @@ test('openclaw picker summary discloses the gateway-config rewrite', async () =>
 // restarted, so attach's write is inert without it (`openclaw/src/attach.js`
 // RESTART_COMMAND / RESTART_INSTRUCTION, LLP 0167#verify-results item 4).
 // attach.js prints that only after the rewrite has happened; the picker row
-// is the one place the user can read it before choosing.
+// is the one place the user can read it before choosing. Asserted against
+// the imported `RESTART_COMMAND`, not a copy of the literal, so a rename in
+// attach.js fails this test instead of leaving the manifest pointing at a
+// command that no longer exists.
 test('openclaw picker summary names the manual gateway restart attach requires', async () => {
   const summary = await pickerSummary('openclaw', 'openclaw')
-  assert.match(summary, /openclaw gateway restart/i)
+  assert.ok(
+    summary.toLowerCase().includes(RESTART_COMMAND.toLowerCase()),
+    `expected summary to contain '${RESTART_COMMAND}', got: ${summary}`
+  )
 })
 
 // `requires_gateway` composes `@hypaware/ai-gateway`, whose source binds an
@@ -86,4 +105,15 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
 test('claude-desktop picker summary keeps the asks-before-changing reassurance', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
   assert.match(summary, /asks before changing anything/i)
+})
+
+// `claude-desktop`'s row sets `requires_gateway` *with* a `gateway_upstream`
+// (`claude-desktop/hypaware.plugin.json` compose), composed as soon as the
+// row is picked, independent of whether the `needs_setup` configure_command
+// has run. Same side-effect class as `claude`, `otel`, and
+// `raw-anthropic`/`raw-openai` above; this row carries no adapter besides
+// the picker summary to disclose it.
+test('claude-desktop picker summary discloses that a local gateway listener is started', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /starts a local gateway listener/i)
 })
