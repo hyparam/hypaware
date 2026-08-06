@@ -27,8 +27,8 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * - `hyp attach --client claude` patches `~/.claude/settings.json`
  *   with the HypAware marker, `env.ANTHROPIC_BASE_URL`, and the
  *   managed hook entries (golden compare): `session-context` on every
- *   managed event, plus `classify-cwd` on the two fresh-cwd events
- *   (LLP 0106).
+ *   managed event, plus the LLP 0106 `classify-cwd` hook, which the
+ *   plugin scopes to the two fresh-cwd events.
  * - A `client.attach` span exists with `hyp_plugin=@hypaware/claude`,
  *   `client_name=claude`, `status=ok`, `restored=false`.
  * - `hyp detach --client claude` removes the managed keys and the
@@ -183,13 +183,18 @@ export async function run({ harness, expect }) {
         typeof v.state_file === 'string' &&
         v.state_file.endsWith('session-context.jsonl')
     )
-    // LLP 0106 split what attach installs on the session-start events:
-    // `session-context` still rides every managed event, and `classify-cwd`
-    // rides only the two events where a *fresh* working directory appears
-    // (SessionStart, CwdChanged). Both sides of the split are asserted here so
-    // dropping either kind, or leaking `classify-cwd` onto the per-prompt and
-    // per-tool events, fails the golden compare instead of passing quietly.
-    // @ref LLP 0106#decision [tests]: the classification hook rides the fresh-cwd events beside session-context, and only those
+    // LLP 0106 settles that attach installs the classification hook *alongside*
+    // the existing session-context hook, which is what makes a golden compare
+    // expecting session-context on its own stale.
+    //
+    // Which events each kind rides is not 0106's to say and is not stated
+    // there: `session-context` on every managed event, `classify-cwd` only
+    // where a *fresh* working directory appears (SessionStart, CwdChanged), is
+    // decided by `MANAGED_HOOK_SPECS` in the claude plugin's `src/settings.js`,
+    // with the reasoning in the comment above it. Both sides are asserted here
+    // so dropping either kind, or leaking `classify-cwd` onto the per-prompt
+    // and per-tool events, fails the golden compare instead of passing quietly.
+    // @ref LLP 0106#decision [tests]: attach installs the classification hook beside the session-context hook
     expect.that(
       'settings: SessionStart carries session-context (with --state-file) then classify-cwd',
       hookCommands(attached?.hooks?.SessionStart),

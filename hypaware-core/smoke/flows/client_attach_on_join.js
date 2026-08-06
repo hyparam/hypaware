@@ -10,6 +10,7 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { readConfigControlStatus } from '../../../src/core/config/apply.js'
 import { readClientActionStatus } from '../../../src/core/config/action_reconciler.js'
 import { DAEMON_RESTART_EXIT_CODE, runDaemon } from '../../../src/core/daemon/runtime.js'
+import { readStatusFile, resolveLiveGatewayEndpointFromStatus } from '../../../src/core/daemon/status.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
@@ -32,11 +33,11 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *      the **drift** branch of the freshness check: rev-1 lets the gateway bind
  *      an ephemeral port, so the relaunch is at a *new* endpoint, the `done`
  *      marker is stale, and the forward gap re-attaches at the new port.
- *   4. rev-1b pins the gateway's `listen` → apply → staged restart → relaunch
- *      re-attaches once at the pinned port; a further relaunch at that same,
- *      now-stable endpoint is the **no-op** branch: the `done` marker
- *      short-circuits and nothing is re-applied (the marker timestamp and the
- *      client settings are unchanged).
+ *   4. rev-1b pins the gateway's `listen` to the port the drifted daemon is
+ *      already bound to (read back from its own `status.json`) → apply →
+ *      staged restart → the relaunch reclaims that same port, so it is the
+ *      **no-op** branch: the `done` marker short-circuits and nothing is
+ *      re-applied (the marker timestamp and the client settings are unchanged).
  *   5. the server drops `@hypaware/claude` (rev-2) → apply → staged restart →
  *      relaunch without the adapter → the reconcile **reverse gap** runs the
  *      disk-driven undo: the marker is removed and the client settings are
@@ -80,9 +81,15 @@ export async function run({ harness, expect }) {
 
   // The freshness check watches the gateway's live endpoint, so the smoke needs
   // both a moving one (rev-1's ephemeral bind) and a stable one (rev-1b's pin).
-  const pinnedPort = await reserveLocalPort()
-  const pinnedListen = `127.0.0.1:${pinnedPort}`
-  const pinnedEndpoint = `http://${pinnedListen}`
+  // The pinned value is deliberately *not* reserved up front: it is read back
+  // from the running daemon's status.json below, so rev-1b pins a port the
+  // daemon is already holding rather than one this process probed and released.
+  /** @type {string} */
+  let pinnedListen = ''
+  /** @type {string} */
+  let pinnedEndpoint = ''
+  /** @type {string | undefined} */
+  let driftStartedAt
 
   const server = await startStubCentralServer()
   try {
@@ -201,6 +208,32 @@ export async function run({ harness, expect }) {
       // ----- smoke_step: pin_port (serve rev-1b → apply → restart) -----
       // rev-1b is rev-1 with the gateway's `listen` pinned, so every later boot
       // binds the same port: the input the freshness check watches stops moving.
+      //
+      // The port it pins is the one *this* daemon is bound to right now, read
+      // back out of its own status.json. That is what keeps the pin race-free:
+      // probing a free port by binding and releasing it would hand rev-1b a
+      // port nobody holds and hope it is still free seconds later (any
+      // co-resident process, including this smoke's own stub server, could take
+      // it), whereas a port the daemon already owns is simply reclaimed across
+      // the staged restart.
+      // @ref LLP 0086#endpoint-discovery [tests]: the live bound port is readable from status.json, which is what lets the pin name a port the daemon already holds
+      driftStartedAt = statusStartedAt(stateRoot)
+      const liveEndpoint = resolveLiveGatewayEndpointFromStatus({ stateRoot })
+      expect.that(
+        'pin: the drifted gateway reports its live bound endpoint in status.json',
+        liveEndpoint,
+        (v) => typeof v === 'string' && v === drifted?.endpoint
+      )
+      // Not decoration: the relaunch below is told apart from this boot's
+      // leftover snapshot by `startedAt`, so an unread one would make that
+      // check pass on stale data.
+      expect.that(
+        'pin: this boot is identifiable in status.json by its startedAt',
+        driftStartedAt,
+        (v) => typeof v === 'string' && v.length > 0
+      )
+      pinnedEndpoint = String(liveEndpoint)
+      pinnedListen = pinnedEndpoint.slice('http://'.length)
       server.setConfig(rev1Config(server.baseUrl, pinnedListen), 'rev-1b')
       const pinExit = await withTimeout(
         driftHandle.done,
@@ -217,32 +250,17 @@ export async function run({ harness, expect }) {
       await driftHandle.stop()
     }
 
-    // ----- smoke_step: pinned_attach (relaunch rev-1b → re-attach at the pinned port) -----
-    const pinnedHandle = await runDaemonHandle(harness)
-    try {
-      await waitFor(
-        () => readConfigControlStatus({ stateRoot }).probation === null,
-        15_000,
-        'probation did not clear within 15s of the rev-1b relaunch'
-      )
-      await waitFor(
-        () => attachMarker(stateRoot)?.endpoint === pinnedEndpoint,
-        15_000,
-        `the attach.claude marker did not move to the pinned endpoint ${pinnedEndpoint}`
-      )
-    } finally {
-      await pinnedHandle.stop()
-      await pinnedHandle.done
-    }
-
-    // Snapshot the pinned-port state for the no-op assertions below.
+    // Snapshot the post-drift state for the no-op assertions below. `pinnedAt`
+    // is a genuinely fresh timestamp, not a leftover: the drift step above
+    // asserted the re-attach moved the marker off `attachedAt`.
     const pinnedAt = attachMarker(stateRoot)?.at
     const pinnedBody = await fs.readFile(claudeSettingsPath, 'utf8')
 
     // ----- smoke_step: no_reattach (a boot at an unchanged endpoint is a no-op) -----
-    // The complement of the drift branch: rev-1b's port is fixed, so this boot
-    // resolves the same endpoint the marker records, the freshness check calls
-    // the marker current, and the `done` marker short-circuits as it always did.
+    // The complement of the drift branch: rev-1b pins the port the drift boot
+    // bound, so this relaunch resolves the same endpoint the marker records,
+    // the freshness check calls the marker current, and the `done` marker
+    // short-circuits as it always did.
     // @ref LLP 0086#re-attach-on-drift [tests]: the guard side of the same check, an unmoved endpoint still short-circuits rather than churning the attach every boot
     const steadyHandle = await runDaemonHandle(harness)
     try {
@@ -250,6 +268,20 @@ export async function run({ harness, expect }) {
         () => readConfigControlStatus({ stateRoot }).probation === null,
         15_000,
         'probation was unexpectedly re-armed on the steady relaunch'
+      )
+      // The pin only holds the endpoint still if the gateway actually reclaimed
+      // the port it released on the staged restart, so read that back off *this*
+      // boot's status.json (`startedAt` moved) before calling the no-op below a
+      // no-op. A gateway that failed to rebind, or fell back to another port
+      // (LLP 0114), would otherwise look identical to a clean short-circuit.
+      await waitFor(
+        () => {
+          const startedAt = statusStartedAt(stateRoot)
+          if (startedAt === undefined || startedAt === driftStartedAt) return false
+          return resolveLiveGatewayEndpointFromStatus({ stateRoot }) === pinnedEndpoint
+        },
+        15_000,
+        `the relaunched gateway did not reclaim the pinned endpoint ${pinnedEndpoint}`
       )
       // Give the boot-already-confirmed pass time to run (and prove it does not
       // re-attach): the marker timestamp must be identical.
@@ -444,18 +476,21 @@ async function runDaemonHandle(harness) {
 }
 
 /**
- * Reserve a free loopback port by binding one and releasing it. Pinning the
- * gateway's `listen` to it is what holds the endpoint still across a relaunch,
- * the branch of the freshness check where a `done` marker still short-circuits.
- * @returns {Promise<number>}
+ * The `startedAt` of the daemon boot that wrote the current `status.json`, or
+ * `undefined` when there is no readable status file yet.
+ *
+ * Which boot wrote a status file matters here because a pinned port makes two
+ * consecutive boots report the *same* endpoint: an endpoint read on its own
+ * cannot tell a fresh bind from the outgoing daemon's leftover snapshot.
+ * @param {string} stateRoot
+ * @returns {string | undefined}
  */
-async function reserveLocalPort() {
-  const probe = http.createServer()
-  await new Promise((resolve) => probe.listen(0, '127.0.0.1', () => resolve(undefined)))
-  const address = /** @type {AddressInfo} */ (probe.address())
-  const { port } = address
-  await new Promise((resolve) => probe.close(() => resolve(undefined)))
-  return port
+function statusStartedAt(stateRoot) {
+  try {
+    return readStatusFile(stateRoot)?.startedAt
+  } catch {
+    return undefined
+  }
 }
 
 /**
