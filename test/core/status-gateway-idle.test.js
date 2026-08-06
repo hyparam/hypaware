@@ -240,7 +240,7 @@ test('a stopped daemon does not warn off a stale status snapshot', async () => {
 // go through the *real* gateway source and the *real* `compileUpstreams`
 // rather than hand-written details, which is what makes them fail if the drop
 // rule and the reported count ever disagree.
-// @ref LLP 0193#visible-when-unintended [tests]: one configured-vs-compiled comparison covers the partial loss as well as the total one
+// @ref LLP 0195#visible-when-unintended [tests]: one configured-vs-compiled comparison covers the partial loss as well as the total one
 // ---------------------------------------------------------------------------
 
 /** An upstream that compiles. Never connected to; the proxy only routes to it. */

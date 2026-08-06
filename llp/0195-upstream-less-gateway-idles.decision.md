@@ -1,4 +1,4 @@
-# LLP 0193: an upstream-less gateway idles, and a gateway missing an upstream says so
+# LLP 0195: an upstream-less gateway idles, and a gateway missing an upstream says so
 
 **Type:** Decision
 **Status:** Accepted

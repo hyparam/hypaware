@@ -701,7 +701,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // upstream (hermes-only) drops nothing and never reaches this branch, so
     // it stays healthy and silent.
     // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway proxies what the config asked for" is readable from status.json steadily, not only from a boot-time log line
-    // @ref LLP 0193#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one, and neither flips overall
+    // @ref LLP 0195#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one, and neither flips overall
     const { idle, configured, dropped, names } = droppedGatewayUpstreams
     // Counts first, names in parentheses when there are any: `name` is itself
     // one of the two keys that drops an entry, so the config that most needs

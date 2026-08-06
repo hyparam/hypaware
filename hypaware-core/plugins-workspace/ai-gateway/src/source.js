@@ -165,7 +165,7 @@ export function createStartSource(state) {
  * nothing is listening on.
  *
  * @ref LLP 0120#consequences [constrained-by]: hermes composes the gateway plugin for the materializer alone, so an upstream-less gateway is a valid config rather than a misconfiguration
- * @ref LLP 0193#idle-not-throw [implements]: the "at least one upstream" invariant moves here from startProxy, which still keeps it for a bind
+ * @ref LLP 0195#idle-not-throw [implements]: the "at least one upstream" invariant moves here from startProxy, which still keeps it for a bind
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state

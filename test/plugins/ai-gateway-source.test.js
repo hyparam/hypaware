@@ -346,7 +346,7 @@ test('the idle log is a warning only when configured upstreams were dropped', as
 // nothing about the boot looks wrong, and the operator's first move when one
 // provider's rows never arrive is to read the daemon log. It has to say so
 // there, not only in `hyp status`.
-// @ref LLP 0193#visible-when-unintended [tests]: an upstream dropped at compile is reported even when the routing table is not empty
+// @ref LLP 0195#visible-when-unintended [tests]: an upstream dropped at compile is reported even when the routing table is not empty
 test('a gateway that lost one of two upstreams warns at boot and reports the drop', async () => {
   /** @type {{ level: string, event: string, attrs: any }[]} */
   const logged = []
