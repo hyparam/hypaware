@@ -165,14 +165,24 @@ depends on `build.sh` being absent from this repo.
 
 ### Wave 3 (deps `[T3, T4]`), two-wide
 
-- **T5, wire up `hyp report render`.** Add `runReportRender` to
-  `report_commands.js` and register it in `core_commands.js` beside its four
-  siblings. **Note an asymmetry worth deciding explicitly:** LLP 0155 built the
-  `report` group around "there is no local reports plane; `--remote` selects a
-  server". `render` is purely local and takes no `--remote`, so it is the first
-  member of that group that is not a REST call. Either it joins the group as a
-  documented local build step, or it becomes a sibling top-level command.
-  Complexity 2, plus one decision.
+- **T5, wire up `hyp report render`. LANDED 2026-08-06.** `runReportRender` in
+  `report_commands.js`, registered in `core_commands.js` beside its four
+  siblings.
+
+  **The asymmetry was resolved by joining the group and fixing its help.** LLP
+  0155 built `report` around "there is no local reports plane; `--remote`
+  selects a server", and `render` is the first member that is not a REST call.
+  It joins anyway, because the user's workflow is render-then-publish and
+  splitting those across two command namespaces would serve the implementation
+  rather than the reader. The group help now separates the local build step
+  from the four plane operations, so 0155's claim stays true of the commands it
+  was written about.
+
+  **The skill lost its prose renderer**, which was the point: 28,405 to 22,739
+  bytes and 414 to 336 lines, with every `build.sh` reference gone. Steps 2, 4,
+  and 6 collapse to "the command does this", and step 6 keeps only the checks a
+  command cannot make (are the findings carded, does the landing page carry
+  stats). `build.sh` is deleted, with a test asserting it does not come back.
 - **T6, tests.** Traditional tests for the deterministic logic, which is
   exactly what `CLAUDE.md` asks for: a table-driven test over `rewrite_hrefs`
   covering own-section, cross-report one-pager, cross-report section, and

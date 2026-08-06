@@ -43,10 +43,17 @@ test('the canonical asset set is complete', () => {
   assert.deepEqual(present, [...ASSETS].sort(), 'src/core/reports/assets/ must hold exactly the renderer asset set')
 })
 
-test('the renderer itself is vendored, not left in a user working tree', () => {
-  const buildScript = path.join(repoRoot, 'src/core/reports/build.sh')
-  assert.ok(fs.existsSync(buildScript), 'src/core/reports/build.sh must exist: the repo owns the renderer')
-  assert.ok(fs.statSync(buildScript).mode & 0o111, 'build.sh must stay executable')
+test('the renderer is repo-owned code, not a script in a user working tree', () => {
+  const renderer = path.join(repoRoot, 'src/core/reports/render.js')
+  assert.ok(fs.existsSync(renderer), 'src/core/reports/render.js must exist: the repo owns the renderer')
+
+  // The shell original was deleted once `hyp report render` replaced it (LLP 0194 T5).
+  // A reappearing build.sh means someone restored the macOS-only, untested path that
+  // CI cannot run at all.
+  assert.ok(
+    !fs.existsSync(path.join(repoRoot, 'src/core/reports/build.sh')),
+    'build.sh was superseded by render.js and must not come back',
+  )
 })
 
 for (const skillDir of SKILL_ASSET_DIRS) {

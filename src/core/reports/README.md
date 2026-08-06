@@ -18,7 +18,8 @@ that skill's 399 lines were a second, prose copy of code that already existed.
 
 Vendoring the script is the fix ([LLP 0193](../../../llp/0193-skills-state-constraints-not-procedures.rfc.md),
 [LLP 0194](../../../llp/0194-skills-state-constraints-not-procedures.plan.md) T1).
-The prose copy goes away once T3 and T5 land.
+Both landed: T3 ported it to `render.js`, T5 wired `hyp report render` and
+cut the skill from 28 KB to 23 KB by deleting the prose account.
 
 ## Contents
 
@@ -26,7 +27,6 @@ The prose copy goes away once T3 and T5 land.
 | --- | --- |
 | `render.js` | **The renderer.** Cross-platform Node port (T3, landed). |
 | `types.d.ts` | `RenderOptions` / `RenderResult`. |
-| `build.sh` | The superseded shell original. Kept only until T5 wires `hyp report render`, because the skill still calls it by name. |
 | `assets/style.css` | The data-report stylesheet, custom-property driven. Copied into every built page. |
 | `assets/copy-md.js` | The "Copy as Markdown" masthead action. |
 | `assets/head.html` | Favicon links plus the copy-script tag, inlined into every `<head>` by pandoc's `-H`. Not a page asset. |
@@ -40,8 +40,10 @@ The prose copy goes away once T3 and T5 land.
   installed skill is self-contained and cannot reach back into this repo at
   runtime. `test/core/report-assets-canonical.test.js` holds all three copies
   byte-identical. LLP 0194 T7 removes the need for the skill copies.
-- **`build.sh` is frozen.** Fix `render.js` instead. The two are not kept in
-  sync, and the shell copy goes away with T5.
+- **The shell original is gone** (deleted in T5, preserved in git history). If
+  rendering misbehaves, fix `render.js` and its tests. Restoring `build.sh`
+  restores a macOS-only, untested path that CI cannot run, and a test now
+  asserts it stays gone.
 - **pandoc is still a hard dependency** (LLP 0193 open question 1, resolved:
   keep it, install it in CI). Nothing else shells out: the port dropped the
   BSD-only `sed -E -i ''` and the macOS-only `sips`, which is what let the
@@ -56,13 +58,16 @@ The prose copy goes away once T3 and T5 land.
 `test/core/report-render.test.js` builds a fixture tree and asserts the
 contract (no leftover `.md` hrefs, a copy action on every page, a `full.md` per
 report, back-links, theme survival). For a change to the rendering pipeline
-itself, the strongest check is still an A/B against a real tree: copy
-`~/hypaware-reports` twice, build one with `build.sh` and one with
-`renderReports`, and diff `html/`. That is how the port was accepted, and it
-came out byte-identical across five reports.
+itself, the strongest check is an A/B against a real tree: copy
+`~/hypaware-reports` twice, render one with the current code and one with the
+change, and diff `html/`. That is how the Node port was accepted against the
+shell original (`git show 0f3dce1^:src/core/reports/build.sh` if you need it
+back for a comparison), and it came out byte-identical across five reports.
 
 ## Not yet moved
 
-`build.sh` deliberately does not generate the top-level `index.html` landing
-page; today the skill regenerates it from a template on every run. LLP 0194 T4
-moves that here, where it is fully deterministic.
+The renderer does not generate the top-level `index.html` landing page; today
+the skill regenerates it from a template on every run, which is why it is not
+reproducible between runs. LLP 0194 T4 moves it here, where it is fully
+deterministic: the per-card stats come from each report's `metric-grid`, which
+is regular parseable markup.

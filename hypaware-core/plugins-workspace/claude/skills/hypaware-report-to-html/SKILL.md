@@ -1,6 +1,6 @@
 ---
 name: hypaware-report-to-html
-description: Render the Markdown HypAware reports under hypaware-reports/ into a static HTML site: enrich the report Markdown with the data-report component vocabulary (metric cards, charts, callouts), run the repo's build.sh (pandoc), and regenerate the top-level landing page. Use when the user says "convert the reports to HTML", "build/render the report site", "rebuild the HTML", "publish the reports", "update the reports landing page / index", or wants to preview or GitHub-Pages the reports. Operates on the ~/hypaware-reports git repo only. Does NOT run any report skill, does NOT touch local HypAware recordings, and does NOT push to the remote unless the user explicitly asks.
+description: Render the Markdown HypAware reports under hypaware-reports/ into a static HTML site: enrich the report Markdown with the data-report component vocabulary (metric cards, charts, callouts), run `hyp report render`, and regenerate the top-level landing page. Use when the user says "convert the reports to HTML", "build/render the report site", "rebuild the HTML", "publish the reports", "update the reports landing page / index", or wants to preview or GitHub-Pages the reports. Operates on the ~/hypaware-reports git repo only. Does NOT run any report skill, does NOT touch local HypAware recordings, and does NOT push to the remote unless the user explicitly asks.
 ---
 
 # Render HypAware reports to HTML
@@ -19,42 +19,39 @@ Markdown into a browsable static site and keeps the landing page in sync.
 
 Two moving parts:
 
-1. **`build.sh`** (in the repo, pandoc-based) converts each `<slug>.md`, plus any
-   `<slug>/` sections, into a self-contained `html/<slug>/` folder: `index.html` for the
-   one-pager with a "← All reports" nav back to the top-level landing page
-   (`../../index.html`), one `<section>.html` per section with a "← Back to the report"
-   nav, `assets/style.css`, and a `.nojekyll`. It rewrites inter-file `.md` links to `.html`
-   on the **emitted HTML** (`href` attributes), which catches Markdown-syntax links and
-   links inside raw-HTML components (`rec` cards, callouts) in one pass: it flattens the
-   one-pager's `<slug>/section.md` links to `section.html` and maps cross-report links
-   (`../<other-slug>.md` → `../<other-slug>/index.html`, `../<other-slug>/sec.md` →
-   `../<other-slug>/sec.html`). `html/` is rebuilt fresh every run (idempotent). A
-   **flat** one-pager (no sibling `<slug>/` dir) builds just `html/<slug>/index.html`.
+1. **`hyp report render`** converts each `<slug>.md`, plus any `<slug>/` sections, into a
+   self-contained `html/<slug>/` folder, and rewrites inter-file `.md` links to `.html`.
+   `html/` is rebuilt fresh every run. A **flat** one-pager (no sibling `<slug>/` dir)
+   builds just `html/<slug>/index.html`. You do not need to know how it does any of
+   this: it is tested code in the hypaware repo under `src/core/reports/`, and its
+   behaviour is not this skill's to describe or re-derive.
 2. **The top-level `index.html`** is the landing page linking to each `html/<slug>/`.
-   `build.sh` does **not** generate it: this skill regenerates it from whatever reports
-   are present, so it never goes stale.
+   `hyp report render` does **not** generate it: this skill regenerates it from whatever
+   reports are present, so it never goes stale.
 
 **The look is carried entirely by `assets/style.css` plus a small raw-HTML component
-vocabulary the report Markdown opts into.** `build.sh` copies the repo-root
-`assets/style.css` into every built page, so upgrading that one file restyles the whole
-site (type, tables, code, callouts, and the auto-styled hero thesis line) with no
-Markdown changes. The metric cards, charts, and callouts are raw `<div>` blocks that
-pandoc's `gfm` reader passes through untouched; authors add them in the source `.md`.
-Both are specified under **Visual system** below.
+vocabulary the report Markdown opts into.** The renderer copies that stylesheet into
+every built page, so upgrading it restyles the whole site (type, tables, code, callouts,
+and the auto-styled hero thesis line) with no Markdown changes. A user's own
+`assets/theme.css`, layered after it and never overwritten, is the supported way to
+restyle one tree. The metric cards, charts, and callouts are raw `<div>` blocks that the
+`gfm` reader passes through untouched; authors add them in the source `.md`. Both are
+specified under **Visual system** below.
 
 ## Prerequisites
 
-- **pandoc** must be installed (`command -v pandoc`; `brew install pandoc` if missing).
-  `build.sh` hard-fails without it.
-- Run from the repo root `~/hypaware-reports`. `assets/style.css` must exist and be the
-  **canonical data-report stylesheet** shipped with this skill (see step 2 below): it's
-  the shared stylesheet every built page and the landing page reference.
+- **pandoc** must be installed (`brew install pandoc`, or
+  `sudo apt-get install pandoc`). `hyp report render` names it and exits 1 if missing.
+- **A recent `hyp`.** Rendering moved into the CLI; a `hyp` without
+  `report render` predates this skill.
+- The reports tree, `~/hypaware-reports` by default. `hyp report render <dir>` takes an
+  explicit one.
 
-> **Upstream source.** `build.sh` and this skill's `assets/` are now owned by the
-> hypaware repo at `src/core/reports/`, and the bundled copies here are held
-> byte-identical to it by a test. Edit the canonical copy, never these. This skill's
-> prose account of what `build.sh` does (step 4) is scheduled to be replaced by a
-> `hyp report render` call: see LLP 0193 and LLP 0194.
+> **Where the renderer lives.** `hyp report render` and this skill's `assets/` are owned
+> by the hypaware repo at `src/core/reports/`, with the bundled asset copies here held
+> byte-identical to it by a test. Edit the canonical copy, never these. If rendering
+> misbehaves, the fix belongs in `src/core/reports/render.js` and its tests, not in
+> prose here (LLP 0193, LLP 0194).
 
 ## Procedure
 
@@ -68,15 +65,11 @@ Work relative to the repo root `~/hypaware-reports`.
    `archive/<timestamp>/` just appeared, or the tree is churning), pause and confirm with
    the user before building: see Notes.
 
-2. **Install / refresh the shared stylesheet.** The repo-root `assets/style.css` must be
-   the data-report stylesheet bundled with this skill. If it is missing, or is an older
-   sheet (a Google Fonts `@import`, `box-shadow` on cards, or no `.metric`/`.callout`/
-   `.barchart` rules), copy this skill's `assets/style.css` over it before building:
-   ```bash
-   cp "$SKILL_DIR/assets/style.css" assets/style.css   # $SKILL_DIR = this skill's folder
-   ```
-   Leave it in place if it already matches. This single file drives the entire visual
-   system; do not hand-tune per-page CSS.
+2. **Assets are the command's job now.** `hyp report render` installs and refreshes the
+   shared stylesheet and favicons itself, from the copies shipped with HypAware. Do not
+   hand-copy them and do not hand-tune per-page CSS. A user's own
+   `assets/theme.css`, if present, is layered after the base sheet and is never
+   overwritten: that is the supported way to restyle a tree.
 
 3. **Enrich the report Markdown (the step that makes it a data report).**
 
@@ -197,86 +190,24 @@ Work relative to the repo root `~/hypaware-reports`.
    a section page), the presence of one component does not make a file done. These are
    source-file edits: include them in the commit at the end.
 
-4. **Build the HTML.** Run the repo's own script: don't reimplement pandoc:
+4. **Build the HTML.**
    ```bash
-   ./build.sh
+   hyp report render                  # defaults to ~/hypaware-reports
+   hyp report render <dir>            # or an explicit tree
    ```
-   It prints `Built html/ : N report(s) …`. `html/` is wiped and rebuilt, so deleted or
-   renamed reports never leave stale HTML behind.
+   It prints `Built html/ : N report(s) ...`. `html/` is wiped and rebuilt, so deleted or
+   renamed reports never leave stale HTML behind, and it refuses without touching
+   anything if the tree holds no reports.
 
-   **Every report page must carry the Hyperparam masthead and a way back to the landing
-   page.** `build.sh` is responsible for both: it prepends a `masthead` header (brand
-   mark + "Hyperparam" + a doc label, "Internal report · generated <date> from HypAware
-   data", the date from the slug; + the back-nav) to every page before
-   pandoc runs, passes `-H assets/head.html` (the favicon `<link>`), and copies
-   `assets/favicon.svg` (the hyperparam.app mark; the in-page `brand-mark` renders it
-   ink-colored via CSS mask) into each output's `assets/`. If the repo's `build.sh`
-   predates this (no `masthead` string in it: `grep -q masthead build.sh`), add the
-   injection where each page is built, then re-run it:
-   ```bash
-   masthead() { # $1 = nav html for the right-hand slot, $2 = doc label
-     printf '<header class="masthead">\n<span class="brand"><span class="brand-mark"></span>Hyperparam</span>\n<span class="doc-label">%s</span>\n<nav class="topnav">%s</nav>\n</header>\n\n' "$2" "$1"
-   }
-   doc_label() { # $1 = slug - says the page is a generated static report, not the HypAware app
-     case "$1" in
-       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*) printf 'Internal report · generated %s from HypAware data' "${1:0:10}" ;;
-       *) printf 'Internal report · generated from HypAware data' ;;
-     esac
-   }
-   {
-     masthead '<a href="../../index.html">&#8592; All reports</a>' "$(doc_label "$slug")"   # sections: 'index.html' / 'Back to the report'
-     cat "$src"
-   } | pandoc -f gfm -t html5 -s \
-     --css assets/style.css \
-     -H assets/head.html \
-     --metadata pagetitle="$(page_title "$src" "$slug")" \
-     -o "$out/index.html"
-   ```
-   (i.e. pipe the masthead + source into pandoc instead of passing `"$src"` as the input
-   file; `assets/head.html` is two `<link rel="icon">` lines, the SVG
-   (`type="image/svg+xml"`) plus a **PNG fallback** (`type="image/png" sizes="64x64"
-   href="assets/favicon.png"`), because **Safari doesn't render SVG favicons**, and
-   build.sh regenerates it if missing. build.sh copies both `favicon.svg` and
-   `favicon.png` into each output's `assets/`, and regenerates the PNG if absent:
-   `sips -s format png -z 64 64 assets/favicon.svg --out assets/favicon.png`. If
-   `assets/favicon.svg` is missing, restore it from this skill's `assets/`, prefer that
-   over re-downloading `https://hyperparam.app/favicon.svg`: the site's SVG is filled
-   solid white (`fill="#fff"`, invisible on a light browser tab); the skill's copy
-   replaces that with an embedded theme-aware style
-   (`path{fill:#33465c}` + `@media (prefers-color-scheme:dark){path{fill:#aec2d6}}`,
-   the stylesheet's slate ink values). If you must re-download, re-apply that edit and
-   regenerate the PNG. The in-page `brand-mark` is unaffected either way: CSS masks it
-   to the page's ink color. Don't expect a favicon at all on pages opened via `file://`:
-   Chrome doesn't load favicons from local files, check on the served site or a local
-   `python3 -m http.server`.) Section pages chain back:
-   "← Back to the report" → one-pager → "← All reports" → landing page. The masthead
-   goes in **build.sh, not the source `.md`**: the Markdown must stay renderer-agnostic.
-
-   **Every page also carries a "Copy … as Markdown" masthead action** (user request
-   2026-07-16: readers paste reports into an agent). build.sh implements it:
-   - It copies each page's raw Markdown next to the built HTML, `index.md` (the
-     one-pager), one `<section>.md` per section, and concatenates `full.md` (one-pager
-     + every section, `---`-separated, file order). These raw files keep their `.md`
-     links untouched (they're source for agents, `rewrite_hrefs` never touches them).
-   - It writes `assets/copy-md.js` if missing (fetch the `data-src` file → clipboard;
-     button text flips to "Copied" for 1.5s; on any failure: e.g. `file://`, where
-     fetch is blocked, it falls back to navigating to the raw `.md`), copies it into
-     each output's `assets/`, and `assets/head.html` gains a third line:
-     `<script defer src="assets/copy-md.js"></script>`. The script MUST use the
-     `ClipboardItem`-with-a-promise pattern (`navigator.clipboard.write([new
-     ClipboardItem({'text/plain': fetchPromise.then(t => new Blob([t]))})])`), with
-     plain `writeText` only as a secondary attempt: Safari revokes the click's
-     clipboard permission across an `await`, so fetch-then-`writeText` silently drops
-     to the open-the-raw-md fallback on Safari.
-   - The masthead nav gets the button after the back link: the one-pager's is
-     `<a href="#" class="copy-md" data-src="full.md">Copy report as Markdown</a>`,
-     each section page's is the same with `data-src="<section>.md"` and the label
-     "Copy page as Markdown". **`data-src`, never `href`**: `rewrite_hrefs` and the
-     leftover-`.md` check must not see these as document links.
-   If the repo's build.sh predates this (`grep -q copy-md build.sh` fails), add the
-   three pieces above and re-run. Canonical copies of `copy-md.js` and `head.html` ship
-   in this skill's `assets/`: restore from there rather than re-deriving the script
-   from this description.
+   The command owns every mechanical detail that used to be described here: pandoc
+   invocation, the Hyperparam masthead and dated doc label, the back-nav chain
+   ("&#8592; Back to the report" on a section, "&#8592; All reports" on a one-pager),
+   the favicon with its PNG fallback (Safari does not render SVG favicons), the
+   "Copy as Markdown" action with its `index.md` / `<section>.md` / `full.md` sidecars,
+   and rewriting `.md` links to `.html` on the emitted HTML so Markdown links and
+   raw-HTML component links are both caught. None of that is your responsibility, and
+   none of it should be re-derived here: it is code, with tests, in
+   `src/core/reports/`.
 
 5. **Regenerate the top-level `index.html` as an at-a-glance dashboard, not a table of
    contents.** Write a fresh landing page (template in [`components.md`](components.md) →
@@ -313,27 +244,19 @@ Work relative to the repo root `~/hypaware-reports`.
    List **every** built report, newest first, so nothing is orphaned. Keep the
    internal-data note: it's a standing warning on this repo.
 
-6. **Verify.** Confirm each report built, links resolve, and the enrichment landed:
+6. **Verify what the command cannot.** `hyp report render` already enforces the
+   structural contract (every page built, no leftover `.md` links, a copy action and
+   back-link on every page, a `full.md` per report) and fails if any of it breaks. What
+   is left is the judgment half, which only you can check:
    ```bash
-   ls html/                                   # one dir per report
-   grep -o '<title>[^<]*</title>' html/*/index.html
-   grep -rlo --include='*.html' 'href="[^"]*\.md"' html/ || echo "no leftover .md links ✓"
-   # (--include='*.html' matters: the raw index.md/full.md/<section>.md shipped next to
-   # each page keep their .md links on purpose - only built pages must be clean)
-   grep -L 'class="copy-md"' html/*/*.html    # should print nothing: every page has its copy action
-   ls html/*/full.md                          # one per report: the copy-report payload exists
    grep -L 'class="rec"' html/*/index.html   # should print nothing: findings/changes are carded
-   grep -c 'rec-stat' index.html             # ≥ number of reports: landing cards carry stats
-   grep -L 'All reports' html/*/index.html   # should print nothing: every report links back
-   grep -o 'href="html/[^"]*proposed-changes.html"' index.html  # one hit per report that has a proposed-changes page
+   grep -c 'rec-stat' index.html             # >= number of reports: landing cards carry stats
+   grep -o 'href="html/[^"]*proposed-changes.html"' index.html  # one hit per report with a proposed-changes page
    ```
-   `href="….md"` in any built page means a link wasn't rewritten: remember links live
-   both in Markdown syntax **and** inside raw-HTML components (`rec` card and callout
-   `href`s), and may point across reports; investigate before publishing. A page missing
-   `rec` cards means step 3 was skipped or stopped halfway; a `metric-grid` is only
-   expected where the source report has a headline-numbers section (do NOT add one to a
-   change-list report to satisfy a check); a landing page without `rec-stat`s means
-   step 5 produced a bare link list.
+   A page missing `rec` cards means step 3 was skipped or stopped halfway; a
+   `metric-grid` is only expected where the source report has a headline-numbers section
+   (do NOT add one to a change-list report to satisfy a check); a landing page without
+   `rec-stat`s means step 5 produced a bare link list.
    Optionally open `index.html` (or `html/<slug>/index.html`) in a browser to
    eyeball it (check both light and dark: the stylesheet supports both).
 
@@ -399,15 +322,15 @@ even when the content skills produced plain Markdown.
   built `html/` and `index.html` into `archive/<timestamp>/`, then clears the top level.
   Normal cycle: archive old batch → generate new reports → **run this skill** to rebuild
   `html/` + `index.html` → commit. Don't run this skill *while* an archive is in progress.
-- **Flat vs. sectioned reports both work.** `build.sh` builds a one-pager with no sibling
+- **Flat vs. sectioned reports both work.** The renderer builds a one-pager with no sibling
   `<slug>/` dir as a single `html/<slug>/index.html`; one with sections gets sibling
   `<section>.html` pages plus back-nav.
 - **`index.html` is generated: don't hand-edit it and expect edits to survive.**
-- **pandoc dialect.** `build.sh` uses `-f gfm` and sets only `pagetitle` (not `title`).
+- **pandoc dialect.** The renderer uses `-f gfm` and sets only `pagetitle` (not `title`).
   `gfm` passes raw HTML blocks through, which is what makes the component vocabulary work:
   leave those flags alone. Keep raw HTML blocks separated from Markdown by blank lines.
 - **Fully self-contained.** The stylesheet uses system fonts only: no webfont `@import`,
   no external assets, so pages render identically offline, on GitHub Pages, and from
   `file://`. Don't reintroduce a webfont.
-- **Don't `rm` the source Markdown.** `build.sh` reads the top-level `<slug>.md` +
+- **Don't `rm` the source Markdown.** The renderer reads the top-level `<slug>.md` +
   `<slug>/` on every run; the HTML under `html/` is derived output.
