@@ -48,7 +48,10 @@ const CLIENT_HEADER = 'x-hypaware-client'
 /** The two provider keys attach owns, in write order. */
 const PROVIDER_KEYS = ['anthropic', 'openai']
 
-const RESTART_COMMAND = 'openclaw gateway restart'
+// Exported so the picker-disclosure test can assert the manifest summary
+// names this exact command, not a copy it could silently drift from
+// (test/plugins/picker-disclosure.test.js).
+export const RESTART_COMMAND = 'openclaw gateway restart'
 
 /**
  * The instruction R4 requires both surfaces to end with. A running OpenClaw

@@ -26,7 +26,7 @@
       {
         "name": "raw-anthropic",
         "label": "Anthropic API",
-        "summary": "For apps you manually point at HypAware.",
+        "summary": "For apps you manually point at HypAware; starts a local gateway listener.",
         "compose": {
           "requires_gateway": true,
           "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
@@ -35,7 +35,7 @@
       {
         "name": "raw-openai",
         "label": "OpenAI API",
-        "summary": "For apps you manually point at HypAware.",
+        "summary": "For apps you manually point at HypAware; starts a local gateway listener.",
         "compose": {
           "requires_gateway": true,
           "gateway_upstream": { "name": "openai", "base_url": "https://api.openai.com", "path_prefix": "/v1", "provider": "openai" }
