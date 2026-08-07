@@ -273,9 +273,12 @@ export function createCodexExchangeProjector(opts = {}) {
  * When the client states no thread id the container is still the right key for a
  * ROOT thread (there the two are one uuid). That was once the common
  * subscription-route shape, a bare `session-id` header; it is not any more, and
- * that header name is not one Codex emits or this file reads
- * (@ref LLP 0151#real-header-names). Since the adapter began reading the body's
- * flat `client_metadata` map, which Codex fills with BOTH ids on every request
+ * that header name is not one this file reads on any path
+ * (@ref LLP 0151#real-header-names). The name is real on Codex's compaction and
+ * websocket paths, so leaving it unread is a decision rather than an oversight:
+ * those requests state the same ids in the turn-metadata blob
+ * (@ref LLP 0165#header-audit-correction). Since the adapter began reading the
+ * body's flat `client_metadata` map, which Codex fills with BOTH ids on every request
  * (@ref LLP 0151#body-is-authority), an ordinary Codex turn states its thread and
  * is answered by the branch above. What is left for the two lines below is a turn
  * that names a container on a Codex-owned surface while naming no `thread_id` on
@@ -772,15 +775,18 @@ const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
 function resolveCodexContext(input, provider, path, reqBody) {
   // @ref LLP 0151#body-is-a-codex-signal [implements]: a Codex-owned body map
   // identifies the exchange on its own, so the API-key route's generic
-  // `/v1/responses` resolves with no Codex header at all. The transport signal is
-  // resolved first because it is also what corroborates the body's ambiguous
-  // flat identity pair (see `readCodexClientMetadata`).
+  // `/v1/responses` resolves with no Codex header at all.
   const transportIsCodex = hasCodexTransportSignal(input, provider, path)
+  // @ref LLP 0165#flat-pair-corroboration [implements]: naming the client and
+  // trusting its unnamespaced identity pair are two different questions, and the
+  // user-agent may only answer the first. Passing the narrow predicate here is
+  // the whole of that split.
+  const flatPairIsCorroborated = hasCodexNamespaceSignal(input, provider, path)
   // @ref LLP 0151#body-is-authority [implements]: the flat body map first, the
   // turn-metadata blob second. Both are projections of one Codex snapshot, so
   // they agree whenever both are present; the body is preferred because it is
   // the only one present for every request kind.
-  const clientMetadata = readCodexClientMetadata(reqBody, transportIsCodex)
+  const clientMetadata = readCodexClientMetadata(reqBody, flatPairIsCorroborated)
   if (!transportIsCodex && clientMetadata === undefined) return undefined
   const metadata = readCodexTurnMetadata(input, clientMetadata)
   const userAgent = readHeader(input.request_headers, 'user-agent')
@@ -927,24 +933,48 @@ function resolveCodexContext(input, provider, path, reqBody) {
 }
 
 /**
- * Whether the transport alone identifies this exchange as Codex, before any part
- * of the request body is consulted: the ChatGPT upstream, the Codex route
- * namespace, a Codex-namespaced compatibility header, or a Codex user-agent
- * product. Every one of these is a name only a Codex client produces.
+ * The transport signals that spell a name out of Codex's own proprietary
+ * vocabulary: the ChatGPT upstream, the `/backend-api/codex/` route namespace,
+ * or an `x-codex-*` compatibility header. Producing any of them takes knowledge
+ * of a route or header name Codex never published as an interface, which is a
+ * meaningfully higher bar than copying a product string.
  *
- * Kept separate from the body signal because it is also what corroborates a
+ * This, and NOT the looser `hasCodexTransportSignal`, is what corroborates a
  * `client_metadata` map carrying no Codex-owned key of its own.
- * @ref LLP 0151#body-is-a-codex-signal [implements]
+ * @ref LLP 0165#flat-pair-corroboration [implements]: the strict half of the
+ * split, the only half a partition key is allowed to rest on.
+ *
+ * @param {AiGatewayExchangeInput} input
+ * @param {string} provider
+ * @param {string} path
+ */
+function hasCodexNamespaceSignal(input, provider, path) {
+  if (provider === 'chatgpt') return true
+  if (isCodexNamespacePath(path)) return true
+  if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
+  return Boolean(readHeader(input.request_headers, X_CODEX_WINDOW_ID))
+}
+
+/**
+ * Whether the transport alone identifies this exchange as Codex, before any part
+ * of the request body is consulted: any namespace signal above, or a Codex
+ * user-agent product.
+ *
+ * Deliberately the loose half of the split. The user-agent is a product-name
+ * convention, not a namespace: any process on the user's own machine can set
+ * `codex_cli_rs/...` without knowing anything Codex-specific. That is enough to
+ * label a row's client, which is a description, and not enough to promote an
+ * unnamespaced `client_metadata` pair into `conversation_id` and the LLP 0030
+ * partition key, which is an identity.
+ * @ref LLP 0165#flat-pair-corroboration [implements]: the loose half, which may
+ * name the client and nothing more.
  *
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
  */
 function hasCodexTransportSignal(input, provider, path) {
-  if (provider === 'chatgpt') return true
-  if (isCodexNamespacePath(path)) return true
-  if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
-  if (readHeader(input.request_headers, X_CODEX_WINDOW_ID)) return true
+  if (hasCodexNamespaceSignal(input, provider, path)) return true
   const userAgent = readHeader(input.request_headers, 'user-agent')
   return codexClientFromUserAgent(userAgent).entrypoint !== undefined
 }
@@ -965,17 +995,21 @@ function hasCodexTransportSignal(input, provider, path) {
  * `/v1/chat/completions`. Honouring the pair on its own would therefore let an
  * unrelated client be stamped `client_name: 'codex'` and dictate this row's
  * `conversation_id` and `session_id`, which is the same defect class as the
- * fictional `thread-id` header this document removed, only through the body. So
- * the pair is trusted only once `corroborated` says the transport already
- * identified the exchange as Codex, where it adds lineage detail to a client
- * that is already known rather than naming the client.
+ * bare `thread-id` header read this document removed, only through the body. So
+ * the pair is trusted only once `corroborated` says a Codex-namespaced transport
+ * signal already identified the exchange, where it adds lineage detail to a
+ * client that is already known rather than naming the client. A Codex-shaped
+ * user-agent is NOT such a signal: see `hasCodexNamespaceSignal`.
  * @ref LLP 0151#body-is-authority: the always-present lineage surface.
  * @ref LLP 0151#body-is-a-codex-signal [constrained-by]: which keys of the map
  * are evidence of Codex, and which only carry detail.
+ * @ref LLP 0165#flat-pair-corroboration [constrained-by]: which transport signals
+ * may corroborate the pair.
  *
  * @param {unknown} reqBody
- * @param {boolean} corroborated Whether the transport (upstream, route, Codex
- *   header, or Codex user-agent) already identified this exchange as Codex.
+ * @param {boolean} corroborated Whether a Codex-namespaced transport signal
+ *   (the ChatGPT upstream, the Codex route namespace, or an `x-codex-*` header)
+ *   already identified this exchange as Codex.
  * @returns {Record<string, unknown> | undefined}
  */
 function readCodexClientMetadata(reqBody, corroborated) {
@@ -1115,9 +1149,12 @@ function selectCodexWorkspace(metadata, cwd) {
 function resolveConversationId(reqBody, input, provider, path, codexContext) {
   // @ref LLP 0151#real-header-names [implements]: the thread comes from the
   // context's own resolution (body map, then turn-metadata blob) and nowhere
-  // else. The `thread-id` / `session-id` header names that used to be consulted
-  // here are names Codex never emits, so they could only ever have let a
-  // non-Codex hop dictate this row's identity.
+  // else. No Codex turn states its lineage in the `thread-id` / `session-id`
+  // header names that used to be consulted here, so they could only ever have
+  // let a non-Codex hop dictate this row's identity.
+  // @ref LLP 0165#header-audit-correction [constrained-by]: those two names are
+  // real on Codex's compaction and websocket paths, and still not read here,
+  // because the turn-metadata blob states the same ids for that request kind.
   if (codexContext?.thread_id) return codexContext.thread_id
   const sessionId = readMetadataSessionId(reqBody)
   if (sessionId) return sessionId

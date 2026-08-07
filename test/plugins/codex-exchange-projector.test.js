@@ -1698,10 +1698,14 @@ test('Codex lineage resolves from the compatibility headers Codex actually sends
   assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
 })
 
-// @ref LLP 0151#real-header-names [tests]: `thread-id`, `session-id` and
-// `parent-thread-id` are names Codex never emits. Reading them let an
-// unrelated proxy hop or a hand-rolled client dictate `conversation_id`, which
-// is the partition-adjacent row identity, so they must resolve to nothing.
+// @ref LLP 0151#real-header-names [tests]: no Codex turn states its lineage
+// under these bare names, so reading them only let an unrelated proxy hop or a
+// hand-rolled client dictate `conversation_id`, which is the partition-adjacent
+// row identity. They must therefore resolve to nothing.
+// @ref LLP 0165#header-audit-correction [tests]: `parent-thread-id` is fictional
+// outright, while `thread-id` and `session-id` are real on the compaction and
+// websocket-handshake paths and still unread, since the turn-metadata blob
+// states the same ids for the one request kind that carries them.
 test('a bare lineage header name Codex never sends resolves to nothing, not a wrong value', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -1894,9 +1898,64 @@ test('a non-Codex client sending only a flat client_metadata identity pair is no
 // @ref LLP 0151#body-is-a-codex-signal [tests]: corroboration is what makes the
 // flat pair readable, not the pair itself, so the guard above must narrow only
 // WHO may be called Codex and not WHAT a known Codex client's map carries. A
-// Codex user-agent is corroboration on its own, so a Codex turn whose map states
-// only the flat pair still resolves its lineage from the body.
-test('a transport-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+// Codex-namespaced header is corroboration on its own, so a Codex turn whose map
+// states only the flat pair still resolves its lineage from the body.
+test('a namespace-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({ 'x-codex-window-id': 'window-corr' }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-corr', thread_id: 'thread-corr' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.conversation_id, 'thread-corr')
+  assert.equal(projection.session_id, 'session-corr')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+})
+
+// @ref LLP 0165#flat-pair-corroboration [tests]: the user-agent is a product-name
+// convention any local process can copy, so it may name the client but must not
+// promote an uncorroborated flat pair into the LLP 0030 partition key. The two
+// halves are asserted together: the row is still called Codex (all four signals
+// still answer "may be called Codex"), and the flat pair still contributes
+// nothing (only the namespace signals answer "may have its flat pair trusted").
+test('a Codex user-agent alone does not let a flat client_metadata pair dictate row identity', () => {
+  const projector = createCodexExchangeProjector()
+  /** @param {Record<string, unknown>} body */
+  const project = (body) => /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({ 'user-agent': 'codex_cli_rs/0.55.0' }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go', ...body }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  const projection = project({ client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' } })
+  // Loose half: the user-agent still identifies the client.
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.client_version, '0.55.0')
+  // Strict half: nothing of the unproven pair reaches the row.
+  assert.notEqual(projection.conversation_id, 'thread-ua')
+  assert.notEqual(projection.session_id, 'session-ua')
+  assert.equal(projection.attributes.codex.thread_id, undefined)
+  assert.equal(projection.attributes.codex.session_id, undefined)
+  assert.equal(projection.attributes.codex.lineage_source, undefined)
+  // Strongest form: the row is identical to the same request without the map.
+  const control = project({})
+  assert.equal(projection.conversation_id, control.conversation_id)
+  assert.equal(projection.session_id, control.session_id)
+})
+
+// @ref LLP 0165#flat-pair-corroboration [tests]: dropping the user-agent branch
+// from the strict predicate must not cost a Codex build that still writes an
+// `x-codex-*` entry into its map. That key names the client on its own, so a
+// user-agent-only transport keeps full lineage whenever the map is self-naming.
+test('a Codex user-agent request keeps its lineage when the map carries a Codex-owned key', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
@@ -1904,14 +1963,18 @@ test('a transport-corroborated Codex request still resolves lineage from a flat-
     request_body: JSON.stringify({
       model: 'gpt-5-codex',
       input: 'go',
-      client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' },
+      client_metadata: {
+        'x-codex-installation-id': 'install-ua',
+        session_id: 'session-ua-owned',
+        thread_id: 'thread-ua-owned',
+      },
     }),
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
 
   assert.equal(projection.client_name, 'codex')
-  assert.equal(projection.conversation_id, 'thread-ua')
-  assert.equal(projection.session_id, 'session-ua')
+  assert.equal(projection.conversation_id, 'thread-ua-owned')
+  assert.equal(projection.session_id, 'session-ua-owned')
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 

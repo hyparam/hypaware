@@ -122,7 +122,9 @@ export async function run({ harness, expect }) {
   const codexTurnId = `turn-${harness.devRunId}`
   // @ref LLP 0151#body-is-authority: Codex states its lineage in the body's flat
   // `client_metadata` map on every request kind, so the fixture carries it there
-  // and NOT under the `thread-id` / `session-id` header names Codex never emits.
+  // and NOT under the bare `thread-id` / `session-id` header names.
+  // @ref LLP 0165#header-audit-correction: those two names are real on Codex's
+  // compaction and websocket paths, but no turn states its lineage in them.
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
     input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
