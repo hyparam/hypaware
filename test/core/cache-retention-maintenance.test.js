@@ -778,7 +778,7 @@ test('legacy epoch compaction preserves the table sort order', async () => {
   }
 })
 
-// --- convergence: baseline gate and neediest-first order (LLP 0195) ---
+// --- convergence: baseline gate and neediest-first order (LLP 0199) ---
 
 test('an already-compacted partition is not recompacted until new data flushes', async () => {
   const cacheRoot = await makeTmpDir('maint-baseline')
