@@ -53,9 +53,14 @@ On a TTY this launches the interactive walkthrough:
 1. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
    - Codex conversations, CLI and Desktop (`codex`)
-   - Raw Anthropic API traffic (`raw-anthropic`)
-   - Raw OpenAI API traffic (`raw-openai`)
    - OTEL logs / traces / metrics (`otel`)
+
+   The raw proxy sources (`raw-anthropic`, `raw-openai`) are not offered in
+   the menu. They open a gateway upstream but configure no client and carry
+   no projector of their own, so on their own they proxy traffic and record
+   nothing. They remain real sources: `hyp init --source raw-anthropic`
+   still composes one, and a config that already collects one keeps it
+   through a reconfigure (LLP 0200).
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
 3. The **retention window** is not asked: the pathway sets it, `90` days on

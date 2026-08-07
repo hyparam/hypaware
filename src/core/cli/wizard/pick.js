@@ -146,6 +146,14 @@ export async function runWizardPick(opts) {
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
     : configured ?? detected
 
+  // Which of the three tiers above `seed` came from: a previous confirmed
+  // selection or the config on disk are both records of a choice the user
+  // made; detection is a guess about the machine. Only the first two may
+  // carry a hidden row through the selection, and `promptPickSelection`
+  // needs to know which it got, because the set itself does not say.
+  // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a pre-checked box the user can still clear, never a source composed on their behalf
+  const seedIsChosen = Boolean(opts.initialSelection) || configured !== undefined
+
   await withSpan(
     'wizard.pick.start',
     {
@@ -184,7 +192,7 @@ export async function runWizardPick(opts) {
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet })
+      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedIsChosen, detected, lockedSet })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -401,12 +409,13 @@ export async function commitWizardPickedConfig(args) {
  *   descriptorList: PickerDescriptor[],
  *   descriptors: Map<string, PickerDescriptor>,
  *   seed: ReadonlySet<string>,
+ *   seedIsChosen: boolean,
  *   detected: Set<PickerSource>,
  *   lockedSet: Set<string>,
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet }) {
+async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedIsChosen, detected, lockedSet }) {
   // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
   // re-entry's previous selection) or the org's locked set yields a
   // usable default, state it in one line and let a bare enter accept it;
@@ -427,10 +436,18 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
   // not evidence the user ever chose the row, and carrying on it would
   // resurrect the `openai` upstream the moment someone unchecked codex -
   // breaking the guarantee that unchecking a row removes its upstream.
+  //
+  // `seedIsChosen` is what keeps "the config on disk" from widening to "the
+  // seed, whatever produced it". On a first run the seed is a DETECTION
+  // result, and carrying off that would compose a source the user was never
+  // shown and cannot uncheck, purely because a probe found it - exactly what
+  // LLP 0011 #autodetect-vs-default forbids. No bundled hidden row declares
+  // a `detect` probe today, but `hidden` is a kernel-contract field any
+  // plugin can set beside one, so the gate is stated rather than assumed.
   const seededVisible = visibleList.some((d) => seed.has(d.id))
-  const carried = seededVisible
-    ? []
-    : descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+  const carried = seedIsChosen && !seededVisible
+    ? descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+    : []
   const withCarried = (/** @type {string[]} */ picked) =>
     /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
 

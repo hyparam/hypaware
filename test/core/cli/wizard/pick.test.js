@@ -1067,3 +1067,26 @@ test('runWizardPick: --source still composes a hidden row (no prompt involved)',
   const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
   assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['openai'])
 })
+
+// Carry-through is scoped to a seed that records a choice (the config on
+// disk, or a re-entry's confirmed selection). On a FIRST run the seed is a
+// detection result, and a hidden row carried off that would be composed
+// without ever being rendered or made uncheckable - detection forcing a
+// source on, which LLP 0011 #autodetect-vs-default forbids. No bundled
+// hidden row declares a `detect` probe, so this drives detection directly.
+// @ref LLP 0011#autodetect-vs-default [tests]: a detected hidden row is not composed on the user's behalf
+test('runWizardPick: a hidden row that is merely detected is not carried on a first run', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt([])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    // No config on disk: the seed is this detection result and nothing else.
+    detect: async () => new Set(['raw-anthropic']),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual(result.sourcesPicked, [])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway'), undefined)
+})
