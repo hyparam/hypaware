@@ -68,7 +68,7 @@ export async function runWizardSyncScope(opts) {
       `warning: the client policy store at '${clientSyncListPath(stateDir)}' is unreadable; ` +
       'skipping the sync-scope step (exports fail until it is repaired or removed)\n'
     )
-    return await finishSpan({ skipped: true, optedOut: [] }, opts)
+    return await finishSpan({ skipped: true, noQuestion: true, optedOut: [] }, opts)
   }
 
   const candidateIds = new Set(opts.candidates.map((d) => d.id))
@@ -81,7 +81,10 @@ export async function runWizardSyncScope(opts) {
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
-    return await finishSpan({ optedOut: [] }, opts)
+    // A statement, not a screen: `noQuestion` is what tells the lane after
+    // this one that there is nothing here to step back *to* (LLP 0191
+    // #back-edges).
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)

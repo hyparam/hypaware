@@ -327,7 +327,11 @@ test('zero candidates: prints the position and the fleet line, prompts nothing, 
     confirm: async () => { prompted = true; return 'accept' },
   }))
 
-  assert.deepEqual(result, { optedOut: [] })
+  // `noQuestion` is the part the orchestrator reads: a lane that only
+  // stated its outcome is not a screen, so the new-folder lane behind it
+  // backs past it to the picker rather than re-running it (LLP 0191
+  // #back-edges).
+  assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
   assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
   assert.match(stdout.text(), /managed by your fleet and always syncs/)
@@ -381,7 +385,8 @@ test('a corrupt store skips the step with a warning and is never overwritten', a
     confirm: async () => { prompted = true; return 'accept' },
   }))
 
-  assert.deepEqual(result, { skipped: true, optedOut: [] })
+  // Skipped and unasked: the lane after it must not try to back into it.
+  assert.deepEqual(result, { skipped: true, noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
   assert.match(stderr.text(), /unreadable/)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')

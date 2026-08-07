@@ -197,7 +197,7 @@ export async function runWizardPick(opts) {
   const seeding = await resolvePickSeeding(opts)
   const {
     descriptors, descriptorList, lockedSources, lockedSet,
-    configPath, existing, configured, detected, seed, interactive,
+    configPath, existing, configured, detected, seed, interactive, defaultRows,
   } = seeding
 
   await withSpan(
@@ -238,7 +238,7 @@ export async function runWizardPick(opts) {
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet })
+      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet, defaultRows })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -457,16 +457,20 @@ export async function commitWizardPickedConfig(args) {
  *   seed: ReadonlySet<string>,
  *   detected: Set<PickerSource>,
  *   lockedSet: Set<string>,
+ *   defaultRows: PickerDescriptor[],
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet }) {
+async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet, defaultRows }) {
   // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
   // re-entry's previous selection) or the org's locked set yields a
   // usable default, state it in one line and let a bare enter accept it;
   // the full menu opens only on request. With no default there is
-  // nothing to confirm, so the menu shows directly.
-  const defaultRows = descriptorList.filter((d) => seed.has(d.id) || lockedSet.has(d.id))
+  // nothing to confirm, so the menu shows directly. `defaultRows` arrives
+  // from `resolvePickSeeding` rather than being re-derived here: the
+  // express gate accepts these exact rows, and LLP 0201 #gate is explicit
+  // that "the defaults" must have one definition, not two that happen to
+  // agree.
   const hasGate = defaultRows.length > 0
   // One source per line; the locked suffix matches the menu rows'. Built by
   // the shared labeller, so the express gate lists these exact rows.

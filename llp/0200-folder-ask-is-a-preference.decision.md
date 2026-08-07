@@ -116,6 +116,14 @@ Escape steps back to the sync lane, cancel ends the run at 130 like any
 other lane, and a non-interactive run never reaches it (LLP 0131
 #attended-only), taking the default.
 
+Back means back to the previous *screen*, which is the sync lane only when
+the sync lane asked something. On a fully fleet-managed machine there is
+nothing left to opt out of, so that lane states its outcome and asks
+nothing; on an unreadable client store it warns and skips. Backing "into"
+either re-ran it and re-asked this question, so escape became a redraw with
+no way out. Past a lane that only narrated, the previous screen is the
+picker ([LLP 0191 #back-edges](./0191-wizard-back-navigation.decision.md#back-edges)).
+
 <a id="cli"></a>**`hyp policy folders [ask|sync] [--json]` is the standing
 control**, the sibling of `hyp policy client` ([LLP 0188 #opt-out](./0188-enrolled-default-sync-with-client-optout.decision.md#opt-out)):
 bare it reports, with a token it writes, idempotent either way. `hyp policy

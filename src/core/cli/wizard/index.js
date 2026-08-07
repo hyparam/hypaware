@@ -196,12 +196,16 @@ export async function runInitWizard(opts) {
   const enrolled = () => managed || joined !== undefined
 
   // The question lanes and their back edges (LLP 0191 #back-edges):
-  // escape steps one screen back - folders to sync (`continue atSync`),
-  // sync to pick (`continue atPick`), pick to the express gate (`continue
-  // atExpress`, or straight to the fork on a pass that showed no gate),
+  // escape steps one *screen* back - folders to sync (`continue atSync`,
+  // or past it to pick when the sync lane asked nothing), sync to pick
+  // (`continue atPick`), pick to the express gate (`continue atExpress`,
+  // or straight to the fork when that pass has no gate to show),
   // the express gate to the fork (`continue atFork`), the fork to the
   // returning gate -
-  // while ctrl+c keeps cancelling the run. Everything after the loop
+  // while ctrl+c keeps cancelling the run. A lane that narrates instead of
+  // asking is not a screen, so the edges step past it rather than re-running
+  // it: landing on one is how escape stops being a step and becomes a
+  // redraw. Everything after the loop
   // (config commit, configure, finale) acts rather than asks, so
   // back-navigation ends at the commit point (LLP 0190 #commit-point).
   // @ref LLP 0191#back-edges [implements]: the orchestrator's loop carries every step-level back transition
@@ -335,6 +339,13 @@ export async function runInitWizard(opts) {
     // overshoot - escape at pick would reach past the gate to the fork,
     // and escape at sync would land on the gate instead of the picker.
     // @ref LLP 0201#edges [implements]: the gate sits on the back chain - it backs to the fork, and the lane after it backs to the gate
+    //
+    // Did the pick lane's escape bring us to this pass? The gate's rows are
+    // the picker's own defaults, so a pass that follows a confirmed empty
+    // selection has nothing left to accept and shows no gate - and falling
+    // forward into the picker again would make that escape a redraw rather
+    // than a step. Behind a gate that cannot render is the fork.
+    let backFromPick = false
     atExpress: while (true) {
       // One question, before the lanes, that accepts every lane's stated
       // default. Asked once per pass through the lanes and only on an
@@ -380,8 +391,13 @@ export async function runInitWizard(opts) {
           }
           expressShown = true
           express = choice === 'defaults'
+        } else if (backFromPick) {
+          // Stepped back out of the picker onto a gate this pass cannot
+          // show: the screen behind it is the fork (LLP 0201 #edges).
+          continue atFork
         }
       }
+      backFromPick = false
 
       atPick: while (true) {
         // The lanes' positions, resolved when their pathway is: a back
@@ -443,7 +459,10 @@ export async function runInitWizard(opts) {
         // One screen back is the express gate when this pass showed one,
         // and the fork when it did not (LLP 0191 #back-edges).
         if (picked.back) {
-          if (expressShown) continue atExpress
+          if (expressShown) {
+            backFromPick = true
+            continue atExpress
+          }
           continue atFork
         }
         if (picked.cancelled || picked.exitCode !== 0) {
@@ -518,7 +537,18 @@ export async function runInitWizard(opts) {
               // The sync lane is always behind this one.
               allowBack: true,
             })
-            if (folders.back) continue atSync
+            // One screen back is the sync lane only when the sync lane was
+            // a screen. On a fully fleet-managed machine (nothing left to
+            // opt out) and on an unreadable store it states its outcome and
+            // asks nothing, so backing "into" it re-ran it and re-asked this
+            // question: escape became a redraw the user could never get out
+            // of. Past a lane that asked nothing, the last screen is the
+            // picker.
+            // @ref LLP 0191#back-edges [implements]: escape reaches the previous screen, skipping a lane that rendered a statement rather than a question
+            if (folders.back) {
+              if (syncScope.noQuestion) continue atPick
+              continue atSync
+            }
             if (folders.cancelled) {
               // Same shape as the sync lane's cancel: nothing new was
               // written, and the enrolled consequence is narrated rather

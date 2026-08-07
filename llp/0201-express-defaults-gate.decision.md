@@ -123,7 +123,11 @@ Back edges mirror the forward edges one screen at a time, and a question
 inserted into the forward chain but not the back chain would make both of
 its neighbours overshoot. On a pass where there is nothing to accept and no
 gate is shown (#no-default-no-accept), the pick lane's back edge reaches the
-fork directly, exactly as it did before the gate existed.
+fork directly, exactly as it did before the gate existed - including the
+pass a back *into* the gate opens, since the rows are the picker's own
+confirmed defaults and a confirmed empty selection leaves none. Escape
+reaches the previous screen; a step that renders nothing is not one, and
+falling forward into the lane the user just left would make escape a redraw.
 Non-interactive runs (`--yes`, presets, `--from-file`) never
 see it: they already take every default without prompting (LLP 0131
 #attended-only).

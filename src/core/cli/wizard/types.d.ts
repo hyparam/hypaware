@@ -96,6 +96,15 @@ export interface WizardSyncScopeResult {
   optedOut: string[]
   /** The step was skipped (corrupt store) rather than answered. */
   skipped?: boolean
+  /**
+   * The lane reached its outcome without presenting a prompt: everything
+   * picked was fleet-locked, or the store was unreadable. It is then a
+   * statement rather than a screen, so the lane after it steps back *past*
+   * it (LLP 0191 #back-edges: escape reaches the last screen the user could
+   * answer, and a lane that asked nothing is not one). Not set on the
+   * express path, which asks nothing anywhere and never backs.
+   */
+  noQuestion?: true
 }
 
 /**

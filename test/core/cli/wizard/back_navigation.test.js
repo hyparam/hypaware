@@ -447,6 +447,97 @@ test('runInitWizard: with nothing to accept there is no gate, and pick backs str
   assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
 })
 
+// A lane that narrates instead of asking is not a screen, so escape has to
+// step past it. The sync lane asks nothing when everything picked is
+// fleet-locked (and nothing when the client store is corrupt): backing
+// "into" it re-ran it and re-asked the new-folder question, so escape at
+// the folders lane became a redraw with no exit but ctrl+c.
+// @ref LLP 0191#back-edges [tests]: escape past a lane that rendered a statement rather than a question reaches the picker
+test('runInitWizard: a back from folders skips a sync lane that asked nothing and reaches pick', async () => {
+  let folderCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    // The fully fleet-managed shape: every picked row is locked, so the
+    // real lane's `candidates` list is empty and it only states its outcome.
+    syncScope: async (/** @type {any} */ o) => {
+      assert.deepEqual(o.candidates, [], 'nothing is left for this lane to ask about')
+      return { optedOut: [], noQuestion: true }
+    },
+    folderAsk: async () => {
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'pick' || c === 'syncScope' || c === 'folderAsk'),
+    ['pick', 'syncScope', 'folderAsk', 'pick', 'syncScope', 'folderAsk'],
+    'escape reaches the picker, the last screen the user could answer'
+  )
+})
+
+// The same edge for the lane that does ask: a sync lane with a question
+// behind it is still where a folders back lands.
+// @ref LLP 0191#back-edges [tests]: a sync lane that asked is the screen behind the folders lane
+test('runInitWizard: a back from folders re-presents a sync lane that did ask', async () => {
+  let folderCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    folderAsk: async () => {
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'pick' || c === 'syncScope' || c === 'folderAsk'),
+    ['pick', 'syncScope', 'folderAsk', 'syncScope', 'folderAsk'],
+    'the picker is two screens back, not one'
+  )
+})
+
+// The gate's rows are the picker's own confirmed defaults, so a confirmed
+// empty selection leaves nothing to accept and the gate cannot render on
+// the pass a pick-back opens. Falling forward into the picker again would
+// make that escape a redraw; the screen behind an unshowable gate is the
+// fork.
+// @ref LLP 0201#edges [tests]: a back into a gate this pass cannot show reaches the fork instead of re-opening the picker
+test('runInitWizard: a back from pick reaches the fork when the confirmed picks leave the gate empty', async () => {
+  let pickCalls = 0
+  let syncCalls = 0
+  let forkCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    fork: async () => { forkCalls += 1; return 'team' },
+    pick: async () => {
+      pickCalls += 1
+      // 1: confirm an empty selection, so the seed the next gate pass would
+      // list is empty. 2: escape out of the re-entered lane.
+      if (pickCalls === 1) return pickResult({ sourcesPicked: [] })
+      if (pickCalls === 2) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+    syncScope: async () => {
+      syncCalls += 1
+      // One back, to re-enter the picker with the empty selection standing.
+      if (syncCalls === 1) return { back: true, optedOut: [] }
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(forkCalls, 2, 'one escape, one step: the fork is what is behind a gate with no rows')
+  assert.deepEqual(
+    calls.filter((c) => c === 'fork' || c === 'express' || c === 'pick'),
+    ['fork', 'express', 'pick', 'pick', 'fork', 'pick'],
+    'the escape out of the re-entered picker steps to the fork, never back into the picker itself'
+  )
+})
+
 // @ref LLP 0191#join-not-undone [tests]:
 test('runInitWizard: back past a completed join reuses it instead of re-running the login', async () => {
   let pickCalls = 0
