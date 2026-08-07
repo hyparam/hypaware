@@ -37,6 +37,18 @@ export function compileConfig(raw) {
 }
 
 /**
+ * Compile the configured upstream entries into routing-table rows, skipping
+ * any entry that lacks a `name` or a `base_url`.
+ *
+ * The skip is silent by design at this layer: this function has no logger and
+ * no way to tell a typo from a shape the caller meant to ignore. It is not
+ * silent overall. The source compares this list's length against the raw entry
+ * count and both logs the difference and publishes it as
+ * `details.upstreams_dropped`, from which `hyp status` warns
+ * (`gateway_upstreams_dropped`, or `gateway_idle_no_upstreams` when nothing
+ * survived at all). Anything that starts calling this without making that
+ * comparison reopens the blind spot.
+ *
  * @param {unknown} raw
  * @returns {UpstreamConfig[]}
  */

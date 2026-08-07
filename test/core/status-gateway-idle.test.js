@@ -9,8 +9,11 @@ import path from 'node:path'
 import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
+/** @import { GatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js' */
 
 // The `gateway_idle_no_upstreams` diagnostic. Letting an upstream-less gateway
 // idle rather than fail its start (#649, LLP 0120) is right for the config
@@ -227,4 +230,232 @@ test('a stopped daemon does not warn off a stale status snapshot', async () => {
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
+})
+
+// ---------------------------------------------------------------------------
+// The partial loss, which the all-dropped check above could not see: with two
+// upstreams configured and one valid, `mergeUpstreams` is non-empty, the proxy
+// binds, `listening` is never set, and a user who typo'd one provider gets a
+// working gateway that routes nothing for it. The signal that catches both is
+// the same one - what the config asked for, against what compiled - so these
+// go through the *real* gateway source and the *real* `compileUpstreams`
+// rather than hand-written details, which is what makes them fail if the drop
+// rule and the reported count ever disagree.
+// @ref LLP 0195#visible-when-unintended [tests]: one configured-vs-compiled comparison covers the partial loss as well as the total one
+// ---------------------------------------------------------------------------
+
+/** An upstream that compiles. Never connected to; the proxy only routes to it. */
+const VALID_UPSTREAM = { name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/anthropic' }
+
+/**
+ * The `details` the real gateway source publishes for a config, via a real
+ * start/status/stop cycle.
+ *
+ * @param {unknown[]} upstreams
+ * @param {GatewayState} [state]
+ *   Defaults to a fresh state with no registered presets, matching every
+ *   other caller here. Pass one already carrying a preset to exercise the
+ *   backfill path in `mergeUpstreams`.
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function realGatewayDetails(upstreams, state = createGatewayState()) {
+  const ctx = /** @type {any} */ ({
+    config: { listen: '127.0.0.1:0', upstreams },
+    storage: {
+      cacheTablePath: (/** @type {string} */ dataset) => dataset,
+      async appendRows() {},
+    },
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  })
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details, 'the gateway source publishes status details')
+    return /** @type {Record<string, unknown>} */ (status.details)
+  } finally {
+    await source.stop()
+  }
+}
+
+test('a gateway that lost one of two configured upstreams warns while listening', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `url` where `base_url` was meant: `compileUpstreams` drops the entry and
+  // says nothing, so openai traffic is never proxied while anthropic is.
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.equal(details.upstreams_configured, 2, 'both entries are counted as configured')
+  assert.equal(details.upstreams_dropped, 1, 'one of them never compiled to a route')
+  assert.ok(details.port, 'and the gateway is listening, which is why this was invisible')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'a partial upstream loss is reported')
+  assert.equal(diag.severity, 'warning')
+  assert.match(diag.message, /1 of its 2 configured upstreams/, 'the message counts the loss')
+  assert.match(diag.message, /openai/, 'and names the upstream that went missing')
+  assert.doesNotMatch(diag.message, /anthropic/, 'not the one that is routing fine')
+  assert.ok(
+    diag.repair.some((r) => r.includes(path.join(hypHome, 'hypaware-config.json'))),
+    'the repair names the file to edit',
+  )
+  // Non-degrading, exactly like the all-dropped case and `gateway_port_fallback`:
+  // a gateway that routes three providers and misses a fourth is still a
+  // working install, and whether a *fully* broken one should flip `overall` is
+  // a separate, deliberately unanswered question.
+  assert.equal(report.overall, 'healthy')
+  assert.equal(
+    report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'),
+    undefined,
+    'and the idle kind does not double-report: the gateway is bound',
+  )
+})
+
+// `readConfiguredUpstreams` compares the raw config entry count against
+// `compileUpstreams`'s output, and knows nothing about `state.presets`. But
+// `mergeUpstreams` (what actually builds the routing table) backfills any
+// registered adapter preset whose name is not already in the *compiled*
+// config table - so a config entry that drops for shape reasons can still be
+// proxied, just via the preset's default endpoint instead of the user's
+// override. The count-based warning still has to fire (the override silently
+// did not take effect), but its message must not claim the name is entirely
+// uncaptured when a preset is quietly covering it.
+test('a dropped upstream whose name matches a registered adapter preset is still proxied, so the warning does not claim silence', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  // Stands in for what `@hypaware/claude` registers at activation: a preset
+  // named `anthropic` with its own default endpoint.
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'anthropic',
+    base_url: 'http://127.0.0.1:1',
+    path_prefix: '/anthropic',
+  })
+  const details = await realGatewayDetails(
+    // `url` where `base_url` was meant: this entry never compiles, but its
+    // name collides with the preset above, so the preset backfills the same
+    // slot and the gateway still binds.
+    [{ name: 'anthropic', url: 'https://api.anthropic.com', path_prefix: '/anthropic' }],
+    state,
+  )
+  assert.equal(details.upstreams_configured, 1, 'one entry was configured')
+  assert.equal(details.upstreams_dropped, 1, 'and it never compiled to a route')
+  assert.ok(details.port, 'the preset backfilled the slot, so the gateway still binds')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'the override silently not taking effect is still worth a warning')
+  assert.equal(
+    report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'),
+    undefined,
+    'the gateway is bound, via the preset, so this is not the total-loss kind',
+  )
+  // `dropped === configured === 1` here, unlike the two-upstream case above:
+  // reachable only through this preset-backfill path, which is exactly what
+  // exercises the singular branch the idle message already had.
+  assert.match(diag.message, /1 of its 1 configured upstream[^s]/, 'singular reads correctly')
+  assert.doesNotMatch(
+    diag.message,
+    /not proxied and nothing is captured for it/,
+    'wrong: an adapter preset is still proxying this name, just not to the address the user configured',
+  )
+  assert.match(
+    diag.message,
+    /unless an adapter preset already covers the same name/,
+    'the message hedges instead of asserting total silence',
+  )
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a partial loss with no usable name still warns off the count', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `name` drops an entry as silently as `base_url` does, and a nameless entry
+  // contributes nothing to `details.upstreams`, so the names alone cannot see
+  // this config at all.
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { provider: 'openai', base_url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.equal(details.upstreams_dropped, 1)
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'the count carries the warning with no name to print')
+  assert.match(diag.message, /1 of its 2 configured upstreams did not compile/)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a total loss still warns, through the same comparison', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([
+    { name: 'anthropic', url: 'https://api.anthropic.com' },
+    { name: 'openai', url: 'https://api.openai.com' },
+  ])
+  assert.equal(details.upstreams_dropped, 2)
+  assert.equal(details.listening, false, 'nothing compiled, so nothing bound')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag, 'the all-dropped case keeps its own kind and its own message')
+  assert.match(diag.message, /listening on nothing/, 'which says the thing only it can say')
+  assert.match(diag.message, /connection refused/)
+  assert.equal(
+    report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped'),
+    undefined,
+    'the two kinds are mutually exclusive',
+  )
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a fully valid gateway config stays quiet', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.equal(details.upstreams_dropped, 0, 'nothing was dropped')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped'), undefined)
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a hermes-only gateway stays quiet through the same comparison', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([])
+  assert.equal(details.listening, false, 'idle, as hermes-only asked for')
+  assert.equal(details.upstreams_dropped, 0, 'and nothing was lost getting there')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped'), undefined)
+  assert.equal(report.overall, 'healthy')
+})
+
+// A status file written by a build from before `upstreams_dropped` existed
+// cannot answer the partial question at all: it recorded a bound gateway and
+// the names it was configured with, and those names include the dropped entry.
+// Guessing a loss from that would warn about every install whose adapter
+// presets outnumber its config entries, so the older file stays quiet here and
+// starts reporting the moment the daemon restarts on this build.
+test('a status file without the dropped count does not guess at a partial loss', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 18521,
+    upstreams: ['anthropic', 'openai'],
+    upstreams_configured: 2,
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped'), undefined)
+  assert.equal(report.overall, 'healthy')
 })

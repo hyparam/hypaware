@@ -7,7 +7,7 @@ import {
   getLogger,
 } from '../../../../src/core/observability/index.js'
 
-import { compileConfig, FALLBACK_LISTEN } from './config.js'
+import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from './control.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
@@ -58,9 +58,9 @@ export function createStartSource(state) {
     // `reload()` hands the daemon's new context to the listener but the
     // closure above keeps the boot-time `ctx` forever, so reading it would
     // publish a stale `details.upstreams` after every reload. Core's
-    // `gateway_idle_no_upstreams` diagnostic reads exactly that field to
-    // tell "hermes-only, correctly idle" from "an upstream was dropped", so
-    // it has to describe the config in force now.
+    // dropped-upstream diagnostics read exactly those fields to tell
+    // "hermes-only, correctly idle" from "an upstream was dropped", so they
+    // have to describe the config in force now.
     let activeCtx = ctx
 
     return {
@@ -86,10 +86,18 @@ export function createStartSource(state) {
             // written with a `provider` and a `base_url` but no `name` leaves
             // `upstreams: []`, indistinguishable from hermes-only. The count
             // is the wider question ("did this config ask for any upstream at
-            // all?") and it is the one core's `gateway_idle_no_upstreams`
-            // diagnostic gates on; the names only decide how the warning
-            // reads.
+            // all?"); the names only decide how core's warning reads.
             upstreams_configured: configured.count,
+            // How many of those entries `compileUpstreams` threw away, which
+            // is the difference between "this gateway is idle because it was
+            // asked to be" and "this gateway routes less than it was asked
+            // to". Reported unconditionally, including as `0`: core tells a
+            // healthy gateway from a status file written before this field
+            // existed by the field's presence, not by its value.
+            upstreams_dropped: configured.dropped,
+            ...(configured.droppedNames.length > 0
+              ? { upstreams_dropped_names: configured.droppedNames }
+              : {}),
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
             // @ref LLP 0066#ephemeral: surface the live opt-out count so an
@@ -157,6 +165,7 @@ export function createStartSource(state) {
  * nothing is listening on.
  *
  * @ref LLP 0120#consequences [constrained-by]: hermes composes the gateway plugin for the materializer alone, so an upstream-less gateway is a valid config rather than a misconfiguration
+ * @ref LLP 0195#idle-not-throw [implements]: the "at least one upstream" invariant moves here from startProxy, which still keeps it for a bind
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
@@ -170,6 +179,7 @@ async function launchListener(ctx, state, liveState) {
   // `config.upstreams` and `state.presets`, neither of which moves between
   // the two binds.
   const upstreams = mergeUpstreams(config.upstreams, state)
+  const configured = readConfiguredUpstreams(ctx)
   if (upstreams.length === 0) {
     liveState.listenFallbackFrom = undefined
     // Two configs reach an empty routing table and they are not the same
@@ -179,7 +189,6 @@ async function launchListener(ctx, state, liveState) {
     // `compileUpstreams` (a missing or misspelled `base_url` is dropped
     // silently), so the operator is going to get ECONNREFUSED from a gateway
     // that reports itself started. Name the entries that vanished, at `warn`.
-    const configured = readConfiguredUpstreams(ctx)
     if (configured.count > 0) {
       ctx.log.warn('aigw.idle_no_upstreams', {
         [Attr.PLUGIN]: PLUGIN_NAME,
@@ -195,6 +204,23 @@ async function launchListener(ctx, state, liveState) {
       })
     }
     return undefined
+  }
+  if (configured.dropped > 0) {
+    // The routing table is non-empty but smaller than the config asked for.
+    // This is the quieter half of the same fault and the one nothing used to
+    // report at all: the proxy binds, `hyp status` reads `started`, and every
+    // request meant for the dropped upstream falls through to whatever the
+    // remaining routes match (or nothing). Logged at boot as well as surfaced
+    // in status, because the boot log is where the operator looks first when
+    // one provider's traffic never shows up in the cache.
+    ctx.log.warn('aigw.upstreams_dropped', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      configured_upstreams: configured.count,
+      dropped_upstreams: configured.dropped,
+      dropped_upstream_names: configured.droppedNames,
+      routed_upstreams: upstreams.length,
+      reason: 'an upstream needs both a name and a base_url to compile to a route',
+    })
   }
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
@@ -369,21 +395,29 @@ export function mergeUpstreams(configUpstreams, state) {
 }
 
 /**
- * Both halves of "what did the config ask for?": how many upstream entries it
- * listed at all, and the names among them. The count is the wider signal (an
- * entry with no `name` still counts), so the idle log and `hyp status` can be
- * loud about a config that listed upstreams and compiled to none even when the
- * names are unusable.
+ * What the config asked for, and how much of it survived `compileUpstreams`.
  *
- * Defensive: if config has been mutated to a degenerate shape, returns a zero
- * count and an empty list so `status()` never throws.
+ * `compileUpstreams` drops an entry missing either `name` or `base_url` and
+ * says nothing, per entry. Comparing the raw entry count against the compiled
+ * one is the only way to see that from outside: the compiled table alone
+ * cannot tell "the user configured one upstream" from "the user configured
+ * three and two evaporated". `dropped` is therefore the signal both the idle
+ * log below and core's `hyp status` gate on, and it covers the partial loss
+ * (some upstreams routed, one silently not) as well as the total one.
+ *
+ * The counts lead and the names follow, because `name` is itself one of the
+ * two keys whose absence drops an entry: the config that most needs this
+ * warning can be exactly the one with no name to print.
+ *
+ * Defensive: if config has been mutated to a degenerate shape, returns zeroes
+ * and empty lists so `status()` never throws.
  *
  * @param {PluginActivationContext} ctx
- * @returns {{ count: number, names: string[] }}
+ * @returns {{ count: number, names: string[], dropped: number, droppedNames: string[] }}
  */
 function readConfiguredUpstreams(ctx) {
   const raw = /** @type {Record<string, unknown>} */ (ctx.config ?? {}).upstreams
-  if (!Array.isArray(raw)) return { count: 0, names: [] }
+  if (!Array.isArray(raw)) return { count: 0, names: [], dropped: 0, droppedNames: [] }
   /** @type {string[]} */
   const out = []
   for (const entry of raw) {
@@ -392,7 +426,24 @@ function readConfiguredUpstreams(ctx) {
       if (typeof name === 'string' && name.length > 0) out.push(name)
     }
   }
-  return { count: raw.length, names: out }
+  // Run the real compiler rather than re-deriving its "does this entry
+  // survive?" predicate here. A second copy of that rule would drift from the
+  // one the routing table is actually built with, and this count's whole job
+  // is to describe that table.
+  const compiled = compileUpstreams(raw)
+  const kept = new Set(compiled.map((u) => u.name))
+  return {
+    count: raw.length,
+    names: out,
+    dropped: raw.length - compiled.length,
+    // Two entries sharing a name where only one compiles leave that name in
+    // `kept`, so the loss shows up in `dropped` with no name to print. That is
+    // the right way round: the count triggers the warning, the names only make
+    // it concrete. The dedupe below handles the opposite duplicate: two
+    // entries sharing a name where *neither* compiles would otherwise print
+    // that one name twice.
+    droppedNames: [...new Set(out.filter((n) => !kept.has(n)))],
+  }
 }
 
 /**
