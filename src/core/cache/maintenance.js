@@ -101,7 +101,14 @@ export async function maintainCache(opts) {
   })
 
   const scope = opts.dataset ? { datasets: [opts.dataset] } : {}
-  const partitions = await discoverCachePartitions(opts.cacheRoot, scope)
+  const discovered = await discoverCachePartitions(opts.cacheRoot, scope)
+  // @ref LLP 0199#neediest-first [implements]: walk partitions in descending
+  // live data-file order, so a max_tick_ms cutoff postpones the healthiest
+  // partitions instead of starving the same directory-order tail every tick.
+  const partitions = discovered
+    .map((part) => ({ part, liveFiles: liveDataFileCount(part.path) }))
+    .sort((a, b) => b.liveFiles - a.liveFiles)
+    .map((entry) => entry.part)
 
   /** @type {MaintenancePartitionReport[]} */
   const reports = []
@@ -109,7 +116,11 @@ export async function maintainCache(opts) {
   let totalCompacted = 0
 
   for (const part of partitions) {
-    if (Date.now() - startMs > budgetMs) break
+    // Always work one partition before the budget can cut the tick short:
+    // the ranking pass above is itself unbudgeted, so on a large enough
+    // cache a bare cutoff here would break at iteration 0 every tick and
+    // maintenance would never run at all.
+    if (reports.length > 0 && Date.now() - startMs > budgetMs) break
 
     const report = await withSpan(
       'maintenance.partition',
@@ -252,20 +263,26 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   }
 
   if (!opts.expireOnly) {
+    // @ref LLP 0199#baseline-gate [implements]: a live data-file count still
+    // sitting on the post-rewrite baseline means nothing has flushed since
+    // the last compaction, so a rewrite would reproduce the same generation.
+    // Without this gate the avg-file-size heuristic re-flags every compacted
+    // partition forever (rewritten files come out far smaller than
+    // compact_avg_file_bytes), and the tick budget is burned rewriting the
+    // same partitions while the rest of the walk starves.
+    const grewSinceCompaction = dataFilesBefore !== resettleBaselineFiles(cursor)
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
-    // when the file-count heuristics say compaction isn't due. Gate that
-    // force on NEW data having flushed since the last sweep (the live
-    // data-file count moved off the recorded baseline): an unmatchable
-    // fallback: one whose transcript line never lands (harness aux,
-    // wire-only reminders) - would otherwise force a full rewrite every
-    // tick forever. The cheap baseline check also lets us skip the
-    // attributes scan entirely when nothing new has flushed.
+    // when the file-count heuristics say compaction isn't due. Sharing the
+    // baseline gate keeps an unmatchable fallback: one whose transcript
+    // line never lands (harness aux, wire-only reminders) - from forcing a
+    // full rewrite every tick, and skips the attributes scan entirely when
+    // nothing new has flushed.
     const hasResettle = settle
-      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(liveDir)
+      ? grewSinceCompaction && await hasResettleCandidate(liveDir)
       : false
-    const shouldCompact = opts.force || hasResettle || needsCompaction(liveDir, cfg)
+    const shouldCompact = opts.force || hasResettle || (grewSinceCompaction && needsCompaction(liveDir, cfg))
     if (shouldCompact && !opts.dryRun) {
       const result = await compactGeneration(r.path, layout, cfg, settle)
       if (result) {
@@ -752,13 +769,14 @@ function isGatewayFallbackRow(row) {
 }
 
 /**
- * The data-file count recorded the last time a settle-compaction rewrote this
- * partition (the "re-settle baseline"). The forced re-settle sweep compares the
- * live data-file count against this: equal means no new data has flushed since
- * the last sweep, so re-running settle would reproduce the same result. An
- * unmatchable fallback row therefore stops forcing a rewrite every tick and is
- * retried only when genuinely new data lands. Undefined for a partition never
- * compacted (first sweep always runs). @ref LLP 0027#re-settle-sweep
+ * The data-file count recorded the last time compaction rewrote this
+ * partition (the "re-settle baseline", LLP 0027#re-settle-sweep). A live
+ * data-file count equal to this means no new data has flushed since the
+ * last rewrite, so both the forced re-settle sweep and the general
+ * compaction heuristics skip the partition until the count moves; a
+ * rewrite would only reproduce the same generation. Undefined for a
+ * partition never compacted (always eligible).
+ * @ref LLP 0199#baseline-gate: the baseline is the convergence signal for all compaction dueness
  *
  * @param {PartitionCursor} cursor
  * @returns {number | undefined}
@@ -873,6 +891,19 @@ function liveGenerationDir(cursor) {
   if (cursor.layout === 'source-table') return 'table'
   if (typeof cursor.epoch === 'number') return `epoch=${cursor.epoch}`
   return null
+}
+
+/**
+ * Live data-file count for a partition dir, resolved through its cursor to
+ * the generation the cursor points at. Zero when the live generation does
+ * not exist (e.g. legacy tables maintenance already skips).
+ *
+ * @param {string} partitionDir
+ * @returns {number}
+ */
+function liveDataFileCount(partitionDir) {
+  const cursor = readCursorSync(partitionDir)
+  return countDataFiles(path.join(partitionDir, generationLayout(cursor).liveDir))
 }
 
 /**

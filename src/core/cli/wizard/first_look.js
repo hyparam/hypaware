@@ -209,7 +209,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
         if (expired) {
           span.setAttribute('partial', true)
           span.setAttribute('budget_ms', budgetMs)
-          span.setAttribute('missing_sections', missingSections(rows, FIRST_LOOK_SECTIONS).join(','))
+          span.setAttribute('missing_sections', missingSections(rows).join(','))
         }
         // `footer: false` because the closing line below is this run's single
         // pointer: setup should teach one command, not two dim lines naming
@@ -225,8 +225,10 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
           // Name the missing sections as *unfinished*, not as empty. "no
           // repos" and "the repos section did not finish" are different
           // claims, and only one of them is true - the same never-silent rule
-          // the block follows for the rows it omits.
-          const missing = missingSections(rows, FIRST_LOOK_SECTIONS)
+          // the block follows for the rows it omits. `collectOverview` stamped
+          // the requested set on `partial` before its first await, so an
+          // expired run still names only the two sections it asked for.
+          const missing = missingSections(rows)
           const which = missing.length > 1
             ? `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} sections`
             : `${missing[0]} section`

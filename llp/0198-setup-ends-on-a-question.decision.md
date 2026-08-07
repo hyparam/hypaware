@@ -164,13 +164,25 @@ interesting half, and interesting is what the on-demand command is for.
 Two consequences the trim must not get wrong:
 
 - **A section nobody requested is never called unfinished.**
-  `missingSections` takes the requested set, so an expired deadline names
-  only sections that were actually started. Without this the trim would
-  make setup claim repos and tools "did not finish" on every single run.
+  `collectOverview` stamps the requested set on the result before its
+  first await, and `missingSections` reads that stamp, so an expired
+  deadline names only sections that were actually started. Stamping
+  rather than passing the set at the call site is what makes an
+  *abandoned* run answer correctly: when the deadline fires the caller
+  holds only the partial result, and the plan has to have travelled on
+  it. Without this the trim would make setup claim repos and tools "did
+  not finish" on every single run.
 - **The pointer line states an upgrade, not a repeat.** "See more
   anytime: `hyp query overview` (adds repos and tools)" - because a
   trimmed block under a line that says "see this again" teaches the user
   that what they just saw is all there is.
+
+The trim only pays off because the planner charges for the sections it
+will actually run: `rowsAffordable` divides the budget by the requested
+count, not by all four
+([LLP 0135 #window](./0135-install-experience-overhaul.design.md#window)).
+Were it still charging four, asking for two would buy a window half the
+size the budget allows and truncate more, not less.
 
 The deadline is untouched. It stays a backstop for a mis-measured plan,
 not the mechanism, and the planner's `SECTION_COST_VS_PROBE` is still
