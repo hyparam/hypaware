@@ -639,6 +639,14 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     // org-config converge timed out, so nothing landed to lock.
     join: async () => { joinCalls += 1; return /** @type {any} */ ({ status: 'ok', lockedSources: [] }) },
     gate: async () => /** @type {any} */ ({ action: 'first-run', managed: false, report: {} }),
+    // Detection is scripted, not probed: the express gate (LLP 0201) is
+    // shown only when there is something to accept, so a run that read the
+    // real machine would ask one fewer question on a host with no AI
+    // clients installed than on the developer laptop that wrote this
+    // script - and every scripted answer below would land on the wrong
+    // prompt. The rows themselves do not matter here ('all' picks whatever
+    // the menu offers); that there *are* rows does.
+    detect: async () => new Set(['claude']),
     configure: async () => ({ results: [] }),
     // A fresh install has no cache, so the real first look would find no
     // dataset and print nothing; the stub says exactly that.
