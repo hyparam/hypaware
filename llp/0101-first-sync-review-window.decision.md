@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0063, LLP 0069, LLP 0093, LLP 0100, LLP 0102
+**Extended-by:** LLP 0200 (#no-release: setup offers the release verb instead of only naming it)
 
 > On an attended enrolling login, the sink driver exports nothing until a
 > **printed, absolute deadline**: the next local 11:59pm, rolled to the
