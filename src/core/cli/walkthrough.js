@@ -516,6 +516,11 @@ export function backfillConsentTitle(providers, retentionDays) {
  * ids (preserving catalog order among them), so a newly-contributed picker
  * row still appears rather than being dropped.
  *
+ * `raw-anthropic` / `raw-openai` are listed here but no longer render:
+ * their manifest marks them `hidden` (LLP 0200). Keep the ids in this
+ * array and their descriptors in the catalog - see
+ * {@link visiblePickerDescriptors} for what still depends on them.
+ *
  * @type {string[]}
  */
 const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
@@ -636,7 +641,11 @@ export async function runPickerWalkthrough(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: descriptorList.map((d) => ({
+        // Hidden rows are absent from the menu but still pickable via
+        // `--source` (which takes the `opts.picks` path above and never
+        // reaches this prompt). They are never detected, so nothing is
+        // silently unchecked by leaving them out here.
+        options: visiblePickerDescriptors(descriptorList).map((d) => ({
           value: d.id,
           label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
           ...(d.summary ? { summary: d.summary } : {}),
@@ -1912,6 +1921,29 @@ export async function loadPickerDescriptors() {
   } catch {
     return new Map()
   }
+}
+
+/**
+ * The descriptors the interactive picker menu renders: everything except
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0200#hidden-rows`).
+ *
+ * Display is the ONLY thing this filters. A hidden row keeps every other
+ * property of a picker source, and each one is load-bearing somewhere:
+ * `hyp init --source raw-anthropic` still composes it, `configuredPickerSources`
+ * still reads it back off a config that collects it, and - the one that
+ * bites hardest if the row is deleted outright rather than hidden - its id
+ * still reaches `datasetOwnedSourceIdsFromCatalog`, which folds picker
+ * descriptors into the dataset-owner map that arms the export seam's
+ * unattributed-row withholding (LLP 0192 #fail-closed). Drop the
+ * descriptors and `ai_gateway_messages` gets an empty owner list, which
+ * both withhold rules read as "never withhold": a privacy guard turned off
+ * by what looks like a UI cleanup.
+ *
+ * @param {Iterable<PickerDescriptor>} descriptors
+ * @returns {PickerDescriptor[]}
+ */
+export function visiblePickerDescriptors(descriptors) {
+  return [...descriptors].filter((d) => d.hidden !== true)
 }
 
 /**

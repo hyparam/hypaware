@@ -284,6 +284,17 @@ export interface PluginPickerContribution {
    */
   detect?: PickerDetectProbe
   /**
+   * True when the row is kept out of the interactive picker menu while
+   * staying a real picker source everywhere else: `hyp init --source
+   * <id>` still composes it, a config that already collects it still
+   * reads back as collecting it, and the id keeps its identity in the
+   * opt-out/sync store and in the dataset-owner map the export-seam
+   * withholding rules key on. For a row whose audience is narrow enough
+   * that a first-run checkbox costs every other user more than it earns
+   * that one.
+   */
+  hidden?: boolean
+  /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
    * (e.g. Claude Desktop's managed-preferences plist). Absent/false

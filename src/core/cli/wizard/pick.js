@@ -22,6 +22,7 @@ import {
   loadPickerDescriptors,
   orderPickerDescriptors,
   resolveHypHome,
+  visiblePickerDescriptors,
 } from '../walkthrough.js'
 
 /**
@@ -78,6 +79,7 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
  * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
+ * @ref LLP 0200#hidden-rows [implements]: a `hidden` row stays out of both screens, and rides through the selection only when the config collects nothing the menu can show
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -410,7 +412,29 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
   // usable default, state it in one line and let a bare enter accept it;
   // the full menu opens only on request. With no default there is
   // nothing to confirm, so the menu shows directly.
-  const defaultRows = descriptorList.filter((d) => seed.has(d.id) || lockedSet.has(d.id))
+  const visibleList = visiblePickerDescriptors(descriptorList)
+  // A hidden row never renders, so neither screen below can return one.
+  // Carrying one through the selection is right in exactly one case: the
+  // config on disk collects nothing the menu can show. Then every row it
+  // does collect is hidden, and an interactive pass would silently strip a
+  // setup the picker has no way to represent (a `--source raw-anthropic`
+  // install being reconfigured).
+  //
+  // Carrying whenever a hidden row is merely seeded would be wrong, because
+  // `configuredPickerSources` seeds a hidden row DERIVATIVELY: `raw-openai`
+  // reads as configured whenever codex's `openai` upstream is present, per
+  // the "composition is lossy" note on that function. Seeding is therefore
+  // not evidence the user ever chose the row, and carrying on it would
+  // resurrect the `openai` upstream the moment someone unchecked codex -
+  // breaking the guarantee that unchecking a row removes its upstream.
+  const seededVisible = visibleList.some((d) => seed.has(d.id))
+  const carried = seededVisible
+    ? []
+    : descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+  const withCarried = (/** @type {string[]} */ picked) =>
+    /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
+
+  const defaultRows = visibleList.filter((d) => seed.has(d.id) || lockedSet.has(d.id))
   const hasGate = defaultRows.length > 0
   let screen = hasGate ? 'gate' : 'menu'
   while (true) {
@@ -445,7 +469,7 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
         throw err
       }
       if (choice === 'accept') {
-        return { rawSources: /** @type {PickerSource[]} */ (defaultRows.map((d) => d.id)) }
+        return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
       }
       screen = 'menu'
     } else {
@@ -458,11 +482,11 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
           // fallback prints the same text as plain text.
           // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
           ...(opts.progress ? { progress: opts.progress } : {}),
-          options: descriptorList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
+          options: visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
           ...(hasGate || opts.allowBack ? { allowBack: true } : {}),
         })
         return {
-          rawSources: /** @type {PickerSource[]} */ (sourceRaw.filter((v) => descriptors.has(v))),
+          rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
         }
       } catch (err) {
         if (isPromptBackError(err)) {

@@ -55,6 +55,13 @@ export interface PickerDescriptor {
   label: string
   summary?: string
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu but
+   * remains a picker source everywhere else (`--source`, read-back,
+   * opt-out identity, dataset ownership). See
+   * `PluginPickerContribution.hidden`.
+   */
+  hidden?: boolean
   needsSetup?: boolean
   configureCommand?: string
   /**
