@@ -187,9 +187,19 @@ test('dataset-scoped withholding: an unattributed dataset drops wholesale only w
 })
 
 /**
- * Mirror the real gateway's ownership shape: a second, local plugin also
- * contributes the attributed dataset, the way the codex/raw picker rows
- * join claude's on `ai_gateway_messages`.
+ * Give the attributed dataset a second declared owner, so the fail-closed
+ * rule has a multi-owner arming set to be `some`-not-`every` over. This is a
+ * synthetic stand-in, not a copy of production: in the real catalog
+ * `ai_gateway_messages` is declared by `@hypaware/ai-gateway` alone and its
+ * two owners are that plugin's own picker rows, `raw-anthropic` and
+ * `raw-openai` (pinned against the real manifests by the test below). The
+ * client plugins that write into the dataset through their projectors,
+ * claude and codex among them, declare no `datasets` and are therefore not
+ * owners, which is exactly why an opt-out on one of them does not arm the
+ * rule (LLP 0192 #fail-closed). The base `makeCatalog()` this extends is
+ * itself a deliberate divergence here: it has `@hypaware/claude` declare
+ * `ai_gateway_messages` with picker id `claude`, standing in for what
+ * `@hypaware/ai-gateway` declares in production.
  * @returns {any}
  */
 function makeGatewayCoOwnedCatalog() {
@@ -206,7 +216,7 @@ function makeGatewayCoOwnedCatalog() {
   return catalog
 }
 
-// @ref LLP 0192#fail-closed [tests]: an unattributed row in an attributed dataset is withheld once any of that dataset's sources is opted out
+// @ref LLP 0192#fail-closed [tests]: an unattributed row in an attributed dataset is withheld once any of that dataset's declared owners is opted out
 test('fail-closed: any opted-out owner of an attributed dataset withholds its unattributed rows', async () => {
   const stateDir = await makeTmpDir()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'hermes', class: 'local-only' }] })

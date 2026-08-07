@@ -53,7 +53,7 @@ export function createSourceWithholdResolver({
         resolveWithheld().has(attributionValue)
       )
     },
-    // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every source that could have produced it is withheld
+    // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every picker source whose plugin declares it is withheld
     shouldWithholdDataset(dataset) {
       if (!datasetOwnedSourceIds) return false
       if (datasetAttributionColumns.has(dataset)) return false
@@ -63,10 +63,14 @@ export function createSourceWithholdResolver({
       return owners.every((id) => withheld.has(id))
     },
     // `some`, not `every`: an unlabeled row cannot be proven to belong to a
-    // synced source, so one standing opt-out over the dataset's producers is
-    // enough to withhold it. Deliberately over-withholds; the capture-side
-    // attribution fix that retires this is LLP 0192 #deferred.
-    // @ref LLP 0192#fail-closed [implements]: an unattributed row in an attributed dataset is withheld once any of that dataset's sources is opted out
+    // synced source, so one standing opt-out among the dataset's declared
+    // owners is enough to withhold it. `owners` is the same manifest-declared
+    // set `shouldWithholdDataset` reads, never "everything that writes rows
+    // here": a plugin whose projector fills the dataset but whose manifest
+    // declares no `datasets` is absent from it, so a client-only opt-out
+    // leaves this rule inert. Deliberately over-withholds within that set;
+    // the capture-side attribution fix that retires it is LLP 0192 #deferred.
+    // @ref LLP 0192#fail-closed [implements]: an unattributed row in an attributed dataset is withheld once any picker source whose plugin declares that dataset is opted out
     shouldWithholdUnattributed(dataset) {
       if (!datasetOwnedSourceIds) return false
       if (!datasetAttributionColumns.has(dataset)) return false

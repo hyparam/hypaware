@@ -322,10 +322,14 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (sourceWithholdResolver && attributionColumn !== undefined) {
           const attributionValue = row[attributionColumn]
           // @ref LLP 0192#fail-closed [implements]: a row with no usable
-          // attribution value cannot be tied to any synced source, so once
-          // any of this dataset's producers is opted out it is withheld
-          // instead of shipped (pre-0192, every unattributed row escaped
-          // both withhold rules).
+          // attribution value cannot be tied to any synced source, so it is
+          // withheld once any of this dataset's declared owners (the picker
+          // sources whose plugin lists the dataset in `contributes.datasets`)
+          // is opted out, instead of shipped (pre-0192, every unattributed
+          // row escaped both withhold rules). Opting out `codex` alone
+          // leaves the unattributed path disarmed. For the bundled catalog,
+          // only an opt-out on a raw gateway row (`raw-anthropic`/
+          // `raw-openai`) arms it.
           const attributed = typeof attributionValue === 'string' && attributionValue !== ''
           const withholdRow = attributed
             ? sourceWithholdResolver.shouldWithhold(attributionValue)
