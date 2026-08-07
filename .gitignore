@@ -7,6 +7,7 @@
 # Node
 node_modules/
 package-lock.json
+*.tgz
 
 # Generated declaration output (built by `npm run build:types`, shipped via the
 # package `files` allowlist; never committed).
