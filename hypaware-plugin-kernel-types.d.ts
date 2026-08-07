@@ -177,6 +177,30 @@ export interface PluginClientManifest {
    * and attributes its entrypoints automatically.
    */
   transcript_entrypoints?: string[]
+  /**
+   * How to start this client on a question, for the wizard's closing
+   * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
+   * cannot be started on a prompt at all: Claude Desktop is a GUI app
+   * with no prompt argument, so it is detectable, pickable, and
+   * attachable but never launchable.
+   */
+  launch?: PluginClientLaunchManifest
+}
+
+/**
+ * A client's launch spec: the binary to look for on `$PATH` and the
+ * argv to start it with. Exactly one `args` element must contain the
+ * `{prompt}` placeholder, which is replaced with the user's question;
+ * a spec without it would start the client mute, which looks like the
+ * feature working (LLP 0198#split).
+ */
+export interface PluginClientLaunchManifest {
+  /** Executable name resolved against `$PATH` (e.g. `claude`). */
+  bin: string
+  /** Argv template; `{prompt}` in any element is replaced. */
+  args: string[]
+  /** Display name for the launch row (e.g. `Claude Code`). */
+  label?: string
 }
 
 export interface PluginAttachProbeManifest {

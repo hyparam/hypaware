@@ -5,10 +5,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { EventEmitter } from 'node:events'
 
-import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
+import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed), the
@@ -646,10 +648,10 @@ test('runInitWizard: an attended run ends on the first look, before the privacy 
   const { opts, stdout } = wizardOpts(home, { fork: async () => 'team', firstLook: stub.runner })
   await runInitWizard(opts)
   const text = stdout.text()
-  // The window probe, then one query per section: setup shows the same
-  // block as `hyp query overview`.
+  // The window probe, then the two sections setup runs. Repos and tools
+  // are `hyp query overview`'s half (LLP 0198#wizard-sections).
   assert.equal(stub.seen[0], OVERVIEW_PROBE_SQL)
-  assert.equal(stub.seen.length, 5)
+  assert.equal(stub.seen.length, 3)
   // Every number in the block is scoped to the window the probe chose.
   assert.match(text, /2026-07-24 to 2026-07-24 \(1 active day, 40 rows\)/)
   assert.match(text, /First look at what HypAware has recorded/)
@@ -676,6 +678,175 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
   })
   await runInitWizard(dryOpts)
   assert.equal(dry.seen.length, 0)
+})
+
+/**
+ * A catalog whose `claude` client declares a launch spec, so the closing
+ * first ask has something to offer.
+ */
+/**
+ * A first look that finds something, so the closing first ask has data
+ * for its questions to be about (LLP 0198#empty-cache).
+ */
+function firstLookWithRows() {
+  return firstLookStub(
+    [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+    [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }]
+  ).runner
+}
+
+function launchableCatalog() {
+  const catalog = emptyCatalog()
+  catalog.clientDescriptors.set('claude', {
+    plugin: '@hypaware/claude',
+    name: 'claude',
+    skillDir: '.claude/skills',
+    launch: { bin: 'claude', args: ['{prompt}'], label: 'Claude Code' },
+  })
+  return catalog
+}
+
+test('runInitWizard: the first ask comes last, after the privacy narration', async () => {
+  // @ref LLP 0198#first-ask [tests]: placed after the narration, which stays the wizard's last words
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd, /** @type {any} */ args) => {
+        spawned.push({ cmd, args })
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.equal(spawned.length, 1)
+  assert.equal(spawned[0].cmd, '/usr/local/bin/claude')
+  assert.equal(spawned[0].args[0], SUGGESTED_PROMPTS[0].prompt)
+  // Order: rows, then what leaves this machine, then the question.
+  assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
+})
+
+test('runInitWizard: a first look with no rows suppresses the launch', async () => {
+  // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
+  // is offered no question it has no data to answer
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    // Every section comes back empty: the dataset exists and holds nothing.
+    firstLook: firstLookStub([], []).runner,
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd) => {
+        spawned.push(cmd)
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.match(stdout.text(), /Nothing recorded yet/)
+})
+
+test('runInitWizard: a first look with no gateway dataset suppresses the launch too', async () => {
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd) => { spawned.push(cmd); return new EventEmitter() },
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.match(stdout.text(), /Nothing recorded yet/)
+})
+
+// --- firstLookHadRows ---
+
+// The mapping from a first-look outcome to the first ask's `hasRows` has
+// three genuinely different answers (`no-dataset` -> false, `slow` -> true,
+// `error`/absent -> undefined, which never withholds the offer). Two of
+// those were reachable by a mutant that still passed the suite: flipping
+// `slow`'s `true` to `false`, and flipping the no-result guard's
+// `undefined` to `false`. Both would wrongly suppress the closing first
+// ask (`hasRows === false` is the one value `runWizardFirstAsk` treats as
+// "skip the launch", per the empty-cache tests above).
+// @ref LLP 0198#empty-cache [tests]: no-dataset, slow, and error/absent each resolve to a distinct hasRows value
+test('firstLookHadRows: a slow first look still reports hasRows true, so the launch is not suppressed', () => {
+  assert.equal(firstLookHadRows({ shown: false, reason: 'slow' }), true)
+})
+
+test('firstLookHadRows: an absent or errored first look reports hasRows undefined, not false, so the offer is never withheld', () => {
+  assert.equal(firstLookHadRows(undefined), undefined)
+  assert.equal(firstLookHadRows({ shown: false, reason: 'error' }), undefined)
+})
+
+test('runInitWizard: a launched client does not change the wizard exit code', async () => {
+  // @ref LLP 0198#real-launch [tests]: the child's exit code is not the install's
+  const { opts } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: () => {
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 3))
+        return child
+      },
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+})
+
+test('runInitWizard: a non-interactive or dry run never launches anything', async () => {
+  /** @type {any[]} */
+  const spawned = []
+  const firstAsk = {
+    resolve: async () => '/usr/local/bin/claude',
+    select: async () => SUGGESTED_PROMPTS[0].id,
+    spawnFn: (/** @type {any} */ cmd) => {
+      spawned.push(cmd)
+      const child = new EventEmitter()
+      queueMicrotask(() => child.emit('close', 0))
+      return child
+    },
+  }
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    catalog: launchableCatalog(),
+    firstAsk,
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.ok(!stdout.text().includes('Questions worth asking'))
+
+  const { opts: dryOpts } = wizardOpts(await tmpHome(), {
+    finale: { dryRun: true },
+    catalog: launchableCatalog(),
+    firstAsk,
+  })
+  await runInitWizard(dryOpts)
+  assert.equal(spawned.length, 0)
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {

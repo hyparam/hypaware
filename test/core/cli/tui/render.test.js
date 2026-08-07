@@ -291,6 +291,76 @@ test('render: items render verbatim between the title and the hint', () => {
   assert.match(lines[3], /enter pick/)
 })
 
+// The frame (LLP 0198 #frame): the closing ask draws as its own screen.
+test('box: frame is wrapped in a border, every row padded to one width', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Ask your first question',
+    box: true,
+    options: [
+      { value: 'a', label: 'What AI tasks cost the most tokens this week?' },
+      { value: 'b', label: 'Not now' },
+    ],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  lines.pop() // trailing newline
+  assert.match(lines[0], /^╭─+╮$/)
+  assert.match(lines[lines.length - 1], /^╰─+╯$/)
+  const width = lines[0].length
+  for (const line of lines.slice(1, -1)) {
+    assert.equal(line.length, width, `row is padded to the frame width: ${JSON.stringify(line)}`)
+    assert.ok(line.startsWith('│ ') && line.endsWith(' │'), `row is bordered: ${JSON.stringify(line)}`)
+  }
+  assert.ok(lines.some((l) => l.includes('> What AI tasks cost the most tokens this week?')))
+})
+
+test('box: a frame wider than the terminal is dropped, not soft-wrapped', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Ask your first question',
+    box: true,
+    options: [{ value: 'a', label: 'What AI tasks cost the most tokens this week?' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const out = render(state, { color: false, columns: 20 })
+  assert.doesNotMatch(out, /[╭╮╰╯│]/)
+  assert.match(out, /^Ask your first question\n/)
+})
+
+test('box: border width measures visible columns, not style escapes', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Pick',
+    box: true,
+    options: [{ value: 'a', label: 'Alpha' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const plain = render(state, { color: false }).split('\n')[0]
+  const colored = render(state, { color: true }).split('\n')[0]
+  assert.equal(colored.replace(/\x1b\[[0-9;]*m/g, '').length, plain.length)
+})
+
+test('box: an unboxed state renders exactly as it did before the field existed', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Pick one',
+    options: [{ value: 'a', label: 'A' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const out = render(state, { color: false, columns: 80 })
+  assert.equal(out, render(state, { color: false }))
+  assert.doesNotMatch(out, /[╭╮╰╯│]/)
+})
+
 test('render: a state without items renders exactly as it does today', () => {
   /** @type {any} */
   const state = {

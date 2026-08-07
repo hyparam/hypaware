@@ -1,7 +1,9 @@
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { OverviewQueryRunner } from '../../query/types.d.ts'
-import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
+import type { ClientDescriptor, PickerDescriptor, PluginCatalog } from '../../types.d.ts'
+import type { SelectSpec } from '../tui/types.d.ts'
 import type {
   AsyncBackfillConsentPrompt,
   AsyncConfirmSelectPrompt,
@@ -398,6 +400,63 @@ export type FirstLookResult =
   | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
 
 /**
+ * A client this run can actually start on a question: picked by the
+ * user, and with its `contributes.client.launch` binary resolved on
+ * `$PATH` (LLP 0198#path-probe). `args` still carries the `{prompt}`
+ * placeholder; substitution happens at spawn.
+ */
+export interface FirstAskLauncher {
+  client: string
+  label: string
+  bin: string
+  binPath: string
+  args: string[]
+}
+
+/**
+ * What the first ask did. Every `launched: false` value is a normal
+ * outcome, never a failed install (LLP 0198#real-launch): `no-launcher`
+ * when nothing picked resolves on `$PATH`, `not-interactive` on a piped
+ * stream, `declined` on "Not now" or a cancelled prompt, `spawn-failed`
+ * when the binary resolved but would not start, `no-rows` when the cache
+ * has nothing for the questions to be about (LLP 0198#empty-cache),
+ * `error` for anything unforeseen. All six print the question list
+ * instead.
+ */
+export type FirstAskResult =
+  | { launched: true; client: string; promptId: string; exitCode?: number }
+  | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'error' }
+
+/** Options for `runWizardFirstAsk`. */
+export interface RunWizardFirstAskOptions {
+  /** Picked client names, from the pick phase (LLP 0180 derivation). */
+  clients: string[]
+  descriptors: Map<string, ClientDescriptor>
+  stdout: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  env: NodeJS.ProcessEnv
+  /** False on a piped run: print the list, never prompt. */
+  interactive?: boolean
+  /**
+   * Whether the cache holds anything the suggested questions could be
+   * answered from. `false` suppresses the launch entirely
+   * (LLP 0198#empty-cache); `undefined` means the caller could not tell,
+   * which never withholds the offer.
+   */
+  hasRows?: boolean
+  /** Working directory the client is started in; defaults to the caller's. */
+  cwd?: string
+  stdin?: NodeJS.ReadableStream
+  /** Real stream for the TUI, when `stdout` above is a buffer. */
+  stdoutStream?: NodeJS.WritableStream
+  /** Test seams; production callers pass none of these. */
+  platform?: string
+  resolve?: (bin: string, env: NodeJS.ProcessEnv, platform?: string) => Promise<string | undefined>
+  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
+  select?: (spec: SelectSpec) => Promise<string | number>
+}
+
+/**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
  * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
@@ -445,6 +504,12 @@ export interface RunInitWizardOptions {
    * built from `ctx`; the step is skipped when neither is available.
    */
   firstLook?: OverviewQueryRunner
+  /**
+   * Overrides for the closing first ask (tests): the PATH resolver, the
+   * spawn seam, the select seam. Production callers pass none, and the
+   * step is attended-only like the first look.
+   */
+  firstAsk?: Partial<RunWizardFirstAskOptions>
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>

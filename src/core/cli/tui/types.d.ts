@@ -57,6 +57,16 @@ export interface PromptChrome {
    * escape keeps meaning cancel.
    */
   allowBack?: boolean
+  /**
+   * Draw a border around the whole frame. For a prompt that has to read as
+   * its own screen rather than as one more paragraph in a scrolling run:
+   * the wizard's closing question list lands under the first look's tables
+   * and rules, where an unframed prompt does not announce itself as the
+   * one thing on screen still waiting for a keypress. Suppressed when the
+   * frame would be wider than the terminal. An omitted field changes no
+   * output.
+   */
+  box?: boolean
 }
 
 export interface MultiselectOption {
@@ -152,6 +162,12 @@ export interface TextSpec extends PromptChrome {
 
 export interface RenderOpts {
   color: boolean
+  /**
+   * Terminal width, when the caller knows it. Used only to suppress a
+   * `box` frame that would not fit; omitted means "unknown", which never
+   * suppresses one.
+   */
+  columns?: number
 }
 
 export interface RunOpts {

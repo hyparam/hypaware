@@ -478,6 +478,8 @@ export function hasRenderableOverview(rows) {
  * claim as calling an unfinished section empty, in the other direction.
  * `collectOverview` stamps the plan on the result, so a subset run carries
  * what it meant to do; a result assembled by hand falls back to all four.
+ * The wizard's two-section first look reads its answer from that stamp
+ * (LLP 0198#wizard-sections).
  *
  * @ref LLP 0135#overrun [implements]: unfinished sections are named as unfinished, which only the requested ones can be
  * @param {OverviewRows} rows
