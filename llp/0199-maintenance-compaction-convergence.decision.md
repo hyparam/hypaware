@@ -44,9 +44,9 @@ snapshot expiry.
 the post-rewrite data-file count in the partition cursor
 (`compaction.resettleBaselineFiles`, introduced for the re-settle sweep,
 LLP 0027#re-settle-sweep). Generalize that gate to all compaction due-ness:
-the file-count heuristics only fire when the live data-file count differs
-from the recorded baseline, i.e. when data has actually flushed (or been
-retention-deleted) since the last rewrite. A partition whose count sits on
+no compaction heuristic fires, the metadata-size clause included, unless the
+live data-file count differs from the recorded baseline, i.e. unless data has
+actually flushed (or been retention-deleted) since the last rewrite. A partition whose count sits on
 its baseline is converged; rewriting it would reproduce the same generation.
 A partition never compacted has no baseline and is always eligible.
 
