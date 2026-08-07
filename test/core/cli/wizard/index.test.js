@@ -681,10 +681,6 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
 })
 
 /**
- * A catalog whose `claude` client declares a launch spec, so the closing
- * first ask has something to offer.
- */
-/**
  * A first look that finds something, so the closing first ask has data
  * for its questions to be about (LLP 0198#empty-cache).
  */
