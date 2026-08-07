@@ -842,3 +842,44 @@ test('maintenance walks partitions neediest-first, not directory order', async (
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('neediest-first order reads the live table dir for source-table partitions', async () => {
+  const cacheRoot = await makeTmpDir('maint-order-source')
+  try {
+    // Same ordering claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: a source-table cursor
+    // never advances its epoch, so file count is the only priority signal.
+    const lightDir = path.join(cacheRoot, 'datasets', 'aaa_light', 'source=test')
+    await appendRowsToTable(path.join(lightDir, 'table'), COLUMNS, [
+      { id: 1, value: 'v', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(lightDir, {
+      epoch: 0,
+      rowCount: 1,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const heavyDir = path.join(cacheRoot, 'datasets', 'zzz_heavy', 'source=test')
+    for (let i = 0; i < 4; i++) {
+      await appendRowsToTable(path.join(heavyDir, 'table'), COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(heavyDir, {
+      epoch: 0,
+      rowCount: 4,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const report = await maintainCache({ cacheRoot, dryRun: true })
+    assert.equal(report.partitions.length, 2)
+    assert.equal(report.partitions[0].dataset, 'zzz_heavy')
+    assert.equal(report.partitions[1].dataset, 'aaa_light')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

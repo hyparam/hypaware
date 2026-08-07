@@ -116,7 +116,11 @@ export async function maintainCache(opts) {
   let totalCompacted = 0
 
   for (const part of partitions) {
-    if (Date.now() - startMs > budgetMs) break
+    // Always work one partition before the budget can cut the tick short:
+    // the ranking pass above is itself unbudgeted, so on a large enough
+    // cache a bare cutoff here would break at iteration 0 every tick and
+    // maintenance would never run at all.
+    if (reports.length > 0 && Date.now() - startMs > budgetMs) break
 
     const report = await withSpan(
       'maintenance.partition',
