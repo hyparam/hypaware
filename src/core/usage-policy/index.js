@@ -60,12 +60,23 @@ export {
 // marker (read returns null, never []); the export-seam resolver reads it
 // lazily, `hyp status` and `hyp sync` narrate it, and the wizard sync-scope
 // step and `hyp policy client` write it.
+export {
+  clientSyncListPath,
+  readClientSyncEntries,
+  writeClientSyncEntries,
+  optedOutClientSourceIds,
+  seedClientSyncStoreIfAbsent,
+  ClientSyncListUnreadableError,
+  CLIENT_SYNC_LIST_UNREADABLE_ERROR_KIND,
+  CLIENT_SYNC_LIST_VERSION,
+} from './client_sync.js'
 // The machine-local folder-ask preference (LLP 0200): whether a session
 // opened in an unclassified folder is asked to classify it (LLP 0106) or
-// left alone under the implicit sync default. Absence reads as `ask`, so a
-// machine that never set it behaves exactly as before. Written by the
-// wizard's sync lane and `hyp policy folders`, read by the classification
-// hook and `hyp policy list`.
+// left alone under the implicit sync default. `sync` is the default and
+// what absence reads as (LLP 0200 #default), so a machine that never set it
+// is never interrupted; `ask` is the opt-in half. Written by the wizard's
+// new-folder step and `hyp policy folders`, read by the classification hook,
+// `hyp status`, and `hyp policy list`.
 export {
   folderAskPath,
   readFolderAskMode,
@@ -78,13 +89,3 @@ export {
   FolderAskUnreadableError,
   FOLDER_ASK_UNREADABLE_ERROR_KIND,
 } from './folder_ask.js'
-export {
-  clientSyncListPath,
-  readClientSyncEntries,
-  writeClientSyncEntries,
-  optedOutClientSourceIds,
-  seedClientSyncStoreIfAbsent,
-  ClientSyncListUnreadableError,
-  CLIENT_SYNC_LIST_UNREADABLE_ERROR_KIND,
-  CLIENT_SYNC_LIST_VERSION,
-} from './client_sync.js'

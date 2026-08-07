@@ -271,11 +271,12 @@ export interface HypAwareStatusReport {
    * when the list itself could not be read or parsed (see the
    * `local_only_list_unreadable` diagnostic) - never a silent zero.
    *
-   * `folderAsk` is the standing new-folder ask (LLP 0200): `ask` is the
-   * default (a session opened in an unclassified folder is asked to classify
-   * it), `sync` means the user retired that question. It rides here for the
-   * same never-silent reason as the count: a suppressed consent prompt is a
-   * state worth seeing.
+   * `folderAsk` is the standing new-folder ask (LLP 0200): `sync` is the
+   * default (unclassified folders sync and nothing interrupts the session),
+   * `ask` means the user opted into a session-start question per new folder.
+   * It rides here for the same never-silent reason as the count: the default
+   * is the mode with data consequences, so it is exactly the one that must
+   * not be silent.
    */
   usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
   /**

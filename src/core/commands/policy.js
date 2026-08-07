@@ -733,8 +733,11 @@ export async function runPolicyList(argv, ctx) {
     : `new folders: ${FOLDER_ASK_STATE_LINE[folderAsk]}\n`
 
   if (entries.length === 0 && clientEntries.length === 0) {
+    // The empty-store line still prints: "no machine-local entries" and the
+    // store path are what this run reports, and a non-default folder mode is
+    // an addition to that, not a replacement for it.
+    ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     if (folderLine) ctx.stdout.write(folderLine)
-    else ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     return 0
   }
   for (const entry of entries) {

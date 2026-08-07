@@ -366,6 +366,87 @@ test('runInitWizard: a back from pick re-presents the fork', async () => {
   assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
 })
 
+/**
+ * A catalog with one picker row, so `expressRowsSafe` finds something to
+ * accept and the express gate is actually shown. With the default empty
+ * catalog there is nothing to accept and no gate at all (LLP 0201
+ * #no-default-no-accept), which is a different back chain.
+ */
+function gatedOverrides() {
+  return {
+    fork: async () => 'team',
+    detect: async () => new Set(['claude']),
+    catalog: /** @type {any} */ ({
+      plugins: new Map(),
+      pluginMetadata: new Map(),
+      knownDatasets: new Set(),
+      clientDescriptors: new Map(),
+      pickerDescriptors: new Map([['claude', { id: 'claude', label: 'Claude Code', plugin: '@hypaware/claude' }]]),
+    }),
+  }
+}
+
+// The express gate is a screen, so it is on the back chain like any other:
+// the lane behind it steps back *to it*, not past it to the fork. Without
+// this, inserting a question into the forward chain silently made its
+// neighbour overshoot by one screen.
+// @ref LLP 0191#back-edges [tests]: escape steps exactly one screen back, express gate included
+test('runInitWizard: a back from pick re-presents the express gate, not the fork', async () => {
+  let pickCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    pick: async () => {
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'fork' || c === 'express' || c === 'pick'),
+    ['fork', 'express', 'pick', 'express', 'pick'],
+    'the gate is re-presented once; the fork is not'
+  )
+})
+
+// @ref LLP 0191#back-edges [tests]: the sync lane backs to the picker, not past it to the express gate
+test('runInitWizard: a back from sync re-presents pick without re-asking the express gate', async () => {
+  let syncCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    syncScope: async () => {
+      syncCalls += 1
+      if (syncCalls === 1) return { back: true, optedOut: [] }
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'express' || c === 'pick' || c === 'syncScope'),
+    ['express', 'pick', 'syncScope', 'pick', 'syncScope'],
+    'the gate is asked once per pass through the lanes, and a sync back is not a new pass'
+  )
+})
+
+// @ref LLP 0201#no-default-no-accept [tests]: with no gate shown, pick's back edge still reaches the fork
+test('runInitWizard: with nothing to accept there is no gate, and pick backs straight to the fork', async () => {
+  let pickCalls = 0
+  const { opts, calls } = await wizardOpts({
+    fork: async () => 'team',
+    pick: async () => {
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(calls.filter((c) => c === 'express').length, 0, 'nothing detected, nothing locked, no gate')
+  assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
+})
+
 // @ref LLP 0191#join-not-undone [tests]:
 test('runInitWizard: back past a completed join reuses it instead of re-running the login', async () => {
   let pickCalls = 0
@@ -616,7 +697,8 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const io = scriptedIo([
     '1',    // fork: Join a team
     '2',    // express gate: No, take me through the steps
-    'b',    // pick menu: step back to the fork
+    'b',    // pick menu: step back one screen - the express gate
+    'b',    // express gate: step back one screen - the fork
     '2',    // fork: Local install and configuration
     '1',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): step by step

@@ -116,7 +116,15 @@ steps back to the fork ([LLP 0191 #back-edges](./0191-wizard-back-navigation.dec
 ctrl+c cancels the run at 130, narrating the enrolled state first when this
 run has already joined. It is asked once per pass through the lanes, so a
 back to the fork and forward again asks it again and may be answered
-differently. Non-interactive runs (`--yes`, presets, `--from-file`) never
+differently. The edge runs both ways: it is a screen on the back chain, so
+the pick lane behind it steps back *to it* rather than past it to the fork,
+and a back out of the sync lane re-presents the picker without re-asking it.
+Back edges mirror the forward edges one screen at a time, and a question
+inserted into the forward chain but not the back chain would make both of
+its neighbours overshoot. On a pass where there is nothing to accept and no
+gate is shown (#no-default-no-accept), the pick lane's back edge reaches the
+fork directly, exactly as it did before the gate existed.
+Non-interactive runs (`--yes`, presets, `--from-file`) never
 see it: they already take every default without prompting (LLP 0131
 #attended-only).
 

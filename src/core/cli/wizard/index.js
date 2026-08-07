@@ -63,7 +63,8 @@ import { wizardStepProgress } from './steps.js'
  *
  * Attended runs can also step *back* (LLP 0191): escape at a question
  * lane returns to the lane before it (folders to sync, sync to pick, pick
- * to the express gate's fork, the fork to a reconfigure run's gate), with
+ * to the express gate - or to the fork when this pass showed no gate - and
+ * the gate itself to the fork, the fork to a reconfigure run's gate), with
  * a completed join reused rather than re-run and confirmed picks
  * re-seeding the re-entered lane. Ctrl+C stays the cancel.
  *
@@ -196,8 +197,10 @@ export async function runInitWizard(opts) {
 
   // The question lanes and their back edges (LLP 0191 #back-edges):
   // escape steps one screen back - folders to sync (`continue atSync`),
-  // sync to pick (`continue atPick`), pick to the fork (`continue
-  // atFork`), the fork to the returning gate -
+  // sync to pick (`continue atPick`), pick to the express gate (`continue
+  // atExpress`, or straight to the fork on a pass that showed no gate),
+  // the express gate to the fork (`continue atFork`), the fork to the
+  // returning gate -
   // while ctrl+c keeps cancelling the run. Everything after the loop
   // (config commit, configure, finale) acts rather than asks, so
   // back-navigation ends at the commit point (LLP 0190 #commit-point).
@@ -324,16 +327,29 @@ export async function runInitWizard(opts) {
       }
     }
 
-    atPick: while (true) {
-      // The express gate (LLP 0201): one question, before the lanes, that
-      // accepts every lane's stated default. Asked once per pass through
-      // the lanes and only on an attended run; declining runs the lanes
-      // exactly as before. Like the fork, it carries no counter - it is
-      // what decides how many questions remain, so it cannot state a
-      // total (LLP 0135 #progress), and an express run suppresses the
-      // remaining position lines because nothing after it is a question.
+    // The express gate (LLP 0201) is a screen in its own right, so it gets
+    // a loop level of its own between the fork and the pick lane. Back
+    // edges mirror the forward edges one screen at a time (LLP 0191
+    // #back-edges): inserting a question into the forward chain without
+    // inserting it into the back chain would make both of its neighbours
+    // overshoot - escape at pick would reach past the gate to the fork,
+    // and escape at sync would land on the gate instead of the picker.
+    // @ref LLP 0201#edges [implements]: the gate sits on the back chain - it backs to the fork, and the lane after it backs to the gate
+    atExpress: while (true) {
+      // One question, before the lanes, that accepts every lane's stated
+      // default. Asked once per pass through the lanes and only on an
+      // attended run; declining runs the lanes exactly as before. Like the
+      // fork, it carries no counter - it is what decides how many
+      // questions remain, so it cannot state a total (LLP 0135
+      // #progress), and an express run suppresses the remaining position
+      // lines because nothing after it is a question.
       // @ref LLP 0201#gate [implements]: the express gate precedes the lanes and answers all of them
       express = false
+      // Did this pass actually show the gate? With nothing detected and
+      // nothing locked there is none (LLP 0201 #no-default-no-accept), and
+      // the pick lane's back edge then reaches the fork directly, exactly
+      // as it did before the gate existed.
+      let expressShown = false
       if (interactive) {
         // The rows accepting would record: the pick lane's own default
         // rows, computed once here and listed verbatim on the gate, so
@@ -362,152 +378,160 @@ export async function runInitWizard(opts) {
             opts.stderr.write('hyp init: cancelled\n')
             return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
+          expressShown = true
           express = choice === 'defaults'
         }
       }
 
-      // The lanes' positions, resolved when their pathway is: a back
-      // through the fork can land on the other pathway, whose itinerary
-      // then states its own positions - exactly as a failed join's retry
-      // does. `pathway` is undefined on non-interactive runs, so the lines
-      // are undefined too and nothing is threaded: the scripted `--yes` /
-      // `--dry-run` / preset / `--from-file` output is byte-identical to
-      // what it was before the breadcrumb existed (LLP 0131
-      // #attended-only). `managed` is part of the itinerary: it adds the
-      // sync lane to a managed machine's local-pathway run (LLP 0188).
-      // An express run answers no more questions, so it states no more
-      // positions: a "Step 3 of 5" above a narration would count screens
-      // nobody is answering.
-      const step = (/** @type {'pick' | 'sync' | 'folders' | 'finale'} */ name) =>
-        express ? undefined : wizardStepProgress(pathway, name, { managed: enrolled() })
-      const pickProgress = step('pick')
-      const syncProgress = step('sync')
-      const foldersProgress = step('folders')
+      atPick: while (true) {
+        // The lanes' positions, resolved when their pathway is: a back
+        // through the fork can land on the other pathway, whose itinerary
+        // then states its own positions - exactly as a failed join's retry
+        // does. `pathway` is undefined on non-interactive runs, so the lines
+        // are undefined too and nothing is threaded: the scripted `--yes` /
+        // `--dry-run` / preset / `--from-file` output is byte-identical to
+        // what it was before the breadcrumb existed (LLP 0131
+        // #attended-only). `managed` is part of the itinerary: it adds the
+        // sync lane to a managed machine's local-pathway run (LLP 0188).
+        // An express run answers no more questions, so it states no more
+        // positions: a "Step 3 of 5" above a narration would count screens
+        // nobody is answering.
+        const step = (/** @type {'pick' | 'sync' | 'folders' | 'finale'} */ name) =>
+          express ? undefined : wizardStepProgress(pathway, name, { managed: enrolled() })
+        const pickProgress = step('pick')
+        const syncProgress = step('sync')
+        const foldersProgress = step('folders')
 
-      const pickFn = opts.pick ?? runWizardPick
-      picked = await pickFn({
-        stdout: opts.stdout,
-        stderr: opts.stderr,
-        ...(opts.stdin ? { stdin: opts.stdin } : {}),
-        env: opts.env,
-        ...(pickProgress ? { progress: pickProgress } : {}),
-        ...(catalog ? { catalog } : {}),
-        ...(locked ? { locked } : {}),
-        ...(managed ? { managed } : {}),
-        ...(opts.picks ? { picks: opts.picks } : {}),
-        ...(opts.exportOrigin ? { exportOrigin: opts.exportOrigin } : {}),
-        ...(opts.force ? { force: opts.force } : {}),
-        ...(opts.prompt ? { prompt: opts.prompt } : {}),
-        ...(opts.confirm ? { confirm: opts.confirm } : {}),
-        // Retention is never asked; the default follows where the durable
-        // copy lives. Only an unmanaged local install keeps the longer
-        // 120-day window (its cache is the only copy of history); a team run,
-        // and a managed machine that reconfigures down the local path, fall
-        // through to the pick phase's 90-day default because the org server
-        // holds the durable copy either way.
-        // @ref LLP 0137#pathway-defaults [implements]: 90-day team / 120-day local retention defaults
-        // @ref LLP 0182#one-reconfigure [constrained-by]: a managed machine can now reach the local pathway, so enrollment and not the pathway label decides
-        ...(pathway === 'local' && !enrolled() ? { retentionDefault: LOCAL_INSTALL_RETENTION_DAYS } : {}),
-        // The shared, run-once detector (never `opts.detect` directly), so
-        // the pick lane's rows are the rows the express gate listed.
-        ...(interactive ? { detect } : opts.detect ? { detect: opts.detect } : {}),
-        ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
-        // Back-navigation is attended-only by construction (it takes a
-        // keypress); the lane's first screen backs out to the fork.
-        ...(interactive ? { allowBack: true } : {}),
-        ...(express ? { autoAccept: true } : {}),
-        ...(pickSeed ? { initialSelection: pickSeed } : {}),
-        // The write commits below, after the sync lane: the overwrite confirm
-        // is then the last question, and a cancel at the sync lane leaves the
-        // existing config untouched (LLP 0190 #commit-point).
-        deferWrite: true,
-      })
-      if (picked.back) continue atFork
-      if (picked.cancelled || picked.exitCode !== 0) {
-        // A join this run has already enrolled this machine; the abort
-        // cannot undo that, so it must not be silent about it.
-        if (joined) await narrateEnrolledAbort(opts)
-        return {
-          exitCode: picked.exitCode,
-          ...(picked.cancelled ? { cancelled: true } : {}),
-          ...(pathway ? { pathway } : {}),
+        const pickFn = opts.pick ?? runWizardPick
+        picked = await pickFn({
+          stdout: opts.stdout,
+          stderr: opts.stderr,
+          ...(opts.stdin ? { stdin: opts.stdin } : {}),
+          env: opts.env,
+          ...(pickProgress ? { progress: pickProgress } : {}),
+          ...(catalog ? { catalog } : {}),
+          ...(locked ? { locked } : {}),
+          ...(managed ? { managed } : {}),
+          ...(opts.picks ? { picks: opts.picks } : {}),
+          ...(opts.exportOrigin ? { exportOrigin: opts.exportOrigin } : {}),
+          ...(opts.force ? { force: opts.force } : {}),
+          ...(opts.prompt ? { prompt: opts.prompt } : {}),
+          ...(opts.confirm ? { confirm: opts.confirm } : {}),
+          // Retention is never asked; the default follows where the durable
+          // copy lives. Only an unmanaged local install keeps the longer
+          // 120-day window (its cache is the only copy of history); a team run,
+          // and a managed machine that reconfigures down the local path, fall
+          // through to the pick phase's 90-day default because the org server
+          // holds the durable copy either way.
+          // @ref LLP 0137#pathway-defaults [implements]: 90-day team / 120-day local retention defaults
+          // @ref LLP 0182#one-reconfigure [constrained-by]: a managed machine can now reach the local pathway, so enrollment and not the pathway label decides
+          ...(pathway === 'local' && !enrolled() ? { retentionDefault: LOCAL_INSTALL_RETENTION_DAYS } : {}),
+          // The shared, run-once detector (never `opts.detect` directly), so
+          // the pick lane's rows are the rows the express gate listed.
+          ...(interactive ? { detect } : opts.detect ? { detect: opts.detect } : {}),
+          ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
+          // Back-navigation is attended-only by construction (it takes a
+          // keypress); the lane's first screen backs out to the fork.
+          ...(interactive ? { allowBack: true } : {}),
+          ...(express ? { autoAccept: true } : {}),
+          ...(pickSeed ? { initialSelection: pickSeed } : {}),
+          // The write commits below, after the sync lane: the overwrite confirm
+          // is then the last question, and a cancel at the sync lane leaves the
+          // existing config untouched (LLP 0190 #commit-point).
+          deferWrite: true,
+        })
+        // One screen back is the express gate when this pass showed one,
+        // and the fork when it did not (LLP 0191 #back-edges).
+        if (picked.back) {
+          if (expressShown) continue atExpress
+          continue atFork
         }
-      }
-      // Remember the confirmed selection: a back into pick - from the sync
-      // lane, or a later pass through the fork - re-seeds with it.
-      pickSeed = picked.sourcesPicked
-
-      // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
-      // the team pathway, or an already-enrolled machine on any pathway - ask
-      // which of the picked, non-locked sources stay local-only. Whether the
-      // run is enrolled is `enrolled()`, not `managed`: see its definition for
-      // the join whose org-config converge timed out, which is enrolled with
-      // no central layer yet. Default-sync means an
-      // untouched prompt opts nothing out. Non-interactive runs skip it
-      // (LLP 0131 #attended-only): default-sync is the correct scripted
-      // outcome, and `hyp policy client` is the standing control.
-      if (interactive && (pathway === 'team' || enrolled())) {
-        // The two enrolled-only questions, in order and with a back edge
-        // between them: which adapters ship (LLP 0188), then what happens
-        // in folders nobody has classified (LLP 0200). Separate lanes
-        // because they answer different axes; a back out of the folder
-        // question re-presents the sync lane, not the picker.
-        // @ref LLP 0200#wizard [implements]: the new-folder step follows the sync lane and backs into it
-        atSync: while (true) {
-          const syncFn = opts.syncScope ?? runWizardSyncScope
-          // The locked descriptors ride along so the lane can state the whole
-          // sync picture: org rows always sync and are shown read-only there.
-          const lockedDescriptors = picked.lockedSources
-            .map((id) => catalog.pickerDescriptors.get(id))
-            .filter((d) => d !== undefined)
-          const syncScope = await syncFn({
-            stdout: opts.stdout,
-            stderr: opts.stderr,
-            ...(opts.stdin ? { stdin: opts.stdin } : {}),
-            env: opts.env,
-            candidates: picked.descriptors,
-            locked: lockedDescriptors,
-            ...(syncProgress ? { progress: syncProgress } : {}),
-            ...(opts.confirm ? { confirm: opts.confirm } : {}),
-            ...(express ? { autoAccept: true } : {}),
-            // The pick lane is always behind this one.
-            allowBack: true,
-          })
-          if (syncScope.back) continue atPick
-          if (syncScope.cancelled) {
-            // Cancelling here leaves the store unwritten, so default-sync
-            // stands; on an enrolled run that must be said, not implied
-            // (LLP 0188).
-            if (joined) await narrateEnrolledAbort(opts)
-            return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
+        if (picked.cancelled || picked.exitCode !== 0) {
+          // A join this run has already enrolled this machine; the abort
+          // cannot undo that, so it must not be silent about it.
+          if (joined) await narrateEnrolledAbort(opts)
+          return {
+            exitCode: picked.exitCode,
+            ...(picked.cancelled ? { cancelled: true } : {}),
+            ...(pathway ? { pathway } : {}),
           }
-          sourcesOptedOut = syncScope.optedOut
-
-          const folderFn = opts.folderAsk ?? runWizardFolderAsk
-          const folders = await folderFn({
-            stdout: opts.stdout,
-            stderr: opts.stderr,
-            ...(opts.stdin ? { stdin: opts.stdin } : {}),
-            env: opts.env,
-            ...(foldersProgress ? { progress: foldersProgress } : {}),
-            ...(opts.confirm ? { confirm: opts.confirm } : {}),
-            ...(express ? { autoAccept: true } : {}),
-            // The sync lane is always behind this one.
-            allowBack: true,
-          })
-          if (folders.back) continue atSync
-          if (folders.cancelled) {
-            // Same shape as the sync lane's cancel: nothing new was
-            // written, and the enrolled consequence is narrated rather
-            // than left implied.
-            if (joined) await narrateEnrolledAbort(opts)
-            return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
-          }
-          folderAsk = folders.mode
-          break atSync
         }
+        // Remember the confirmed selection: a back into pick - from the sync
+        // lane, or a later pass through the fork - re-seeds with it.
+        pickSeed = picked.sourcesPicked
+
+        // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
+        // the team pathway, or an already-enrolled machine on any pathway - ask
+        // which of the picked, non-locked sources stay local-only. Whether the
+        // run is enrolled is `enrolled()`, not `managed`: see its definition for
+        // the join whose org-config converge timed out, which is enrolled with
+        // no central layer yet. Default-sync means an
+        // untouched prompt opts nothing out. Non-interactive runs skip it
+        // (LLP 0131 #attended-only): default-sync is the correct scripted
+        // outcome, and `hyp policy client` is the standing control.
+        if (interactive && (pathway === 'team' || enrolled())) {
+          // The two enrolled-only questions, in order and with a back edge
+          // between them: which adapters ship (LLP 0188), then what happens
+          // in folders nobody has classified (LLP 0200). Separate lanes
+          // because they answer different axes; a back out of the folder
+          // question re-presents the sync lane, not the picker.
+          // @ref LLP 0200#wizard [implements]: the new-folder step follows the sync lane and backs into it
+          atSync: while (true) {
+            const syncFn = opts.syncScope ?? runWizardSyncScope
+            // The locked descriptors ride along so the lane can state the whole
+            // sync picture: org rows always sync and are shown read-only there.
+            const lockedDescriptors = picked.lockedSources
+              .map((id) => catalog.pickerDescriptors.get(id))
+              .filter((d) => d !== undefined)
+            const syncScope = await syncFn({
+              stdout: opts.stdout,
+              stderr: opts.stderr,
+              ...(opts.stdin ? { stdin: opts.stdin } : {}),
+              env: opts.env,
+              candidates: picked.descriptors,
+              locked: lockedDescriptors,
+              ...(syncProgress ? { progress: syncProgress } : {}),
+              ...(opts.confirm ? { confirm: opts.confirm } : {}),
+              ...(express ? { autoAccept: true } : {}),
+              // The pick lane is always behind this one.
+              allowBack: true,
+            })
+            if (syncScope.back) continue atPick
+            if (syncScope.cancelled) {
+              // Cancelling here leaves the store unwritten, so default-sync
+              // stands; on an enrolled run that must be said, not implied
+              // (LLP 0188).
+              if (joined) await narrateEnrolledAbort(opts)
+              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
+            }
+            sourcesOptedOut = syncScope.optedOut
+
+            const folderFn = opts.folderAsk ?? runWizardFolderAsk
+            const folders = await folderFn({
+              stdout: opts.stdout,
+              stderr: opts.stderr,
+              ...(opts.stdin ? { stdin: opts.stdin } : {}),
+              env: opts.env,
+              ...(foldersProgress ? { progress: foldersProgress } : {}),
+              ...(opts.confirm ? { confirm: opts.confirm } : {}),
+              ...(express ? { autoAccept: true } : {}),
+              // The sync lane is always behind this one.
+              allowBack: true,
+            })
+            if (folders.back) continue atSync
+            if (folders.cancelled) {
+              // Same shape as the sync lane's cancel: nothing new was
+              // written, and the enrolled consequence is narrated rather
+              // than left implied.
+              if (joined) await narrateEnrolledAbort(opts)
+              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
+            }
+            folderAsk = folders.mode
+            break atSync
+          }
+        }
+        break atFork
       }
-      break atFork
     }
   }
 

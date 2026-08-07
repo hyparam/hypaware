@@ -109,18 +109,18 @@ export interface ClientSyncEntry {
 }
 
 // The machine-local answer to "should a session opened in an unclassified
-// folder be asked to classify it?" (LLP 0200, extending LLP 0106). `ask` is
-// the default and the behavior every machine had before the preference
-// existed: one session-start question per new folder. `sync` says the user
-// has answered that question standing: unclassified folders keep the implicit
-// `full` default (they sync) and the hook stays quiet. Only the ask is
-// suppressed - `.hypignore` dotfiles, machine-local entries, and the export
-// seam are untouched by it.
+// folder be asked to classify it?" (LLP 0200, extending LLP 0106). `sync` is
+// the default (LLP 0200 #default): the user has answered that question
+// standing, unclassified folders keep the implicit `full` default (they
+// sync), and the hook stays quiet. `ask` is the opt-in half and is LLP 0106
+// as it shipped: one session-start question per new folder. Only the ask is
+// gated either way - `.hypignore` dotfiles, machine-local entries, and the
+// export seam are untouched by it (LLP 0200 #suppression).
 export type FolderAskMode = 'ask' | 'sync'
 
 // On-disk shape of the machine-local folder-ask preference
 // (`<stateDir>/usage-policy/folder-ask.json`, LLP 0200). File absence means
-// `ask`, so the preference is inert on a machine that never set it.
+// `sync`, the product default, so a machine that never set it is never asked.
 export interface FolderAskFile {
   version: 1
   mode: FolderAskMode
