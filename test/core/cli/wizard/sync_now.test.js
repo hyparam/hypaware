@@ -154,6 +154,25 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })
 
+// @ref LLP 0200#read-back [tests]: an unreadable re-read is "still held", never a claimed release
+test('a re-read that throws is reported as not sent, not as a release', async () => {
+  const spawn = fakeSpawn({ code: 0 })
+  const o = opts({
+    answer: 'now',
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => {
+      throw new Error('EACCES')
+    },
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  // The child ran and may well have sent nothing; the one answer that cannot
+  // be walked back is telling the user it sent. So: not released, and the
+  // deadline is restated rather than the run ending on silence.
+  assert.deepEqual(result, { asked: true, released: false, reason: 'sync-declined' })
+  assert.match(o.stdout.text(), /Nothing was sent/)
+})
+
 test('a spawn failure never fails the install, and restates the wait', async () => {
   const spawn = fakeSpawn({ error: new Error('ENOENT') })
   const o = opts({ answer: 'now', spawnFn: spawn.spawnFn })

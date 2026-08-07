@@ -202,16 +202,22 @@ function runSyncChild(opts) {
  * "still held", the conservative direction: claiming a sync happened is the
  * one wrong answer that cannot be walked back.
  *
+ * A failed re-read therefore returns the deadline this step started from,
+ * never `null` - `null` is the caller's word for "the marker is gone, it
+ * sent", so handing it back on an error would report a release nobody
+ * observed and swallow the line that restates the wait.
+ *
+ * @ref LLP 0200#read-back [implements]: an unreadable re-read is treated as still held
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<number | null>}
  */
 async function readHold(opts) {
-  if (opts.readDeadline) return await opts.readDeadline()
   try {
+    if (opts.readDeadline) return await opts.readDeadline()
     const stateDir = readObservabilityEnv(opts.env).stateDir
     return await readFirstSyncDeadline({ stateDir })
   } catch {
-    return null
+    return opts.deadline
   }
 }
 
