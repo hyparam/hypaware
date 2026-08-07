@@ -76,6 +76,22 @@ There are two authoring surfaces for the same classes:
   hyp policy unset <path> [class]     # back to the implicit default
   ```
 
+On a machine connected to a server, folders you have not marked sync
+without asking. You can instead be asked, once per new folder, how to
+handle it, at the moment you open a session there:
+
+```sh
+hyp policy folders ask    # ask once per new folder
+hyp policy folders sync   # back to syncing without asking (the default)
+hyp policy folders        # report which is in force
+```
+
+This gates the question only. In either setting, folders you already
+marked keep their class, `.hypignore` files are unaffected, and nothing
+already local-only or ignored starts syncing. The setting is machine-local
+and reversible, `hyp init` asks for it in its own step, and `hyp status`
+names it on an enrolled machine.
+
 Two caveats apply to both surfaces:
 
 - **Prospective only.** A marking gates future recording and forwarding.

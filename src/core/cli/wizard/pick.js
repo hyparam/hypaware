@@ -7,6 +7,7 @@ import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
+import { narrateAcceptedGate } from './express.js'
 import {
   DEFAULT_RETENTION_DAYS,
   WALKTHROUGH_CANCEL_EXIT_CODE,
@@ -40,51 +41,24 @@ import {
 export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 
 /**
- * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
- * prompt/write/guard/overwrite-confirm shape but sources its rows from the
- * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
- * `PICKER_SOURCES` table, and understands central-layer-locked rows. When
- * detection or the locked set yields a default selection, a defaults gate
- * (LLP 0190 #pick-gate) states it first and a bare enter accepts it; the
- * full menu opens only on request.
+ * Everything the pick lane decides *before* it asks anything: the ordered
+ * descriptors, the locked set, the config on disk, the detection pass, and
+ * the seed those three produce (LLP 0183 #seed-from-config, LLP 0191
+ * #re-entry-seeding, LLP 0011 #autodetect-vs-default), plus the
+ * `defaultRows` a gate would state.
  *
- * A row's initial checked state is `locked.includes(id)`, then whatever the
- * local config on disk already collects, and only on a first run (no config
- * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
- * `· managed by your fleet`
- * suffix and is filtered out of the returned sources before composition: it
- * is already in the central layer, so composing it again into the local
- * layer would be the exact collision join-before-pick exists to avoid
- * (`@ref LLP 0129#join-before-picker`). Locked-source membership itself is
- * computed upstream by the join phase (T3's `classifyClientProvenance`); this
- * phase only consumes the resulting id list.
+ * Hoisted out of {@link runWizardPick} so the express gate (LLP 0201) can
+ * name the same rows this lane would list without re-deriving them: two
+ * computations of "the defaults" could disagree, and the one screen that
+ * accepts them all is the worst place for that. The orchestrator passes a
+ * detection function that runs once and is shared with the lane, so a
+ * machine is probed once per run.
  *
- * Composition itself is the descriptor-driven `composePickerConfig` fold
- * (T6), unchanged from the walkthrough. This phase does not run the finale
- * (daemon install / attach / backfill) or the configure phase; the wizard
- * orchestrator invokes those separately.
- *
- * Non-interactive callers (`--yes`, `--dry-run`, presets, `--from-file`) set
- * `opts.picks` and skip prompting and detection entirely, matching today's
- * `interactive = !opts.picks` split so every existing non-interactive picker
- * test keeps its shape.
- *
- * On a reconfigure the local config already on disk is read first and is
- * what the phase starts from: the rows it collects, the retention window it
- * carries, and the export destination it expresses (LLP 0183). The wizard
- * asks about none of those three, so re-deriving them would silently
- * discard answers the user gave on a previous run.
- *
- * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
- * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
- * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
- *
+ * @ref LLP 0201#gate [implements]: one computation of "the defaults", read by both the express gate and the pick lane
  * @param {RunWizardPickOptions} opts
- * @returns {Promise<WizardPickResult>}
  */
-export async function runWizardPick(opts) {
+export async function resolvePickSeeding(opts) {
   const { env } = opts
-  const log = getLogger('wizard')
   const interactive = !opts.picks
 
   const descriptors = opts.catalog
@@ -143,6 +117,88 @@ export async function runWizardPick(opts) {
   const seed = opts.initialSelection
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
     : configured ?? detected
+
+  return {
+    descriptors,
+    descriptorList,
+    lockedSources,
+    lockedSet,
+    configPath,
+    existing,
+    configured,
+    detected,
+    seed,
+    interactive,
+    defaultRows: descriptorList.filter((d) => seed.has(d.id) || lockedSet.has(d.id)),
+  }
+}
+
+/**
+ * The rows a defaults gate lists, one label per line, locked rows
+ * fleet-suffixed. Shared so the pick gate (LLP 0190 #pick-gate) and the
+ * express gate (LLP 0201 #gate) can never disagree about what "the
+ * defaults" are: the express gate names exactly the rows accepting it will
+ * record.
+ *
+ * @ref LLP 0201#gate [implements]: the express gate lists the pick gate's own rows, from one computation
+ * @param {{ defaultRows: PickerDescriptor[], lockedSet: Set<string> }} seeding
+ * @returns {string[]}
+ */
+export function defaultRowLabels({ defaultRows, lockedSet }) {
+  return defaultRows.map((d) => `  ${d.label}${lockedSet.has(d.id) ? LOCKED_LABEL_SUFFIX : ''}`)
+}
+
+/**
+ * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
+ * prompt/write/guard/overwrite-confirm shape but sources its rows from the
+ * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
+ * `PICKER_SOURCES` table, and understands central-layer-locked rows. When
+ * detection or the locked set yields a default selection, a defaults gate
+ * (LLP 0190 #pick-gate) states it first and a bare enter accepts it; the
+ * full menu opens only on request.
+ *
+ * A row's initial checked state is `locked.includes(id)`, then whatever the
+ * local config on disk already collects, and only on a first run (no config
+ * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
+ * `· managed by your fleet`
+ * suffix and is filtered out of the returned sources before composition: it
+ * is already in the central layer, so composing it again into the local
+ * layer would be the exact collision join-before-pick exists to avoid
+ * (`@ref LLP 0129#join-before-picker`). Locked-source membership itself is
+ * computed upstream by the join phase (T3's `classifyClientProvenance`); this
+ * phase only consumes the resulting id list.
+ *
+ * Composition itself is the descriptor-driven `composePickerConfig` fold
+ * (T6), unchanged from the walkthrough. This phase does not run the finale
+ * (daemon install / attach / backfill) or the configure phase; the wizard
+ * orchestrator invokes those separately.
+ *
+ * Non-interactive callers (`--yes`, `--dry-run`, presets, `--from-file`) set
+ * `opts.picks` and skip prompting and detection entirely, matching today's
+ * `interactive = !opts.picks` split so every existing non-interactive picker
+ * test keeps its shape.
+ *
+ * On a reconfigure the local config already on disk is read first and is
+ * what the phase starts from: the rows it collects, the retention window it
+ * carries, and the export destination it expresses (LLP 0183). The wizard
+ * asks about none of those three, so re-deriving them would silently
+ * discard answers the user gave on a previous run.
+ *
+ * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
+ * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
+ * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
+ *
+ * @param {RunWizardPickOptions} opts
+ * @returns {Promise<WizardPickResult>}
+ */
+export async function runWizardPick(opts) {
+  const { env } = opts
+  const log = getLogger('wizard')
+  const seeding = await resolvePickSeeding(opts)
+  const {
+    descriptors, descriptorList, lockedSources, lockedSet,
+    configPath, existing, configured, detected, seed, interactive,
+  } = seeding
 
   await withSpan(
     'wizard.pick.start',
@@ -412,6 +468,18 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
   // nothing to confirm, so the menu shows directly.
   const defaultRows = descriptorList.filter((d) => seed.has(d.id) || lockedSet.has(d.id))
   const hasGate = defaultRows.length > 0
+  // One source per line; the locked suffix matches the menu rows'. Built by
+  // the shared labeller, so the express gate lists these exact rows.
+  const gateItems = defaultRowLabels({ defaultRows, lockedSet })
+  // The express gate already accepted this lane (LLP 0201): state the rows
+  // the gate would have shown and take them. With no gate there is no
+  // default to take, so the menu opens as it always would.
+  // @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
+  if (hasGate && opts.autoAccept) {
+    // No leading blank: the welcome banner printed one already.
+    narrateAcceptedGate({ stdout: opts.stdout, title: 'HypAware will record:', items: gateItems, lead: false })
+    return { rawSources: /** @type {PickerSource[]} */ (defaultRows.map((d) => d.id)) }
+  }
   let screen = hasGate ? 'gate' : 'menu'
   while (true) {
     if (screen === 'gate') {
@@ -420,10 +488,7 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
         choice = await confirm({
           title: 'HypAware will record:',
           ...(opts.progress ? { progress: opts.progress } : {}),
-          // One source per line; the locked suffix matches the menu rows'.
-          items: defaultRows.map(
-            (d) => `  ${d.label}${lockedSet.has(d.id) ? LOCKED_LABEL_SUFFIX : ''}`
-          ),
+          items: gateItems,
           options: [
             {
               value: 'accept',

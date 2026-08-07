@@ -60,6 +60,24 @@ export {
 // marker (read returns null, never []); the export-seam resolver reads it
 // lazily, `hyp status` and `hyp sync` narrate it, and the wizard sync-scope
 // step and `hyp policy client` write it.
+// The machine-local folder-ask preference (LLP 0200): whether a session
+// opened in an unclassified folder is asked to classify it (LLP 0106) or
+// left alone under the implicit sync default. Absence reads as `ask`, so a
+// machine that never set it behaves exactly as before. Written by the
+// wizard's sync lane and `hyp policy folders`, read by the classification
+// hook and `hyp policy list`.
+export {
+  folderAskPath,
+  readFolderAskMode,
+  readFolderAskModeSafe,
+  writeFolderAskMode,
+  isFolderAskMode,
+  DEFAULT_FOLDER_ASK_MODE,
+  FOLDER_ASK_MODES,
+  FOLDER_ASK_VERSION,
+  FolderAskUnreadableError,
+  FOLDER_ASK_UNREADABLE_ERROR_KIND,
+} from './folder_ask.js'
 export {
   clientSyncListPath,
   readClientSyncEntries,

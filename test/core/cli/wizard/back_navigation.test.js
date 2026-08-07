@@ -329,6 +329,10 @@ async function wizardOpts(over = {}) {
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async () => pickResult(),
     syncScope: async () => ({ optedOut: [] }),
+    folderAsk: async () => ({ mode: 'sync' }),
+    // The express gate (LLP 0201) fronts the lanes; these tests walk the
+    // back edges between them, so it declines by default.
+    express: async () => 'choose',
     configure: async () => ({ results: [] }),
     finaleRunner: async () => ({
       daemonInstall: { skipped: true, dryRun: false },
@@ -341,7 +345,7 @@ async function wizardOpts(over = {}) {
     }),
     ...over,
   })
-  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure']) {
+  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'express', 'configure']) {
     const inner = opts[name]
     opts[name] = async (/** @type {any[]} */ ...a) => { calls.push(name); return inner(...a) }
   }
@@ -611,11 +615,14 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
     '1',    // fork: Join a team
+    '2',    // express gate: No, take me through the steps
     'b',    // pick menu: step back to the fork
     '2',    // fork: Local install and configuration
     '1',    // disconnect?: No, stay connected
+    '2',    // express gate (asked again on this pass): step by step
     'all',  // pick menu: record everything offered
     '1',    // sync gate: Sync all
+    '1',    // new folders: Sync them all
   ])
   const stderr = makeBuf()
   let joinCalls = 0
@@ -650,11 +657,13 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   // Enrolled-state decisions survive the walk to the local pathway.
   assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
   assert.match(out, /These will sync to your server:/)
-  // The itinerary is the enrolled one (pick, sync, finish), not the solo
-  // two-step local one: the denominator is the same `enrolled()` read the
-  // sync lane is gated on, so a regression there shows up here too.
-  assert.match(out, /Step 1 of 3 · Choose what to collect/)
-  assert.match(out, /Step 2 of 3 · Choose what syncs/)
+  // The itinerary is the enrolled one (pick, sync, folders, finish), not
+  // the solo two-step local one: the denominator is the same `enrolled()`
+  // read both enrolled lanes are gated on, so a regression there shows up
+  // here too.
+  assert.match(out, /Step 1 of 4 · Choose what to collect/)
+  assert.match(out, /Step 2 of 4 · Choose what syncs/)
+  assert.match(out, /Step 3 of 4 · Choose how new folders are handled/)
 
   // The run ended in a real config on disk, written after the last question.
   assert.match(String(result.configPath), /hypaware-config\.json$/)

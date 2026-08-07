@@ -145,6 +145,12 @@ function legacyNumberedPromptFactory(opts) {
  * the y/N. It also names what survives the regeneration, so the answer is
  * a decision about the picks rather than a bet on how much is lost.
  *
+ * That is three facts, and as one paragraph they arrived as a wall of text
+ * with the actual question buried at the end of it. So it is laid out
+ * instead: the path on its own line, the consequence and the carried-over
+ * list indented under it, and `Continue?` alone on the last line where a
+ * reader's eye lands. Same facts, same order, scannable.
+ *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
  * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
@@ -156,9 +162,13 @@ export function defaultOverwriteConfirmFactory(opts) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
       const answer = await rl.question(
-        `The config at ${targetPath} will be rewritten from your picks. ` +
-        'Your retention window, export destinations, hand-edited settings, and any ' +
-        'plugins the picker does not manage are carried over; a backup is kept. ' +
+        '\n' +
+        `This config will be rewritten from your picks:\n` +
+        `  ${targetPath}\n` +
+        '\n' +
+        '  Carried over: retention window, export destinations, hand-edited\n' +
+        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
+        '\n' +
         'Continue? [y/N]: '
       )
       return /^y(es)?$/i.test(answer.trim())

@@ -3,6 +3,7 @@ import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '..
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { OverviewQueryRunner } from '../../query/types.d.ts'
 import type { ClientDescriptor, PickerDescriptor, PluginCatalog } from '../../types.d.ts'
+import type { FolderAskMode } from '../../usage-policy/types.d.ts'
 import type { SelectSpec } from '../tui/types.d.ts'
 import type {
   AsyncBackfillConsentPrompt,
@@ -41,7 +42,7 @@ export type WizardPathway = 'team' | 'local'
  * not one per phase: `configure` and the privacy narration are output, and
  * `first look` is a closing report rather than a decision.
  */
-export type WizardStepName = 'join' | 'pick' | 'sync' | 'finale'
+export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
 
 /**
  * The sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate): after
@@ -77,6 +78,13 @@ export interface RunWizardSyncScopeOptions {
   prompt?: AsyncPickPrompt
   /** Defaults-gate seam (tests); defaults to the confirm-select factory. */
   confirm?: AsyncConfirmSelectPrompt
+  /**
+   * Take the gate's stated default without stopping at it (LLP 0201): the
+   * express gate already answered this lane, so it narrates the statement
+   * its gate would have shown and proceeds. Has no effect on a lane with
+   * no default to state, which still asks.
+   */
+  autoAccept?: boolean
 }
 
 export interface WizardSyncScopeResult {
@@ -87,6 +95,80 @@ export interface WizardSyncScopeResult {
   /** Candidate source ids the user opted out (kept local-only). */
   optedOut: string[]
   /** The step was skipped (corrupt store) rather than answered. */
+  skipped?: boolean
+}
+
+/**
+ * The new-folder step (LLP 0200 #wizard): one question on every enrolled
+ * run, asked after the per-adapter sync lane. It answers a different axis
+ * than that lane - not "which adapters ship" but "what happens the next
+ * time I work somewhere new" - which is why it is its own step.
+ */
+export interface RunWizardFolderAskOptions {
+  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  /** The step's position line, rendered like the other lanes'. */
+  progress?: string
+  /**
+   * Offer back-navigation out of the lane (LLP 0191): escape returns
+   * `back: true` and the orchestrator re-presents the sync lane.
+   */
+  allowBack?: boolean
+  /** Prompt seam (tests); defaults to the confirm-select factory. */
+  confirm?: AsyncConfirmSelectPrompt
+  /**
+   * Take the default answer without asking (LLP 0201): the express gate
+   * already answered this lane, so it narrates and records the default.
+   */
+  autoAccept?: boolean
+}
+
+/**
+ * The express gate's answer (LLP 0201): `defaults` accepts every lane's
+ * stated default without stopping at it, `choose` runs the lanes as they
+ * are. `back` returns to the fork; `cancelled` ends the run like any other
+ * cancelled prompt.
+ */
+export type WizardExpressChoice = 'defaults' | 'choose' | 'back' | 'cancelled'
+
+export interface RunWizardExpressGateOptions {
+  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  /**
+   * The rows accepting will record, already labelled (locked rows
+   * fleet-suffixed) by `defaultRowLabels`. These are the pick gate's own
+   * rows, so the two screens can never disagree about what "all of these"
+   * means. Never empty: the orchestrator skips the gate when there is
+   * nothing to accept.
+   */
+  rows: string[]
+  /**
+   * Whether this run is enrolled. Gates the two claims the gate can only
+   * honestly make on a machine with a server: that everything syncs, and
+   * that new folders sync without a question.
+   */
+  enrolled?: boolean
+  /** Offer back-navigation to the fork (LLP 0191). */
+  allowBack?: boolean
+  /** Prompt seam (tests); defaults to the confirm-select factory. */
+  confirm?: AsyncConfirmSelectPrompt
+}
+
+export interface WizardFolderAskResult {
+  /**
+   * The mode in force when the lane finished: the answer on a normal run,
+   * and the pre-existing mode on a cancel, a back, or a failed write.
+   */
+  mode: FolderAskMode
+  /** The user cancelled at the prompt; the wizard exits 130. */
+  cancelled?: boolean
+  /** The user stepped back out of the lane (LLP 0191); nothing written. */
+  back?: true
+  /** The answer could not be written; the previous mode stands. */
   skipped?: boolean
 }
 
@@ -344,6 +426,14 @@ export interface RunWizardPickOptions {
    */
   confirm?: AsyncConfirmSelectPrompt
   /**
+   * Take the defaults gate's stated rows without stopping at it
+   * (LLP 0201): the express gate already answered this lane, so it
+   * narrates what the gate would have shown and proceeds. With nothing
+   * detected and nothing locked there is no gate and no default to take,
+   * so the menu still opens - "defaults where there are defaults".
+   */
+  autoAccept?: boolean
+  /**
    * The lane's position line (LLP 0135 #progress), e.g.
    * `Step 2 of 3 · Choose what to collect`. Threaded onto the picker's
    * prompt spec rather than folded into its title, so the TUI and the
@@ -516,6 +606,8 @@ export interface RunInitWizardOptions {
   join?: (opts: RunWizardJoinOptions) => Promise<WizardJoinResult>
   pick?: (opts: RunWizardPickOptions) => Promise<WizardPickResult>
   syncScope?: (opts: RunWizardSyncScopeOptions) => Promise<WizardSyncScopeResult>
+  folderAsk?: (opts: RunWizardFolderAskOptions) => Promise<WizardFolderAskResult>
+  express?: (opts: RunWizardExpressGateOptions) => Promise<WizardExpressChoice>
   configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
   /** Pick-phase prompt seams, threaded through unchanged (tests). */

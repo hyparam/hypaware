@@ -9,11 +9,17 @@ import { readObservabilityEnv } from '../observability/env.js'
 import {
   ClientSyncListUnreadableError,
   clientSyncListPath,
+  DEFAULT_FOLDER_ASK_MODE,
+  FOLDER_ASK_MODES,
+  FolderAskUnreadableError,
+  folderAskPath,
   LocalOnlyListUnreadableError,
   localOnlyListPath,
   readClientSyncEntries,
+  readFolderAskMode,
   readLocalOnlyEntries,
   writeClientSyncEntries,
+  writeFolderAskMode,
 } from '../usage-policy/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
@@ -23,7 +29,7 @@ import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmar
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
- * @import { ClientSyncEntry, UsageClass } from '../../../src/core/usage-policy/types.js'
+ * @import { ClientSyncEntry, FolderAskMode, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -541,6 +547,131 @@ export async function runPolicyClient(argv, ctx) {
   return 0
 }
 
+const POLICY_FOLDERS_USAGE = 'hyp policy folders [ask|sync] [--json]'
+
+/** How the folder-ask preference is named to a human. */
+const FOLDER_ASK_STORE_LABEL = 'machine-local new-folder preference'
+
+/**
+ * The two modes stated as the consequence the user cares about, not as the
+ * token they typed. `sync` is the default (LLP 0200 #default); `ask` buys
+ * the per-folder session-start question (LLP 0106).
+ *
+ * @type {Record<FolderAskMode, string>}
+ */
+const FOLDER_ASK_STATE_LINE = {
+  ask: 'ask - a session opened in a new folder asks once how to handle it',
+  sync: 'sync - they sync without asking (the default)',
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ mode?: FolderAskMode, json: boolean, error?: string }}
+ */
+function parsePolicyFoldersArgs(argv) {
+  const empty = { json: false }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      mode: { type: 'string', enum: [...FOLDER_ASK_MODES] },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['mode'],
+  })
+  if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_FOLDERS_USAGE}` }
+  if (!parsed.ok) return { ...empty, error: parsed.error }
+  const p = /** @type {{ mode?: FolderAskMode, json: boolean }} */ (parsed.params)
+  return { mode: p.mode, json: p.json }
+}
+
+/**
+ * `hyp policy folders [ask|sync] [--json]`
+ *
+ * The standing answer to the session-start classification question
+ * (LLP 0106): whether opening a session in a folder nobody has classified
+ * asks how to handle it, or lets it sync under the implicit default without
+ * asking. `sync` is the default (LLP 0200 #default) and the wizard's
+ * new-folder step is where most machines set it; this verb is the standing
+ * control afterwards. With no argument it reports the current mode; with
+ * `ask` or `sync` it writes one, idempotently.
+ *
+ * Deliberately narrow: this is a prompt preference, not a policy. `sync`
+ * suppresses the *question*, never a classification - `.hypignore` dotfiles,
+ * every entry `hyp policy set` wrote, and the export seam behave identically
+ * in both modes, so nothing already marked local-only or ignored starts
+ * syncing because the ask was turned off.
+ *
+ * @ref LLP 0200#cli [implements]: the post-onboarding surface over the folder-ask preference, the sibling of `policy client`
+ * @ref LLP 0200#suppression [constrained-by]: the mode gates the ask alone; resolved classes and the export seam are untouched
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPolicyFolders(argv, ctx) {
+  const parsed = parsePolicyFoldersArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const storePath = folderAskPath(stateDir)
+
+  if (!parsed.mode) {
+    /** @type {FolderAskMode} */
+    let mode
+    try {
+      mode = await readFolderAskMode({ stateDir })
+    } catch (err) {
+      if (!(err instanceof FolderAskUnreadableError)) throw err
+      return reportUnreadableFolderAsk(ctx, err)
+    }
+    if (parsed.json) {
+      ctx.stdout.write(JSON.stringify({ mode, path: storePath }) + '\n')
+      return 0
+    }
+    ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
+    ctx.stdout.write(`(${FOLDER_ASK_STORE_LABEL}: ${storePath})\n`)
+    return 0
+  }
+
+  const mode = parsed.mode
+  try {
+    await writeFolderAskMode({ stateDir, mode })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`error: could not write the ${FOLDER_ASK_STORE_LABEL} at '${storePath}' (${detail})\n`)
+    return 1
+  }
+  if (parsed.json) {
+    ctx.stdout.write(JSON.stringify({ mode, path: storePath }) + '\n')
+    return 0
+  }
+  ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
+  // Say what did *not* change: turning the ask off is the surprising one,
+  // and "I stopped being asked" must not read as "everything now syncs".
+  ctx.stdout.write(
+    mode === 'sync'
+      ? "  folders you already marked keep their class; mark one any time with 'hyp policy set <path> local-only|ignore'\n"
+      : '  a folder that already has a class is never asked about again\n'
+  )
+  return 0
+}
+
+/**
+ * The `policy folders` edge's wording for a corrupt preference file,
+ * mirroring {@link reportUnreadableStore} (same span-tagging rationale).
+ *
+ * @param {CommandRunContext} ctx
+ * @param {FolderAskUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableFolderAsk(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
+  ctx.stderr.write(`error: the ${FOLDER_ASK_STORE_LABEL} at '${err.filePath}' is unreadable or malformed\n`)
+  ctx.stderr.write(`  repair or remove it, or run 'hyp policy folders ask' to rewrite it\n`)
+  return 1
+}
+
 export async function runPolicyList(argv, ctx) {
   const parsed = parsePolicyListArgs(argv)
   if (parsed.error) {
@@ -570,17 +701,40 @@ export async function runPolicyList(argv, ctx) {
     return reportUnreadableClientStore(ctx, err)
   }
 
+  // The new-folder preference (LLP 0200) rides along for the same reason:
+  // it is a machine-local answer the user gave, and a machine that stopped
+  // asking should be able to see that here rather than only by opening a
+  // session somewhere new and noticing the silence.
+  /** @type {FolderAskMode} */
+  let folderAsk
+  try {
+    folderAsk = await readFolderAskMode({ stateDir })
+  } catch (err) {
+    if (!(err instanceof FolderAskUnreadableError)) throw err
+    return reportUnreadableFolderAsk(ctx, err)
+  }
+
   if (parsed.json) {
     ctx.stdout.write(JSON.stringify({
       entries,
       path: listPath,
       clients: { entries: clientEntries, path: clientStorePath },
+      folders: { mode: folderAsk, path: folderAskPath(stateDir) },
     }) + '\n')
     return 0
   }
 
+  // Only the non-default mode is worth a line here: `list` exists to show
+  // what the user changed, and printing the product default on every run
+  // would be noise. `hyp status` and `hyp policy folders` state the mode
+  // unconditionally for anyone who wants it either way.
+  const folderLine = folderAsk === DEFAULT_FOLDER_ASK_MODE
+    ? null
+    : `new folders: ${FOLDER_ASK_STATE_LINE[folderAsk]}\n`
+
   if (entries.length === 0 && clientEntries.length === 0) {
-    ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
+    if (folderLine) ctx.stdout.write(folderLine)
+    else ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     return 0
   }
   for (const entry of entries) {
@@ -591,5 +745,6 @@ export async function runPolicyList(argv, ctx) {
     ctx.stdout.write(`clients kept local-only: ${clientEntries.map((e) => e.source).sort().join(' · ')}\n`)
     ctx.stdout.write(`(${CLIENT_STORE_LABEL}: ${clientStorePath})\n`)
   }
+  if (folderLine) ctx.stdout.write(folderLine)
   return 0
 }
