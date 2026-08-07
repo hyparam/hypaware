@@ -235,9 +235,9 @@ plus `--depth`, `--direction out|in|both`, `--type <node_type>`, `--edge-type
 and `edge` datasets are queryable through `hyp query sql` like any other
 dataset.
 
-Claude Code and Codex additionally get a `hypaware-graph` skill (and a
-`graph_neighbors` tool) so an assistant can project and walk the graph on your
-behalf.
+The `hypaware-graph` skill ships with this plugin (along with a
+`graph_neighbors` tool), so an assistant can project and walk the graph on your
+behalf wherever the graph is enabled.
 
 ## Attaching and detaching AI clients
 
