@@ -312,11 +312,10 @@ export function createActionReconciler(opts) {
           // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
           //   over an effect it recorded, whichever status it carries
           // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: the reverse gap treats refused the way it treats failed
-          if (
-            !marker ||
-            ((marker.status === 'failed' || marker.status === 'refused') &&
-              readInstalledAssets(marker).length === 0)
-          ) {
+          //
+          // The test itself is {@link markerRecordsNoEffect}, shared with
+          // `hyp leave`'s parallel gate rather than spelled out twice.
+          if (markerRecordsNoEffect(marker)) {
             delete markers[requestKey]
             mutated = true
             continue
@@ -500,6 +499,56 @@ export function readInstalledAssets(marker) {
   const raw = marker?.installed_assets
   if (!Array.isArray(raw)) return []
   return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
+}
+
+/**
+ * Whether a marker records no on-disk effect at all: the question every gate
+ * that drops markers actually asks before choosing between a plain drop and a
+ * real reversal. Lives beside {@link readInstalledAssets} for the same reason
+ * that accessor does: the droppers (this reconciler's reverse gap and
+ * `hyp leave`) are not all handlers, and two gates deciding "nothing to undo"
+ * for themselves are two chances to disagree about it.
+ *
+ * Two independent records both have to say nothing happened:
+ *
+ * - **A status that never wrote the handler's effect.** `failed` and `refused`
+ *   are the whole of that set: a `failed` `perform()` tried and did not land,
+ *   and a refusal stops *before* touching the client's settings (LLP 0186).
+ *   `done` and `applied` are their opposite by definition, and this is why
+ *   "carries no assets" cannot be the whole test on its own: a `done` attach
+ *   that copied no files still owns the settings edit it wrote.
+ * - **No `installed_assets`.** A marker that went `done` and was later
+ *   rewritten `failed` or `refused` carries the earlier attach's file list
+ *   forward, and nothing else on disk names those copies.
+ *
+ * A status this function does not recognize counts as recording an effect, so
+ * a marker state added later routes to the real reversal until someone decides
+ * otherwise, rather than being silently dropped by a gate nobody remembered to
+ * update. A missing marker records nothing by construction.
+ *
+ * **Known incomplete, in the one direction those two records do not cover.**
+ * A marker that reached `done` and was later rewritten `failed` or `refused`
+ * carries the earlier attach's *asset* list forward, but nothing carries its
+ * *settings* write forward: no field on the rewritten marker distinguishes it
+ * from one whose first `perform()` applied nothing at all. So an attach that
+ * landed a settings write while installing no assets (a client contributing
+ * none, a copy that failed, any pre-LLP-0138 marker) and then re-`perform()`ed
+ * into a failure or a refusal reads as "recorded nothing" here and is dropped
+ * over settings that are still on disk. Closing it means teaching the rewrite
+ * to record the effect it overwrites, a marker-schema question LLP 0138 has
+ * not settled, rather than changing this test.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {boolean}
+ * @ref LLP 0138#marker-undo [implements]: a marker is never dropped over an
+ *   effect it recorded, so the drop test is "recorded nothing", not a status name
+ * @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: a
+ *   refusal wrote nothing of its own, exactly as a failure did not
+ */
+export function markerRecordsNoEffect(marker) {
+  if (!marker) return true
+  if (marker.status !== 'failed' && marker.status !== 'refused') return false
+  return readInstalledAssets(marker).length === 0
 }
 
 /**

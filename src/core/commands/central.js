@@ -12,6 +12,7 @@ import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import {
   clearClientActionMarker,
+  markerRecordsNoEffect,
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
@@ -464,16 +465,25 @@ export async function runLeave(argv, ctx) {
         for (const name of attachedNames) {
           const marker = attachMarkers[name]
           const installedAssets = readInstalledAssets(marker)
-          if (!marker || (marker.status === 'failed' && installedAssets.length === 0)) {
-            // A failed marker that recorded nothing applied no effect; just
-            // drop it, mirroring the reconciler's own reverse pass. A failed
-            // marker CAN still name assets: an attach that went `done` and then
-            // re-`perform()`ed unsuccessfully is rewritten `failed` with its
-            // `installed_assets` carried forward, and those copies are still on
-            // disk. Such a marker falls through to the normal reversal below.
+          // A marker that recorded nothing applied no effect; just drop it,
+          // through the same `markerRecordsNoEffect` test the reconciler's own
+          // reverse pass uses, so the two gates cannot drift over a marker
+          // state only one of them was taught about. That is not hypothetical:
+          // this gate asked `status === 'failed'` and was left behind when
+          // LLP 0186 added the terminal `refused` state, even though a refusal
+          // records strictly less than a failure does (it stops before touching
+          // the client's settings at all).
+          //
+          // A `failed` or `refused` marker CAN still name assets: an attach that
+          // went `done` and then re-`perform()`ed unsuccessfully is rewritten
+          // with its `installed_assets` carried forward, and those copies are
+          // still on disk. Such a marker falls through to the normal reversal
+          // below, whichever of the two states it now carries.
+          // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: leave's assetless-drop reads refused the way the reverse gap does
+          if (markerRecordsNoEffect(marker)) {
             try {
               clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
-            } catch { /* best-effort: a stale failed marker is a status blemish */ }
+            } catch { /* best-effort: a stale marker that undoes nothing is a status blemish */ }
             continue
           }
           const descriptor = descriptors.get(name)
