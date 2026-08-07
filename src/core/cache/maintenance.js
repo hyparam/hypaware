@@ -102,7 +102,7 @@ export async function maintainCache(opts) {
 
   const scope = opts.dataset ? { datasets: [opts.dataset] } : {}
   const discovered = await discoverCachePartitions(opts.cacheRoot, scope)
-  // @ref LLP 0195#neediest-first [implements]: walk partitions in descending
+  // @ref LLP 0199#neediest-first [implements]: walk partitions in descending
   // live data-file order, so a max_tick_ms cutoff postpones the healthiest
   // partitions instead of starving the same directory-order tail every tick.
   const partitions = discovered
@@ -259,7 +259,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0195#baseline-gate [implements]: a live data-file count still
+    // @ref LLP 0199#baseline-gate [implements]: a live data-file count still
     // sitting on the post-rewrite baseline means nothing has flushed since
     // the last compaction, so a rewrite would reproduce the same generation.
     // Without this gate the avg-file-size heuristic re-flags every compacted
@@ -772,7 +772,7 @@ function isGatewayFallbackRow(row) {
  * compaction heuristics skip the partition until the count moves; a
  * rewrite would only reproduce the same generation. Undefined for a
  * partition never compacted (always eligible).
- * @ref LLP 0195#baseline-gate: the baseline is the convergence signal for all compaction dueness
+ * @ref LLP 0199#baseline-gate: the baseline is the convergence signal for all compaction dueness
  *
  * @param {PartitionCursor} cursor
  * @returns {number | undefined}
