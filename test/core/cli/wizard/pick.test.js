@@ -1090,3 +1090,56 @@ test('runWizardPick: a hidden row that is merely detected is not carried on a fi
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway'), undefined)
 })
+
+// A re-entry (stepping back from a later lane) seeds with the selection the
+// previous pass confirmed - which, for a raw-only install, holds the carried
+// hidden row beside whatever the user just added. Re-asking "does the seed
+// collect anything the menu can show?" against that seed answers yes, so the
+// carried row would be dropped and `back` then `enter` would silently delete
+// the upstream the whole install runs on.
+// @ref LLP 0191#re-entry-seeding [tests]: a carried hidden row survives stepping back into pick
+// @ref LLP 0200#carry-through [tests]: once carried, a hidden row stays carried
+test('runWizardPick: a carried hidden row survives a re-entry that adds a visible row', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A `--source raw-openai` install: nothing the menu can show.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+
+  // Pass one: the menu opens (no visible row is seeded) and the user adds
+  // claude. The hidden row rides along.
+  const first = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: capturingPrompt(['claude']).prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual([...first.sourcesPicked].sort(), ['claude', 'raw-openai'])
+
+  // Pass two: the user stepped back, so the wizard re-seeds with that answer
+  // and the defaults gate now has a visible row to offer. Accepting it must
+  // not quietly drop the raw row.
+  const second = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    initialSelection: first.sourcesPicked,
+    prompt: capturingPrompt(['claude']).prompt,
+    confirm: async () => 'accept',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual([...second.sourcesPicked].sort(), ['claude', 'raw-openai'])
+  const written = JSON.parse(await fs.readFile(second.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(
+    gateway.config.upstreams.map((/** @type {any} */ u) => u.name).sort(),
+    ['anthropic', 'openai']
+  )
+})

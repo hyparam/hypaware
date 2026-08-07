@@ -29,7 +29,7 @@ import {
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { PickerDescriptor } from '../../../../src/core/types.js'
  * @import { AsyncConfirmSelectPrompt, AsyncPickPrompt, PickerExport, PickerSource, WalkthroughOption } from '../../../../src/core/cli/types.js'
- * @import { RunWizardPickOptions, WizardPickResult } from '../../../../src/core/cli/wizard/types.js'
+ * @import { RunWizardPickOptions, SeedOrigin, WizardPickResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
 /**
@@ -79,7 +79,8 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
  * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
- * @ref LLP 0200#hidden-rows [implements]: a `hidden` row stays out of both screens, and rides through the selection only when the config collects nothing the menu can show
+ * @ref LLP 0200#hidden-rows [implements]: a `hidden` row stays out of both screens
+ * @ref LLP 0200#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -146,13 +147,14 @@ export async function runWizardPick(opts) {
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
     : configured ?? detected
 
-  // Which of the three tiers above `seed` came from: a previous confirmed
-  // selection or the config on disk are both records of a choice the user
-  // made; detection is a guess about the machine. Only the first two may
-  // carry a hidden row through the selection, and `promptPickSelection`
-  // needs to know which it got, because the set itself does not say.
+  // Which of the three tiers above produced `seed`. The set itself does not
+  // say, and hidden-row carry-through reads differently off each: a
+  // re-entry's selection was already confirmed by a previous pass, the
+  // config on disk is a record whose hidden rows may be derivative, and
+  // detection is a guess about the machine that is never a choice at all.
   // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a pre-checked box the user can still clear, never a source composed on their behalf
-  const seedIsChosen = Boolean(opts.initialSelection) || configured !== undefined
+  /** @type {SeedOrigin} */
+  const seedOrigin = opts.initialSelection ? 'selection' : configured !== undefined ? 'config' : 'detected'
 
   await withSpan(
     'wizard.pick.start',
@@ -192,7 +194,7 @@ export async function runWizardPick(opts) {
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedIsChosen, detected, lockedSet })
+      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedOrigin, detected, lockedSet })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -409,13 +411,13 @@ export async function commitWizardPickedConfig(args) {
  *   descriptorList: PickerDescriptor[],
  *   descriptors: Map<string, PickerDescriptor>,
  *   seed: ReadonlySet<string>,
- *   seedIsChosen: boolean,
+ *   seedOrigin: SeedOrigin,
  *   detected: Set<PickerSource>,
  *   lockedSet: Set<string>,
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedIsChosen, detected, lockedSet }) {
+async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, seedOrigin, detected, lockedSet }) {
   // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
   // re-entry's previous selection) or the org's locked set yields a
   // usable default, state it in one line and let a bare enter accept it;
@@ -423,31 +425,43 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
   // nothing to confirm, so the menu shows directly.
   const visibleList = visiblePickerDescriptors(descriptorList)
   // A hidden row never renders, so neither screen below can return one.
-  // Carrying one through the selection is right in exactly one case: the
-  // config on disk collects nothing the menu can show. Then every row it
-  // does collect is hidden, and an interactive pass would silently strip a
-  // setup the picker has no way to represent (a `--source raw-anthropic`
-  // install being reconfigured).
+  // Carrying one through the selection is right when the config on disk
+  // collects nothing the menu can show: then every row it does collect is
+  // hidden, and an interactive pass would silently strip a setup the picker
+  // has no way to represent (a `--source raw-anthropic` install being
+  // reconfigured).
   //
   // Carrying whenever a hidden row is merely seeded would be wrong, because
   // `configuredPickerSources` seeds a hidden row DERIVATIVELY: `raw-openai`
   // reads as configured whenever codex's `openai` upstream is present, per
-  // the "composition is lossy" note on that function. Seeding is therefore
-  // not evidence the user ever chose the row, and carrying on it would
-  // resurrect the `openai` upstream the moment someone unchecked codex -
+  // the "composition is lossy" note on that function. Seeding off the config
+  // is therefore not evidence the user ever chose the row, and carrying on it
+  // would resurrect the `openai` upstream the moment someone unchecked codex -
   // breaking the guarantee that unchecking a row removes its upstream.
   //
-  // `seedIsChosen` is what keeps "the config on disk" from widening to "the
-  // seed, whatever produced it". On a first run the seed is a DETECTION
-  // result, and carrying off that would compose a source the user was never
-  // shown and cannot uncheck, purely because a probe found it - exactly what
-  // LLP 0011 #autodetect-vs-default forbids. No bundled hidden row declares
-  // a `detect` probe today, but `hidden` is a kernel-contract field any
-  // plugin can set beside one, so the gate is stated rather than assumed.
+  // `seedOrigin` is what keeps "the config on disk" from widening to "the
+  // seed, whatever produced it", in both directions:
+  //
+  //   - `detected` never carries. On a first run the seed is a DETECTION
+  //     result, and carrying off that would compose a source the user was
+  //     never shown and cannot uncheck, purely because a probe found it -
+  //     exactly what LLP 0011 #autodetect-vs-default forbids. No bundled
+  //     hidden row declares a `detect` probe today, but `hidden` is a
+  //     kernel-contract field any plugin can set beside one, so the gate is
+  //     stated rather than assumed.
+  //   - `selection` always carries, without the "nothing visible seeded"
+  //     test. A re-entry's seed is the selection a previous pass already
+  //     confirmed, and nothing derives a hidden id into it: read-back never
+  //     reaches this tier, so a hidden row is in the previous answer only
+  //     because that pass carried it under the rule below. Re-applying the
+  //     rule against a seed that now also holds the visible rows the user
+  //     just added would drop the row, so `back` then `enter` would delete
+  //     the very upstream the carry exists to preserve.
+  // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
+  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
   const seededVisible = visibleList.some((d) => seed.has(d.id))
-  const carried = seedIsChosen && !seededVisible
-    ? descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
-    : []
+  const carries = seedOrigin === 'selection' || (seedOrigin === 'config' && !seededVisible)
+  const carried = carries ? seededHidden : []
   const withCarried = (/** @type {string[]} */ picked) =>
     /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
 

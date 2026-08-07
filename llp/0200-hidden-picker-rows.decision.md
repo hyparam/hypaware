@@ -65,10 +65,22 @@ stay; only `visiblePickerDescriptors` filters.
 ## Carry-through, and why seeding is not consent {#carry-through}
 
 A hidden row never renders, so neither screen can return one. It rides
-through the selection in exactly one case: **the config on disk collects
-nothing the menu can show.** Then every row it collects is hidden, and an
-interactive pass would silently strip a setup the picker cannot represent -
-a `--source raw-anthropic` install being reconfigured.
+through the selection in one case: **the config on disk collects nothing the
+menu can show.** Then every row it collects is hidden, and an interactive
+pass would silently strip a setup the picker cannot represent - a
+`--source raw-anthropic` install being reconfigured.
+
+Once carried, it stays carried. The pick lane can be re-entered by stepping
+back from a later lane, and LLP 0191 #re-entry-seeding seeds that pass with
+the selection the previous one confirmed. That seed holds the carried hidden
+row *and* whatever visible rows the user added, so re-testing "the seed
+collects nothing the menu can show" against it fails and the row would be
+dropped: `back` then `enter` would delete the upstream the carry exists to
+preserve. So the test above is asked of a **config** seed only. A
+**selection** seed carries every hidden row in it unconditionally, which is
+safe for the reason the next paragraph is about: read-back cannot reach that
+tier, so a hidden id is in a previous answer only because this rule put it
+there.
 
 Carrying on seed membership alone was tried and is wrong. Seeding is
 *derivative* for these rows: `raw-openai` reads as configured whenever
@@ -103,6 +115,9 @@ against LLP 0192's deferred decision.
   `validatePickerContributions` rejects a non-boolean.
 - `visiblePickerDescriptors` (walkthrough.js) is the single display filter,
   used by `runWalkthrough`'s prompt and by `runWizardPick`'s gate and menu.
+- The pick lane's seed grows a companion `SeedOrigin`
+  (`selection` / `config` / `detected`), because carry-through has to ask
+  which tier produced the seed and the set does not say.
 - `PICKER_DISPLAY_ORDER` keeps both raw ids: order is still defined for
   them, they simply do not render.
 - The sync/opt-out menu is unchanged. It governs data classes already on
