@@ -84,15 +84,19 @@ test('a client with no launch spec stays unlaunchable (Claude Desktop has no pro
  */
 const PREAUTH_FLAG = /(-{1,2})(dangerously|allowedTools|permission-mode|full-auto|yolo|sandbox|ask-for-approval)/i
 
-/** Short forms, which are too short to pattern-match without false hits. */
-const PREAUTH_SHORT_FLAGS = new Set(['-a'])
+// Short forms are too short to pattern-match by stem, but they still take
+// the attached-value shapes clap accepts: codex reads -a=never and -anever
+// as the same thing as -a never. Prefix-matching denies all three, and any
+// future short flag starting -a, which is the same loud-failure trade the
+// long form already makes.
+const PREAUTH_SHORT_FLAG = /^-a/
 
 /**
  * @param {string} arg
  * @returns {boolean}
  */
 function isPreauthFlag(arg) {
-  return PREAUTH_FLAG.test(arg) || PREAUTH_SHORT_FLAGS.has(arg)
+  return PREAUTH_FLAG.test(arg) || PREAUTH_SHORT_FLAG.test(arg)
 }
 
 // The launched session gets no more permission than the user would grant
@@ -132,6 +136,8 @@ test('the permission-widening denylist covers the documented equivalents', () =>
     '--sandbox',
     '--sandbox=danger-full-access',
     '--ask-for-approval',
+    '-a=never',
+    '-anever',
     '-a',
   ]) {
     assert.ok(isPreauthFlag(flag), `${flag} should be denied`)
