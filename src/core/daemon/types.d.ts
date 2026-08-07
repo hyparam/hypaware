@@ -121,6 +121,21 @@ export interface StatusDiagnostic {
 }
 
 /**
+ * Which of a bound gateway's dropped upstream names an adapter preset is
+ * still proxying, and which nothing is. Produced by intersecting the dropped
+ * names with `details.registered_presets`, both of which the gateway source
+ * publishes; the two lists together always account for every dropped name.
+ *
+ * `covered` is not "fine": the operator's `base_url` still silently did not
+ * take effect, and traffic is going to the preset's default endpoint instead.
+ * It is only the difference between a misdirected upstream and a dead one.
+ */
+export interface DroppedUpstreamAttribution {
+  covered: string[]
+  silent: string[]
+}
+
+/**
  * Display state of one reconciler client-action, derived for `hyp status`
  * from the persisted marker store (LLP 0036 / 0041) plus the effective
  * config: `hyp status` never runs a pass. A `failed` entry is

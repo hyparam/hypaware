@@ -323,6 +323,9 @@ test('a gateway that lost one of two configured upstreams warns while listening'
 // override. The count-based warning still has to fire (the override silently
 // did not take effect), but its message must not claim the name is entirely
 // uncaptured when a preset is quietly covering it.
+//
+// This is also the only path that reaches `dropped === configured === 1`, so
+// it is where the singular wording gets exercised.
 test('a dropped upstream whose name matches a registered adapter preset is still proxied, so the warning does not claim silence', async () => {
   const { hypHome, stateRoot } = await makeHome()
   const state = createGatewayState()
@@ -359,13 +362,15 @@ test('a dropped upstream whose name matches a registered adapter preset is still
   assert.match(diag.message, /1 of its 1 configured upstream[^s]/, 'singular reads correctly')
   assert.doesNotMatch(
     diag.message,
-    /not proxied and nothing is captured for it/,
+    /nothing is proxied or captured/,
     'wrong: an adapter preset is still proxying this name, just not to the address the user configured',
   )
+  // The daemon publishes `registered_presets`, so the message settles the
+  // question instead of hedging over both answers (issue #676 item 1).
   assert.match(
     diag.message,
-    /unless an adapter preset already covers the same name/,
-    'the message hedges instead of asserting total silence',
+    /anthropic is still proxied by the adapter preset registered under the same name/,
+    'it says which of the two things happened',
   )
   assert.equal(report.overall, 'healthy')
 })
@@ -458,4 +463,175 @@ test('a status file without the dropped count does not guess at a partial loss',
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped'), undefined)
   assert.equal(report.overall, 'healthy')
+})
+
+// ---------------------------------------------------------------------------
+// Issue #676 item 1: the bound-gateway message hedged ("unless an adapter
+// preset already covers the same name") over a question the daemon already
+// publishes the answer to. `details.registered_presets` lists every preset an
+// adapter plugin registered at activation, and `mergeUpstreams` backfills one
+// exactly when its name is absent from the compiled config table - which is
+// what a dropped entry's name is, by definition. So the intersection of the
+// dropped names with the registered presets decides, per name, between "still
+// proxied, just not to the address you configured" and "silent". The hedge
+// survives only where the daemon genuinely did not say: a status file with no
+// preset list, or a drop this build could attach no name to.
+//
+// Issue #676 item 2: the names used to ride in a parenthetical attached to the
+// configured-upstreams noun ("1 of its 2 configured upstreams (openai)"),
+// which reads for a moment as the configured set rather than the dropped one.
+// They now sit at the consequence they belong to.
+// @ref LLP 0195#visible-when-unintended [tests]: the same configured-vs-compiled comparison, reported against the preset table the daemon already publishes
+// ---------------------------------------------------------------------------
+
+test('a dropped upstream covered by no preset is reported as silent, definitively', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.deepEqual(details.registered_presets, [], 'no adapter plugin registered anything')
+  assert.deepEqual(details.upstreams_dropped_names, ['openai'], 'and the drop is attributable')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.doesNotMatch(
+    diag.message,
+    /unless an adapter preset/,
+    'the daemon published the preset list, so there is nothing left to hedge about',
+  )
+  assert.match(
+    diag.message,
+    /nothing is proxied or captured for openai/,
+    'it says outright that this name is dead',
+  )
+})
+
+test('a dropped upstream a registered preset covers is reported as still proxied, definitively', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'anthropic',
+    base_url: 'http://127.0.0.1:1',
+    path_prefix: '/anthropic',
+  })
+  const details = await realGatewayDetails(
+    [{ name: 'anthropic', url: 'https://api.anthropic.com', path_prefix: '/anthropic' }],
+    state,
+  )
+  assert.deepEqual(details.registered_presets, ['anthropic'], 'the preset the drop collides with')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'an override that silently did not take effect is still worth a warning')
+  assert.doesNotMatch(diag.message, /unless an adapter preset/, 'no hedge: the answer is known')
+  assert.match(
+    diag.message,
+    /still proxied by the adapter preset/,
+    'it says which of the two things actually happened',
+  )
+  assert.match(diag.message, /base_url/, 'and that the configured address is the part that was lost')
+  assert.doesNotMatch(
+    diag.message,
+    /nothing is proxied or captured/,
+    'because that is the other case, and it is not this one',
+  )
+})
+
+test('a mixed drop separates the covered name from the silent one', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'anthropic',
+    base_url: 'http://127.0.0.1:1',
+    path_prefix: '/anthropic',
+  })
+  // Two typo'd overrides. Only one of them has a preset behind it.
+  const details = await realGatewayDetails(
+    [
+      { name: 'anthropic', url: 'https://api.anthropic.com', path_prefix: '/anthropic' },
+      { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+    ],
+    state,
+  )
+  assert.equal(details.upstreams_dropped, 2)
+  assert.ok(details.port, 'the preset backfill keeps the gateway bound')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(diag.message, /nothing is proxied or captured for openai/, 'openai is dead')
+  assert.match(diag.message, /anthropic is still proxied by the adapter preset/, 'anthropic is not')
+})
+
+test('the dropped names do not read as the configured set', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  // "1 of its 2 configured upstreams (openai)" lists the dropped name against
+  // the configured noun. Whatever the sentence does with the name, it must not
+  // hang it off that phrase.
+  assert.doesNotMatch(
+    diag.message,
+    /configured upstreams? \(/,
+    'no parenthetical hangs the dropped names off the configured-upstreams noun',
+  )
+  assert.match(diag.message, /1 of its 2 configured upstreams did not compile/)
+})
+
+// The hedge is not deleted, it is confined to the case that still earns it: a
+// status file from a build that never wrote `registered_presets` cannot be
+// intersected with anything, and inventing "no preset covers this" from a
+// missing field would turn an unknown into a false assertion of silence.
+test('a status file with no preset list keeps the hedge', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 18521,
+    upstreams: ['anthropic'],
+    upstreams_configured: 2,
+    upstreams_dropped: 1,
+    upstreams_dropped_names: ['openai'],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(
+    diag.message,
+    /unless an adapter preset already covers the same name/,
+    'unknown stays hedged rather than being guessed either way',
+  )
+  assert.match(diag.message, /\(dropped: openai\)/, 'and the name is labelled as the dropped one')
+})
+
+// A drop this build could attach no name to cannot be intersected either, even
+// though the preset list is right there: the entry that lost its `name` is
+// exactly the one whose destination is unknowable from status.
+test('an unattributable drop keeps the hedge even with a preset list', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { provider: 'openai', base_url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.deepEqual(details.registered_presets, [], 'the preset list is present, and empty')
+  assert.equal(details.upstreams_dropped, 1)
+  assert.equal(details.upstreams_dropped_names, undefined, 'with no name to attribute it to')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(diag.message, /unless an adapter preset already covers the same name/)
 })
