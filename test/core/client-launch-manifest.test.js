@@ -67,6 +67,34 @@ test('a client with no launch spec stays unlaunchable (Claude Desktop has no pro
   if (desktop) assert.equal(desktop.launch, undefined)
 })
 
+/**
+ * The stems of the flags that widen what a launched client may do.
+ *
+ * A pattern rather than a list of whole flags, because the decision it
+ * pins says "or any equivalent" and the equivalents are open-ended: the
+ * same permission is granted by `--permission-mode acceptEdits`, by
+ * `--dangerously-bypass-approvals-and-sandbox`, by `--yolo`, and by an
+ * `=true` suffixed form of any of them. Matched unanchored so a flag
+ * embedded in a larger argument string is caught too. A false positive
+ * here is a loud test failure someone reads; a false negative is a
+ * session that silently starts pre-authorized.
+ *
+ * These are string literals to assert the absence of. Nothing here
+ * passes any of them to anything.
+ */
+const PREAUTH_FLAG = /(-{1,2})(dangerously|allowedTools|permission-mode|full-auto|yolo|sandbox|ask-for-approval)/i
+
+/** Short forms, which are too short to pattern-match without false hits. */
+const PREAUTH_SHORT_FLAGS = new Set(['-a'])
+
+/**
+ * @param {string} arg
+ * @returns {boolean}
+ */
+function isPreauthFlag(arg) {
+  return PREAUTH_FLAG.test(arg) || PREAUTH_SHORT_FLAGS.has(arg)
+}
+
 // The launched session gets no more permission than the user would grant
 // it by hand: HypAware never widens what the client may do just because
 // it started the session. Asserted as literal string absence, not as a
@@ -75,12 +103,42 @@ test('a client with no launch spec stays unlaunchable (Claude Desktop has no pro
 test('the bundled CLI clients\' launch args never carry a permission-widening flag', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
-  const PREAUTH_FLAGS = ['--allowedTools', '--dangerously-skip-permissions']
   for (const name of ['claude', 'codex']) {
     const launch = catalog.clientDescriptors.get(name)?.launch
+    // Keeps the assertion from passing vacuously: a client that lost its
+    // launch block has no args to scan, and would otherwise sail through.
     assert.ok(launch, `${name} should be launchable`)
-    for (const flag of PREAUTH_FLAGS) {
-      assert.ok(!launch.args.includes(flag), `${name} launch args must not carry ${flag}`)
+    for (const arg of launch.args) {
+      assert.ok(!isPreauthFlag(arg), `${name} launch args must not carry ${arg}`)
     }
+  }
+})
+
+// The denylist's own reach, pinned by example. The assertion above is
+// only as good as what this matches, and its first form was an exact
+// two-entry list that `--yolo` and `--permission-mode acceptEdits` would
+// have walked straight past.
+// @ref LLP 0198#no-preauth [tests]: "or any equivalent" is the load-bearing half
+test('the permission-widening denylist covers the documented equivalents', () => {
+  for (const flag of [
+    '--allowedTools',
+    '--dangerously-skip-permissions',
+    '--dangerously-skip-permissions=true',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--permission-mode',
+    '--permission-mode=acceptEdits',
+    '--full-auto',
+    '--yolo',
+    '--sandbox',
+    '--sandbox=danger-full-access',
+    '--ask-for-approval',
+    '-a',
+  ]) {
+    assert.ok(isPreauthFlag(flag), `${flag} should be denied`)
+  }
+  // And does not flag the ordinary shape of a launch spec, so a client
+  // that grows a legitimate argument is not blocked by superstition.
+  for (const benign of ['{prompt}', '--print', '--model', 'exec', '-p', 'chat']) {
+    assert.ok(!isPreauthFlag(benign), `${benign} should not be denied`)
   }
 })
