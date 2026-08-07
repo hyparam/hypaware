@@ -614,6 +614,19 @@ under [LLP 0037](./0037-backfill-on-join.decision.md) default-on doctrine.
 
 ## First look {#first-look}
 
+> **Extended-by [LLP 0198](./0198-setup-ends-on-a-question.decision.md):**
+> two changes to what is settled below. (1) The block is no longer the
+> run's last step: a closing "first ask" follows the privacy narration
+> with a few questions worth putting to the rows this block just showed,
+> and starts the user's own client on the one they pick. The narration
+> keeps its position as the wizard's last words. (2) **Setup renders
+> `['models', 'daily']`, not all four sections**
+> ([#wizard-sections](./0198-setup-ends-on-a-question.decision.md#wizard-sections)),
+> taking up the seam this section left open; "Both callers render all
+> four" below is superseded for the wizard. `hyp query overview` is
+> unchanged and still renders all four. The look's budget and placement
+> are otherwise untouched.
+
 Setup used to end on a hint: `next: hyp query sql 'select count(*) from
 logs'`. That command fails on most installs, because `logs` only exists
 when `@hypaware/otel` is configured, and it asks the user to do the work of

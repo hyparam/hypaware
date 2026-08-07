@@ -250,6 +250,59 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   assert.match(stdout.text(), /not connected to a central server/)
 })
 
+test('leave tears down a central layer whose active-slot pointer does not resolve (#623)', async () => {
+  // The D4 login gate refuses on a machine whose layer it cannot resolve and
+  // tells the user to run `hyp leave`. Resolution swallows a pointer it cannot
+  // follow, so keying leave's "nothing to do" on the resolved path alone would
+  // make that advice a dead end: the gate would refuse forever and leave would
+  // claim there is nothing to disconnect.
+  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
+    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+    ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+    ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+  ])) {
+    const { stateRoot, stdout, opts } = await makeDispatchOpts()
+    const controlDir = path.join(stateRoot, 'config-control')
+    await fs.mkdir(controlDir, { recursive: true })
+    // The slot file is intact and still names the org's server: this machine is
+    // enrolled, only its pointer is damaged.
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://central.example', identity: {} } } },
+    }))
+    await writePointer(controlDir)
+
+    const code = await dispatch(['leave'], opts)
+    assert.equal(code, 0, `${name}: ${stdout.text()}`)
+    assert.doesNotMatch(stdout.text(), /not connected to a central server/, name)
+    assert.match(stdout.text(), /removed the central config layer/, name)
+    await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
+    await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
+  }
+})
+
+test('leave reports a central layer it cannot remove instead of throwing (#623)', async () => {
+  // An unreadable control directory is one of the states the D4 gate refuses
+  // on, so leave has to reach its later steps and name the problem rather than
+  // aborting on an uncaught EACCES.
+  const { stateRoot, stdout, stderr, opts } = await makeDispatchOpts()
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.chmod(controlDir, 0o000)
+  try {
+    const code = await dispatch(['leave'], opts)
+    assert.equal(code, 1, stdout.text() + stderr.text())
+    assert.match(stderr.text(), /could not remove the central config layer/)
+    assert.match(stderr.text(), /EACCES/)
+    // Later steps still ran: an abort here would strand the attach reversal.
+    assert.match(stdout.text(), /nothing to restart/)
+  } finally {
+    await fs.chmod(controlDir, 0o700)
+  }
+})
+
 test('leave still tears down when only a stale attach marker survives a prior partial leave', async () => {
   // A prior leave removed the central layer (step 1) but died before reversing
   // an attach. The leftover `done` marker is the only "still connected" signal;

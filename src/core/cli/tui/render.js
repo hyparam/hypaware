@@ -20,7 +20,7 @@
 // used to carry their own copy, which is how the CLI ended up with a red
 // that only prompts knew about and no yellow anywhere.
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
-import { ANSI, paint } from '../style.js'
+import { ANSI, boxed, paint } from '../style.js'
 
 /**
  * Open a frame with the prompt's chrome: the optional position line
@@ -50,11 +50,31 @@ function chromeLines(state, opts) {
 }
 
 /**
+ * Build the frame: the kind's own lines, optionally inside a border.
+ *
+ * The border is a whole-frame property, not a per-kind one, which is why
+ * the join lives here rather than in the three builders: a boxed prompt is
+ * the same prompt with a rectangle around it, and no kind should have to
+ * know how to draw one.
+ *
  * @param {State} state
  * @param {RenderOpts} opts
  * @returns {string}
  */
 export function render(state, opts) {
+  const lines = frameLines(state, opts)
+  const framed = state.box
+    ? boxed(lines, { color: opts.color, ...(opts.columns !== undefined ? { columns: opts.columns } : {}) })
+    : lines
+  return framed.join('\n') + '\n'
+}
+
+/**
+ * @param {State} state
+ * @param {RenderOpts} opts
+ * @returns {string[]}
+ */
+function frameLines(state, opts) {
   switch (state.kind) {
     case 'multiselect': return renderMultiselect(state, opts)
     case 'select':      return renderSelect(state, opts)
@@ -90,6 +110,7 @@ function defaultHint(state) {
 /**
  * @param {MultiselectState} state
  * @param {RenderOpts} opts
+ * @returns {string[]}
  */
 function renderMultiselect(state, opts) {
   const lines = chromeLines(state, opts)
@@ -126,7 +147,7 @@ function renderMultiselect(state, opts) {
   if (state.error) {
     lines.push(paint(state.error, ANSI.red, opts.color))
   }
-  return lines.join('\n') + '\n'
+  return lines
 }
 
 /**
@@ -140,6 +161,7 @@ function renderMultiselect(state, opts) {
  *
  * @param {SelectState} state
  * @param {RenderOpts} opts
+ * @returns {string[]}
  */
 function renderSelect(state, opts) {
   const lines = chromeLines(state, opts)
@@ -154,12 +176,13 @@ function renderSelect(state, opts) {
       lines.push(paint(`    ${o.summary}`, ANSI.dim, opts.color))
     }
   })
-  return lines.join('\n') + '\n'
+  return lines
 }
 
 /**
  * @param {TextState} state
  * @param {RenderOpts} opts
+ * @returns {string[]}
  */
 function renderText(state, opts) {
   const lines = chromeLines(state, opts)
@@ -174,5 +197,5 @@ function renderText(state, opts) {
   if (state.error) {
     lines.push(paint(state.error, ANSI.red, opts.color))
   }
-  return lines.join('\n') + '\n'
+  return lines
 }

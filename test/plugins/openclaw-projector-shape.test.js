@@ -1,10 +1,18 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import { sessionMatchKey, wireMatchKey } from '../../hypaware-core/plugins-workspace/openclaw/src/match_key.js'
+
+const PROJECTOR_SOURCE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
+)
 
 /**
  * @param {Record<string, unknown>} [overrides]
@@ -362,6 +370,232 @@ test('project() marks a truncated OpenAI stream stop_reason=error', async () => 
   const assistant = projection.messages.at(-1)
   assert.deepEqual(assistant.content, [{ type: 'text', text: 'par' }])
   assert.equal(assistant.stop_reason, 'error')
+})
+
+/**
+ * The one match key every content-free assistant row hashes to, whichever
+ * wire shape produced it. Named here because it is the collision the
+ * cut-stream floor exists to prevent: three decoders converging on one key
+ * means an empty row from one shape can settle against an empty row from
+ * another.
+ */
+const EMPTY_ASSISTANT_MATCH_KEY = wireMatchKey('assistant', [])
+
+/**
+ * @param {any} projection
+ */
+function matchKeys(projection) {
+  return projection.messages.map((/** @type {any} */ m) => m.attributes?.openclaw?.match_key)
+}
+
+// A stream cut before anything finished has no content to record. The row
+// this used to emit carried an empty content array, a live message_index and
+// the canonical empty-assistant match key, so it stayed eligible for the
+// ordinal settlement fallback and could acquire a native message_id it had no
+// content for.
+test('project() emits no assistant row for a cut OpenAI stream that carried no content', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-7', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' } }] },
+    ]),
+  })
+
+  assert.ok(projection)
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user'])
+  assert.ok(!matchKeys(projection).includes(EMPTY_ASSISTANT_MATCH_KEY))
+})
+
+test('project() emits no assistant row for a cut Anthropic stream that carried no content', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_02',
+          role: 'assistant',
+          model: 'claude-sonnet-4-5',
+          content: [],
+          usage: { input_tokens: 3, output_tokens: 0 },
+        },
+      },
+    ]),
+  })
+
+  assert.ok(projection)
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user'])
+  assert.ok(!matchKeys(projection).includes(EMPTY_ASSISTANT_MATCH_KEY))
+})
+
+// The floor is "cut AND empty", not "empty": a response that reached its
+// terminal event and genuinely produced nothing is a real answer the row set
+// must keep, on either wire.
+test('project() still records a terminal Anthropic stream whose content is genuinely empty', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_03', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 0 } },
+      { type: 'message_stop' },
+    ]),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'end_turn')
+})
+
+test('project() still records a terminal OpenAI stream whose content is genuinely empty', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-8', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: 'content_filter' }] },
+    ]),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'content_filter')
+})
+
+test('project() still records a non-streamed OpenAI response whose content is empty', async () => {
+  const projection = await project({
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: JSON.stringify({
+      id: 'chatcmpl-9',
+      object: 'chat.completion',
+      model: 'gpt-5',
+      choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'content_filter' }],
+    }),
+  })
+
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [])
+  assert.equal(assistant.stop_reason, 'content_filter')
+})
+
+// The floor's marker value and a wire stop reason can collide. First-party
+// Anthropic and OpenAI never send `error`, but this projector reads whatever
+// the upstream sent: an unrecognized upstream is parsed as the Anthropic wire
+// by design, and an OpenAI-compatible endpoint behind a config upstream can
+// send `finish_reason: "error"`. A response that terminated saying `error` is
+// a real answer, so cut-ness is carried by object identity rather than
+// re-derived from the emitted string.
+test('project() still records a terminal response whose wire stop reason is literally error', async () => {
+  const streamed = await project({
+    is_sse: true,
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { id: 'chatcmpl-10', model: 'gpt-5', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: 'error' }] },
+    ]),
+  })
+  const streamedAssistant = streamed.messages.at(-1)
+  assert.equal(streamedAssistant.role, 'assistant')
+  assert.deepEqual(streamedAssistant.content, [])
+  assert.equal(streamedAssistant.stop_reason, 'error')
+
+  const body = await project({
+    request_headers: headers('openai'),
+    request_body: JSON.stringify(OPENAI_REQUEST),
+    response_body: JSON.stringify({
+      id: 'chatcmpl-11',
+      object: 'chat.completion',
+      model: 'gpt-5',
+      choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'error' }],
+    }),
+  })
+  const bodyAssistant = body.messages.at(-1)
+  assert.equal(bodyAssistant.role, 'assistant')
+  assert.deepEqual(bodyAssistant.content, [])
+  assert.equal(bodyAssistant.stop_reason, 'error')
+
+  const anthropic = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_04', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+      { type: 'message_delta', delta: { stop_reason: 'error' } },
+      { type: 'message_stop' },
+    ]),
+  })
+  const anthropicAssistant = anthropic.messages.at(-1)
+  assert.equal(anthropicAssistant.role, 'assistant')
+  assert.deepEqual(anthropicAssistant.content, [])
+  assert.equal(anthropicAssistant.stop_reason, 'error')
+})
+
+// A caller-supplied history turn is never this projector's own cut stream,
+// whatever `stop_reason` the client replayed on it.
+test('project() never drops a request-history assistant turn that replays stop_reason error', async () => {
+  const projection = await project({
+    request_headers: headers(undefined),
+    request_body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      system: 'You are OpenClaw, a personal AI assistant.',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [], stop_reason: 'error' },
+        { role: 'user', content: [{ type: 'text', text: 'again' }] },
+      ],
+    }),
+    response_body: JSON.stringify(ANTHROPIC_RESPONSE),
+  })
+
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), [
+    'user', 'assistant', 'user', 'assistant',
+  ])
+})
+
+// The floor's two halves, the recorded `stop_reason` and the set membership
+// that actually decides the drop, are only correct together: a reconstruction
+// that stamps the marker without registering the message emits a content-free
+// row the floor no longer recognizes. No behavior test can see that, because
+// the wire shape that does it is the one nobody has written yet, and the
+// tests above only cover the two that exist. So this is a lint on the source,
+// the same shape as `house-style-em-dash.test.js`: a convention that lives
+// only in a docstring is a convention that drifts back.
+//
+// The case is not hypothetical. PR #586's Responses reconstruction writes the
+// marker as a bare `partial.stop_reason = 'error'` and has to become a
+// `markCutStream(partial)` call when it merges. This is what notices if it
+// does not.
+test('the cut-stream marker is only ever stamped through markCutStream', () => {
+  const source = fs.readFileSync(PROJECTOR_SOURCE, 'utf8')
+  const start = source.indexOf('function markCutStream(')
+  assert.notEqual(start, -1, 'markCutStream is gone: the floor no longer has one stamping point')
+  const end = source.indexOf('\n}\n', start)
+
+  /** @type {Array<{ stamp: string, insideMarkCutStream: boolean }>} */
+  const stamps = []
+  for (const match of source.matchAll(/\.stop_reason\s*=\s*(?:CUT_STREAM_STOP_REASON|'error'|"error")/g)) {
+    const at = match.index ?? -1
+    stamps.push({ stamp: match[0], insideMarkCutStream: at > start && at < end })
+  }
+
+  assert.deepEqual(stamps, [
+    { stamp: '.stop_reason = CUT_STREAM_STOP_REASON', insideMarkCutStream: true },
+  ])
 })
 
 // @ref LLP 0157#requirements [tests]: R8, every fallback-identity row carries

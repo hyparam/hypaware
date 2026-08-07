@@ -110,6 +110,31 @@ test('materializer parity with live projector: native message ids', async () => 
   assert.equal(gateway(live[0])?.exchange_id, 'ex')
 })
 
+// @ref LLP 0194#decision [tests]: per-message provider wins over the exchange
+// provider row by row, and a message that omits it falls back, so every
+// projector that never sets the field is unchanged.
+test('a per-message provider overrides the exchange provider row by row', async () => {
+  /** @type {AiGatewayProjectedExchange} */
+  const projection = {
+    provider: 'openai',
+    session_id: 'conv-mixed-provider',
+    conversation_source: 'openclaw',
+    client_name: 'openclaw',
+    conversation_started_at: '2026-05-01T00:00:00.000Z',
+    messages: [
+      { role: 'user', content: 'hi', message_id: 'm1', previous_message_id: [], message_created_at: '2026-05-01T00:00:01.000Z' },
+      { role: 'assistant', content: 'yo', message_id: 'm2', previous_message_id: ['m1'], message_created_at: '2026-05-01T00:00:02.000Z' },
+      { role: 'user', content: 'and locally?', message_id: 'm3', previous_message_id: ['m2'], message_created_at: '2026-05-01T00:00:03.000Z', provider: 'ollama' },
+      { role: 'assistant', content: 'sure', message_id: 'm4', previous_message_id: ['m3'], message_created_at: '2026-05-01T00:00:04.000Z', provider: 'ollama' },
+    ],
+  }
+  const rows = await materializer.materialize(item(projection), MAT_CTX)
+  assert.deepEqual(
+    rows.map((row) => [row.message_id, row.provider]),
+    [['m1', 'openai'], ['m2', 'openai'], ['m3', 'ollama'], ['m4', 'ollama']]
+  )
+})
+
 test('materializer parity with live projector: fallback identity and chain', async () => {
   /** @type {AiGatewayProjectedExchange} */
   const projection = {

@@ -777,3 +777,109 @@ test('legacy epoch compaction preserves the table sort order', async () => {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// --- convergence: baseline gate and neediest-first order (LLP 0199) ---
+
+test('an already-compacted partition is not recompacted until new data flushes', async () => {
+  const cacheRoot = await makeTmpDir('maint-baseline')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-01')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(partDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    // Tiny files: the avg-file-size heuristic marks the partition due.
+    const first = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(first.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+
+    // The rewrite's output files are still below compact_avg_file_bytes,
+    // but nothing has flushed since: the partition has converged.
+    const second = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(second.totalCompacted, 0)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+
+    // New data moves the file count off the baseline: due again.
+    await appendRowsToTable(path.join(partDir, 'epoch=1'), COLUMNS, [
+      { id: 99, value: 'fresh', timestamp: new Date().toISOString() },
+    ])
+    const third = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(third.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 2)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('maintenance walks partitions neediest-first, not directory order', async () => {
+  const cacheRoot = await makeTmpDir('maint-order')
+  try {
+    // `aaa_light` sorts first in directory order but has one data file;
+    // `zzz_heavy` sorts last but is the most fragmented.
+    const lightDir = path.join(cacheRoot, 'datasets', 'aaa_light', 'date=2026-08-01')
+    await appendRowsToTable(path.join(lightDir, 'epoch=0'), COLUMNS, [
+      { id: 1, value: 'v', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(lightDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const heavyDir = path.join(cacheRoot, 'datasets', 'zzz_heavy', 'date=2026-08-01')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(path.join(heavyDir, 'epoch=0'), COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(heavyDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, dryRun: true })
+    assert.equal(report.partitions.length, 2)
+    assert.equal(report.partitions[0].dataset, 'zzz_heavy')
+    assert.equal(report.partitions[1].dataset, 'aaa_light')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('neediest-first order reads the live table dir for source-table partitions', async () => {
+  const cacheRoot = await makeTmpDir('maint-order-source')
+  try {
+    // Same ordering claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: a source-table cursor
+    // never advances its epoch, so file count is the only priority signal.
+    const lightDir = path.join(cacheRoot, 'datasets', 'aaa_light', 'source=test')
+    await appendRowsToTable(path.join(lightDir, 'table'), COLUMNS, [
+      { id: 1, value: 'v', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(lightDir, {
+      epoch: 0,
+      rowCount: 1,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const heavyDir = path.join(cacheRoot, 'datasets', 'zzz_heavy', 'source=test')
+    for (let i = 0; i < 4; i++) {
+      await appendRowsToTable(path.join(heavyDir, 'table'), COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(heavyDir, {
+      epoch: 0,
+      rowCount: 4,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const report = await maintainCache({ cacheRoot, dryRun: true })
+    assert.equal(report.partitions.length, 2)
+    assert.equal(report.partitions[0].dataset, 'zzz_heavy')
+    assert.equal(report.partitions[1].dataset, 'aaa_light')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

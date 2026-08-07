@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude",
   "version": "2.0.0",
-  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships helper skills.",
+  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships the hypaware-query, hypaware-reference, hypaware-privacy, hypaware-report, and session opt-out skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -30,13 +30,14 @@
         "marker_key": "_hypaware"
       },
       "required_upstreams": ["anthropic"],
-      "transcript_entrypoints": ["cli", "sdk-cli"]
+      "transcript_entrypoints": ["cli", "sdk-cli"],
+      "launch": { "bin": "claude", "args": ["{prompt}"], "label": "Claude Code" }
     },
     "picker": [
       {
         "name": "claude",
         "label": "Claude Code",
-        "summary": "CLI and SDK conversations, including OpenClaw's claude-cli backend; attaches Claude Code and installs helper skills.",
+        "summary": "CLI and SDK conversations, including OpenClaw's claude-cli backend; attaches Claude Code, starts a local gateway listener, and installs helper skills.",
         "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
           "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
@@ -51,11 +52,7 @@
       { "name": "hypaware-ignore", "clients": ["claude"] },
       { "name": "hypaware-unignore", "clients": ["claude"] },
       { "name": "hypaware-privacy", "clients": ["claude"] },
-      { "name": "hypaware-graph", "clients": ["claude"] },
-      { "name": "hypaware-ai-usage-report", "clients": ["claude"] },
-      { "name": "hypaware-report-to-html", "clients": ["claude"] },
-      { "name": "hypaware-publish-report", "clients": ["claude"] },
-      { "name": "hypaware-apply-report-changes", "clients": ["claude"] }
+      { "name": "hypaware-report", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }

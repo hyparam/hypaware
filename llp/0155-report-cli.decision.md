@@ -56,6 +56,16 @@ static record via `hyp remote login <target> --token-file`. Reports are
 server-specific (server LLP 0020), so there is no local mode: `--remote`
 selects a server, it never switches one on.
 
+**Extended-by: [LLP 0196 #mechanics-as-code](./0196-skills-state-constraints-not-procedures.rfc.md#mechanics-as-code)**
+(2026-08-06). `hyp report render` joins this group as its one **local** member:
+a build step that turns a reports tree's Markdown into a static site, taking no
+`--remote` and no credential. The paragraph above remains true of the four
+plane operations it was written about (publish, list, get, delete); render is
+not a plane operation. It joins the group because a user's workflow is
+render-then-publish, and splitting those across two command namespaces would
+serve the implementation rather than the reader. The group help states the
+split.
+
 <a id="endpoint"></a>**The reports endpoint derives from the one registered
 target URL.** Sibling of `deriveIdentityBase` and `deriveMcpEndpoint`
 (LLP 0084): a registered URL whose path ends in `/v1/mcp` is treated as that

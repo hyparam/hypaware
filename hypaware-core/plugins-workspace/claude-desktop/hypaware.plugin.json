@@ -24,7 +24,7 @@
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "Requires Claude sign-in and admin approval.",
+        "summary": "Requires Claude sign-in and admin approval; starts a local gateway listener; setup asks before changing anything.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
         "needs_setup": true,
         "configure_command": "claude-desktop install",

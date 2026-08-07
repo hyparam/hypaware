@@ -15,7 +15,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select } from './tui/index.js'
-import { PromptBackRequestedError, isPromptCancelledError } from './tui/runtime.js'
+import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 
 /**
@@ -27,6 +27,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
+ * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
@@ -71,10 +72,93 @@ export function resolveHypHome(env) {
 }
 
 /**
+ * How many extra times a question that opted in may re-ask after an
+ * answer that names no row. One: enough to catch a typo, small enough
+ * that a pipe of garbage costs a fixed two lines of output and then
+ * moves on. Questions that do not opt in never re-ask at all.
+ *
+ * @ref LLP 0190#sync-gate [implements]: the malformed-answer re-ask is capped and gated
+ */
+const MAX_MALFORMED_REASKS = 1
+
+/**
+ * Ceiling on the answer lines held for a still-unasked prompt. An
+ * interface asks at most `1 + MAX_MALFORMED_REASKS` questions and is
+ * closed straight after, so anything past a handful is unreadable
+ * backlog: a pipe that floods stdin (`yes |`) must not grow an array
+ * for as long as the prompt is on screen.
+ */
+const MAX_QUEUED_LINES = 4
+
+/**
+ * Read answer lines off a readline interface without losing one and
+ * without ever waiting on a stream that can no longer answer.
+ *
+ * `rl.question()` cannot do either job here. It registers its `line`
+ * listener only when it is called, so a second answer line arriving in
+ * the same chunk as the first ("y\n3\n" from a pipe) is emitted and
+ * dropped before a re-ask can ask: readline emits both synchronously
+ * and the next `question()` is a microtask away. And at EOF its promise
+ * is left permanently unsettled - the interface closes, `question`
+ * neither resolves nor rejects - which is a hang, or a silent
+ * "unsettled top-level await" exit. Queueing every line from
+ * construction fixes the first; resolving the pending ask as `null` on
+ * `close` fixes the second.
+ *
+ * `close` alone is not enough for the second job. Readline registers its
+ * `end` listener when the interface is built, so an interface built over
+ * a stream that has ALREADY ended never sees an `end` and never emits
+ * `close` - the second prompt asked on a spent stdin would wait forever
+ * even though the first resolved. The stream's own `readableEnded` is
+ * the answer readline can no longer give, so it seeds `closed` here.
+ *
+ * @param {Interface} rl
+ * @param {NodeJS.ReadableStream} input
+ * @param {NodeJS.WritableStream} output
+ * @returns {(prompt: string) => Promise<string | null>} writes one prompt and takes the next line, `null` once the stream is spent
+ */
+function queuedLineAsker(rl, input, output) {
+  /** @type {string[]} */
+  const queued = []
+  /** @type {((line: string | null) => void) | null} */
+  let waiting = null
+  let closed = /** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true
+  const take = () => {
+    const resolve = waiting
+    waiting = null
+    return resolve
+  }
+  rl.on('line', (line) => {
+    const resolve = take()
+    if (resolve) resolve(line)
+    else if (queued.length < MAX_QUEUED_LINES) queued.push(line)
+  })
+  rl.on('close', () => {
+    closed = true
+    const resolve = take()
+    if (resolve) resolve(null)
+  })
+  return function askLine(prompt) {
+    // Byte-identical to what `rl.question` writes: with `terminal: false`
+    // readline puts the query straight on the output stream.
+    output.write(prompt)
+    if (queued.length > 0) return Promise.resolve(/** @type {string} */ (queued.shift()))
+    if (closed) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      waiting = resolve
+    })
+  }
+}
+
+/**
  * Build the default interactive prompt. Uses Node's `readline` against
  * the provided stdin/stdout. Accepts comma-separated indices (1-based)
  * or "all" for every option; a question with `enterKeepsChecked` also
- * shows each row's checked state and keeps it on a bare enter.
+ * shows each row's checked state, keeps it on a bare enter, takes
+ * "none" as the word for a deliberate empty selection, and re-asks once
+ * on an answer that names no row before keeping the checked state. A
+ * question without the opt-in keeps its historical line and answers,
+ * and a closed stdin cancels it rather than answering it.
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncPickPrompt}
@@ -84,6 +168,7 @@ function legacyNumberedPromptFactory(opts) {
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function ask(question) {
     const rl = readline.createInterface({ input, output, terminal: false })
+    const askLine = queuedLineAsker(rl, input, output)
     try {
       // The plain-text form of the TUI's dim breadcrumb line: same text,
       // same position (above the title), no styling.
@@ -100,33 +185,94 @@ function legacyNumberedPromptFactory(opts) {
           output.write(`     ${opt.summary}\n`)
         }
       })
-      const answer = await rl.question(
-        question.allowBack
-          ? `select (e.g. 1,3, "all",${question.enterKeepsChecked ? ' enter keeps [x],' : ''} or b to go back): `
-          : question.enterKeepsChecked
-            ? 'select (e.g. 1,3, "all", or enter to keep [x]): '
-            : 'select (e.g. 1,3 or "all"): '
-      )
-      const trimmed = answer.trim().toLowerCase()
-      // The readline form of the TUI's escape (LLP 0191): same signal,
-      // same caller handling, so both paths step back identically.
-      if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
-      // A bare enter keeps the rendered checked set when the question
-      // opted in, mirroring the TUI multiselect's enter (checked rows,
-      // disabled included; callers filter locked rows regardless).
-      // Everywhere else it stays "select none", which scripted non-TTY
-      // runs of the picker rely on.
-      // @ref LLP 0190#sync-gate [implements]: the numbered fallback's enter keeps the checked defaults too
-      if (!trimmed) {
-        if (question.enterKeepsChecked) return question.options.filter((o) => o.checked).map((o) => o.value)
-        return []
+      // The opted-in question advertises "none": there, an empty
+      // selection is a real answer (enter keeps the checked rows
+      // instead), so the word for "yes, nothing" belongs on screen and
+      // not only in a re-ask the user may never trigger. Every other
+      // question keeps its historical line, byte for byte.
+      // @ref LLP 0190#sync-gate [implements]: the opted-in prompt names the explicit empty selection
+      const promptLine = question.enterKeepsChecked
+        ? question.allowBack
+          ? 'select (e.g. 1,3, "all", "none", enter keeps [x], or b to go back): '
+          : 'select (e.g. 1,3, "all", "none", or enter to keep [x]): '
+        : question.allowBack
+          ? 'select (e.g. 1,3, "all", or b to go back): '
+          : 'select (e.g. 1,3 or "all"): '
+      // The default a question falls back to when there is no answer to
+      // read: the rendered checked set where enter keeps it, else the
+      // historical empty selection.
+      const defaulted = () =>
+        question.enterKeepsChecked ? question.options.filter((o) => o.checked).map((o) => o.value) : []
+      // Only a question that opted in re-asks, and then only once. Every
+      // other caller (the pick menus, `runPickerWalkthrough`) asks exactly
+      // as many times as it did before: once.
+      const attempts = 1 + (question.enterKeepsChecked ? MAX_MALFORMED_REASKS : 0)
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const answer = await askLine(promptLine)
+        // Closed or exhausted stdin. The question can no longer be
+        // answered either way, so it never waits on it - but "no answer"
+        // is not the same as "answered nothing". Where enter keeps the
+        // checked rows, keeping them is the stated default and a dropped
+        // stdin lands on it. Everywhere else the historical default is
+        // the EMPTY selection, and returning it would read a dropped
+        // terminal as "the user picked nothing" and carry the wizard on
+        // into the daemon install with no sources. That is a cancel, the
+        // same one the TUI raises on ctrl+c, handled by the same callers.
+        // @ref LLP 0190#sync-gate [implements]: EOF takes the stated default only where enter has one; elsewhere it cancels
+        if (answer === null) {
+          if (question.enterKeepsChecked) return defaulted()
+          throw new PromptCancelledError()
+        }
+        const trimmed = answer.trim().toLowerCase()
+        // The readline form of the TUI's escape (LLP 0191): same signal,
+        // same caller handling, so both paths step back identically.
+        if (question.allowBack && trimmed === 'b') throw new PromptBackRequestedError()
+        // A bare enter keeps the rendered checked set when the question
+        // opted in, mirroring the TUI multiselect's enter (checked rows,
+        // disabled included; callers filter locked rows regardless).
+        // Everywhere else it stays "select none", which scripted non-TTY
+        // runs of the picker rely on.
+        // @ref LLP 0190#sync-gate [implements]: the numbered fallback's enter keeps the checked defaults too
+        if (!trimmed) return defaulted()
+        if (trimmed === 'all') return question.options.map((o) => o.value)
+        // The explicit empty selection. Every question already read it as
+        // one (it names no row), naming it just gives the re-ask below a
+        // word that means "yes, nothing".
+        if (trimmed === 'none') return []
+        const indices = trimmed
+          .split(',')
+          .map((s) => Number.parseInt(s.trim(), 10))
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length)
+        // A partially valid answer still wins outright.
+        if (indices.length > 0) return indices.map((n) => question.options[n - 1].value)
+        // An answer that names no row ("y", "0", "9" out of range) reads
+        // as "select nothing", which in the sync menu silently opts every
+        // candidate out. Say so and give the typo one correction; on the
+        // last attempt say what is being kept instead, because a spent
+        // budget that printed nothing would be the silence this whole
+        // path exists to remove.
+        // @ref LLP 0190#sync-gate [implements]: a malformed answer re-asks once, and the last one reports the fallback
+        if (attempt < attempts) {
+          output.write(`nothing matched '${answer.trim()}' - enter numbers like 1,3, "all", or "none"\n`)
+        } else if (question.enterKeepsChecked) {
+          const kept = defaulted()
+          output.write(
+            kept.length > 0
+              ? `nothing matched '${answer.trim()}' - keeping the checked rows: ${kept.join(', ')}\n`
+              : `nothing matched '${answer.trim()}' - nothing was checked, so nothing is selected\n`
+          )
+        }
       }
-      if (trimmed === 'all') return question.options.map((o) => o.value)
-      const indices = trimmed
-        .split(',')
-        .map((s) => Number.parseInt(s.trim(), 10))
-        .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length)
-      return indices.map((n) => question.options[n - 1].value)
+      // The budget is spent and every answer named a row that is not
+      // there, so the question falls back rather than asking again: no
+      // input can hold a scripted run at this prompt. It falls back to
+      // the SAME default a bare enter takes, not to the empty selection,
+      // which in the sync menu would opt every candidate out - issue
+      // #634 one answer later, and the one thing this loop exists to
+      // prevent. Questions without the opt-in still fall back to the
+      // historical empty selection, because that is their enter too.
+      // @ref LLP 0190#sync-gate [implements]: the spent budget lands on the stated default, not on an empty selection
+      return defaulted()
     } finally {
       rl.close()
     }
@@ -1798,6 +1944,8 @@ export function orderPickerDescriptors(descriptors) {
  * @param {Map<string, PickerDescriptor>} pickerDescriptors
  * @param {Map<string, ClientDescriptor>} clientDescriptors
  * @returns {string[]}
+ * @ref LLP 0177 [implements]: the picker enabled OpenClaw and left it unattached, because
+ *   this list was a hardcode the manifest could not reach
  * @ref LLP 0180#decision [implements]: derivation from client contributions, not enumeration
  */
 export function derivePickedClients(sources, pickerDescriptors, clientDescriptors) {

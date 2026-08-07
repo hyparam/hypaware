@@ -10,6 +10,10 @@
  * components now import, and classifies those leading words so a run's
  * diagnostics are coloured without every write site having to remember.
  *
+ * It owns the CLI's shared *chrome* on the same grounds: the palette, and
+ * the one frame shape ({@link boxed}) that both the TUI's prompts and the
+ * printed blocks draw when a block needs to read as its own screen.
+ *
  * @ref LLP 0189#palette [implements]: one palette, one severity vocabulary, applied at the stream
  */
 
@@ -34,6 +38,56 @@ export const ANSI = {
  */
 export function paint(text, sgr, on) {
   return on ? `${sgr}${text}${ANSI.reset}` : text
+}
+
+// Only `\x1b[...m` (SGR) sequences are emitted by this CLI, and they are the
+// ones that occupy no columns.
+const ANSI_SGR = /\x1b\[[0-9;]*m/g
+
+/**
+ * Visible width of one line, ignoring style escapes. Measured in code
+ * units, which matches column count for the Latin text, box glyphs and
+ * middots the CLI prints.
+ *
+ * @param {string} line - a single line, without its trailing newline
+ * @returns {number}
+ */
+export function visibleWidth(line) {
+  return line.replace(ANSI_SGR, '').length
+}
+
+/** The one frame shape: rounded, single-ruled, to match the dim `─` rules. */
+const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' }
+
+/**
+ * Draw a border around a block of lines.
+ *
+ * The border is dim so it separates without competing: the frame's job is
+ * to say "this is one screen", and the content inside keeps whatever
+ * emphasis it already had. It is also a shape rather than a colour, so the
+ * separation survives `NO_COLOR` and a colour-blind reader
+ * (`@ref LLP 0135#disclosure`).
+ *
+ * A frame wider than the terminal would soft-wrap into a broken rectangle,
+ * which is worse than no frame at all, so a block that does not fit is
+ * returned unframed. `columns` omitted means "do not know", and an unknown
+ * width never suppresses the frame.
+ *
+ * @param {string[]} lines - already-styled content lines, no trailing newlines
+ * @param {{ color: boolean, columns?: number }} opts
+ * @returns {string[]}
+ */
+export function boxed(lines, { color, columns }) {
+  if (lines.length === 0) return lines
+  const width = Math.max(...lines.map(visibleWidth))
+  if (typeof columns === 'number' && columns > 0 && width + 4 > columns) return lines
+  const rule = BOX.h.repeat(width + 2)
+  const edge = paint(BOX.v, ANSI.dim, color)
+  return [
+    paint(`${BOX.tl}${rule}${BOX.tr}`, ANSI.dim, color),
+    ...lines.map((line) => `${edge} ${line}${' '.repeat(width - visibleWidth(line))} ${edge}`),
+    paint(`${BOX.bl}${rule}${BOX.br}`, ANSI.dim, color),
+  ]
 }
 
 /**
