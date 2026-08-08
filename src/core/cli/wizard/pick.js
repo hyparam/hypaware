@@ -23,13 +23,14 @@ import {
   loadPickerDescriptors,
   orderPickerDescriptors,
   resolveHypHome,
+  visiblePickerDescriptors,
 } from '../walkthrough.js'
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { PickerDescriptor } from '../../../../src/core/types.js'
  * @import { AsyncConfirmSelectPrompt, AsyncPickPrompt, PickerExport, PickerSource, WalkthroughOption } from '../../../../src/core/cli/types.js'
- * @import { RunWizardPickOptions, WizardPickResult } from '../../../../src/core/cli/wizard/types.js'
+ * @import { RunWizardPickOptions, SeedOrigin, WizardPickResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
 /**
@@ -54,7 +55,15 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * detection function that runs once and is shared with the lane, so a
  * machine is probed once per run.
  *
+ * Hidden rows (LLP 0202) are resolved here for the same reason: `visibleList`
+ * is the single display filter's output, `defaultRows` is drawn from it so
+ * neither gate can state a hidden row, and `carried` is the hidden-row
+ * carry-through, decided off `seedOrigin` before any screen renders, so the
+ * express gate's auto-accept and the pick lane's own screens preserve a
+ * raw-only config the same way.
+ *
  * @ref LLP 0201#gate [implements]: one computation of "the defaults", read by both the express gate and the pick lane
+ * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of the gates and the menu
  * @param {RunWizardPickOptions} opts
  */
 export async function resolvePickSeeding(opts) {
@@ -118,9 +127,60 @@ export async function resolvePickSeeding(opts) {
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
     : configured ?? detected
 
+  // Which of the three tiers above produced `seed`. The set itself does not
+  // say, and hidden-row carry-through reads differently off each: a
+  // re-entry's selection was already confirmed by a previous pass, the
+  // config on disk is a record whose hidden rows may be derivative, and
+  // detection is a guess about the machine that is never a choice at all.
+  // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a pre-checked box the user can still clear, never a source composed on their behalf
+  /** @type {SeedOrigin} */
+  const seedOrigin = opts.initialSelection ? 'selection' : configured !== undefined ? 'config' : 'detected'
+
+  const visibleList = visiblePickerDescriptors(descriptorList)
+  // A hidden row never renders, so no screen downstream can return one.
+  // Carrying one through the selection is right when the config on disk
+  // collects nothing the menu can show: then every row it does collect is
+  // hidden, and an interactive pass would silently strip a setup the picker
+  // has no way to represent (a `--source raw-anthropic` install being
+  // reconfigured).
+  //
+  // Carrying whenever a hidden row is merely seeded would be wrong, because
+  // `configuredPickerSources` seeds a hidden row DERIVATIVELY: `raw-openai`
+  // reads as configured whenever codex's `openai` upstream is present, per
+  // the "composition is lossy" note on that function. Seeding off the config
+  // is therefore not evidence the user ever chose the row, and carrying on it
+  // would resurrect the `openai` upstream the moment someone unchecked codex -
+  // breaking the guarantee that unchecking a row removes its upstream.
+  //
+  // `seedOrigin` is what keeps "the config on disk" from widening to "the
+  // seed, whatever produced it", in both directions:
+  //
+  //   - `detected` never carries. On a first run the seed is a DETECTION
+  //     result, and carrying off that would compose a source the user was
+  //     never shown and cannot uncheck, purely because a probe found it -
+  //     exactly what LLP 0011 #autodetect-vs-default forbids. No bundled
+  //     hidden row declares a `detect` probe today, but `hidden` is a
+  //     kernel-contract field any plugin can set beside one, so the gate is
+  //     stated rather than assumed.
+  //   - `selection` always carries, without the "nothing visible seeded"
+  //     test. A re-entry's seed is the selection a previous pass already
+  //     confirmed, and nothing derives a hidden id into it: read-back never
+  //     reaches this tier, so a hidden row is in the previous answer only
+  //     because that pass carried it under the rule below. Re-applying the
+  //     rule against a seed that now also holds the visible rows the user
+  //     just added would drop the row, so `back` then `enter` would delete
+  //     the very upstream the carry exists to preserve.
+  // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
+  // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
+  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+  const seededVisible = visibleList.some((d) => seed.has(d.id))
+  const carries = seedOrigin === 'selection' || (seedOrigin === 'config' && !seededVisible)
+  const carried = carries ? seededHidden : []
+
   return {
     descriptors,
     descriptorList,
+    visibleList,
     lockedSources,
     lockedSet,
     configPath,
@@ -128,8 +188,9 @@ export async function resolvePickSeeding(opts) {
     configured,
     detected,
     seed,
+    carried,
     interactive,
-    defaultRows: descriptorList.filter((d) => seed.has(d.id) || lockedSet.has(d.id)),
+    defaultRows: visibleList.filter((d) => seed.has(d.id) || lockedSet.has(d.id)),
   }
 }
 
@@ -187,6 +248,7 @@ export function defaultRowLabels({ defaultRows, lockedSet }) {
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
  * @ref LLP 0183#seed-from-config [implements]: a reconfigure starts from the config on disk, not from detection and pathway defaults
+ * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of every screen but remains a source
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -196,8 +258,8 @@ export async function runWizardPick(opts) {
   const log = getLogger('wizard')
   const seeding = await resolvePickSeeding(opts)
   const {
-    descriptors, descriptorList, lockedSources, lockedSet,
-    configPath, existing, configured, detected, seed, interactive, defaultRows,
+    descriptors, descriptorList, visibleList, lockedSources, lockedSet,
+    configPath, existing, configured, detected, seed, carried, interactive, defaultRows,
   } = seeding
 
   await withSpan(
@@ -238,7 +300,7 @@ export async function runWizardPick(opts) {
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet, defaultRows })
+      selection = await promptPickSelection({ opts, ask, confirm, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -446,22 +508,31 @@ export async function commitWizardPickedConfig(args) {
  * (`opts.allowBack`). A back with no target is not offered at all.
  * Cancellation propagates as the prompt's own throw.
  *
+ * Both screens draw from `visibleList` and every selection they return is
+ * widened by `carried`, so a hidden row (LLP 0202) is never shown and a
+ * carried raw-only setup survives whichever screen confirms the selection,
+ * the express auto-accept included.
+ *
  * @ref LLP 0191#lane-loops [implements]: menu backs to gate; the lane's first screen backs out to the previous wizard step
+ * @ref LLP 0202#carry-through [implements]: every confirming screen returns the carried hidden rows with the picks
  *
  * @param {{
  *   opts: RunWizardPickOptions,
  *   ask: AsyncPickPrompt,
  *   confirm: AsyncConfirmSelectPrompt,
- *   descriptorList: PickerDescriptor[],
+ *   visibleList: PickerDescriptor[],
  *   descriptors: Map<string, PickerDescriptor>,
  *   seed: ReadonlySet<string>,
  *   detected: Set<PickerSource>,
  *   lockedSet: Set<string>,
  *   defaultRows: PickerDescriptor[],
+ *   carried: string[],
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, confirm, descriptorList, descriptors, seed, detected, lockedSet, defaultRows }) {
+async function promptPickSelection({ opts, ask, confirm, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried }) {
+  const withCarried = (/** @type {string[]} */ picked) =>
+    /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
   // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
   // re-entry's previous selection) or the org's locked set yields a
   // usable default, state it in one line and let a bare enter accept it;
@@ -482,7 +553,7 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
   if (hasGate && opts.autoAccept) {
     // No leading blank: the welcome banner printed one already.
     narrateAcceptedGate({ stdout: opts.stdout, title: 'HypAware will record:', items: gateItems, lead: false })
-    return { rawSources: /** @type {PickerSource[]} */ (defaultRows.map((d) => d.id)) }
+    return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
   let screen = hasGate ? 'gate' : 'menu'
   while (true) {
@@ -514,7 +585,7 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
         throw err
       }
       if (choice === 'accept') {
-        return { rawSources: /** @type {PickerSource[]} */ (defaultRows.map((d) => d.id)) }
+        return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
       }
       screen = 'menu'
     } else {
@@ -527,11 +598,11 @@ async function promptPickSelection({ opts, ask, confirm, descriptorList, descrip
           // fallback prints the same text as plain text.
           // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
           ...(opts.progress ? { progress: opts.progress } : {}),
-          options: descriptorList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
+          options: visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
           ...(hasGate || opts.allowBack ? { allowBack: true } : {}),
         })
         return {
-          rawSources: /** @type {PickerSource[]} */ (sourceRaw.filter((v) => descriptors.has(v))),
+          rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
         }
       } catch (err) {
         if (isPromptBackError(err)) {

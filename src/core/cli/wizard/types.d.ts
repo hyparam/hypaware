@@ -37,6 +37,24 @@ export type WizardForkChoice = 'team' | 'local' | 'quit' | 'back'
 export type WizardPathway = 'team' | 'local'
 
 /**
+ * Which tier produced the pick lane's seed set, most-recent answer first
+ * (LLP 0191 #re-entry-seeding, LLP 0183 #seed-from-config). The seed set
+ * itself does not record where it came from, and hidden-row carry-through
+ * (LLP 0200 #carry-through) reads differently off each tier:
+ *
+ * - `selection`: a re-entry after stepping back, seeded with the selection
+ *   the previous pass confirmed. A hidden row is in it only because that
+ *   pass carried it, so it carries again.
+ * - `config`: a reconfigure, seeded by reading the config on disk back.
+ *   Read-back seeds a hidden row *derivatively* (a client's upstream also
+ *   satisfies the raw row that composes the same bytes), so a hidden row
+ *   here carries only when the menu can show nothing the config collects.
+ * - `detected`: a first run, seeded by probing the machine. Never a
+ *   choice, so it never carries.
+ */
+export type SeedOrigin = 'selection' | 'config' | 'detected'
+
+/**
  * The wizard lanes that count as a step in the position indicator
  * (LLP 0135 #progress). One entry per lane that asks the user something,
  * not one per phase: `configure` and the privacy narration are output, and
