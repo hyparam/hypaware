@@ -1077,6 +1077,45 @@ test('runWizardPick: a raw-only config survives a reconfigure that picks nothing
   assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
 })
 
+test('runWizardPick: the express path carries a raw-only config and never states the hidden row', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A fleet-locked claude gives the express gate a row to accept while the
+  // local config collects only a hidden row. Accepting without a keypress
+  // (LLP 0201) must preserve the raw setup the same way the interactive
+  // screens do: the carry is decided before any screen renders, so the fast
+  // path cannot strip what the slow path would keep.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const stdout = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
+    confirm: async () => { throw new Error('the express path must not prompt') },
+    detect: async () => new Set(),
+    locked: ['claude'],
+    confirmOverwrite: async () => true,
+  }))
+  const out = stdout.text()
+  assert.match(out, /HypAware will record:/)
+  assert.doesNotMatch(out, /raw|API/i, 'the hidden row is not narrated on the fast path either')
+  // Locked claude is dropped from local-layer composition; the carried raw
+  // row is what the local layer still collects.
+  assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+  assert.deepEqual(result.clientsPicked, ['claude'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+})
+
 test('runWizardPick: a hidden row seeded only derivatively does not resurrect an unchecked upstream', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
