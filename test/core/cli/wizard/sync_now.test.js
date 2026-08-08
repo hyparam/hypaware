@@ -2,8 +2,12 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
+import { firstSyncHoldMarkerPath, writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 
 // The closing "send now" offer (LLP 0200): setup asks whether to wait out the
 // first-sync review window, and hands the user a real `hyp sync` rather than a
@@ -182,6 +186,55 @@ test('a spawn failure never fails the install, and restates the wait', async () 
   assert.match(o.stderr.text(), /Could not start hyp sync: ENOENT/)
   assert.match(o.stdout.text(), /Nothing was sent/)
 })
+
+// Everything above replaces the re-read with the `readDeadline` seam, which
+// means the step's own production body - resolve the state dir from the
+// environment, then read the marker there - has never been run by a test. That
+// is the body the release claim is decided in, and it is the one place where a
+// wrong answer ("your history is on its way") cannot be walked back. A path
+// helper that drifted, or a state dir resolved from the wrong variable, would
+// find no marker, and every run would report a release that never happened -
+// invisible to all eight tests above, because none of them execute the code.
+//
+// So these two drive it end to end against a real marker on disk, with no seam
+// at all: the only thing standing in for `hyp sync` is a spawn stub that either
+// clears the marker (a release) or leaves it (a declined plan).
+//
+// @ref LLP 0200#read-back [tests]: the marker on disk decides, so the read that consults it is exercised for real
+for (const scenario of [
+  { name: 'left in place', release: false, expected: { asked: true, released: false, reason: 'sync-declined' } },
+  { name: 'cleared by the child', release: true, expected: { asked: true, released: true } },
+]) {
+  test(`the read-back resolves a real hold marker from the environment: ${scenario.name}`, async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sync-now-'))
+    const hypHome = path.join(home, '.hyp')
+    const stateDir = path.join(hypHome, 'hypaware')
+    await fs.mkdir(stateDir, { recursive: true })
+    const deadline = await writeFirstSyncHoldMarker({ stateDir })
+    assert.equal(typeof deadline, 'number')
+
+    const o = opts({ answer: 'now', deadline })
+    // The real environment resolution, and no `readDeadline` override.
+    o.args.env = /** @type {NodeJS.ProcessEnv} */ ({ HYP_HOME: hypHome })
+    delete (/** @type {{ readDeadline?: unknown }} */ (o.args)).readDeadline
+    o.args.spawnFn = /** @type {any} */ ((/** @type {string} */ _cmd, /** @type {string[]} */ _args) => {
+      /** @type {Record<string, (arg: any) => void>} */
+      const handlers = {}
+      queueMicrotask(async () => {
+        if (scenario.release) await fs.rm(firstSyncHoldMarkerPath(stateDir), { force: true })
+        handlers.close?.(0)
+      })
+      return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
+    })
+
+    const result = await runWizardSyncNow(o.args)
+    assert.deepEqual(result, scenario.expected)
+    // A run that did not send always restates the wait; a run that did must
+    // never print it, or the release reads as though it were withheld.
+    if (scenario.release) assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
+    else assert.match(o.stdout.text(), /Nothing was sent/)
+  })
+}
 
 test('a cancelled prompt is a wait, not an error', async () => {
   const o = opts()
