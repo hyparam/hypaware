@@ -49,7 +49,7 @@ import {
   runSkillsInstall,
   runUnignore,
 } from '../commands/clients.js'
-import { runPolicyClient, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
 
 /**
  * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -375,7 +375,9 @@ function buildCoreCommands(registry) {
         'The class-neutral successor to the hyp ignore --sync/--local-only/--private',
         'flags: writes to the same machine-local, class-per-entry store (never a',
         '.hypignore dotfile). set/show/unset act on one path; list enumerates every',
-        'machine-local entry on this machine.',
+        'machine-local entry on this machine; client and folders set the two',
+        'standing preferences (which clients sync, and whether new folders are',
+        'asked about at all).',
       ].join('\n'),
     }),
     {
@@ -420,6 +422,22 @@ function buildCoreCommands(registry) {
         'arguments, lists the opted-out clients.',
       ].join('\n'),
       run: runPolicyClient,
+    },
+    {
+      name: 'policy folders',
+      summary: 'Let new folders sync (default), or be asked once about each',
+      usage: 'hyp policy folders [ask|sync] [--json]',
+      help: [
+        'On a machine connected to a server, folders you have not marked sync',
+        'without asking. `policy folders ask` turns on the per-folder question:',
+        'a session opened somewhere new asks once how to handle it. `policy',
+        'folders sync` returns to the default. With no argument, reports the',
+        'current setting; `hyp init` asks for it in its own step.',
+        '',
+        'This gates the question only. Folders you already marked keep their class,',
+        'and .hypignore files are unaffected, in either setting.',
+      ].join('\n'),
+      run: runPolicyFolders,
     },
     {
       name: 'purge',

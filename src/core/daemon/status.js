@@ -26,6 +26,7 @@ import {
   LocalOnlyListUnreadableError,
   optedOutClientSourceIds,
   readClientSyncEntries,
+  readFolderAskModeSafe,
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -50,6 +51,7 @@ import {
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -875,11 +877,19 @@ export async function collectHypAwareStatus(opts = {}) {
   // it surfaces as a loud diagnostic and a null count rather than a silent 0
   // ("enrolled but withholding" must never be a silent state, R9).
   // @ref LLP 0069#requirements [implements]: R9 - hyp status surfaces the local-only list's presence and size
-  /** @type {{ localOnlyDirCount: number } | null} */
+  // The standing new-folder ask (LLP 0200) rides in the same section: a
+  // machine that stopped asking has a consent prompt switched off, which is
+  // exactly the kind of state R9 says must never be silent. The safe reader
+  // never throws and reads a corrupt preference as `ask`, the mode that is
+  // actually in force when the hook cannot read it either.
+  // @ref LLP 0200#cli [implements]: hyp status names a suppressed folder ask alongside the withholding counts
+  const folderAsk = await readFolderAskModeSafe({ stateDir: stateRoot })
+
+  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode } | null} */
   let usagePolicy = null
   try {
     const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
-    usagePolicy = { localOnlyDirCount: localOnlyDirs.length }
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk }
   } catch (err) {
     const filePath = err instanceof LocalOnlyListUnreadableError
       ? err.filePath

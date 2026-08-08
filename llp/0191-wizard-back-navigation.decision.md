@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0135 (#orchestration, #progress: the wizard this adds navigation to), LLP 0190 (#pick-gate, #sync-gate, #commit-point: the gate/menu screens and the boundary back cannot cross), LLP 0129 (#failed-join-returns-to-fork: the pre-existing fork re-entry), LLP 0063 (D3: the sign-in is the accepting act), LLP 0011 (autodetect seeds, never forces)
+**Extended-by:** [LLP 0200](./0200-folder-ask-is-a-preference.decision.md) (a fourth enrolled lane, `folders`, joins the chain after `sync` and backs into it), [LLP 0201](./0201-express-defaults-gate.decision.md) (#edges: the express gate joins the chain between the fork and the pick lane - it backs to the fork, and the pick lane backs to it whenever it was shown)
 
 > Extends the prompt flow of [LLP 0135](./0135-install-experience-overhaul.design.md)
 > and the gate screens of [LLP 0190](./0190-wizard-defaults-gate.decision.md).

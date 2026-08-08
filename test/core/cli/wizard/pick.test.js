@@ -200,6 +200,46 @@ test('runWizardPick: the gate names locked sources as fleet-managed and accept k
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
+// The express path (LLP 0201): the gate's rows are taken without a
+// keypress, but the statement is still printed - the never-silent floor
+// binds the statement, not the prompt.
+// @ref LLP 0201#narrate [tests]:
+
+test('runWizardPick: autoAccept takes the gate rows and prints what the gate would have said', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const stdout = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
+    confirm: async () => { throw new Error('the express path must not prompt') },
+    detect: async () => new Set(['codex']),
+    locked: ['claude'],
+  }))
+  const out = stdout.text()
+  assert.match(out, /HypAware will record:/)
+  assert.match(out, /· managed by your fleet/, 'the locked row is named on the fast path too')
+  assert.match(out, /codex/i)
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
+})
+
+test('runWizardPick: autoAccept with no default to take still opens the menu', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    autoAccept: true,
+    confirm: async () => { throw new Error('there is no gate to accept') },
+    detect: async () => new Set(),
+  }))
+  // Defaults where there are defaults: with nothing detected and nothing
+  // locked, "accept the defaults" would mean "record nothing".
+  assert.deepEqual(result.sourcesPicked, ['otel'])
+})
+
 test('runWizardPick: no gate when nothing is detected and nothing is locked', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -302,7 +342,16 @@ test('runWizardPick: options come from catalog.pickerDescriptors, not a hardcode
     detect: async () => new Set(),
   }))
   const ids = state.question.options.map((/** @type {any} */ o) => o.value).sort()
-  assert.deepEqual(ids, [...catalog.pickerDescriptors.keys()].sort())
+  const visible = [...catalog.pickerDescriptors.values()]
+    .filter((d) => d.hidden !== true)
+    .map((d) => d.id)
+    .sort()
+  assert.deepEqual(ids, visible)
+  // The filter is display-only, so the catalog still carries the hidden
+  // rows the withhold arming set is folded from (LLP 0202 #hidden-rows).
+  assert.ok(catalog.pickerDescriptors.has('raw-anthropic'))
+  assert.ok(!ids.includes('raw-anthropic'))
+  assert.ok(!ids.includes('raw-openai'))
 })
 
 // --- locked (central-layer) rows ---
@@ -969,4 +1018,220 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   // from the picks, and the prompt has to say so before the y/N.
   assert.match(asked.text(), /rewritten from your picks/i)
   assert.match(asked.text(), /carried over/i)
+})
+
+// --- hidden rows (LLP 0202) ---
+
+test('runWizardPick: a hidden row is absent from the defaults gate as well as the menu', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A raw-only config: every row it collects is hidden, so the gate has
+  // nothing to list and the menu opens directly.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt([])
+  const confirmCalls = []
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async (/** @type {any} */ q) => { confirmCalls.push(q); return 'customize' },
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
+  assert.ok(!rendered.includes('raw-anthropic'))
+  // No visible row is seeded, so there is no defaults gate to show.
+  assert.deepEqual(confirmCalls, [])
+})
+
+test('runWizardPick: a raw-only config survives a reconfigure that picks nothing new', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt([])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  // The menu could not show the row, so it must not have silently dropped
+  // it: the upstream the install runs on is still there.
+  assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+})
+
+test('runWizardPick: the express path carries a raw-only config and never states the hidden row', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A fleet-locked claude gives the express gate a row to accept while the
+  // local config collects only a hidden row. Accepting without a keypress
+  // (LLP 0201) must preserve the raw setup the same way the interactive
+  // screens do: the carry is decided before any screen renders, so the fast
+  // path cannot strip what the slow path would keep.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const stdout = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
+    confirm: async () => { throw new Error('the express path must not prompt') },
+    detect: async () => new Set(),
+    locked: ['claude'],
+    confirmOverwrite: async () => true,
+  }))
+  const out = stdout.text()
+  assert.match(out, /HypAware will record:/)
+  assert.doesNotMatch(out, /raw|API/i, 'the hidden row is not narrated on the fast path either')
+  // Locked claude is dropped from local-layer composition; the carried raw
+  // row is what the local layer still collects.
+  assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+  assert.deepEqual(result.clientsPicked, ['claude'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+})
+
+test('runWizardPick: a hidden row seeded only derivatively does not resurrect an unchecked upstream', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // codex's `openai` upstream also makes `raw-openai` read as configured.
+  // Unchecking codex must still remove it: seeding is not consent.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+        { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+        { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
+      ] } },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual(result.sourcesPicked, ['claude'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+})
+
+test('runWizardPick: --source still composes a hidden row (no prompt involved)', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    picks: { sources: ['raw-openai'], exportChoice: 'keep-local', retentionDays: 90 },
+  }))
+  assert.deepEqual(result.sourcesPicked, ['raw-openai'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['openai'])
+})
+
+// Carry-through is scoped to a seed that records a choice (the config on
+// disk, or a re-entry's confirmed selection). On a FIRST run the seed is a
+// detection result, and a hidden row carried off that would be composed
+// without ever being rendered or made uncheckable - detection forcing a
+// source on, which LLP 0011 #autodetect-vs-default forbids. No bundled
+// hidden row declares a `detect` probe, so this drives detection directly.
+// @ref LLP 0011#autodetect-vs-default [tests]: a detected hidden row is not composed on the user's behalf
+test('runWizardPick: a hidden row that is merely detected is not carried on a first run', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt([])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    // No config on disk: the seed is this detection result and nothing else.
+    detect: async () => new Set(['raw-anthropic']),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual(result.sourcesPicked, [])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway'), undefined)
+})
+
+// A re-entry (stepping back from a later lane) seeds with the selection the
+// previous pass confirmed - which, for a raw-only install, holds the carried
+// hidden row beside whatever the user just added. Re-asking "does the seed
+// collect anything the menu can show?" against that seed answers yes, so the
+// carried row would be dropped and `back` then `enter` would silently delete
+// the upstream the whole install runs on.
+// @ref LLP 0191#re-entry-seeding [tests]: a carried hidden row survives stepping back into pick
+// @ref LLP 0202#carry-through [tests]: once carried, a hidden row stays carried
+test('runWizardPick: a carried hidden row survives a re-entry that adds a visible row', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // A `--source raw-openai` install: nothing the menu can show.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+
+  // Pass one: the menu opens (no visible row is seeded) and the user adds
+  // claude. The hidden row rides along.
+  const first = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: capturingPrompt(['claude']).prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual([...first.sourcesPicked].sort(), ['claude', 'raw-openai'])
+
+  // Pass two: the user stepped back, so the wizard re-seeds with that answer
+  // and the defaults gate now has a visible row to offer. Accepting it must
+  // not quietly drop the raw row.
+  const second = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    initialSelection: first.sourcesPicked,
+    prompt: capturingPrompt(['claude']).prompt,
+    confirm: async () => 'accept',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual([...second.sourcesPicked].sort(), ['claude', 'raw-openai'])
+  const written = JSON.parse(await fs.readFile(second.configPath, 'utf8'))
+  const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
+  assert.deepEqual(
+    gateway.config.upstreams.map((/** @type {any} */ u) => u.name).sort(),
+    ['anthropic', 'openai']
+  )
 })

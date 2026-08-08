@@ -53,9 +53,14 @@ On a TTY this launches the interactive walkthrough:
 1. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
    - Codex conversations, CLI and Desktop (`codex`)
-   - Raw Anthropic API traffic (`raw-anthropic`)
-   - Raw OpenAI API traffic (`raw-openai`)
    - OTEL logs / traces / metrics (`otel`)
+
+   The raw proxy sources (`raw-anthropic`, `raw-openai`) are not offered in
+   the menu. They open a gateway upstream but configure no client and carry
+   no projector of their own, so on their own they proxy traffic and record
+   nothing. They remain real sources: `hyp init --source raw-anthropic`
+   still composes one, and a config that already collects one keeps it
+   through a reconfigure (LLP 0202).
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
 3. The **retention window** is not asked: the pathway sets it, `90` days on
@@ -323,6 +328,20 @@ hyp policy show [path]                # which class governs, and from which sour
 hyp policy list                       # every machine-local entry
 hyp policy unset <path> [class]       # back to the implicit default
 ```
+
+On a machine connected to a server, folders you have not marked sync
+without asking. If you would rather be asked once per new folder, a session
+opened somewhere new can prompt you to classify it instead:
+
+```sh
+hyp policy folders ask                # ask once per new folder
+hyp policy folders sync               # back to syncing without asking (default)
+hyp policy folders                    # report which is in force
+```
+
+This gates the question only: folders you already marked keep their class,
+and `.hypignore` files are unaffected either way. `hyp init` asks for this
+in its own step, and `hyp status` names it on an enrolled machine.
 
 Markings are prospective only: rows captured before a marking existed stay
 in the cache. Delete those with the separate destructive step:

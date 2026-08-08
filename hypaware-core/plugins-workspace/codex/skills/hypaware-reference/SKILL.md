@@ -85,6 +85,10 @@ curated HypAware registry.
 - Opt a folder out of recording - `hyp ignore <path>` writes a committable
   `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb.
+- Decide what happens in new folders - by default they sync with no
+  question; `hyp policy folders ask` asks once per new folder instead, and
+  `hyp policy folders sync` returns to the default. It gates the question
+  only, never an existing class.
 - "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
   stable shape).
 

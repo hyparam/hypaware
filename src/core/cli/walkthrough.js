@@ -31,6 +31,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { ClientAssetInstall } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -291,6 +292,12 @@ function legacyNumberedPromptFactory(opts) {
  * the y/N. It also names what survives the regeneration, so the answer is
  * a decision about the picks rather than a bet on how much is lost.
  *
+ * That is three facts, and as one paragraph they arrived as a wall of text
+ * with the actual question buried at the end of it. So it is laid out
+ * instead: the path on its own line, the consequence and the carried-over
+ * list indented under it, and `Continue?` alone on the last line where a
+ * reader's eye lands. Same facts, same order, scannable.
+ *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
  * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
@@ -302,9 +309,13 @@ export function defaultOverwriteConfirmFactory(opts) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
       const answer = await rl.question(
-        `The config at ${targetPath} will be rewritten from your picks. ` +
-        'Your retention window, export destinations, hand-edited settings, and any ' +
-        'plugins the picker does not manage are carried over; a backup is kept. ' +
+        '\n' +
+        `This config will be rewritten from your picks:\n` +
+        `  ${targetPath}\n` +
+        '\n' +
+        '  Carried over: retention window, export destinations, hand-edited\n' +
+        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
+        '\n' +
         'Continue? [y/N]: '
       )
       return /^y(es)?$/i.test(answer.trim())
@@ -516,6 +527,11 @@ export function backfillConsentTitle(providers, retentionDays) {
  * ids (preserving catalog order among them), so a newly-contributed picker
  * row still appears rather than being dropped.
  *
+ * `raw-anthropic` / `raw-openai` are listed here but no longer render:
+ * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
+ * array and their descriptors in the catalog - see
+ * {@link visiblePickerDescriptors} for what still depends on them.
+ *
  * @type {string[]}
  */
 const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
@@ -636,7 +652,11 @@ export async function runPickerWalkthrough(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: descriptorList.map((d) => ({
+        // Hidden rows are absent from the menu but still pickable via
+        // `--source` (which takes the `opts.picks` path above and never
+        // reaches this prompt). They are never detected, so nothing is
+        // silently unchecked by leaving them out here.
+        options: visiblePickerDescriptors(descriptorList).map((d) => ({
           value: d.id,
           label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
           ...(d.summary ? { summary: d.summary } : {}),
@@ -1546,6 +1566,11 @@ export async function runPickerFinale(args) {
       },
       async (span) => {
         const framed = framedStream(stdout)
+        // No `stdout` here on purpose: the materializer's per-copy line is the
+        // right output for `hyp skills install`, where the copies are the
+        // command's subject, but in the finale a dozen path lines bury the one
+        // fact the step reports. The counts go out instead; the paths stay
+        // available in the run summary and the span.
         const installed = await materializeClientAssets({
           clients: clientsPicked,
           descriptors: descriptorMap,
@@ -1553,9 +1578,9 @@ export async function runPickerFinale(args) {
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
           dryRun,
-          stdout: framed,
           stderr,
         })
+        for (const line of clientAssetCountLines(installed, dryRun)) framed.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1915,6 +1940,29 @@ export async function loadPickerDescriptors() {
 }
 
 /**
+ * The descriptors the interactive picker menu renders: everything except
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ *
+ * Display is the ONLY thing this filters. A hidden row keeps every other
+ * property of a picker source, and each one is load-bearing somewhere:
+ * `hyp init --source raw-anthropic` still composes it, `configuredPickerSources`
+ * still reads it back off a config that collects it, and - the one that
+ * bites hardest if the row is deleted outright rather than hidden - its id
+ * still reaches `datasetOwnedSourceIdsFromCatalog`, which folds picker
+ * descriptors into the dataset-owner map that arms the export seam's
+ * unattributed-row withholding (LLP 0192 #fail-closed). Drop the
+ * descriptors and `ai_gateway_messages` gets an empty owner list, which
+ * both withhold rules read as "never withhold": a privacy guard turned off
+ * by what looks like a UI cleanup.
+ *
+ * @param {Iterable<PickerDescriptor>} descriptors
+ * @returns {PickerDescriptor[]}
+ */
+export function visiblePickerDescriptors(descriptors) {
+  return [...descriptors].filter((d) => d.hidden !== true)
+}
+
+/**
  * Sort picker descriptors into `PICKER_DISPLAY_ORDER`, keeping any
  * unlisted id after the known ones in catalog order (Array.prototype.sort
  * is stable). Returns a fresh insertion-ordered map so both the prompt
@@ -1977,6 +2025,47 @@ export async function buildWalkthroughClientDescriptorMap() {
     }
   } catch { /* discovery failure → empty map */ }
   return map
+}
+
+/**
+ * One line per client naming how many skills and agents landed there, in the
+ * order the copies were made.
+ *
+ * Counted per client rather than summed across them, because the sum is the
+ * one number that is true of nobody: six skills copied to two clients is
+ * twelve copies, and neither client got twelve. Names are left out entirely -
+ * the user picked these clients a screen ago and did not choose the assets,
+ * so the roster is not a decision they are being shown for review.
+ *
+ * @param {ClientAssetInstall[]} installed
+ * @param {boolean} dryRun
+ * @returns {string[]}
+ */
+function clientAssetCountLines(installed, dryRun) {
+  /** @type {Map<string, { skills: number, agents: number }>} */
+  const byClient = new Map()
+  for (const item of installed) {
+    let counts = byClient.get(item.client)
+    if (!counts) byClient.set(item.client, (counts = { skills: 0, agents: 0 }))
+    if (item.kind === 'skill') counts.skills += 1
+    else counts.agents += 1
+  }
+  const verb = dryRun ? '(dry-run) would install' : 'installed'
+  return [...byClient].map(([client, counts]) => {
+    const parts = []
+    if (counts.skills > 0) parts.push(plural(counts.skills, 'skill'))
+    if (counts.agents > 0) parts.push(plural(counts.agents, 'agent'))
+    return `${verb} ${parts.join(' and ')} for ${client}`
+  })
+}
+
+/**
+ * @param {number} count
+ * @param {string} noun
+ * @returns {string}
+ */
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
 /**
