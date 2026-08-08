@@ -295,13 +295,18 @@ test('an unbounded number of upstream names is capped, and the rest counted', as
 // there is.
 test('an older status file counts every name it holds, capped or not', async () => {
   const { hypHome, stateRoot } = await makeHome()
-  writeRunningDaemon(stateRoot, {
-    listening: false,
-    upstreams: Array.from({ length: 20 }, (_, i) => `up-${i}`),
-  })
+  // 20 names, two of which sanitize away to nothing: past the cap, so the cap
+  // cannot be what makes the count 20, and holding names the printer refuses,
+  // so the sanitizer cannot be either. Counting either filter's leavings would
+  // report 18 or 8 upstreams for a config that asked for 20.
+  const older = Array.from({ length: 20 }, (_, i) => (i === 3 || i === 11 ? '\u200b\u200b' : `up-${i}`))
+  writeRunningDaemon(stateRoot, { listening: false, upstreams: older })
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
   assert.ok(diag)
   assert.match(diag.message, /nothing: 20 upstreams \(/, 'the fallback count is the raw one')
+  // 20 held, 8 printed: the 12 the line does not show are all accounted for,
+  // whichever filter withheld them.
+  assert.match(diag.message, /\+12 more/, 'and every name it does not print is counted back')
 })

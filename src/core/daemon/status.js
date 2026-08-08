@@ -119,10 +119,15 @@ export function gatewaySourceDetails(sources) {
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
   // @ref LLP 0114#fallback-is-visible [implements]: the gateway records whether this bind came through the default-port fallback
   const listenFallback = details.listen_fallback === true
-  const listenFallbackFrom =
-    typeof details.listen_fallback_from === 'string' && details.listen_fallback_from.length > 0
-      ? details.listen_fallback_from
-      : undefined
+  // Display-only, and read out of a file: `listen_fallback_from` is the
+  // configured listen address the gateway could not take, and it is printed
+  // verbatim into `gateway_port_fallback`'s message and its repair line. That
+  // makes it the same kind of value as an upstream `name` or an `entrypoint`,
+  // so it is cleaned at the same last point before render. `host` above is
+  // deliberately left alone: it is not display-only (it composes the endpoint
+  // attach writes into client settings), so bounding it is a separate change.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: a string read back out of status.json is cleaned before it is printed, whichever detail it came from
+  const listenFallbackFrom = sanitizeLabel(details.listen_fallback_from)
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
 }
 
