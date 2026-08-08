@@ -348,7 +348,7 @@ test('runWizardPick: options come from catalog.pickerDescriptors, not a hardcode
     .sort()
   assert.deepEqual(ids, visible)
   // The filter is display-only, so the catalog still carries the hidden
-  // rows the withhold arming set is folded from (LLP 0200 #hidden-rows).
+  // rows the withhold arming set is folded from (LLP 0202 #hidden-rows).
   assert.ok(catalog.pickerDescriptors.has('raw-anthropic'))
   assert.ok(!ids.includes('raw-anthropic'))
   assert.ok(!ids.includes('raw-openai'))
@@ -1020,7 +1020,7 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   assert.match(asked.text(), /carried over/i)
 })
 
-// --- hidden rows (LLP 0200) ---
+// --- hidden rows (LLP 0202) ---
 
 test('runWizardPick: a hidden row is absent from the defaults gate as well as the menu', async () => {
   const tmp = await mkTmp()
@@ -1151,7 +1151,7 @@ test('runWizardPick: a hidden row that is merely detected is not carried on a fi
 // carried row would be dropped and `back` then `enter` would silently delete
 // the upstream the whole install runs on.
 // @ref LLP 0191#re-entry-seeding [tests]: a carried hidden row survives stepping back into pick
-// @ref LLP 0200#carry-through [tests]: once carried, a hidden row stays carried
+// @ref LLP 0202#carry-through [tests]: once carried, a hidden row stays carried
 test('runWizardPick: a carried hidden row survives a re-entry that adds a visible row', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()

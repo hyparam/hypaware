@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0013, LLP 0015, LLP 0016
-**Extended-by:** LLP 0200 (the raw proxy sources remain sources but are no longer offered in the wizard menu)
+**Extended-by:** LLP 0202 (the raw proxy sources remain sources but are no longer offered in the wizard menu)
 
 > The source subsystem: how plugins contribute sources and how the kernel drives
 > their lifecycle. Decomposed from `hypaware-design.md#sources`. This is the LLP

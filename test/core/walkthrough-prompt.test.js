@@ -35,7 +35,7 @@ test('picker prompt prints context under source options and defaults export to l
 
   assert.equal(result.exitCode, 0)
   // Row 3 is otel: the raw API rows sort between codex and otel in
-  // PICKER_DISPLAY_ORDER but are `hidden`, so they never render (LLP 0200).
+  // PICKER_DISPLAY_ORDER but are `hidden`, so they never render (LLP 0202).
   assert.deepEqual(result.sourcesPicked, ['otel'])
   assert.equal(result.exportPicked, 'local-parquet')
 

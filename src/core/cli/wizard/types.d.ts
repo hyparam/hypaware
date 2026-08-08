@@ -40,7 +40,7 @@ export type WizardPathway = 'team' | 'local'
  * Which tier produced the pick lane's seed set, most-recent answer first
  * (LLP 0191 #re-entry-seeding, LLP 0183 #seed-from-config). The seed set
  * itself does not record where it came from, and hidden-row carry-through
- * (LLP 0200 #carry-through) reads differently off each tier:
+ * (LLP 0202 #carry-through) reads differently off each tier:
  *
  * - `selection`: a re-entry after stepping back, seeded with the selection
  *   the previous pass confirmed. A hidden row is in it only because that

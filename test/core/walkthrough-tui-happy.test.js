@@ -85,7 +85,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     })
 
     // Sources prompt. The rendered rows are claude, codex, otel: the raw
-    // API rows are `hidden` and never render (LLP 0200). Move down twice
+    // API rows are `hidden` and never render (LLP 0202). Move down twice
     // to land on otel, toggle, then enter. It is the only prompt: export
     // defaults to local-parquet and retention is never asked (LLP 0137).
     await settle()
@@ -107,7 +107,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     assert.equal(config.sinks?.local?.writer, '@hypaware/format-parquet')
     // Wire-through evidence: the TUI rendered the source list at least once.
     assert.match(io.output(), /OpenTelemetry/)
-    // ...and the hidden rows stayed out of it (LLP 0200).
+    // ...and the hidden rows stayed out of it (LLP 0202).
     assert.doesNotMatch(io.output(), /Anthropic API/)
     assert.doesNotMatch(io.output(), /OpenAI API/)
   } finally {
@@ -177,7 +177,7 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
   // TTY probe. One answer: source '3' (otel; the raw API rows are hidden,
-  // LLP 0200). Neither export nor retention is asked.
+  // LLP 0202). Neither export nor retention is asked.
   Object.defineProperty(input, 'isTTY', { value: true })
   const stdout = answerDrivenOutput(input, ['3\n'], true)
   const stderr = makeBuf()

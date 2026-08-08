@@ -60,7 +60,7 @@ On a TTY this launches the interactive walkthrough:
    no projector of their own, so on their own they proxy traffic and record
    nothing. They remain real sources: `hyp init --source raw-anthropic`
    still composes one, and a config that already collects one keeps it
-   through a reconfigure (LLP 0200).
+   through a reconfigure (LLP 0202).
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
 3. The **retention window** is not asked: the pathway sets it, `90` days on

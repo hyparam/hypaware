@@ -90,7 +90,7 @@ test('openclaw picker summary names the manual gateway restart attach requires',
 // same class of side effect the otel row already names, and these two rows
 // carry no adapter to disclose it anywhere else.
 //
-// Since LLP 0200 both rows are `hidden`, and the picker menu was the only
+// Since LLP 0202 both rows are `hidden`, and the picker menu was the only
 // consumer of `summary`, so this copy currently reaches nobody: these two
 // are composed by `hyp init --source <id>`, which never prompts. The
 // assertions stay because hiding is a display filter, not a deletion - the

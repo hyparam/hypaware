@@ -1,4 +1,4 @@
-# LLP 0200: Picker rows can be hidden from the menu without ceasing to be sources
+# LLP 0202: Picker rows can be hidden from the menu without ceasing to be sources
 
 **Type:** Decision
 **Status:** Accepted

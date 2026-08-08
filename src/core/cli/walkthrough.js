@@ -527,7 +527,7 @@ export function backfillConsentTitle(providers, retentionDays) {
  * row still appears rather than being dropped.
  *
  * `raw-anthropic` / `raw-openai` are listed here but no longer render:
- * their manifest marks them `hidden` (LLP 0200). Keep the ids in this
+ * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
  * array and their descriptors in the catalog - see
  * {@link visiblePickerDescriptors} for what still depends on them.
  *
@@ -1935,7 +1935,7 @@ export async function loadPickerDescriptors() {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0200#hidden-rows`).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:

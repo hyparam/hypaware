@@ -11,7 +11,7 @@ use the same words to mean the same things.
 A thing HypAware can capture signals from. The picker sources are `claude`,
 `codex`, `raw-anthropic`, `raw-openai`, and `otel`; the first-run wizard menu
 offers `claude`, `codex`, and `otel`, the two raw proxy rows being **hidden**
-(LLP 0200) rather than removed. Sources divide into two kinds:
+(LLP 0202) rather than removed. Sources divide into two kinds:
 
 - **Client source**: a known tool HypAware configures for you. `claude` and
   `codex` are the client sources. Picking one adds its gateway upstream *and*
@@ -25,7 +25,7 @@ offers `claude`, `codex`, and `otel`, the two raw proxy rows being **hidden**
   "observe my own AI app" persona. Not autodetectable: there is no installed
   tool to find. Reached by `hyp init --source <id>` only: the rows are
   hidden from the menu because, carrying no adapter, they compose a working
-  proxy that projects no rows (LLP 0200).
+  proxy that projects no rows (LLP 0202).
 
 `otel` is a third shape: a local OTLP receiver for apps that export
 OpenTelemetry signals. Like a raw proxy source, it is manual and not
