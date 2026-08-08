@@ -31,6 +31,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { ClientAssetInstall } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -1565,6 +1566,11 @@ export async function runPickerFinale(args) {
       },
       async (span) => {
         const framed = framedStream(stdout)
+        // No `stdout` here on purpose: the materializer's per-copy line is the
+        // right output for `hyp skills install`, where the copies are the
+        // command's subject, but in the finale a dozen path lines bury the one
+        // fact the step reports. The counts go out instead; the paths stay
+        // available in the run summary and the span.
         const installed = await materializeClientAssets({
           clients: clientsPicked,
           descriptors: descriptorMap,
@@ -1572,9 +1578,9 @@ export async function runPickerFinale(args) {
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
           dryRun,
-          stdout: framed,
           stderr,
         })
+        for (const line of clientAssetCountLines(installed, dryRun)) framed.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -2019,6 +2025,47 @@ export async function buildWalkthroughClientDescriptorMap() {
     }
   } catch { /* discovery failure → empty map */ }
   return map
+}
+
+/**
+ * One line per client naming how many skills and agents landed there, in the
+ * order the copies were made.
+ *
+ * Counted per client rather than summed across them, because the sum is the
+ * one number that is true of nobody: six skills copied to two clients is
+ * twelve copies, and neither client got twelve. Names are left out entirely -
+ * the user picked these clients a screen ago and did not choose the assets,
+ * so the roster is not a decision they are being shown for review.
+ *
+ * @param {ClientAssetInstall[]} installed
+ * @param {boolean} dryRun
+ * @returns {string[]}
+ */
+function clientAssetCountLines(installed, dryRun) {
+  /** @type {Map<string, { skills: number, agents: number }>} */
+  const byClient = new Map()
+  for (const item of installed) {
+    let counts = byClient.get(item.client)
+    if (!counts) byClient.set(item.client, (counts = { skills: 0, agents: 0 }))
+    if (item.kind === 'skill') counts.skills += 1
+    else counts.agents += 1
+  }
+  const verb = dryRun ? '(dry-run) would install' : 'installed'
+  return [...byClient].map(([client, counts]) => {
+    const parts = []
+    if (counts.skills > 0) parts.push(plural(counts.skills, 'skill'))
+    if (counts.agents > 0) parts.push(plural(counts.agents, 'agent'))
+    return `${verb} ${parts.join(' and ')} for ${client}`
+  })
+}
+
+/**
+ * @param {number} count
+ * @param {string} noun
+ * @returns {string}
+ */
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
 /**
