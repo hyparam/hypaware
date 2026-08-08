@@ -13,6 +13,7 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
   join: 'Join your team',
   pick: 'Choose what to collect',
   sync: 'Choose what syncs',
+  folders: 'Choose how new folders are handled',
   finale: 'Finish setup',
 })
 
@@ -38,7 +39,7 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  *    every list here and `runInitWizard` passes it no progress line.
  */
 const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} */ ({
-  team: ['join', 'pick', 'sync', 'finale'],
+  team: ['join', 'pick', 'sync', 'folders', 'finale'],
   local: ['pick', 'finale'],
 })
 
@@ -47,10 +48,13 @@ const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} *
  * uncommitted pathway (the fork has not resolved, or the run is
  * non-interactive) has no itinerary and therefore no denominator.
  *
- * The `sync` lane (LLP 0188 #never-silent) runs on every enrolled run:
- * always on the team pathway (the run that just enrolled), and on the
- * local pathway only for a managed machine reconfiguring through it
- * (LLP 0182: `managed` is an input, not a pathway). `managed` is known
+ * The `sync` lane (LLP 0188 #never-silent) and the `folders` lane
+ * (LLP 0200 #wizard) run on every enrolled run, in that order: always on
+ * the team pathway (the run that just enrolled), and on the local pathway
+ * only for a managed machine reconfiguring through it (LLP 0182:
+ * `managed` is an input, not a pathway). Both are enrolled-only for the
+ * same reason - nothing forwards from an unenrolled machine, so neither
+ * question has stakes there (LLP 0106 #enrolled-only). `managed` is known
  * at the gate, before the fork, so the denominator still resolves once.
  *
  * @param {WizardPathway | undefined} pathway
@@ -61,7 +65,7 @@ export function wizardItinerary(pathway, opts = {}) {
   if (!pathway) return []
   const base = WIZARD_ITINERARIES[pathway] ?? []
   if (pathway === 'local' && opts.managed === true) {
-    return base.flatMap((step) => (step === 'pick' ? ['pick', 'sync'] : [step]))
+    return base.flatMap((step) => (step === 'pick' ? ['pick', 'sync', 'folders'] : [step]))
   }
   return base
 }

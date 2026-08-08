@@ -10,6 +10,7 @@ import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { localOnlyListPath, writeLocalOnlyDirs } from '../../src/core/usage-policy/local_only.js'
+import { writeFolderAskMode } from '../../src/core/usage-policy/folder_ask.js'
 
 // T8 - `hyp status` never-silent withholding surface (LLP 0069 R9, LLP 0080
 // #status). `collectHypAwareStatus` reads the machine-local local-only list
@@ -41,11 +42,11 @@ test('no local-only list yet: count is 0 and the text/JSON surfaces stay quiet',
   const hypHome = await makeHome()
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
-  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 0 })
+  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'sync' })
   assert.ok(!report.diagnostics.some((d) => d.kind === 'local_only_list_unreadable'))
 
   const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
-  assert.deepEqual(json.usage_policy, { local_only_dir_count: 0 })
+  assert.deepEqual(json.usage_policy, { local_only_dir_count: 0, folder_ask: 'sync' })
 
   const stdout = makeBuf()
   renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
@@ -58,7 +59,7 @@ test('an empty (but present) list also hides the line', async () => {
   await writeLocalOnlyDirs({ stateDir: stateRoot, dirs: [] })
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
-  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 0 })
+  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'sync' })
 
   const stdout = makeBuf()
   renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
@@ -74,11 +75,11 @@ test('N > 0 renders the withholding line in text and the count in JSON', async (
   })
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
-  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 2 })
+  assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 2, folderAsk: 'sync' })
   assert.equal(report.overall, 'healthy')
 
   const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
-  assert.deepEqual(json.usage_policy, { local_only_dir_count: 2 })
+  assert.deepEqual(json.usage_policy, { local_only_dir_count: 2, folder_ask: 'sync' })
 
   const stdout = makeBuf()
   renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
@@ -116,4 +117,45 @@ test('a corrupt local-only list surfaces a diagnostic and a null usagePolicy, ne
   const text = stdout.text()
   assert.doesNotMatch(text, /local-only:\s+withholding/, 'never renders a count it does not trust')
   assert.match(text, /local_only_list_unreadable/)
+})
+
+// The standing new-folder ask (LLP 0200) rides the same never-silent rule: a
+// machine that switched the classification prompt off says so, and one that
+// never touched it renders exactly what it rendered before.
+// @ref LLP 0200#cli [tests]:
+
+test('the new-folder line is enrolled-only, and states either mode', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+
+  // A solo host has no server, so the question has no stakes and the hook
+  // is inert there (LLP 0106 #enrolled-only): no line, either mode.
+  const solo = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(solo.layered, null)
+  assert.deepEqual(solo.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'sync' })
+  const soloOut = makeBuf()
+  renderStatusText({ report: solo, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: soloOut })
+  assert.doesNotMatch(soloOut.text(), /new folders:/)
+
+  // An enrolled host states it either way: the default is the mode with
+  // data consequences, so it is exactly the one that must not be silent.
+  const enrolled = { ...solo, layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }) }
+  const syncOut = makeBuf()
+  renderStatusText({ report: enrolled, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: syncOut })
+  assert.match(syncOut.text(), /new folders:\s+sync without asking/)
+  assert.match(syncOut.text(), /hyp policy folders ask/)
+
+  await writeFolderAskMode({ stateDir: stateRoot, mode: 'ask' })
+  const asked = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.deepEqual(asked.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'ask' })
+  const json = renderStatusJson({ report: asked, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
+  assert.deepEqual(json.usage_policy, { local_only_dir_count: 0, folder_ask: 'ask' })
+
+  const askOut = makeBuf()
+  renderStatusText({
+    report: { ...asked, layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }) },
+    clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: askOut,
+  })
+  assert.match(askOut.text(), /new folders:\s+asked about once each/)
+  assert.match(askOut.text(), /hyp policy folders sync/)
 })

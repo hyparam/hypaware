@@ -324,6 +324,20 @@ hyp policy list                       # every machine-local entry
 hyp policy unset <path> [class]       # back to the implicit default
 ```
 
+On a machine connected to a server, folders you have not marked sync
+without asking. If you would rather be asked once per new folder, a session
+opened somewhere new can prompt you to classify it instead:
+
+```sh
+hyp policy folders ask                # ask once per new folder
+hyp policy folders sync               # back to syncing without asking (default)
+hyp policy folders                    # report which is in force
+```
+
+This gates the question only: folders you already marked keep their class,
+and `.hypignore` files are unaffected either way. `hyp init` asks for this
+in its own step, and `hyp status` names it on an enrolled machine.
+
 Markings are prospective only: rows captured before a marking existed stay
 in the cache. Delete those with the separate destructive step:
 

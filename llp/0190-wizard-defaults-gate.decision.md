@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
+**Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
 > and the prompt flow of [LLP 0135 §pick](./0135-install-experience-overhaul.design.md).

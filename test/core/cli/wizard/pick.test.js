@@ -200,6 +200,46 @@ test('runWizardPick: the gate names locked sources as fleet-managed and accept k
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
+// The express path (LLP 0201): the gate's rows are taken without a
+// keypress, but the statement is still printed - the never-silent floor
+// binds the statement, not the prompt.
+// @ref LLP 0201#narrate [tests]:
+
+test('runWizardPick: autoAccept takes the gate rows and prints what the gate would have said', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const stdout = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
+    confirm: async () => { throw new Error('the express path must not prompt') },
+    detect: async () => new Set(['codex']),
+    locked: ['claude'],
+  }))
+  const out = stdout.text()
+  assert.match(out, /HypAware will record:/)
+  assert.match(out, /· managed by your fleet/, 'the locked row is named on the fast path too')
+  assert.match(out, /codex/i)
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
+})
+
+test('runWizardPick: autoAccept with no default to take still opens the menu', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    autoAccept: true,
+    confirm: async () => { throw new Error('there is no gate to accept') },
+    detect: async () => new Set(),
+  }))
+  // Defaults where there are defaults: with nothing detected and nothing
+  // locked, "accept the defaults" would mean "record nothing".
+  assert.deepEqual(result.sourcesPicked, ['otel'])
+})
+
 test('runWizardPick: no gate when nothing is detected and nothing is locked', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()

@@ -14,6 +14,7 @@ import type {
 } from '../registry/types.d.ts'
 import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { CommandRunner, DurableBinResult } from '../cli/types.d.ts'
+import type { FolderAskMode } from '../usage-policy/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -270,8 +271,15 @@ export interface HypAwareStatusReport {
    * from forwarding, read from the machine-local exclusion list. Null only
    * when the list itself could not be read or parsed (see the
    * `local_only_list_unreadable` diagnostic) - never a silent zero.
+   *
+   * `folderAsk` is the standing new-folder ask (LLP 0200): `sync` is the
+   * default (unclassified folders sync and nothing interrupts the session),
+   * `ask` means the user opted into a session-start question per new folder.
+   * It rides here for the same never-silent reason as the count: the default
+   * is the mode with data consequences, so it is exactly the one that must
+   * not be silent.
    */
-  usagePolicy: { localOnlyDirCount: number } | null
+  usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
   /**
    * The pending first-sync export hold's absolute deadline (epoch ms), read
    * from the machine-local marker (LLP 0101). Null whenever no hold is live:

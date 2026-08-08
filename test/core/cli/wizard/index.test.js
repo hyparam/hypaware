@@ -33,6 +33,18 @@ async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-index-'))
 }
 
+/**
+ * A catalog with one picker row plus a detector that finds it, so the
+ * express gate (LLP 0201) has rows to list. With nothing detected and
+ * nothing locked the gate is skipped entirely, which is what
+ * `emptyCatalog` gives.
+ */
+function detectableCatalog() {
+  const catalog = emptyCatalog()
+  catalog.pickerDescriptors.set('claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' })
+  return catalog
+}
+
 /** Minimal empty catalog so the orchestrator never discovers real plugins. */
 function emptyCatalog() {
   return /** @type {any} */ ({
@@ -100,6 +112,10 @@ function wizardOpts(home, over = {}) {
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
     syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
+    folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
+    // The express gate (LLP 0201) fronts the lanes on every attended run;
+    // these tests exercise the step-by-step path, so it declines by default.
+    express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'choose' },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
       opts._finaleArgs = args
@@ -117,7 +133,7 @@ function wizardOpts(home, over = {}) {
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
-  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure']) {
+  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure']) {
     const inner = opts[name]
     opts[name] = async (/** @type {any[]} */ ...a) => { calls.push(name); return inner(...a) }
   }
@@ -300,11 +316,92 @@ test('runInitWizard: a managed first run locks the org rows from the on-disk cen
 
 // --- the sync-scope step (LLP 0188 #never-silent) ---
 
-test('runInitWizard: the team pathway runs the sync-scope step between pick and configure', async () => {
+// The express gate (LLP 0201): one yes before the lanes accepts every
+// lane's stated default. The lanes still run - they narrate instead of
+// prompting - so nothing is skipped except the keypresses.
+// @ref LLP 0201#gate [tests]:
+
+test('runInitWizard: accepting the express gate auto-accepts every lane and states no positions', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // Every lane still runs, in order: the gate answers them, it does not
+  // remove them.
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  assert.equal(opts._pickOpts.autoAccept, true)
+  assert.equal(opts._syncOpts.autoAccept, true)
+  assert.equal(opts._folderOpts.autoAccept, true)
+  assert.equal(opts._expressOpts.enrolled, true, 'the gate is told whether it can promise anything about a server')
+  // No lane is answering anything, so no lane states a position.
+  assert.equal(opts._pickOpts.progress, undefined)
+  assert.equal(opts._syncOpts.progress, undefined)
+  assert.equal(opts._folderOpts.progress, undefined)
+  assert.equal(opts._finaleArgs.progress, undefined)
+})
+
+test('runInitWizard: with nothing detected and nothing locked, no express gate is shown', async () => {
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    detect: async () => new Set(),
+    express: async () => { gates += 1; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(gates, 0, 'nothing to accept is nothing to ask about (LLP 0201 #no-default-no-accept)')
+  assert.equal(opts._pickOpts.autoAccept, undefined, 'the lane opens its own menu instead')
+})
+
+test('runInitWizard: declining the express gate leaves the lanes prompting, positions and all', async () => {
+  const { opts } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
+  await runInitWizard(opts)
+  assert.equal(opts._pickOpts.autoAccept, undefined)
+  assert.equal(opts._syncOpts.autoAccept, undefined)
+  assert.equal(opts._folderOpts.autoAccept, undefined)
+  assert.equal(opts._pickOpts.progress, 'Step 2 of 5 · Choose what to collect')
+})
+
+test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'cancelled',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(calls, ['gate', 'fork'])
+  assert.match(stderr.text(), /cancelled/)
+})
+
+test('runInitWizard: back at the express gate re-presents the fork', async () => {
+  let forks = 0
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => { forks += 1; return 'local' },
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => { gates += 1; return gates === 1 ? 'back' : 'choose' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(forks, 2, 'the fork is the screen behind the express gate')
+  assert.equal(gates, 2)
+})
+
+test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure', 'finale'])
+  // The two enrolled-only questions run in order (LLP 0188, then LLP 0200
+  // #wizard) and both precede the acting phases.
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
   // Candidates are the pick result's locked-filtered descriptors.
   assert.deepEqual(opts._syncOpts.candidates, pickResult().descriptors)
 })

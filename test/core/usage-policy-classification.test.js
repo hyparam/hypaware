@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,6 +10,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/matcher.js'
 import { localOnlyListPath } from '../../src/core/usage-policy/local_only.js'
+import { folderAskPath, writeFolderAskMode } from '../../src/core/usage-policy/folder_ask.js'
 import { LocalOnlyListUnreadableError } from '../../src/core/usage-policy/local_only.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import {
@@ -68,28 +69,152 @@ test('buildClassificationPrompt names the folder, all three classes, and each po
   assert.equal(prompt.includes('\u2014'), false)
 })
 
-test('decideClassification: prompt only when enrolled AND interactive AND unclassified', () => {
+test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
+  // A user who does not want this question at all has to be able to answer
+  // that in the session that asked, not by finding a setting later.
+  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
+  assert.match(prompt, /hyp policy folders sync/)
+  assert.match(prompt, /hyp policy folders ask/)
+})
+
+test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
+  const asking = { askMode: /** @type {const} */ ('ask') }
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: false }),
+    decideClassification({ enrolled: true, interactive: true, governed: false, ...asking }),
     { prompt: true, reason: 'unclassified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: false, interactive: true, governed: false }),
+    decideClassification({ enrolled: false, interactive: true, governed: false, ...asking }),
     { prompt: false, reason: 'unenrolled' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: true }),
+    decideClassification({ enrolled: true, interactive: true, governed: true, ...asking }),
     { prompt: false, reason: 'classified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: false, governed: false }),
+    decideClassification({ enrolled: true, interactive: false, governed: false, ...asking }),
     { prompt: false, reason: 'non-interactive' }
   )
   // Unenrolled dominates even when interactive+unclassified would otherwise ask.
-  assert.equal(decideClassification({ enrolled: false, interactive: false, governed: false }).prompt, false)
+  assert.equal(decideClassification({ enrolled: false, interactive: false, governed: false, ...asking }).prompt, false)
+  // An omitted askMode is the product default (LLP 0200 #default), which is
+  // sync: the per-folder ask is the opt-in half of the pair.
+  assert.equal(decideClassification({ enrolled: true, interactive: true, governed: false }).reason, 'ask-disabled')
 })
 
-test('evaluateCwdClassification prompts for an enrolled, interactive, unclassified cwd', async () => {
+test('decideClassification: the default sync mode means no ask at all (LLP 0200 #default)', () => {
+  assert.deepEqual(
+    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'sync' }),
+    { prompt: false, reason: 'ask-disabled' }
+  )
+  // "Stop asking me" is the broadest answer on the screen, so it outranks
+  // every per-folder reason below it - but never enrollment, which is what
+  // makes the hook exist at all.
+  assert.equal(
+    decideClassification({ enrolled: true, interactive: true, governed: true, askMode: 'sync' }).reason,
+    'ask-disabled'
+  )
+  assert.equal(
+    decideClassification({ enrolled: false, interactive: true, governed: false, askMode: 'sync' }).reason,
+    'unenrolled'
+  )
+  // The explicit `ask` is exactly today's behavior, not a third state.
+  assert.deepEqual(
+    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'ask' }),
+    { prompt: true, reason: 'unclassified' }
+  )
+})
+
+test('evaluateCwdClassification honors a standing sync preference and reports it', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-ask-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await writeFolderAskMode({ stateDir, mode: 'sync' })
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, false)
+    assert.equal(result.reason, 'ask-disabled')
+    assert.equal(result.askMode, 'sync')
+    assert.equal(result.promptText, undefined)
+    assert.equal(result.enrolled, true, 'the machine is still enrolled; only the question is off')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a machine that never answered is not asked: the default is sync (LLP 0200 #default)', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-default-'))
+  try {
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, false)
+    assert.equal(result.reason, 'ask-disabled')
+    assert.equal(result.askMode, 'sync', 'no preference on disk means the product default, not the ask')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('turning the ask on restores the per-folder question', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-on-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await writeFolderAskMode({ stateDir, mode: 'ask' })
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, true)
+    assert.equal(result.reason, 'unclassified')
+    assert.ok(result.promptText?.includes('/work/fresh'))
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a corrupt preference costs a question, never a silent sync', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-corrupt-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const prefPath = folderAskPath(stateDir)
+    mkdirSync(path.dirname(prefPath), { recursive: true })
+    writeFileSync(prefPath, '{ truncated')
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, true)
+    assert.equal(result.askMode, 'ask')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('evaluateCwdClassification prompts for an enrolled, interactive, unclassified cwd with the ask on', async () => {
   const result = await evaluateCwdClassification({
     cwd: '/work/fresh',
     interactive: true,
@@ -97,6 +222,7 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, true)
@@ -131,6 +257,7 @@ test('evaluateCwdClassification does not prompt once the folder is classified', 
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
       createResolver: (listPath) => makeResolver({ governedBy: listPath, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, false)
@@ -146,6 +273,7 @@ test('evaluateCwdClassification passes a non-interactive session through', async
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, false)
