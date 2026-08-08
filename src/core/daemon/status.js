@@ -121,10 +121,15 @@ export function gatewaySourceDetails(sources) {
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
   // @ref LLP 0114#fallback-is-visible [implements]: the gateway records whether this bind came through the default-port fallback
   const listenFallback = details.listen_fallback === true
-  const listenFallbackFrom =
-    typeof details.listen_fallback_from === 'string' && details.listen_fallback_from.length > 0
-      ? details.listen_fallback_from
-      : undefined
+  // Display-only, and read out of a file: `listen_fallback_from` is the
+  // configured listen address the gateway could not take, and it is printed
+  // verbatim into `gateway_port_fallback`'s message and its repair line. That
+  // makes it the same kind of value as an upstream `name` or an `entrypoint`,
+  // so it is cleaned at the same last point before render. `host` above is
+  // deliberately left alone: it is not display-only (it composes the endpoint
+  // attach writes into client settings), so bounding it is a separate change.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: a string read back out of status.json is cleaned before it is printed, whichever detail it came from
+  const listenFallbackFrom = sanitizeLabel(details.listen_fallback_from)
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
 }
 
@@ -145,6 +150,57 @@ function gatewaySourceRawDetails(sources) {
   const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
   if (!rawDetails) return undefined
   return /** @type {Record<string, unknown>} */ (rawDetails)
+}
+
+/**
+ * How many upstream names a single warning line will spell out before it stops
+ * naming them and counts the remainder.
+ *
+ * `sanitizeLabel` bounds each name; nothing bounds how many of them the file
+ * holds. These names are read inside one sentence rather than down a block of
+ * lines, so the cap sits well under `recent clients`' 32: the count leads that
+ * sentence and is the number that actually matters, which leaves the list free
+ * to be a sample.
+ */
+const MAX_PRINTED_UPSTREAM_NAMES = 8
+
+/**
+ * The upstream names a status file offers, made safe to print: each one
+ * cleaned through `sanitizeLabel`, the list capped, and the number of names
+ * being withheld returned alongside so the message can account for them.
+ *
+ * `total` counts the raw non-empty strings, before either filter, because that
+ * is what an older status file's missing `upstreams_configured` falls back to.
+ * Cleaning bounds what is *printed*; it must never revise how many upstreams
+ * the config is reported to have asked for.
+ *
+ * These names arrive in the same file as `recent_entrypoints`, so the reason
+ * that list is sanitized on read applies here unchanged: `status.json` is a
+ * *file*, and core cannot assume the daemon that wrote it was this version,
+ * this build, or well behaved, while everything read here is about to be
+ * printed to a terminal. An upstream `name` is config-authored rather than
+ * client-authored, which lowers the odds but not the reachability, and two
+ * paths reading one file should not disagree about whether it is trusted.
+ *
+ * @param {unknown} value
+ * @returns {{ names: string[], total: number, hidden: number }}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: the sanitize-and-cap on read is a property of reading status.json, not of the entrypoint list that first needed it
+ */
+function printableUpstreamNames(value) {
+  const raw = Array.isArray(value)
+    ? /** @type {string[]} */ (value.filter((u) => typeof u === 'string' && u.length > 0))
+    : []
+  /** @type {string[]} */
+  const names = []
+  for (const name of raw) {
+    if (names.length === MAX_PRINTED_UPSTREAM_NAMES) break
+    const label = sanitizeLabel(name)
+    // A name that sanitizes away entirely is withheld rather than printed
+    // empty; `hidden` counts it with the ones the cap dropped, since from the
+    // reader's side both are names the file holds and the line does not show.
+    if (label !== undefined) names.push(label)
+  }
+  return { names, total: raw.length, hidden: raw.length - names.length }
 }
 
 /**
@@ -173,24 +229,21 @@ function gatewaySourceRawDetails(sources) {
  *
  * A status file written before `upstreams_configured` existed carries names
  * only; those still count for themselves, so an older daemon's dropped
- * `base_url` stays visible.
+ * `base_url` stays visible. The count comes off the raw list for that reason,
+ * while `printableUpstreamNames` bounds only the names handed back for
+ * display (`hidden` is how many of them it kept back).
  *
  * @param {SourceSnapshot[] | undefined} sources
- * @returns {{ count: number, names: string[] } | undefined}
+ * @returns {{ count: number, names: string[], hidden: number } | undefined}
  */
 function gatewayIdleWithConfiguredUpstreams(sources) {
   const details = gatewaySourceRawDetails(sources)
   if (!details || details.listening !== false) return undefined
-  const upstreams = details.upstreams
-  const names = Array.isArray(upstreams)
-    ? /** @type {string[]} */ (upstreams.filter((u) => typeof u === 'string' && u.length > 0))
-    : []
+  const { names, total, hidden } = printableUpstreamNames(details.upstreams)
   const rawCount = details.upstreams_configured
   const count =
-    typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
-      ? rawCount
-      : names.length
-  return count > 0 ? { count, names } : undefined
+    typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : total
+  return count > 0 ? { count, names, hidden } : undefined
 }
 
 /**
@@ -673,11 +726,14 @@ export async function collectHypAwareStatus(opts = {}) {
     // *wanted* no upstream (hermes-only) reports no configured upstreams here
     // and never reaches this branch, so it stays healthy and silent.
     // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway is listening" is readable from status.json steadily, not only from a boot-time log line
-    const { count, names } = idleGatewayUpstreams
+    const { count, names, hidden } = idleGatewayUpstreams
     // Count first, names in parentheses when there are any: `name` is itself
     // one of the two keys that drops an entry, so the config that most needs
-    // this warning is exactly the one that can supply no name to print.
-    const named = names.length > 0 ? ` (${names.join(', ')})` : ''
+    // this warning is exactly the one that can supply no name to print. The
+    // names the reader held back are counted rather than dropped silently, so
+    // a truncated list never reads as a complete one.
+    const withheld = hidden > 0 ? `, +${hidden} more` : ''
+    const named = names.length > 0 ? ` (${names.join(', ')}${withheld})` : ''
     diagnostics.push({
       severity: 'warning',
       kind: 'gateway_idle_no_upstreams',

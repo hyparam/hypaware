@@ -228,3 +228,85 @@ test('a stopped daemon does not warn off a stale status snapshot', async () => {
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams'), undefined)
 })
+
+// The names in this warning are read out of `status.json`, which is a *file*:
+// core cannot assume the daemon that wrote it was this version, this build, or
+// well behaved, and the value is about to be printed to a terminal. The
+// `recent clients` list is read back out of the same file through
+// `sanitizeLabel` and a count cap for exactly that reason (LLP 0164); these
+// names were going to the terminal raw. All three ways a name can be hostile
+// are answered below - control and invisible bytes, unbounded length, and
+// unbounded count.
+// @ref LLP 0164#status-reads-it-from-the-status-file [tests]: what core reads back out of status.json is cleaned at the last point before render, whichever list it came from
+test('a hostile upstream name cannot drive the terminal from the warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    listening: false,
+    // An escape sequence that erases the line and forges a plausible second
+    // status line, and a zero-width run that hides inside a name on screen.
+    upstreams: ['anthropic\u001b[2K\nhyp: all good', 'open\u200b\u200bai'],
+    upstreams_configured: 2,
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag)
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(diag.message), 'no control byte reaches the message')
+  assert.ok(!diag.message.includes('\u200b'), 'and no zero-width run does either')
+  assert.match(diag.message, /anthropic/, 'the printable part of a name still names it')
+  assert.match(diag.message, /openai/, 'a hidden run is closed up, not made to drop the name')
+})
+
+test('an unbounded upstream name is clamped in the warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const long = 'a'.repeat(5000)
+  writeRunningDaemon(stateRoot, { listening: false, upstreams: [long], upstreams_configured: 1 })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag)
+  assert.ok(!diag.message.includes(long), 'the raw name is not printed whole')
+  // `sanitizeLabel`'s 120-character clamp, truncation marker included.
+  assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped, and marked truncated')
+})
+
+test('an unbounded number of upstream names is capped, and the rest counted', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const many = Array.from({ length: 50 }, (_, i) => `up-${i}`)
+  writeRunningDaemon(stateRoot, { listening: false, upstreams: many, upstreams_configured: 50 })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag)
+  assert.match(diag.message, /nothing: 50 upstreams \(/, 'the count is still the true one')
+  assert.equal(
+    many.filter((name) => diag.message.includes(`${name},`) || diag.message.includes(`${name})`)).length,
+    8,
+    'only the capped number of names is spelled out',
+  )
+  // A truncated list that reads as a complete one would be worse than no list.
+  assert.match(diag.message, /\+42 more/, 'and the names held back are counted, not dropped')
+})
+
+// The sanitizer and the cap bound what is *printed*. Neither may revise the
+// count, which is the whole signal separating a dropped upstream from a
+// legitimately upstream-less gateway - including on a status file too old to
+// carry `upstreams_configured`, where the raw name list is the only count
+// there is.
+test('an older status file counts every name it holds, capped or not', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // 20 names, two of which sanitize away to nothing: past the cap, so the cap
+  // cannot be what makes the count 20, and holding names the printer refuses,
+  // so the sanitizer cannot be either. Counting either filter's leavings would
+  // report 18 or 8 upstreams for a config that asked for 20.
+  const older = Array.from({ length: 20 }, (_, i) => (i === 3 || i === 11 ? '\u200b\u200b' : `up-${i}`))
+  writeRunningDaemon(stateRoot, { listening: false, upstreams: older })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_idle_no_upstreams')
+  assert.ok(diag)
+  assert.match(diag.message, /nothing: 20 upstreams \(/, 'the fallback count is the raw one')
+  // 20 held, 8 printed: the 12 the line does not show are all accounted for,
+  // whichever filter withheld them.
+  assert.match(diag.message, /\+12 more/, 'and every name it does not print is counted back')
+})
