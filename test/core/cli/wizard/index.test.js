@@ -830,7 +830,7 @@ test('runInitWizard: the first ask comes last, after the privacy narration', asy
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
 })
 
-// @ref LLP 0200#offer [tests]: the sync offer sits between the narration it acts on and the first ask that may take the terminal
+// @ref LLP 0203#offer [tests]: the sync offer sits between the narration it acts on and the first ask that may take the terminal
 test('runInitWizard: an enrolled run is offered the first sync, after the narration and before the first ask', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })

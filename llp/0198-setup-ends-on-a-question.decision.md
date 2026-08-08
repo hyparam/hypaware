@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
-**Extended-by:** LLP 0200 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask)
+**Extended-by:** LLP 0203 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask)
 **Related:** LLP 0135 (#first-look, #privacy, #finale: the closing sequence this appends to), LLP 0130 (#picker-block: manifest-contributed picker rows, the pattern the launch spec follows), LLP 0180 (client derivation from `contributes.client`), LLP 0107 (#gating: the skills that make these questions answerable ride attach), LLP 0011 (#no-architectural-names: the user asks in their own words)
 
 > Extends the closing sequence of [LLP 0135](./0135-install-experience-overhaul.design.md).

@@ -12,7 +12,7 @@
  * logs on the server tonight has to notice the sentence, remember the command,
  * and run it in a terminal the wizard is about to hand to a client.
  *
- * @ref LLP 0200#offer [implements]: setup offers the release rather than only naming it
+ * @ref LLP 0203#offer [implements]: setup offers the release rather than only naming it
  *
  * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { RunWizardSyncNowOptions, WizardSyncNowResult } from '../../../../src/core/cli/wizard/types.js'
@@ -40,7 +40,7 @@ const NOW = 'now'
  * before this ran, so a cancelled prompt, a failed spawn, or a child that
  * exits non-zero all degrade to the wait the user already had.
  *
- * @ref LLP 0200#offer [implements]: the closing sync offer, attended-only, defaulting to wait
+ * @ref LLP 0203#offer [implements]: the closing sync offer, attended-only, defaulting to wait
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<WizardSyncNowResult>}
  */
@@ -98,7 +98,7 @@ export async function runWizardSyncNow(opts) {
         // a user who read the destination list and answered no, and telling
         // the second one their history is on its way would be a false claim
         // about the one thing this screen exists to be honest about.
-        // @ref LLP 0200#read-back [implements]: the outcome is read from the hold marker, never inferred from the exit code
+        // @ref LLP 0203#read-back [implements]: the outcome is read from the hold marker, never inferred from the exit code
         const stillHeld = await readHold(opts)
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
@@ -173,7 +173,7 @@ async function askSendNow(opts, deadline) {
  * owns a real prompt. It is safe here because the wizard's own prompt has
  * resolved, so raw mode and the cursor are already restored.
  *
- * @ref LLP 0200#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
+ * @ref LLP 0203#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<{ code: number | null, error?: string }>}
  */
@@ -207,7 +207,7 @@ function runSyncChild(opts) {
  * sent", so handing it back on an error would report a release nobody
  * observed and swallow the line that restates the wait.
  *
- * @ref LLP 0200#read-back [implements]: an unreadable re-read is treated as still held
+ * @ref LLP 0203#read-back [implements]: an unreadable re-read is treated as still held
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<number | null>}
  */

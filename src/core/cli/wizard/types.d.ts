@@ -545,7 +545,7 @@ export type FirstAskResult =
   | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'error' }
 
 /**
- * The closing "send now" offer's outcome (LLP 0200).
+ * The closing "send now" offer's outcome (LLP 0203).
  *
  * `released` is read back from the hold marker, never inferred from the
  * child's exit code: `hyp sync` exits 0 both when it sends and when the

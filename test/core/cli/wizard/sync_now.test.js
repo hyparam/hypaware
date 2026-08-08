@@ -9,7 +9,7 @@ import path from 'node:path'
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
 import { firstSyncHoldMarkerPath, writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 
-// The closing "send now" offer (LLP 0200): setup asks whether to wait out the
+// The closing "send now" offer (LLP 0203): setup asks whether to wait out the
 // first-sync review window, and hands the user a real `hyp sync` rather than a
 // sentence naming it. What it must never do is release anything itself, or
 // claim a sync happened that did not.
@@ -107,7 +107,7 @@ test('a non-interactive run is never asked, and never sends', async () => {
   assert.equal(o.asked.length, 0)
 })
 
-// @ref LLP 0200#offer [tests]: waiting leads and is the default, so a stray enter cannot release
+// @ref LLP 0203#offer [tests]: waiting leads and is the default, so a stray enter cannot release
 test('the question offers wait first, as the default, and declining spawns nothing', async () => {
   const o = opts({ answer: 'wait' })
   const result = await runWizardSyncNow(o.args)
@@ -121,7 +121,7 @@ test('the question offers wait first, as the default, and declining spawns nothi
   assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
 })
 
-// @ref LLP 0200#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation
+// @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation
 test('send now spawns `hyp sync` on the inherited terminal and reports the release', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
@@ -143,7 +143,7 @@ test('send now spawns `hyp sync` on the inherited terminal and reports the relea
   assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
 })
 
-// @ref LLP 0200#read-back [tests]: `hyp sync` exits 0 on a declined plan too, so the marker decides
+// @ref LLP 0203#read-back [tests]: `hyp sync` exits 0 on a declined plan too, so the marker decides
 test('a child that exits 0 without releasing is reported as not sent', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
@@ -158,7 +158,7 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })
 
-// @ref LLP 0200#read-back [tests]: an unreadable re-read is "still held", never a claimed release
+// @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release
 test('a re-read that throws is reported as not sent, not as a release', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
@@ -200,7 +200,7 @@ test('a spawn failure never fails the install, and restates the wait', async () 
 // at all: the only thing standing in for `hyp sync` is a spawn stub that either
 // clears the marker (a release) or leaves it (a declined plan).
 //
-// @ref LLP 0200#read-back [tests]: the marker on disk decides, so the read that consults it is exercised for real
+// @ref LLP 0203#read-back [tests]: the marker on disk decides, so the read that consults it is exercised for real
 for (const scenario of [
   { name: 'left in place', release: false, expected: { asked: true, released: false, reason: 'sync-declined' } },
   { name: 'cleared by the child', release: true, expected: { asked: true, released: true } },

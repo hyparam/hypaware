@@ -660,7 +660,7 @@ export async function runInitWizard(opts) {
   // ...and then the offer to end the wait. It sits between the narration
   // and the first ask because it is an action on what the narration just
   // said, and because the first ask may take the terminal for good.
-  // @ref LLP 0200#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
+  // @ref LLP 0203#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
   if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true) {
@@ -855,7 +855,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
  *
  * @ref LLP 0101#deadline [constrained-by]: narration only; the hold marker and its absolute deadline are the login lane's
  *
- * Returns the deadline it narrated, so the closing sync offer (LLP 0200)
+ * Returns the deadline it narrated, so the closing sync offer (LLP 0203)
  * runs off the same read rather than racing a second one against a marker
  * `hyp sync` may have cleared in between.
  *

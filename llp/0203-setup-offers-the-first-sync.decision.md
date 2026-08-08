@@ -1,4 +1,4 @@
-# LLP 0200: setup offers the first sync, it does not only name it
+# LLP 0203: setup offers the first sync, it does not only name it
 
 **Type:** Decision
 **Status:** Draft
