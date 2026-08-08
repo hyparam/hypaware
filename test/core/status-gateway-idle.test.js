@@ -535,7 +535,7 @@ test('a dropped upstream a registered preset covers is reported as still proxied
     /still proxied by the adapter preset/,
     'it says which of the two things actually happened',
   )
-  assert.match(diag.message, /base_url/, 'and that the configured address is the part that was lost')
+  assert.match(diag.message, /base_url/, 'and names the configured fields that did not take effect')
   assert.doesNotMatch(
     diag.message,
     /nothing is proxied or captured/,
@@ -737,4 +737,77 @@ test('two covered names read as two presets', async () => {
   )
   assert.match(diag.message, /each preset's own base_url and path_prefix/)
   assert.doesNotMatch(diag.message, /nothing is proxied or captured/, 'neither of them is silent')
+})
+
+// ---------------------------------------------------------------------------
+// Review round 2 of #678: the hedged branch hedged the *preset* question and
+// then asserted the *traffic* one anyway ("traffic meant for it is not proxied
+// and nothing is captured"). That is the same false claim round 1 removed from
+// the definitive branch, and it is reachable on a current build rather than
+// only from an old status file: an entry that lost its `name` is one of the
+// two ways to drop, and a nameless drop is exactly what cannot be intersected
+// with the preset list. Not knowing which preset covers a name says nothing
+// about whether a surviving `/` catch-all takes the path.
+// @ref LLP 0195#visible-when-unintended [tests]: the hedged wording is bounded to the same dropped *name* the comparison can see, not to the traffic
+// ---------------------------------------------------------------------------
+
+test('the hedged branch does not claim the traffic is dead either, because a catch-all still takes it', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // Nameless drop next to a surviving upstream with no `path_prefix`. The
+  // survivor compiles to the '/' catch-all, so `/openai/v1/chat/completions`
+  // is proxied and recorded under anthropic while this line is being printed.
+  const details = await realGatewayDetails([
+    { name: 'anthropic', base_url: 'http://127.0.0.1:1' },
+    { provider: 'openai', base_url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.equal(details.upstreams_dropped, 1)
+  assert.equal(details.upstreams_dropped_names, undefined, 'nothing to intersect with the presets')
+  assert.deepEqual(details.registered_presets, [], 'and the preset list is present, so this is a live build')
+  assert.equal(pathMatchesPrefix('/openai/v1/chat/completions', '/'), true, 'the catch-all takes it')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(
+    diag.message,
+    /unless an adapter preset already covers the same name/,
+    'the preset question is still genuinely unanswered here',
+  )
+  assert.doesNotMatch(
+    diag.message,
+    /traffic meant for (it|them) is not proxied/,
+    'but that is no licence to assert the traffic is dead, which the catch-all above disproves',
+  )
+  assert.match(
+    diag.message,
+    /nothing is proxied or captured under that name/,
+    'the claim is bounded to the name, as it is on the definitive branch',
+  )
+  assert.match(diag.message, /falls through to whatever surviving route its path matches/)
+})
+
+test('the hedged branch pluralises for a multi-entry drop', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // An older daemon's status file: two dropped entries, and no preset list to
+  // attribute either of them with.
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 18522,
+    upstreams: ['anthropic'],
+    upstreams_configured: 3,
+    upstreams_dropped: 2,
+    upstreams_dropped_names: ['openai', 'gemini'],
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(diag.message, /\(dropped: openai, gemini\)/)
+  assert.match(
+    diag.message,
+    /nothing is proxied or captured under those names, and requests aimed at them get a 404 or fall through to whatever surviving route their path matches/,
+    'plural throughout, and bounded to the names',
+  )
+  assert.doesNotMatch(diag.message, /traffic meant for them is not proxied/)
 })

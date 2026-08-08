@@ -285,9 +285,15 @@ function attributeDroppedUpstreams(details, dropped, names) {
  *   prefix the operator wrote gets a 404 from a gateway this same line
  *   describes as still proxying that name.
  *
- * The hedge survives verbatim for the case that still deserves it, where the
- * status file does not say which happened. It is a weaker sentence, not a
- * wrong one.
+ * The hedge survives for the case that still deserves it, where the status
+ * file does not say which of the two happened. It hedges only that question,
+ * though. The catch-all above is a fact about the *routing table*, not about
+ * the preset list, so it holds on the hedged branch identically and the
+ * hedged sentence is bounded to the name in the same way. Hedging the preset
+ * question is not licence to assert the traffic one: the shape that most
+ * often reaches this branch is an entry that lost its `name` (nothing to
+ * intersect), which is an ordinary current-build config, not only an old
+ * status file.
  *
  * @ref LLP 0195#visible-when-unintended [constrained-by]: the kind still fires on the configured-vs-compiled comparison alone; this only reports which fate each dropped name met
  *
@@ -302,7 +308,8 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
     // set: an unlabelled `(openai)` next to "2 configured upstreams" invites
     // exactly the wrong reading.
     const named = names.length > 0 ? ` (dropped: ${names.join(', ')})` : ''
-    return `${dropped === 1 ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same name, traffic meant for ${dropped === 1 ? 'it' : 'them'} is not proxied and nothing is captured`
+    const one = dropped === 1
+    return `${one ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same ${one ? 'name' : 'names'}, nothing is proxied or captured under ${one ? 'that name' : 'those names'}, and ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its' : 'their'} path matches`
   }
   /** @type {string[]} */
   const parts = []
