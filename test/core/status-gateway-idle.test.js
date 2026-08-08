@@ -329,7 +329,7 @@ test('a gateway that lost one of two configured upstreams warns while listening'
 //
 // This is also the only path that reaches `dropped === configured === 1`, so
 // it is where the singular wording gets exercised.
-test('a dropped upstream whose name matches a registered adapter preset is still proxied, so the warning does not claim silence', async () => {
+test('a dropped upstream whose name a registered adapter preset backfills is not reported as silence', async () => {
   const { hypHome, stateRoot } = await makeHome()
   const state = createGatewayState()
   // Stands in for what `@hypaware/claude` registers at activation: a preset
@@ -659,7 +659,8 @@ test('a silent dropped name is not reported as a dead path, because a surviving 
     { name: 'anthropic', base_url: 'http://127.0.0.1:1' },
     { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
   ])
-  assert.equal(compileUpstreams(/** @type {any} */ ([{ name: 'anthropic', base_url: 'http://127.0.0.1:1' }]))[0].path_prefix, '/', 'an absent path_prefix compiles to the catch-all')
+  const survivor = compileUpstreams(/** @type {any} */ ([{ name: 'anthropic', base_url: 'http://127.0.0.1:1' }]))
+  assert.equal(survivor[0].path_prefix, '/', 'an absent path_prefix compiles to the catch-all')
   assert.deepEqual(details.upstreams_dropped_names, ['openai'])
   writeRunningDaemon(stateRoot, details)
 
