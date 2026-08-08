@@ -12,6 +12,7 @@
  *   WizardJoinResult,
  *   WizardPathway,
  *   WizardPickResult,
+ *   WizardSyncNowResult,
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
  */
@@ -31,6 +32,7 @@ import { runWizardFirstAsk } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, defaultRowLabels, resolvePickSeeding, runWizardPick } from './pick.js'
+import { runWizardSyncNow } from './sync_now.js'
 import { runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
@@ -653,7 +655,25 @@ export async function runInitWizard(opts) {
   // only - the hold itself was written by the join lane's login). Keyed
   // on the remembered join, like the abort narration above: enrollment
   // survives a back through the fork (LLP 0191 #join-not-undone).
-  if (joined) await narratePrivacyIfTeamPath(opts)
+  const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts) : null
+
+  // ...and then the offer to end the wait. It sits between the narration
+  // and the first ask because it is an action on what the narration just
+  // said, and because the first ask may take the terminal for good.
+  // @ref LLP 0200#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
+  /** @type {WizardSyncNowResult | undefined} */
+  let syncNow
+  if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true) {
+    syncNow = await runWizardSyncNow({
+      deadline: holdDeadline,
+      stdout: opts.stdout,
+      stderr: opts.stderr,
+      env: opts.env,
+      interactive: true,
+      ...(opts.stdin ? { stdin: opts.stdin } : {}),
+      ...(opts.syncNow ?? {}),
+    })
+  }
 
   // The exit door. Placed after the privacy narration on purpose: the
   // narration stays the wizard's last *words* (LLP 0135 #privacy), and
@@ -690,6 +710,9 @@ export async function runInitWizard(opts) {
     express,
     cancelled,
     first_ask: firstAsk ? (firstAsk.launched ? `launched:${firstAsk.client}` : firstAsk.reason) : 'skipped',
+    // How often an enrolled install chooses not to wait is the measurement
+    // that says whether the window is sized for the people in it.
+    sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
   })
 
   return {
@@ -832,7 +855,12 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
  *
  * @ref LLP 0101#deadline [constrained-by]: narration only; the hold marker and its absolute deadline are the login lane's
  *
+ * Returns the deadline it narrated, so the closing sync offer (LLP 0200)
+ * runs off the same read rather than racing a second one against a marker
+ * `hyp sync` may have cleared in between.
+ *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
+ * @returns {Promise<number | null>} the live deadline, or null when no hold applies
  */
 async function narratePrivacyIfTeamPath(opts) {
   let deadline = null
@@ -842,7 +870,7 @@ async function narratePrivacyIfTeamPath(opts) {
   } catch {
     // Unreadable state dir: skip the narration rather than fail the run.
   }
-  if (typeof deadline !== 'number') return
+  if (typeof deadline !== 'number') return null
   opts.stdout.write(
     '\n' +
     'Nothing has been uploaded yet - nothing leaves this machine before\n' +
@@ -852,6 +880,7 @@ async function narratePrivacyIfTeamPath(opts) {
     'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
     'before sending anything.\n'
   )
+  return deadline
 }
 
 /**

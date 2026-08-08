@@ -830,6 +830,59 @@ test('runInitWizard: the first ask comes last, after the privacy narration', asy
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
 })
 
+// @ref LLP 0200#offer [tests]: the sync offer sits between the narration it acts on and the first ask that may take the terminal
+test('runInitWizard: an enrolled run is offered the first sync, after the narration and before the first ask', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  /** @type {any[]} */
+  const spawned = []
+  /** @type {any[]} */
+  const asked = []
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    syncNow: {
+      confirm: async (/** @type {any} */ question) => {
+        asked.push(question)
+        // The wizard prints "Starting hyp sync..." on 'now'; this run waits.
+        return 'wait'
+      },
+      spawnFn: () => { throw new Error('a waiting run must not sync') },
+    },
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd, /** @type {any} */ args) => {
+        spawned.push({ cmd, args })
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+
+  assert.equal(asked.length, 1)
+  assert.match(asked[0].title, /Send your recorded history to the server now, or wait\?/)
+  // Asked after the narration that gives the question its meaning, and
+  // before the launch that may never give the terminal back.
+  const text = stdout.text()
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
+  assert.equal(spawned.length, 1)
+})
+
+test('runInitWizard: a local install with no hold is never offered a sync', async () => {
+  /** @type {any[]} */
+  const asked = []
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    syncNow: { confirm: async (/** @type {any} */ q) => { asked.push(q); return 'wait' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked.length, 0)
+})
+
 test('runInitWizard: a first look with no rows suppresses the launch', async () => {
   // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
   // is offered no question it has no data to answer

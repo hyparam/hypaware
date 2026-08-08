@@ -544,6 +544,42 @@ export type FirstAskResult =
   | { launched: true; client: string; promptId: string; exitCode?: number }
   | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'error' }
 
+/**
+ * The closing "send now" offer's outcome (LLP 0200).
+ *
+ * `released` is read back from the hold marker, never inferred from the
+ * child's exit code: `hyp sync` exits 0 both when it sends and when the
+ * user reads its destination list and answers no. `sync-declined` is that
+ * second case, and it is deliberately distinct from `declined` (the wizard's
+ * own question) - the two say different things about how far the user got.
+ */
+export type WizardSyncNowResult =
+  | { asked: true; released: true }
+  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'spawn-failed' }
+  | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
+
+/** Options for `runWizardSyncNow`. */
+export interface RunWizardSyncNowOptions {
+  /**
+   * The live first-sync deadline (epoch ms), as the privacy narration read
+   * it. Anything else means no hold applies and the step does not run: the
+   * offer only exists because the wait does.
+   */
+  deadline: number | null
+  stdout: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  env: NodeJS.ProcessEnv
+  /** False on a piped or scripted run: never prompt, never send. */
+  interactive?: boolean
+  stdin?: NodeJS.ReadableStream
+  /** Real stream for the TUI, when `stdout` above is a buffer. */
+  stdoutStream?: NodeJS.WritableStream
+  /** Test seams; production callers pass none of these. */
+  confirm?: AsyncConfirmSelectPrompt
+  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
+  readDeadline?: () => Promise<number | null>
+}
+
 /** Options for `runWizardFirstAsk`. */
 export interface RunWizardFirstAskOptions {
   /** Picked client names, from the pick phase (LLP 0180 derivation). */
@@ -627,6 +663,12 @@ export interface RunInitWizardOptions {
    * step is attended-only like the first look.
    */
   firstAsk?: Partial<RunWizardFirstAskOptions>
+  /**
+   * Overrides for the closing sync offer (tests): the confirm seam, the
+   * spawn seam, the hold re-read. Production callers pass none, and the
+   * step runs only on an enrolled run with a live hold.
+   */
+  syncNow?: Partial<RunWizardSyncNowOptions>
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>
