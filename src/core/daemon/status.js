@@ -224,11 +224,11 @@ function gatewayDroppedUpstreams(sources) {
  * A dropped entry is absent from the compiled config table by definition, and
  * `mergeUpstreams` (the gateway source) backfills a registered preset into
  * exactly the names that table is missing. So a dropped name that is also a
- * registered preset name is still routed, just to the preset's own endpoint
- * instead of the `base_url` the operator's entry meant to set; a dropped name
- * that is not is genuinely unrouted and uncaptured. The daemon publishes both
- * halves already (`registered_presets`, `upstreams_dropped_names`), so the
- * message can say which one happened rather than hedging over both.
+ * registered preset name is still routed, by the preset's own entry rather
+ * than the one the operator wrote; a dropped name that is not has no route of
+ * its own at all. The daemon publishes both halves already
+ * (`registered_presets`, `upstreams_dropped_names`), so the message can say
+ * which one happened rather than hedging over both.
  *
  * Two shapes withhold the answer rather than inventing one, because this reads
  * a *file* that some other build may have written:
@@ -261,12 +261,29 @@ function attributeDroppedUpstreams(details, dropped, names) {
 /**
  * What a bound gateway's dropped upstreams mean for the traffic aimed at them.
  *
- * Two fates, and they are not close: a name no preset covers is dead (requests
- * for it match no route, so nothing is proxied and nothing is captured), while
- * a name a preset covers is still flowing, just to the preset's endpoint
- * instead of the one the operator's entry meant to set. Both are worth the
- * warning and they call for different fixes, so when `attribution` can tell
- * them apart the message names each set rather than hedging across both.
+ * Two fates, and they are not close: a name no preset covers has no route of
+ * its own at all, while a name a preset covers is still routed, by the
+ * preset's own entry rather than the one the operator wrote. Both are worth
+ * the warning and they call for different fixes, so when `attribution` can
+ * tell them apart the message names each set rather than hedging across both.
+ *
+ * Both clauses are scoped to the *name*, because the name is the only thing
+ * the status file can settle. Routing is by `path_prefix` and `match()`, not
+ * by name (`matchUpstream` in the gateway's `proxy.js`), and the compiled
+ * prefixes are not published, so neither clause may claim more than it knows:
+ *
+ * - **A dropped name is not a dead path.** A surviving upstream written with
+ *   no `path_prefix` compiles to `/`, which `pathMatchesPrefix` matches every
+ *   path against, so a request aimed at the dropped name can still be proxied
+ *   and recorded - under the *other* upstream's name. The gateway source says
+ *   the same where it logs this fault ("falls through to whatever the
+ *   remaining routes match (or nothing)"). Hence "under the name X", with the
+ *   fall-through spelled out, rather than a flat claim that nothing happens.
+ * - **A covered name loses more than its `base_url`.** `mergeUpstreams`
+ *   backfills the preset's whole entry, so the preset's `path_prefix`,
+ *   `provider` and `priority` are in force too. A client still pointed at the
+ *   prefix the operator wrote gets a 404 from a gateway this same line
+ *   describes as still proxying that name.
  *
  * The hedge survives verbatim for the case that still deserves it, where the
  * status file does not say which happened. It is a weaker sentence, not a
@@ -293,13 +310,15 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
   // Silence leads: it is the more damaging of the two, and the reason the
   // operator is reading this line at all.
   if (silent.length > 0) {
+    const one = silent.length === 1
     parts.push(
-      `nothing is proxied or captured for ${silent.join(', ')} (no adapter preset covers ${silent.length === 1 ? 'that name' : 'those names'})`,
+      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its' : 'their'} path matches`,
     )
   }
   if (covered.length > 0) {
+    const one = covered.length === 1
     parts.push(
-      `${covered.join(', ')} ${covered.length === 1 ? 'is' : 'are'} still proxied by the adapter preset registered under the same name, at the preset's default endpoint rather than the base_url this config meant to set`,
+      `${covered.join(', ')} ${one ? 'is' : 'are'} still proxied by the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and path_prefix are what is in force, not the ones this config meant to set`,
     )
   }
   return parts.join('; ')

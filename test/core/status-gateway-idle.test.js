@@ -10,7 +10,9 @@ import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/st
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
-import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
+import { createStartSource, mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
+import { compileUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
+import { pathMatchesPrefix } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 /** @import { GatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js' */
@@ -504,8 +506,8 @@ test('a dropped upstream covered by no preset is reported as silent, definitivel
   )
   assert.match(
     diag.message,
-    /nothing is proxied or captured for openai/,
-    'it says outright that this name is dead',
+    /nothing is proxied or captured under the name openai/,
+    'it says outright that this name has no route',
   )
 })
 
@@ -564,7 +566,7 @@ test('a mixed drop separates the covered name from the silent one', async () => 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
   assert.ok(diag)
-  assert.match(diag.message, /nothing is proxied or captured for openai/, 'openai is dead')
+  assert.match(diag.message, /nothing is proxied or captured under the name openai/, 'openai has no route')
   assert.match(diag.message, /anthropic is still proxied by the adapter preset/, 'anthropic is not')
 })
 
@@ -634,4 +636,105 @@ test('an unattributable drop keeps the hedge even with a preset list', async () 
   const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
   assert.ok(diag)
   assert.match(diag.message, /unless an adapter preset already covers the same name/)
+})
+
+// ---------------------------------------------------------------------------
+// Review of #678: both definitive clauses are claims about a *name*, and the
+// gateway routes by `path_prefix` and `match()`. Neither the status file nor
+// this module has the compiled prefixes, so neither clause may be read as a
+// claim about a path. These two pin the routing facts that bound the wording,
+// so a later edit that reaches for "traffic for openai is dead" or "only the
+// base_url was lost" fails here rather than in front of an operator.
+// @ref LLP 0195#visible-when-unintended [tests]: the warning reports which fate each dropped *name* met, which is all the configured-vs-compiled comparison can see
+// ---------------------------------------------------------------------------
+
+test('a silent dropped name is not reported as a dead path, because a surviving catch-all still takes its traffic', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // A surviving upstream written with no `path_prefix` compiles to '/', which
+  // matches every path there is, so the dropped entry's traffic is proxied and
+  // recorded - under anthropic's name, not openai's.
+  assert.equal(pathMatchesPrefix('/openai/v1/chat/completions', '/'), true, 'the catch-all takes it')
+  const details = await realGatewayDetails([
+    { name: 'anthropic', base_url: 'http://127.0.0.1:1' },
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  assert.equal(compileUpstreams(/** @type {any} */ ([{ name: 'anthropic', base_url: 'http://127.0.0.1:1' }]))[0].path_prefix, '/', 'an absent path_prefix compiles to the catch-all')
+  assert.deepEqual(details.upstreams_dropped_names, ['openai'])
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(
+    diag.message,
+    /nothing is proxied or captured under the name openai/,
+    'the claim is about the name, which is the part status can settle',
+  )
+  assert.match(
+    diag.message,
+    /falls through to whatever surviving route its path matches/,
+    'and it does not deny the fall-through that the catch-all above actually performs',
+  )
+})
+
+test('a covered dropped name is reported as losing its path_prefix too, not only its base_url', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'anthropic',
+    base_url: 'http://127.0.0.1:1',
+    path_prefix: '/v1/messages',
+  })
+  // The operator's entry asked for a different prefix. It never compiled, so
+  // the preset's whole entry is what backfills: a client still pointed at
+  // /claude gets a 404 from a gateway that is otherwise proxying "anthropic".
+  const configured = [{ name: 'anthropic', url: 'https://proxy.internal', path_prefix: '/claude' }]
+  const merged = mergeUpstreams(compileUpstreams(/** @type {any} */ (configured)), state)
+  assert.deepEqual(
+    merged.map((u) => [u.name, u.path_prefix]),
+    [['anthropic', '/v1/messages']],
+    'the operator path_prefix is gone, not just the base_url',
+  )
+  const details = await realGatewayDetails(configured, state)
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(diag.message, /still proxied by the adapter preset/)
+  assert.match(
+    diag.message,
+    /own base_url and path_prefix are what is in force/,
+    'both fields reverted, and the message names both',
+  )
+})
+
+// Two presets, two dropped names: one preset noun and one "the same name"
+// would describe two different endpoints as though they were one.
+test('two covered names read as two presets', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  const api = createAiGatewayApi(state)
+  api.registerUpstreamPreset({ name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/v1/messages' })
+  api.registerUpstreamPreset({ name: 'openai', base_url: 'http://127.0.0.1:2', path_prefix: '/v1' })
+  const details = await realGatewayDetails(
+    [
+      { name: 'anthropic', url: 'https://api.anthropic.com', path_prefix: '/anthropic' },
+      { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+    ],
+    state,
+  )
+  assert.equal(details.upstreams_dropped, 2)
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(
+    diag.message,
+    /anthropic, openai are still proxied by the adapter presets registered under the same names/,
+    'plural presets, plural names',
+  )
+  assert.match(diag.message, /each preset's own base_url and path_prefix/)
+  assert.doesNotMatch(diag.message, /nothing is proxied or captured/, 'neither of them is silent')
 })

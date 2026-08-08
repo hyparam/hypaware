@@ -126,9 +126,14 @@ export interface StatusDiagnostic {
  * names with `details.registered_presets`, both of which the gateway source
  * publishes; the two lists together always account for every dropped name.
  *
- * `covered` is not "fine": the operator's `base_url` still silently did not
- * take effect, and traffic is going to the preset's default endpoint instead.
- * It is only the difference between a misdirected upstream and a dead one.
+ * `covered` is not "fine": the operator's entry did not take effect at all, so
+ * the preset's own `base_url` *and* `path_prefix` are what is in force. It is
+ * only the difference between a misdirected upstream and a nameless one.
+ *
+ * `silent` is scoped to the name, not to the path. Routing is by `path_prefix`
+ * and `match()`, and a surviving upstream written with no `path_prefix` is the
+ * `/` catch-all, so traffic aimed at a silent name can still be proxied and
+ * recorded under another upstream's name.
  */
 export interface DroppedUpstreamAttribution {
   covered: string[]
