@@ -12,7 +12,8 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { createStartSource, mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { compileUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
-import { pathMatchesPrefix } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
+import { compileUpstreams as compileRoutes, matchUpstream, pathMatchesPrefix } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
+import { anthropicUpstreamPreset } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 /** @import { GatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js' */
@@ -371,7 +372,7 @@ test('a dropped upstream whose name matches a registered adapter preset is still
   // question instead of hedging over both answers (issue #676 item 1).
   assert.match(
     diag.message,
-    /anthropic is still proxied by the adapter preset registered under the same name/,
+    /anthropic is in the routing table only as the adapter preset registered under the same name/,
     'it says which of the two things happened',
   )
   assert.equal(report.overall, 'healthy')
@@ -511,7 +512,7 @@ test('a dropped upstream covered by no preset is reported as silent, definitivel
   )
 })
 
-test('a dropped upstream a registered preset covers is reported as still proxied, definitively', async () => {
+test('a dropped upstream a registered preset covers is reported as backfilled, definitively', async () => {
   const { hypHome, stateRoot } = await makeHome()
   const state = createGatewayState()
   createAiGatewayApi(state).registerUpstreamPreset({
@@ -532,7 +533,7 @@ test('a dropped upstream a registered preset covers is reported as still proxied
   assert.doesNotMatch(diag.message, /unless an adapter preset/, 'no hedge: the answer is known')
   assert.match(
     diag.message,
-    /still proxied by the adapter preset/,
+    /in the routing table only as the adapter preset/,
     'it says which of the two things actually happened',
   )
   assert.match(diag.message, /base_url/, 'and names the configured fields that did not take effect')
@@ -567,7 +568,7 @@ test('a mixed drop separates the covered name from the silent one', async () => 
   const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
   assert.ok(diag)
   assert.match(diag.message, /nothing is proxied or captured under the name openai/, 'openai has no route')
-  assert.match(diag.message, /anthropic is still proxied by the adapter preset/, 'anthropic is not')
+  assert.match(diag.message, /anthropic is in the routing table only as the adapter preset/, 'anthropic is not')
 })
 
 test('the dropped names do not read as the configured set', async () => {
@@ -677,7 +678,7 @@ test('a silent dropped name is not reported as a dead path, because a surviving 
   )
 })
 
-test('a covered dropped name is reported as losing its path_prefix too, not only its base_url', async () => {
+test('a covered dropped name is reported as losing its whole entry, not only its base_url', async () => {
   const { hypHome, stateRoot } = await makeHome()
   const state = createGatewayState()
   createAiGatewayApi(state).registerUpstreamPreset({
@@ -701,11 +702,16 @@ test('a covered dropped name is reported as losing its path_prefix too, not only
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
   assert.ok(diag)
-  assert.match(diag.message, /still proxied by the adapter preset/)
+  assert.match(diag.message, /in the routing table only as the adapter preset/)
   assert.match(
     diag.message,
-    /own base_url and path_prefix are what is in force/,
-    'both fields reverted, and the message names both',
+    /own base_url and routing rules are in force/,
+    'the whole entry reverted, so the message names the endpoint and the routing surface',
+  )
+  assert.doesNotMatch(
+    diag.message,
+    /path_prefix are what is in force/,
+    'and does not single out path_prefix, which a match()-carrying preset never routes on',
   )
 })
 
@@ -732,10 +738,10 @@ test('two covered names read as two presets', async () => {
   assert.ok(diag)
   assert.match(
     diag.message,
-    /anthropic, openai are still proxied by the adapter presets registered under the same names/,
+    /anthropic, openai are in the routing table only as the adapter presets registered under the same names/,
     'plural presets, plural names',
   )
-  assert.match(diag.message, /each preset's own base_url and path_prefix/)
+  assert.match(diag.message, /each preset's own base_url and routing rules are in force/)
   assert.doesNotMatch(diag.message, /nothing is proxied or captured/, 'neither of them is silent')
 })
 
@@ -806,8 +812,147 @@ test('the hedged branch pluralises for a multi-entry drop', async () => {
   assert.match(diag.message, /\(dropped: openai, gemini\)/)
   assert.match(
     diag.message,
-    /nothing is proxied or captured under those names, and requests aimed at them get a 404 or fall through to whatever surviving route their path matches/,
+    /nothing is proxied or captured under those names, and requests aimed at them get a 404 or fall through to whatever surviving route their paths match/,
     'plural throughout, and bounded to the names',
   )
   assert.doesNotMatch(diag.message, /traffic meant for them is not proxied/)
+})
+
+// ---------------------------------------------------------------------------
+// Review round 2 of #678, the other half: the `covered` clause said the name
+// "is still proxied by the adapter preset", which is a claim about *routing*
+// backed only by a name-set intersection. Two ways it is false, both on
+// ordinary configs, and both invisible to a test that only checks the preset
+// entry exists in `mergeUpstreams`'s output:
+//
+//  1. The backfilled preset can be shadowed outright. `mergeUpstreams` appends
+//     presets after the config entries and `compileUpstreams` (proxy.js)
+//     breaks a rank tie on that order, so a surviving config upstream at an
+//     equal `path_prefix` wins every path the preset would have taken.
+//  2. `path_prefix` is not "what is in force" for a preset carrying a
+//     `match()`, which every bundled adapter preset does. `matchUpstream`
+//     consults the function and never looks at `prefix`, which survives only
+//     as a sort key.
+//
+// So these assert against `matchUpstream` over the *real* sorted routing
+// table, which is the thing the sentence is about.
+// @ref LLP 0195#visible-when-unintended [tests]: the warning reports what the configured-vs-compiled comparison can see, which is the routing table, not the traffic
+// ---------------------------------------------------------------------------
+
+/**
+ * The routing table an install really binds, as `matchUpstream` sees it.
+ *
+ * @param {unknown[]} configUpstreams
+ * @param {GatewayState} state
+ */
+function realRoutingTable(configUpstreams, state) {
+  return compileRoutes(mergeUpstreams(compileUpstreams(/** @type {any} */ (configUpstreams)), state))
+}
+
+test('a covered name is not claimed to be proxied, because a surviving upstream can shadow the preset', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamPreset({
+    name: 'chatgpt',
+    base_url: 'https://chatgpt.com',
+    path_prefix: '/backend-api/codex',
+    provider: 'chatgpt',
+  })
+  // The typo'd entry drops, so the preset backfills under `chatgpt`. But a
+  // surviving entry sits at the same prefix and the same default priority, and
+  // config entries merge before presets, so the tie breaks against the preset:
+  // it is in the table and routes nothing at all.
+  const configured = [
+    { name: 'chatgpt', url: 'https://chatgpt.com', path_prefix: '/backend-api/codex' },
+    { name: 'mirror', base_url: 'http://127.0.0.1:9', path_prefix: '/backend-api/codex' },
+  ]
+  const table = realRoutingTable(configured, state)
+  assert.deepEqual(table.map((u) => u.name), ['mirror', 'chatgpt'], 'the preset sorts behind the survivor')
+  assert.equal(matchUpstream(table, 'POST', '/backend-api/codex/responses', {})?.name, 'mirror')
+  assert.equal(matchUpstream(table, 'POST', '/backend-api/codex', {})?.name, 'mirror')
+
+  const details = await realGatewayDetails(configured, state)
+  assert.deepEqual(details.upstreams_dropped_names, ['chatgpt'])
+  assert.deepEqual(details.registered_presets, ['chatgpt'])
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.doesNotMatch(
+    diag.message,
+    /still proxied by the adapter preset/,
+    'the preset routes zero requests here, so this must not be asserted from a name match',
+  )
+  assert.match(
+    diag.message,
+    /chatgpt is in the routing table only as the adapter preset registered under the same name/,
+    'the table entry is the fact the intersection actually supports',
+  )
+  assert.match(
+    diag.message,
+    /a surviving upstream can still outrank the preset on any path/,
+    'and the shadowing above is not denied',
+  )
+})
+
+test('a covered name does not claim path_prefix is in force, which a match()-carrying preset never routes on', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const state = createGatewayState()
+  // The real Claude adapter preset, not a stand-in: it carries a `match()`,
+  // so `matchUpstream` never consults its `/v1/messages` prefix.
+  const preset = anthropicUpstreamPreset()
+  assert.equal(typeof preset.match, 'function', 'the shipped preset routes by match()')
+  createAiGatewayApi(state).registerUpstreamPreset(preset)
+  const configured = [{ name: 'anthropic', url: 'https://proxy.internal', path_prefix: '/claude' }]
+  const table = realRoutingTable(configured, state)
+  assert.equal(table[0].prefix, '/v1/messages', 'the prefix survives only as a sort key')
+  assert.equal(
+    matchUpstream(table, 'POST', '/totally/elsewhere', { 'x-api-key': 'sk-ant-test' })?.name,
+    'anthropic',
+    'and the preset takes a path its own path_prefix does not cover',
+  )
+
+  const details = await realGatewayDetails(configured, state)
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.doesNotMatch(
+    diag.message,
+    /path_prefix are what is in force/,
+    'naming path_prefix understates a match() preset as badly as it overstates the operator entry',
+  )
+  assert.match(diag.message, /own base_url and routing rules are in force/)
+  assert.match(
+    diag.message,
+    /nothing this config set for it took effect/,
+    'which is the part the operator has to act on',
+  )
+})
+
+test('the hedged branch pluralises names off the names, not off the entry count', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // Two same-named entries both drop. `readConfiguredUpstreams` dedupes, so
+  // two dropped entries print one name, and the count guard withholds
+  // attribution. The entry nouns must stay plural and the name nouns singular.
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com' },
+    { name: 'openai', url: 'https://api.openai.com/v2' },
+  ])
+  assert.equal(details.upstreams_dropped, 2)
+  assert.deepEqual(details.upstreams_dropped_names, ['openai'], 'two entries, one name')
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.match(diag.message, /those entries are not in the routing table \(dropped: openai\)/, 'plural entries')
+  assert.match(
+    diag.message,
+    /covers the same name, nothing is proxied or captured under that name, and a request aimed at it gets a 404/,
+    'singular names, because only one name was printed',
+  )
 })

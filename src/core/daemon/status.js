@@ -261,16 +261,17 @@ function attributeDroppedUpstreams(details, dropped, names) {
 /**
  * What a bound gateway's dropped upstreams mean for the traffic aimed at them.
  *
- * Two fates, and they are not close: a name no preset covers has no route of
- * its own at all, while a name a preset covers is still routed, by the
- * preset's own entry rather than the one the operator wrote. Both are worth
+ * Two fates, and they are not close: a name no preset covers has no entry in
+ * the routing table at all, while a name a preset covers has one, backfilled
+ * from the preset rather than from what the operator wrote. Both are worth
  * the warning and they call for different fixes, so when `attribution` can
  * tell them apart the message names each set rather than hedging across both.
  *
- * Both clauses are scoped to the *name*, because the name is the only thing
- * the status file can settle. Routing is by `path_prefix` and `match()`, not
- * by name (`matchUpstream` in the gateway's `proxy.js`), and the compiled
- * prefixes are not published, so neither clause may claim more than it knows:
+ * Every clause is a claim about the *routing table*, never about the traffic,
+ * because the table is all a name-set intersection can reach. Routing is by
+ * `path_prefix` and `match()` and then by rank (`matchUpstream` and
+ * `compileUpstreams` in the gateway's `proxy.js` sort on `priority`, then
+ * prefix length, then merge order), and none of that is published:
  *
  * - **A dropped name is not a dead path.** A surviving upstream written with
  *   no `path_prefix` compiles to `/`, which `pathMatchesPrefix` matches every
@@ -279,11 +280,21 @@ function attributeDroppedUpstreams(details, dropped, names) {
  *   the same where it logs this fault ("falls through to whatever the
  *   remaining routes match (or nothing)"). Hence "under the name X", with the
  *   fall-through spelled out, rather than a flat claim that nothing happens.
- * - **A covered name loses more than its `base_url`.** `mergeUpstreams`
- *   backfills the preset's whole entry, so the preset's `path_prefix`,
- *   `provider` and `priority` are in force too. A client still pointed at the
- *   prefix the operator wrote gets a 404 from a gateway this same line
- *   describes as still proxying that name.
+ * - **A covered name is a table entry, not a guarantee of traffic.** The
+ *   backfilled preset can be shadowed outright: `mergeUpstreams` appends
+ *   presets after the config entries, and `compileUpstreams` breaks a rank
+ *   tie on that order, so a surviving config upstream at an equal
+ *   `path_prefix` (or at a higher `priority`) wins every path the preset
+ *   would have taken. Hence "in the routing table only as the preset", plus
+ *   the outranking note, rather than "is still proxied".
+ * - **A covered name loses more than its `base_url`, and not only its
+ *   `path_prefix`.** `mergeUpstreams` backfills the preset's whole entry, so
+ *   its `provider` and `priority` come too, and a preset carrying a `match()`
+ *   (which every bundled adapter preset does) routes by that function while
+ *   `path_prefix` degrades to a sort key `matchUpstream` never consults. The
+ *   claude preset's `match()` takes `/v1/complete` and any anthropic-headered
+ *   path, so naming `path_prefix` as "what is in force" understates its
+ *   reach as badly as it overstates the operator's. Hence "routing rules".
  *
  * The hedge survives for the case that still deserves it, where the status
  * file does not say which of the two happened. It hedges only that question,
@@ -308,8 +319,14 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
     // set: an unlabelled `(openai)` next to "2 configured upstreams" invites
     // exactly the wrong reading.
     const named = names.length > 0 ? ` (dropped: ${names.join(', ')})` : ''
-    const one = dropped === 1
-    return `${one ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same ${one ? 'name' : 'names'}, nothing is proxied or captured under ${one ? 'that name' : 'those names'}, and ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its' : 'their'} path matches`
+    const oneEntry = dropped === 1
+    // The entry nouns count entries and the name nouns count names, because
+    // the two differ: the dedupe in `readConfiguredUpstreams` prints one name
+    // for two same-named dropped entries, which is one of the shapes that
+    // lands here. With no names to print at all there is nothing to
+    // disagree with, so the entry count stands in.
+    const oneName = (names.length > 0 ? names.length : dropped) === 1
+    return `${oneEntry ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same ${oneName ? 'name' : 'names'}, nothing is proxied or captured under ${oneName ? 'that name' : 'those names'}, and ${oneName ? 'a request' : 'requests'} aimed at ${oneName ? 'it' : 'them'} ${oneName ? 'gets' : 'get'} a 404 or ${oneName ? 'falls' : 'fall'} through to whatever surviving route ${oneName ? 'its path matches' : 'their paths match'}`
   }
   /** @type {string[]} */
   const parts = []
@@ -319,13 +336,13 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
   if (silent.length > 0) {
     const one = silent.length === 1
     parts.push(
-      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its' : 'their'} path matches`,
+      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its path matches' : 'their paths match'}`,
     )
   }
   if (covered.length > 0) {
     const one = covered.length === 1
     parts.push(
-      `${covered.join(', ')} ${one ? 'is' : 'are'} still proxied by the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and path_prefix are what is in force, not the ones this config meant to set`,
+      `${covered.join(', ')} ${one ? 'is' : 'are'} in the routing table only as the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and routing rules are in force, nothing this config set for ${one ? 'it' : 'them'} took effect, and a surviving upstream can still outrank ${one ? 'the preset' : 'a preset'} on any path`,
     )
   }
   return parts.join('; ')
