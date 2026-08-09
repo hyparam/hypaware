@@ -61,10 +61,13 @@ seam moves inward rather than up.
 <a id="no-prose-control-flow"></a>**Prose is for humans, codes are for
 control flow.** `classifyLoginFailure` switches on `reason`. The three
 message constants stop being exported API and go back to being strings
-`explainLoginError` prints. The wizard keeps teeing stderr, because
-`WizardJoinResult.detail` echoes the lane's own explanation to the user
-([LLP 0135](./0135-install-experience-overhaul.design.md#join)) - that
-use is narration, which is what captured prose is good for.
+`explainLoginError` prints. The wizard keeps teeing stderr. The tee
+writes through, so the lane's own explanation reaches the user's terminal
+exactly as it always did, and the copy it keeps alongside fills
+`WizardJoinResult.detail`
+([LLP 0135](./0135-install-experience-overhaul.design.md#join)). No
+control flow reads that copy any more; it is narration held as a
+diagnostic, which is what captured prose is good for.
 
 The classification is unchanged: exactly the three refusals are
 `'failed'`; everything else non-zero stays `'abandoned'`. A provider

@@ -151,6 +151,7 @@ export async function computeCentralLockedSources(opts) {
  * retriable, which is the same answer the stderr matcher gave when it
  * recognized nothing.
  *
+ * @ref LLP 0058#d7 [constrained-by]: the three definitive reasons are the D7 refusal codes verbatim, so the split is the server's taxonomy and not a wizard-local one
  * @ref LLP 0179#no-prose-control-flow [implements]: classify on the reason code, never on the lane's English
  * @param {Pick<LoginLaneResult, 'reason'>} login
  * @returns {'failed' | 'abandoned'}
