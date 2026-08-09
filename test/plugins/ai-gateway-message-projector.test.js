@@ -894,6 +894,51 @@ test('committed-session index: N concurrent fresh-session misses past the rebuil
   )
 })
 
+test('committed-session index: a scan slower than the rebuild window still serves cache hits', async () => {
+  // Finding: `atMs` was stamped when the scan STARTED. A `session_id` scan
+  // that itself outlives SESSION_INDEX_REBUILD_MS was therefore stale the
+  // moment it resolved, so the very next miss rebuilt again: back-to-back
+  // whole-table scans that never serve a single hit, on exactly the table
+  // size that makes the index worth having. The window has to age the
+  // ANSWER, so it runs from completion.
+  let clockMs = 0
+  const now = () => clockMs
+  let discoverCalls = 0
+  /** @type {() => void} */
+  let releaseScan = () => {}
+  const scanGate = new Promise((resolve) => {
+    releaseScan = () => resolve(undefined)
+  })
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      // The scan is in flight across the whole rebuild window.
+      await scanGate
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+    },
+    async *readRows() {
+      yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+    },
+  }))
+  const projector = freshSessionProjector(storage, now)
+
+  const first = projector.projectExchange({ ...exchange(), path: 'sess-a' })
+  // Let the build start, advance the clock past the window while its scan is
+  // still running, and only then let the scan finish.
+  await new Promise((resolve) => setImmediate(resolve))
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  releaseScan()
+  assert.equal((await first).length, 1, 'the session that triggered the slow build still emits its row')
+  assert.equal(discoverCalls, 1, 'a scan slower than the window is not stale the moment it resolves')
+
+  // A later miss, one millisecond after the scan resolved: comfortably
+  // inside a window measured from completion.
+  clockMs += 1
+  const second = await projector.projectExchange({ ...exchange(), path: 'sess-b' })
+  assert.equal(second.length, 1, 'the next fresh session still emits its row')
+  assert.equal(discoverCalls, 1, 'the freshly-completed index serves a hit instead of rebuilding at once')
+})
+
 test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
   // The proxy fires onExchangeFinished without serializing, so two first
   // exchanges for the same session can be in flight at once. Both must
