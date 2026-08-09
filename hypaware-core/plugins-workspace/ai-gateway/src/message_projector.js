@@ -339,7 +339,23 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
   let built
 
   function rebuild() {
-    const attempt = { atMs: now(), ids: scanCommittedSessionIds(storage, log) }
+    // `scanCommittedSessionIds` reports a scan it could not run as
+    // `undefined` rather than by rejecting, but nothing structural holds it
+    // to that. Normalize a rejection into the same "could not scan" outcome
+    // so this promise is total: the self-clearing guard below attaches a
+    // fulfillment handler to a promise nothing else awaits, so a scan that
+    // ever threw would surface as an UNHANDLED rejection and Node would
+    // kill the daemon, instead of the index degrading the way every other
+    // failure in this best-effort path does.
+    // @ref LLP 0204#fix [constrained-by]: the seed index is best-effort, so
+    //   a scan it cannot complete must degrade the index, never end the process
+    const ids = scanCommittedSessionIds(storage, log).catch((err) => {
+      log?.warn?.('aigw.session_index_scan_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    })
+    const attempt = { atMs: now(), ids }
     built = attempt
     // A build that failed to scan cannot stand in as "no committed rows"
     // for the rebuild window; clear it once the failure is known so the
@@ -387,6 +403,11 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
  * it returns `undefined` so the caller can tell "no sessions known" from
  * "the scan could not run" and err toward scanning instead of silently
  * treating a broken index as authoritative.
+ *
+ * Reports failure by RESOLVING to `undefined`, never by rejecting. Callers
+ * may attach handlers to the returned promise that no one awaits, so a
+ * rejection escaping here would be unhandled; `rebuild()` normalizes one
+ * back to `undefined` rather than assuming this contract holds.
  *
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log

@@ -894,6 +894,62 @@ test('committed-session index: N concurrent fresh-session misses past the rebuil
   )
 })
 
+test('committed-session index: a scan that throws degrades the index instead of killing the process', async () => {
+  // Finding (#685): the index's self-clearing guard attaches a fulfillment
+  // handler to the scan promise and nothing awaits the derived promise, so a
+  // scan that ever threw became an UNHANDLED rejection. `source.js`
+  // catches whatever `projectExchange` rejects with, so that orphan is the
+  // one path out of here that reaches Node's default handler and takes the
+  // whole daemon down: strictly worse than the degraded index the rest of
+  // this path is built to tolerate.
+  //
+  // Driven here by a storage whose FIRST `discoverCachePartitions` (the
+  // index build) answers with a non-iterable, so the exception escapes
+  // `scanCommittedSessionIds` from outside its try/catch. Later calls are
+  // well-formed, so the per-session fallback scan is unaffected and the
+  // "err toward scanning" degradation is observable on its own.
+  /** @type {unknown[]} */
+  const unhandled = []
+  /** @param {unknown} reason */
+  const onUnhandled = (reason) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    let discoverCalls = 0
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      async discoverCachePartitions() {
+        discoverCalls++
+        // Contract says CachePartitionMeta[]; a malformed answer makes the
+        // `for (const part of partitions ?? [])` loop throw.
+        if (discoverCalls === 1) return /** @type {never} */ ({ malformed: true })
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+      },
+      async *readRows() {
+        yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+      },
+    }))
+    const projector = freshSessionProjector(storage, () => 0)
+
+    const rows = await projector.projectExchange({ ...exchange(), path: 'sess-throwing-index' })
+
+    // An index that cannot answer must not swallow the session: the
+    // per-session scan runs and the row is still emitted.
+    assert.equal(rows.length, 1, 'a failed index build errs toward scanning and still emits the row')
+    assert.ok(discoverCalls >= 2, 'the failed index build falls back to the per-session committed-row scan')
+
+    // Unhandled rejections are only detected once the microtask queue has
+    // drained, so give the loop a turn before asserting there were none.
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(
+      unhandled.map((reason) => (reason instanceof Error ? reason.message : String(reason))),
+      [],
+      'a throwing session-index scan must not produce an unhandled rejection'
+    )
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
 test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
   // The proxy fires onExchangeFinished without serializing, so two first
   // exchanges for the same session can be in flight at once. Both must
