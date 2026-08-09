@@ -9,6 +9,7 @@ import {
   computeMessageId,
   createAiGatewayConversationState,
   createAiGatewayMessageProjector,
+  SESSION_INDEX_REBUILD_MS,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
@@ -803,6 +804,94 @@ test('seeding: sessions with no committed rows share one index build and skip th
   assert.equal(b.length, 1, 'second fresh session emits its row')
   assert.equal(discoverCalls, 1, 'both fresh sessions share a single index build')
   assert.equal(messageScanReads, 0, 'no fresh session pays the per-session committed-row scan')
+})
+
+function freshSessionIndexStorage() {
+  let discoverCalls = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+    },
+    /** @param {string} tablePath @param {string[]=} columns */
+    async *readRows(tablePath, columns) {
+      // The only committed session id in this table is one no test below
+      // ever looks up, so every lookup is a genuine miss.
+      yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+    },
+  }))
+  return { storage, getDiscoverCalls: () => discoverCalls }
+}
+
+/**
+ * @param {ReturnType<typeof freshSessionIndexStorage>['storage']} storage
+ * @param {() => number} now
+ */
+function freshSessionProjector(storage, now) {
+  return createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'fresh', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+    now,
+  })
+}
+
+test('committed-session index: a miss past the rebuild window triggers exactly one rebuild', async () => {
+  // Previously untested branch: SESSION_INDEX_REBUILD_MS is hard-coded, so
+  // exercising "stale, then rebuilt" requires an injectable clock.
+  let clockMs = 0
+  const now = () => clockMs
+  const { storage, getDiscoverCalls } = freshSessionIndexStorage()
+  const projector = freshSessionProjector(storage, now)
+
+  await projector.projectExchange({ ...exchange(), path: 'sess-a' })
+  assert.equal(getDiscoverCalls(), 1, 'first projection builds the index')
+
+  await projector.projectExchange({ ...exchange(), path: 'sess-a2' })
+  assert.equal(getDiscoverCalls(), 1, 'still inside the rebuild window: the stale-but-fresh index is trusted')
+
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  await projector.projectExchange({ ...exchange(), path: 'sess-b' })
+  assert.equal(getDiscoverCalls(), 2, 'past the rebuild window: a miss triggers exactly one rebuild')
+})
+
+test('committed-session index: N concurrent fresh-session misses past the rebuild window share one rebuild', async () => {
+  // Finding: `current` was captured before an `await`, so every caller that
+  // suspended on the stale index re-tested the stale `atMs` after resuming
+  // and rebuilt again, even though another caller had already refreshed
+  // `built`. This must observe exactly one rebuild for N concurrent misses,
+  // not N. (Verified to fail against the pre-fix code: N=6 concurrent misses
+  // produced 7 discoverCachePartitions calls instead of 2.)
+  let clockMs = 0
+  const now = () => clockMs
+  const { storage, getDiscoverCalls } = freshSessionIndexStorage()
+  const projector = freshSessionProjector(storage, now)
+
+  // Warm the index once, inside the window.
+  await projector.projectExchange({ ...exchange(), path: 'sess-warm' })
+  assert.equal(getDiscoverCalls(), 1, 'warm-up projection builds the index once')
+
+  // Move past the rebuild window, then fire N concurrent lookups for N
+  // distinct fresh session ids (autonomous clients minting session ids).
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  const N = 6
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) => projector.projectExchange({ ...exchange(), path: `sess-fresh-${i}` }))
+  )
+  for (const rows of results) assert.equal(rows.length, 1, 'each concurrent fresh session still emits its own row')
+  assert.equal(
+    getDiscoverCalls(),
+    2,
+    `${N} concurrent misses past the rebuild window must share a single rebuild, not one each`
+  )
 })
 
 test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {

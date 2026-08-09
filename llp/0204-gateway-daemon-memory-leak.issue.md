@@ -63,6 +63,12 @@ All in one change set, code-`@ref`ed to this issue:
 - Recorder: a finished exchange removes itself from `active` via its
   `finishedSignal`; `finalize()` also releases the raw chunk buffers once
   the decoded bodies are on the row.
+- Recorder drain timer: `drain()`'s force-finish timeout is ref'd instead
+  of unref'd, so its `Promise.race` always settles within `timeoutMs`
+  instead of the timer being droppable by an otherwise-idle event loop
+  and the await hanging forever. Consequence: `drain()` can now hold the
+  process open for up to `timeoutMs` when an exchange never settles,
+  where before the process could exit early regardless.
 - Settle dedupe: `scanExistingPartIds` accepts a `restrictTo` key set;
   the flush passes its batch keys, bounding memory to O(batch) and
   stopping the read once every batch key is resolved. Backfill keeps the

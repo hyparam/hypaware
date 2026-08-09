@@ -136,6 +136,7 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *   storage?: ExtendedQueryStorageService | QueryStorageService,
  *   log?: PluginLogger | { warn(message: string, fields?: Record<string, unknown>): void, info?: (m: string, f?: Record<string, unknown>) => void },
  *   isSessionIgnored?: (sessionId: string) => boolean,
+ *   now?: () => number,
  * }} opts
  */
 export function createAiGatewayMessageProjector(opts) {
@@ -172,10 +173,13 @@ export function createAiGatewayMessageProjector(opts) {
   // is by `source=` only, so the per-session seed scan cannot prune by
   // path and reads the WHOLE table; autonomous clients mint fresh session
   // ids constantly, and for a fresh id that full scan finds nothing. This
-  // index is one single-column scan, built lazily and shared by every
-  // session, so an unseen session skips its seed scan outright.
+  // index is built lazily and shared by every session, so an unseen
+  // session skips its seed scan outright; because a fresh session id is
+  // always a miss in this workload, the index still pays one whole-table
+  // `session_id` scan per `SESSION_INDEX_REBUILD_MS` window, indefinitely,
+  // rather than the single build the name suggests.
   // @ref LLP 0204#fix [implements]: new sessions must not pay a whole-table scan
-  const sessionIndex = createCommittedSessionIndex(storage, log)
+  const sessionIndex = createCommittedSessionIndex(storage, log, opts.now)
 
   return {
     /**
@@ -317,7 +321,7 @@ async function seedSessionIfCommitted(sessionId, state, storage, log, sessionInd
  * settlement/compaction still collapse - the documented failure envelope
  * of the seed scan itself.
  */
-const SESSION_INDEX_REBUILD_MS = 10 * 60_000
+export const SESSION_INDEX_REBUILD_MS = 10 * 60_000
 
 /**
  * Lazily-built index of session_ids that have any committed
@@ -327,14 +331,25 @@ const SESSION_INDEX_REBUILD_MS = 10 * 60_000
  *
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @param {() => number} [now] Injectable clock, defaulting to `Date.now`,
+ *   so rebuild-window tests don't depend on wall-clock timing.
  */
-function createCommittedSessionIndex(storage, log) {
-  /** @type {{ atMs: number, ids: Promise<Set<string>> } | undefined} */
+function createCommittedSessionIndex(storage, log, now = Date.now) {
+  /** @type {{ atMs: number, ids: Promise<Set<string> | undefined> } | undefined} */
   let built
 
   function rebuild() {
-    built = { atMs: Date.now(), ids: scanCommittedSessionIds(storage, log) }
-    return built
+    const attempt = { atMs: now(), ids: scanCommittedSessionIds(storage, log) }
+    built = attempt
+    // A build that failed to scan cannot stand in as "no committed rows"
+    // for the rebuild window; clear it once the failure is known so the
+    // NEXT caller retries instead of trusting a stale, un-scanned answer.
+    // Guarded on `built === attempt` so a later, already-succeeded rebuild
+    // (from a concurrent caller) is not clobbered by this one's failure.
+    attempt.ids.then((ids) => {
+      if (ids === undefined && built === attempt) built = undefined
+    })
+    return attempt
   }
 
   return {
@@ -347,23 +362,35 @@ function createCommittedSessionIndex(storage, log) {
      */
     async mightHaveCommittedRows(sessionId) {
       if (!canScanCommittedRows(storage)) return false
-      let current = built ?? rebuild()
-      if ((await current.ids).has(sessionId)) return true
-      if (Date.now() - current.atMs < SESSION_INDEX_REBUILD_MS) return false
-      current = rebuild()
-      return (await current.ids).has(sessionId)
+      const current = built ?? rebuild()
+      const ids = await current.ids
+      // A build that could not scan is not "definitely no committed
+      // rows"; err toward running the per-session scan, the same
+      // best-effort posture as the scan itself (see JSDoc above).
+      if (ids === undefined) return true
+      if (ids.has(sessionId)) return true
+      if (now() - current.atMs < SESSION_INDEX_REBUILD_MS) return false
+      // Another caller may have rebuilt (or a failed build may have
+      // cleared itself) while this one awaited.
+      const next = built === current || !built ? rebuild() : built
+      const nextIds = await next.ids
+      return nextIds === undefined || nextIds.has(sessionId)
     },
   }
 }
 
 /**
  * Scan committed partitions for the distinct `session_id`s present.
- * Best-effort like the message-id scan: any failure degrades to "no
- * sessions known", which the caller treats as nothing-to-seed.
+ * Best-effort like the message-id scan: an unreadable PARTITION is
+ * skipped and still contributes the rest. A failure to even discover
+ * partitions is a distinct outcome from "scanned and found nothing":
+ * it returns `undefined` so the caller can tell "no sessions known" from
+ * "the scan could not run" and err toward scanning instead of silently
+ * treating a broken index as authoritative.
  *
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
- * @returns {Promise<Set<string>>}
+ * @returns {Promise<Set<string> | undefined>}
  */
 async function scanCommittedSessionIds(storage, log) {
   /** @type {Set<string>} */
@@ -378,7 +405,7 @@ async function scanCommittedSessionIds(storage, log) {
     log?.warn?.('aigw.session_index_scan_failed', {
       error: err instanceof Error ? err.message : String(err),
     })
-    return ids
+    return undefined
   }
 
   for (const part of partitions ?? []) {
