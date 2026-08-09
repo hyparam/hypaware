@@ -20,7 +20,15 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
-import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
+import {
+  ClientSyncListUnreadableError,
+  localOnlyListPath,
+  LocalOnlyListUnreadableError,
+  optedOutClientSourceIds,
+  readClientSyncEntries,
+  readFolderAskModeSafe,
+  readLocalOnlyDirs,
+} from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
@@ -43,6 +51,7 @@ import {
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -105,13 +114,8 @@ const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
  * @ref LLP 0086#endpoint-discovery [implements]: the daemon's live bound port is read from status.json sources[].details, not guessed
  */
 export function gatewaySourceDetails(sources) {
-  const list = Array.isArray(sources) ? sources : []
-  const source =
-    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
-    list.find((s) => s && s.name === 'ai-gateway')
-  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
-  if (!rawDetails) return undefined
-  const details = /** @type {Record<string, unknown>} */ (rawDetails)
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return undefined
   const port = details.port
   if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
@@ -122,6 +126,71 @@ export function gatewaySourceDetails(sources) {
       ? details.listen_fallback_from
       : undefined
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
+}
+
+/**
+ * The gateway source's `status()` details as the daemon captured them, before
+ * any "is it bound?" filtering. `gatewaySourceDetails` above answers "where do
+ * I send traffic?" and so returns nothing for a gateway that never bound; the
+ * idle checks below need the details of exactly that case.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {Record<string, unknown> | undefined}
+ */
+function gatewaySourceRawDetails(sources) {
+  const list = Array.isArray(sources) ? sources : []
+  const source =
+    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
+    list.find((s) => s && s.name === 'ai-gateway')
+  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
+  if (!rawDetails) return undefined
+  return /** @type {Record<string, unknown>} */ (rawDetails)
+}
+
+/**
+ * How many upstreams a *deliberately idle* gateway was nonetheless configured
+ * with, and which of them it can name, or `undefined` when the gateway is
+ * bound, absent, or idle for the reason it is allowed to be idle.
+ *
+ * An upstream-less gateway is a legitimate config (LLP 0120: hermes composes
+ * the plugin for its materializer alone and contributes no upstream), so the
+ * source idles instead of failing to start. That trade turns one class of
+ * misconfiguration silent: a config that *did* list upstreams and lost them
+ * all to `compileUpstreams` (an entry missing either required key is dropped
+ * without complaint, and `diagnoseV1Config`'s `gateway_missing_*_upstream`
+ * check does not fire for that shape, since it matches on `provider` too) also
+ * idles, reporting `started` and `healthy` while the user's client gets
+ * ECONNREFUSED.
+ *
+ * The *count* is what separates them, not the names. `compileUpstreams` drops
+ * an entry for a missing `name` exactly as silently as for a missing
+ * `base_url`, and a nameless entry contributes nothing to `details.upstreams`,
+ * so a config of `provider = "anthropic", base_url = "..."` looks identical to
+ * hermes-only through the names alone. `details.upstreams_configured` counts
+ * the entries the config listed whatever shape they were in, so hermes-only
+ * yields 0 and any dropped upstream yields at least 1. The names still ride
+ * along, pre-compile, because they make the warning concrete when they exist.
+ *
+ * A status file written before `upstreams_configured` existed carries names
+ * only; those still count for themselves, so an older daemon's dropped
+ * `base_url` stays visible.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {{ count: number, names: string[] } | undefined}
+ */
+function gatewayIdleWithConfiguredUpstreams(sources) {
+  const details = gatewaySourceRawDetails(sources)
+  if (!details || details.listening !== false) return undefined
+  const upstreams = details.upstreams
+  const names = Array.isArray(upstreams)
+    ? /** @type {string[]} */ (upstreams.filter((u) => typeof u === 'string' && u.length > 0))
+    : []
+  const rawCount = details.upstreams_configured
+  const count =
+    typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
+      ? rawCount
+      : names.length
+  return count > 0 ? { count, names } : undefined
 }
 
 /**
@@ -300,6 +369,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // always boots, so a broken/absent local layer is a warning, never an
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
+
+  // A local layer that is present but does not parse: `activePlugins` is then
+  // empty (or central-only) because the file could not be read, not because
+  // the operator disabled anything. Any diagnostic whose repair is "your
+  // config no longer names this" would be reading a parse failure as intent,
+  // so the attached-but-not-configured check below stands down here and lets
+  // `config_unreadable` / `config_local_unreadable` own the run.
+  const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
@@ -583,6 +660,42 @@ export async function collectHypAwareStatus(opts = {}) {
       repair: [`free ${from} and restart the daemon - attached clients re-point automatically`],
     })
   }
+  const idleGatewayUpstreams = daemon.running
+    ? gatewayIdleWithConfiguredUpstreams(daemonStatusFile?.sources)
+    : undefined
+  if (idleGatewayUpstreams) {
+    // The gateway bound nothing while the config listed upstreams it wanted
+    // proxied: every one was dropped at compile, so there is no listener and
+    // no error either. Before the source was allowed to idle this was a source
+    // start failure and `hyp status` said `[failed]`; the same install must not
+    // now read `[started]` / `healthy` with the reason living only in a log
+    // line. Non-degrading like `gateway_port_fallback`: an install that
+    // *wanted* no upstream (hermes-only) reports no configured upstreams here
+    // and never reaches this branch, so it stays healthy and silent.
+    // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway is listening" is readable from status.json steadily, not only from a boot-time log line
+    const { count, names } = idleGatewayUpstreams
+    // Count first, names in parentheses when there are any: `name` is itself
+    // one of the two keys that drops an entry, so the config that most needs
+    // this warning is exactly the one that can supply no name to print.
+    const named = names.length > 0 ? ` (${names.join(', ')})` : ''
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'gateway_idle_no_upstreams',
+      message: `the gateway is running but listening on nothing: ${count} ${count === 1 ? 'upstream' : 'upstreams'}${named} ${count === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`,
+      // Not `hyp config validate`: it prints `config ok` for this config and
+      // exits 0. `@hypaware/ai-gateway` registers no config section, so
+      // nothing validates upstream shape, and `diagnoseV1Config` matches an
+      // upstream by its `provider` field, so a nameless anthropic entry
+      // satisfies the one check that does look. A repair line that sends the
+      // user to a command which affirms the broken config is worse than no
+      // repair line, so point at the file and the two required keys instead.
+      // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
+      repair: [
+        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        `hyp daemon restart  # the daemon reads the file only at boot`,
+      ],
+    })
+  }
   /** @type {ClientAttachReport[]} */
   const clients = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
@@ -638,34 +751,75 @@ export async function collectHypAwareStatus(opts = {}) {
         message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
         repair: [`hyp attach --client ${clientName}`],
       })
+    } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
+      // The mirror image of `client_attach_missing`: the marker is on disk but
+      // nothing enables the adapter, so this client still routes through a
+      // gateway that no longer collects it (and, with no gateway configured at
+      // all, through a dead port). Re-running the picker and unchecking a
+      // previously picked client is the way in; the wizard warns at the time,
+      // and this is the after-the-fact backstop for a run already closed.
+      //
+      // Solo hosts only. On a joined host a config-named client's attach is the
+      // reconciler's to reverse, so the same shape there is a pass it has not
+      // run yet, not a state the operator should undo by hand. And only when
+      // the local layer actually parsed: an unreadable file says nothing about
+      // what the operator enabled, so "not configured" would be a guess, and
+      // detaching on a guess is the one irreversible thing here.
+      // @ref LLP 0185#status-backstop [implements]: attached-but-not-configured is a warning on solo hosts, and the reconciler's business on managed ones
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_attached_not_configured',
+        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
+        repair: [`hyp detach --client ${clientName}`],
+      })
     }
   }
 
-  // ----- client sync provenance split (LLP 0132 #never-silent) -----
-  // On a managed machine the central sink exports the whole cache, so a
-  // source the user added to the *local* layer (LLP 0031) is collected and
-  // locally queryable but never forwarded (LLP 0132 #rule). That withholding
-  // must never be a silent state: group the picked (configured) clients by
-  // provenance so `hyp status` can show the "syncing / local-only" split.
-  // A solo host (no central layer) has nothing to withhold from, so the
-  // split is null there and the V1 surface is unchanged.
-  // @ref LLP 0132#never-silent [implements]: hyp status shows the syncing vs local-only client split so a local addition on a managed machine is never silent
+  // ----- client sync split (LLP 0188 #never-silent) -----
+  // On an enrolled machine every configured source syncs by default; only
+  // the machine-local opt-out store (LLP 0188 #opt-out) keeps one local.
+  // That withholding must never be a silent state: split every configured
+  // picker source (not just attach-probed clients - a hermes opt-out must
+  // be visible too) into syncing vs local-only. A solo host (no central
+  // layer) has nothing to withhold from, so the split is null there and
+  // the V1 surface is unchanged. A corrupt opt-out store degrades to a
+  // null split plus a warning diagnostic: status is best-effort, the
+  // export seam is what enforces (and fails closed on the same file).
+  // @ref LLP 0188#never-silent [implements]: hyp status shows the syncing vs local-only split, driven by the opt-out store
   /** @type {{ syncing: string[], localOnly: string[] } | null} */
   let clientSync = null
   if (hasCentral && catalog) {
     const layeredForProvenance = { centralConfig, effective: config }
-    /** @type {string[]} */
-    const syncing = []
-    /** @type {string[]} */
-    const localOnly = []
-    for (const c of clients) {
-      if (!c.configured) continue
-      const provenance = classifyClientProvenance(c.name, layeredForProvenance, catalog)
-      if (provenance === 'local') localOnly.push(c.name)
-      else syncing.push(c.name)
+    /** @type {Set<string> | null} */
+    let optedOut = null
+    try {
+      optedOut = new Set(optedOutClientSourceIds(await readClientSyncEntries({ stateDir: stateRoot })))
+    } catch (err) {
+      if (!(err instanceof ClientSyncListUnreadableError)) throw err
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_sync_list_unreadable',
+        message: `the machine-local client policy store at '${err.filePath}' is unreadable or malformed - exports fail until it is repaired or removed`,
+        repair: ['inspect and fix or remove the file, then rerun hyp status'],
+      })
     }
-    if (syncing.length > 0 || localOnly.length > 0) {
-      clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+    if (optedOut !== null) {
+      /** @type {string[]} */
+      const syncing = []
+      /** @type {string[]} */
+      const localOnly = []
+      for (const id of catalog.pickerDescriptors.keys()) {
+        const provenance = classifyClientProvenance(id, layeredForProvenance, catalog)
+        if (provenance === 'absent') continue
+        // Central sources always sync; an opt-out entry for one is inert
+        // (LLP 0188 #locked), so only a 'local'-provenance opt-out lands
+        // in the local-only column.
+        if (provenance === 'local' && optedOut.has(id)) localOnly.push(id)
+        else syncing.push(id)
+      }
+      if (syncing.length > 0 || localOnly.length > 0) {
+        clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+      }
     }
   }
 
@@ -723,11 +877,19 @@ export async function collectHypAwareStatus(opts = {}) {
   // it surfaces as a loud diagnostic and a null count rather than a silent 0
   // ("enrolled but withholding" must never be a silent state, R9).
   // @ref LLP 0069#requirements [implements]: R9 - hyp status surfaces the local-only list's presence and size
-  /** @type {{ localOnlyDirCount: number } | null} */
+  // The standing new-folder ask (LLP 0200) rides in the same section: a
+  // machine that stopped asking has a consent prompt switched off, which is
+  // exactly the kind of state R9 says must never be silent. The safe reader
+  // never throws and reads a corrupt preference as `ask`, the mode that is
+  // actually in force when the hook cannot read it either.
+  // @ref LLP 0200#cli [implements]: hyp status names a suppressed folder ask alongside the withholding counts
+  const folderAsk = await readFolderAskModeSafe({ stateDir: stateRoot })
+
+  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode } | null} */
   let usagePolicy = null
   try {
     const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
-    usagePolicy = { localOnlyDirCount: localOnlyDirs.length }
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk }
   } catch (err) {
     const filePath = err instanceof LocalOnlyListUnreadableError
       ? err.filePath
@@ -927,6 +1089,15 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
           ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
           ...(typeof marker.last_attempt === 'string' ? { lastAttempt: marker.last_attempt } : {}),
           ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
+        })
+      } else if (marker && marker.status === 'refused') {
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: terminal refused marker, reason+at, no attempts
+        actions.push({
+          kind,
+          requestKey,
+          state: 'refused',
+          ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
+          ...(typeof marker.at === 'string' ? { at: marker.at } : {}),
         })
       } else if (marker) {
         // `done` (run-once / attached) or `applied` (reversible): the effect

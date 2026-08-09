@@ -3,6 +3,7 @@
 import process from 'node:process'
 import readline from 'node:readline'
 
+import { visibleWidth } from '../style.js'
 import { reduce } from './keypress.js'
 import { render } from './render.js'
 
@@ -85,9 +86,13 @@ export async function run(initialState, io) {
     if (previousLineCount > 0) {
       buf += `\x1b[${previousLineCount}A\r${CLEAR_TO_END}`
     }
-    const frame = render(state, { color })
+    // Width is read per frame, not once: a resize between keystrokes must
+    // reach both the renderer (which drops a box that no longer fits) and
+    // the row count below it, or the two disagree about the same frame.
+    const columns = terminalColumns(stdout)
+    const frame = render(state, { color, columns })
     buf += frame
-    previousLineCount = countPhysicalRows(frame, terminalColumns(stdout))
+    previousLineCount = countPhysicalRows(frame, columns)
     stdout.write(buf)
   }
 
@@ -111,6 +116,9 @@ export async function run(initialState, io) {
           } else if (state.status === 'cancelled') {
             cleanup()
             reject(new PromptCancelledError())
+          } else if (state.status === 'backed') {
+            cleanup()
+            reject(new PromptBackRequestedError())
           }
         } catch (err) {
           cleanup()
@@ -174,22 +182,6 @@ function terminalColumns(stdout) {
   return typeof cols === 'number' && cols > 0 ? cols : 80
 }
 
-// Match ANSI SGR (color/style) sequences so they are excluded from the
-// visible-width measurement. The renderer only emits `\x1b[...m` codes.
-const ANSI_SGR = /\x1b\[[0-9;]*m/g
-
-/**
- * Visible (printable) width of a single logical line, ignoring ANSI
- * style codes. Measured in code units, which matches column count for
- * the Latin/punctuation text the prompts render.
- *
- * @param {string} line
- * @returns {number}
- */
-function visibleWidth(line) {
-  return line.replace(ANSI_SGR, '').length
-}
-
 /**
  * Count the number of *physical* terminal rows a frame occupies. The
  * runtime uses this to know how far to move the cursor up before
@@ -240,5 +232,32 @@ export class PromptCancelledError extends Error {
 export function isPromptCancelledError(err) {
   return err instanceof PromptCancelledError || (
     err instanceof Error && err.name === 'PromptCancelledError'
+  )
+}
+
+/**
+ * Thrown when the user steps back from a prompt that opted into
+ * back-navigation (`allowBack`, LLP 0191): escape on the TUI path, `b`
+ * on the readline fallbacks. A control-flow signal like
+ * {@link PromptCancelledError}, not a failure: callers re-run the
+ * previous screen.
+ */
+export class PromptBackRequestedError extends Error {
+  constructor(message = 'TUI prompt backed out') {
+    super(message)
+    this.name = 'PromptBackRequestedError'
+  }
+}
+
+/**
+ * Identify a back request across direct runtime errors and wrapped
+ * copies that preserve the established error name.
+ *
+ * @param {unknown} err
+ * @returns {err is PromptBackRequestedError}
+ */
+export function isPromptBackError(err) {
+  return err instanceof PromptBackRequestedError || (
+    err instanceof Error && err.name === 'PromptBackRequestedError'
   )
 }

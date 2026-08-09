@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-ai-usage-report.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-report.
 ---
 
 # HypAware Reference
@@ -78,13 +78,17 @@ curated HypAware registry.
 
 - Query or inspect recorded data - use the **hypaware-query** skill.
 - Team token usage, cost, and improvement analysis - use the
-  **hypaware-ai-usage-report** skill.
+  **hypaware-report** skill.
 - See what was captured here, and mark or purge it - use the
   **hypaware-privacy** skill (also the review before an enrolled machine's
   first sync).
 - Opt a folder out of recording - `hyp ignore <path>` writes a committable
   `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb. To pause only this conversation, `/hypaware-ignore`.
+- Decide what happens in new folders - by default they sync with no
+  question; `hyp policy folders ask` asks once per new folder instead, and
+  `hyp policy folders sync` returns to the default. It gates the question
+  only, never an existing class.
 - "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
   stable shape).
 

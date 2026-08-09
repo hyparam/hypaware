@@ -93,6 +93,14 @@ export interface BootKernelResult {
   /** Bundled plugins available but not activated this boot. */
   skipped: PluginName[]
   /**
+   * Plugins whose manifest this boot discovered (bundled, excluded-bundled, or
+   * installed) but whose boot profile did not select: the profile never gave
+   * them a chance to activate. Wider than `skipped`, which only covers the V1
+   * allowlist's bundled manifests and so omits the excluded opt-ins that
+   * `all-bundled`/`all-available` drop even when the config names them.
+   */
+  withheldByProfile: PluginName[]
+  /**
    * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
    * derived from the very manifests this boot discovered. The daemon threads
    * it onto the client-action reconcile context so the attach handler can

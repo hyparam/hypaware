@@ -17,6 +17,9 @@ import {
   readLocalOnlyEntries,
   writeLocalOnlyEntries,
 } from '../../src/core/usage-policy/local_only.js'
+import { clientSyncListPath, readClientSyncEntries } from '../../src/core/usage-policy/client_sync.js'
+import { folderAskPath, readFolderAskMode } from '../../src/core/usage-policy/folder_ask.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -689,5 +692,270 @@ test('hyp policy (bare) renders group help listing set/show/unset/list', async (
     assert.match(res.stdout, /show/)
     assert.match(res.stdout, /unset/)
     assert.match(res.stdout, /list/)
+  })
+})
+
+/* ------------------------------ policy client (LLP 0188) ------------------------------ */
+
+test('hyp policy client: empty store lists nothing opted out and names the store', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy client', [], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /no clients are kept local-only/)
+    assert.match(res.stdout, /machine-local client policy store/)
+  })
+})
+
+test('hyp policy client <name> local-only writes the opt-out; show and list reflect it; sync removes it', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+
+    const set = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(set.code, 0, set.stderr)
+    assert.match(set.stdout, /openclaw: local-only/)
+    assert.match(set.stdout, /rows already exported are not recalled/)
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), [
+      { source: 'openclaw', class: 'local-only' },
+    ])
+
+    const show = await run('policy client', ['openclaw'], { cwd: root, hypHome })
+    assert.equal(show.code, 0)
+    assert.match(show.stdout, /openclaw: local-only/)
+
+    const list = await run('policy client', [], { cwd: root, hypHome })
+    assert.match(list.stdout, /clients kept local-only: openclaw/)
+
+    const unset = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(unset.code, 0)
+    assert.match(unset.stdout, /openclaw: sync/)
+    // @ref LLP 0188#no-retroactive-ship: the flip-back names the property
+    assert.match(unset.stdout, /rows withheld while local-only are not uploaded/)
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), [])
+
+    const again = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(again.code, 0, 'sync on a non-opted-out client is an idempotent no-op')
+    assert.match(again.stdout, /default, unchanged/)
+  })
+})
+
+// The two `--json` shapes (LLP 0188 #opt-out): the enumerate form
+// ({ entries, path }) and the single-client form ({ source, state, managed,
+// path }). Pinned as parsed whole objects, not substrings, so a field
+// rename breaks here instead of in a consumer.
+test('hyp policy client --json: both shapes are stable, before and after an opt-out', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const storePath = clientSyncListPath(stateDir)
+
+    const emptyList = await run('policy client', ['--json'], { cwd: root, hypHome })
+    assert.equal(emptyList.code, 0)
+    assert.deepEqual(JSON.parse(emptyList.stdout), { entries: [], path: storePath })
+
+    const showDefault = await run('policy client', ['openclaw', '--json'], { cwd: root, hypHome })
+    assert.equal(showDefault.code, 0)
+    assert.deepEqual(JSON.parse(showDefault.stdout), {
+      source: 'openclaw', state: 'sync', managed: false, path: storePath,
+    })
+
+    const set = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(set.code, 0, set.stderr)
+
+    const list = await run('policy client', ['--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(list.stdout), {
+      entries: [{ source: 'openclaw', class: 'local-only' }], path: storePath,
+    })
+
+    const show = await run('policy client', ['openclaw', '--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(show.stdout), {
+      source: 'openclaw', state: 'local-only', managed: false, path: storePath,
+    })
+  })
+})
+
+test('hyp policy client with an unknown name exits 2 and names known ids', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy client', ['not-a-client', 'local-only'], { cwd: root, hypHome })
+    assert.equal(res.code, 2)
+    assert.match(res.stderr, /unknown client 'not-a-client'/)
+    assert.match(res.stderr, /openclaw/)
+  })
+})
+
+test('hyp policy client refuses to opt out a central-configured source (LLP 0188 #locked)', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const seedPath = centralSeedPath(stateDir)
+    mkdirSync(path.dirname(seedPath), { recursive: true })
+    writeFileSync(seedPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/claude' }],
+    }))
+
+    const res = await run('policy client', ['claude', 'local-only'], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /managed by your fleet and always syncs/)
+    assert.equal(await readClientSyncEntries({ stateDir }), null, 'nothing was written')
+
+    const show = await run('policy client', ['claude'], { cwd: root, hypHome })
+    assert.match(show.stdout, /claude: sync \(managed by your fleet\)/)
+
+    // A non-central source on the same machine still opts out fine.
+    const other = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(other.code, 0, other.stderr)
+  })
+})
+
+test('hyp policy client fails loudly on a corrupt store', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const storePath = clientSyncListPath(stateDir)
+    mkdirSync(path.dirname(storePath), { recursive: true })
+    writeFileSync(storePath, '{ nope')
+
+    const res = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /machine-local client policy store/)
+    assert.match(res.stderr, /unreadable or malformed/)
+    assert.equal(readFileSync(storePath, 'utf8'), '{ nope', 'the corrupt store is never overwritten')
+  })
+})
+
+test('hyp policy list includes the clients section, text and --json', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await run('policy client', ['hermes', 'local-only'], { cwd: root, hypHome })
+    await run('policy set', [path.join(root, 'proj'), 'local-only'], { cwd: root, hypHome })
+
+    const text = await run('policy list', [], { cwd: root, hypHome })
+    assert.equal(text.code, 0)
+    assert.match(text.stdout, /clients kept local-only: hermes/)
+
+    const json = await run('policy list', ['--json'], { cwd: root, hypHome })
+    const parsed = JSON.parse(json.stdout)
+    assert.deepEqual(parsed.clients.entries, [{ source: 'hermes', class: 'local-only' }])
+    assert.equal(parsed.clients.path, clientSyncListPath(stateDir))
+    assert.equal(parsed.entries.length, 1, 'the directory entries are unchanged')
+  })
+})
+
+/* ------------------------------ policy folders (LLP 0200) ------------------------------ */
+
+// The standing answer to the session-start classification question: whether a
+// session opened in an unclassified folder is asked how to handle it, or lets
+// it sync under the implicit default without asking. The verb gates the
+// question alone - no directory entry, no `.hypignore`, and no export-seam
+// behavior moves with it.
+// @ref LLP 0200#cli [tests]:
+
+test('hyp policy folders: with nothing set, reports the sync default and names the store', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+
+    const res = await run('policy folders', [], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /new folders: sync/, 'sync is the product default (LLP 0200 #default)')
+    assert.match(res.stdout, new RegExp(escapeRe(folderAskPath(stateDir))))
+    assert.ok(!existsSync(folderAskPath(stateDir)), 'reporting never stamps the preference')
+  })
+})
+
+test('hyp policy folders ask buys the per-folder question; folders sync retires it again', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+
+    const on = await run('policy folders', ['ask'], { cwd: root, hypHome })
+    assert.equal(on.code, 0, on.stderr)
+    assert.match(on.stdout, /asks once how to handle it/)
+    assert.equal(await readFolderAskMode({ stateDir }), 'ask')
+
+    const report = await run('policy folders', [], { cwd: root, hypHome })
+    assert.match(report.stdout, /new folders: ask/)
+
+    const off = await run('policy folders', ['sync'], { cwd: root, hypHome })
+    assert.equal(off.code, 0, off.stderr)
+    assert.match(off.stdout, /new folders: sync - they sync without asking/)
+    // Going back to sync is the direction that changes what leaves the
+    // machine, so it says what did not change with it.
+    assert.match(off.stdout, /folders you already marked keep their class/)
+    assert.equal(await readFolderAskMode({ stateDir }), 'sync')
+  })
+})
+
+test('hyp policy folders is idempotent and never touches the directory store', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await run('policy set', [root, 'local-only'], { cwd: root, hypHome })
+
+    for (const _ of [0, 1]) {
+      const res = await run('policy folders', ['ask'], { cwd: root, hypHome })
+      assert.equal(res.code, 0, res.stderr)
+    }
+    assert.equal(await readFolderAskMode({ stateDir }), 'ask')
+    assert.deepEqual(
+      await readLocalOnlyEntries({ stateDir }),
+      [{ dir: root, class: 'local-only' }],
+      'moving the question leaves every classification exactly as it was'
+    )
+  })
+})
+
+test('hyp policy folders --json emits the mode and the store path, both shapes', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+
+    const before = await run('policy folders', ['--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(before.stdout), { mode: 'sync', path: folderAskPath(stateDir) })
+
+    const written = await run('policy folders', ['ask', '--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(written.stdout), { mode: 'ask', path: folderAskPath(stateDir) })
+  })
+})
+
+test('hyp policy folders rejects an unknown mode with a usage error', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy folders', ['never'], { cwd: root, hypHome })
+    assert.equal(res.code, 2)
+    assert.match(res.stderr, /error:/)
+    assert.ok(!existsSync(folderAskPath(stateDirOf(hypHome))), 'a rejected mode is never persisted')
+  })
+})
+
+test('hyp policy folders fails loudly on a corrupt preference and names the repair', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const prefPath = folderAskPath(stateDirOf(hypHome))
+    mkdirSync(path.dirname(prefPath), { recursive: true })
+    writeFileSync(prefPath, '{ nope')
+
+    const res = await run('policy folders', [], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /unreadable or malformed/)
+    assert.match(res.stderr, /hyp policy folders ask/)
+    assert.equal(readFileSync(prefPath, 'utf8'), '{ nope', 'never overwritten by the read path')
+
+    // The write path is the documented repair and must work over the corrupt file.
+    const repair = await run('policy folders', ['ask'], { cwd: root, hypHome })
+    assert.equal(repair.code, 0, repair.stderr)
+    assert.equal(await readFolderAskMode({ stateDir: stateDirOf(hypHome) }), 'ask')
+  })
+})
+
+test('hyp policy list surfaces the per-folder ask when it is on, text and --json', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+
+    // The default is not worth a line: `list` shows what the user changed.
+    const quiet = await run('policy list', ['--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(quiet.stdout).folders, { mode: 'sync', path: folderAskPath(stateDir) })
+    const quietText = await run('policy list', [], { cwd: root, hypHome })
+    assert.match(quietText.stdout, /no machine-local entries/)
+    assert.ok(!/new folders/.test(quietText.stdout))
+
+    await run('policy folders', ['ask'], { cwd: root, hypHome })
+    const text = await run('policy list', [], { cwd: root, hypHome })
+    assert.equal(text.code, 0)
+    assert.match(text.stdout, /new folders: ask/)
+
+    const json = await run('policy list', ['--json'], { cwd: root, hypHome })
+    assert.deepEqual(JSON.parse(json.stdout).folders, { mode: 'ask', path: folderAskPath(stateDir) })
   })
 })

@@ -98,6 +98,65 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * The central-layer file names {@link resolveCentralLayerPath} resolves
+ * *through*: the pointer it reads and the files it can name. Their presence
+ * is the on-disk evidence that this host has a central layer, independent of
+ * whether the resolution above managed to follow them.
+ */
+const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json', 'config.b.json']
+
+/**
+ * Why {@link resolveCentralLayerPath} returned `null`, for the one caller that
+ * cannot treat "resolved nothing" and "could not resolve" alike: the D4
+ * exclusivity gate (LLP 0063), which reads `null` as *not enrolled* and would
+ * otherwise let a second org enroll a machine whose layer it merely failed to
+ * look up (#623).
+ *
+ * Resolution is lossy on purpose everywhere else. `readActiveSlot` swallows
+ * every `readlink` error into `null` (the pointer replaced by a regular file,
+ * a dangling or looping link, a target that is not a slot), and `existsSync`
+ * swallows `EACCES` on `config-control/` into `false`. Boot and `hyp status`
+ * are right to see one `null`: either way there is no layer to merge or show.
+ * A permission decision is not, so this reports resolution *failure*
+ * separately: the control directory could not be listed, or it still holds
+ * central-layer files that the resolution above did not manage to name.
+ *
+ * `null` means the absence is real: no control directory, or one with no
+ * central-layer file left in it (what `hyp leave` and `resetCentralLayerToSeed`
+ * produce). Nothing here reads file *contents*: a layer that resolves is the
+ * loader's business, not this function's.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {{ configPath: string, errorKind: 'config_unreadable', message: string } | null}
+ * @ref LLP 0031#physical-layout [constrained-by]: same active-slot-else-seed layout, read for evidence of a layer rather than for a path to load
+ */
+export function centralLayerResolutionFailure({ stateRoot }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  if (resolveCentralLayerPath({ stateRoot }) !== null) return null
+  /** @type {string[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(controlDir)
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    // No control directory at all is the genuine never-joined host.
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null
+    return {
+      configPath: controlDir,
+      errorKind: 'config_unreadable',
+      message: `failed to read the central config directory ${controlDir}: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  const residue = CENTRAL_LAYER_BASENAMES.filter((name) => entries.includes(name))
+  if (residue.length === 0) return null
+  return {
+    configPath: controlDir,
+    errorKind: 'config_unreadable',
+    message: `${controlDir} still holds central layer state (${residue.join(', ')}) that the active-slot pointer does not resolve to a readable layer file`,
+  }
+}
+
+/**
  * Reset the central layer to **seed-config mode**: remove the active-slot
  * pointer, both A/B slot files and their etag sidecars, and the
  * apply-engine state (probation / bad-etag / last-rollback). Best-effort

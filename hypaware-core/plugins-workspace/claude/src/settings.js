@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
+import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 
 /**
  * Claude Code settings.json attach writer, keyed on the `_hypaware`
@@ -325,9 +326,11 @@ async function readSettings(settingsPath) {
     parsed = JSON.parse(raw)
   } catch (err) {
     if (looksLikeJsonc(raw)) {
-      throw new ClaudeSettingsError(
-        `${settingsPath} appears to be JSONC; refuse to modify`,
-        { code: 'JSONC', cause: err }
+      throw markActionRefused(
+        new ClaudeSettingsError(
+          `${settingsPath} appears to be JSONC; refuse to modify`,
+          { code: 'JSONC', cause: err }
+        )
       )
     }
     throw new ClaudeSettingsError(`malformed JSON in ${settingsPath}: ${errMsg(err)}`, {

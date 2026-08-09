@@ -49,18 +49,47 @@ export function createStartSource(state) {
       entrypoints: createEntrypointActivity(),
     }
 
+    // `undefined` when the compiled routing table is empty: the source idles
+    // instead of binding a listener that could route nothing. See
+    // {@link launchListener}.
     let proxy = await launchListener(ctx, state, liveState)
+
+    // The config `status()` reports on, not the one this source booted with.
+    // `reload()` hands the daemon's new context to the listener but the
+    // closure above keeps the boot-time `ctx` forever, so reading it would
+    // publish a stale `details.upstreams` after every reload. Core's
+    // `gateway_idle_no_upstreams` diagnostic reads exactly that field to
+    // tell "hermes-only, correctly idle" from "an upstream was dropped", so
+    // it has to describe the config in force now.
+    let activeCtx = ctx
 
     return {
       async status() {
+        const configured = readConfiguredUpstreams(activeCtx)
         /** @type {SourceStatus} */
         const status = {
           state: 'ready',
           rowsWritten: liveState.rowsWritten,
           details: {
-            host: proxy.host,
-            port: proxy.port,
-            upstreams: readConfiguredUpstreamNames(ctx),
+            // Omitted while idle, which is already how `gatewaySourceDetails`
+            // (core `daemon/status.js`) reads "no reachable gateway here" off
+            // the status file for a bind that never happened.
+            ...(proxy ? { host: proxy.host, port: proxy.port } : { listening: false }),
+            // Raw configured names, pre-compile, deliberately: an entry the
+            // compiler dropped (a `url =` where `base_url` was meant) still
+            // appears here, which is what lets core see the difference
+            // between a gateway with nothing to proxy and a gateway whose
+            // upstream fell out of the routing table.
+            upstreams: configured.names,
+            // The names cannot carry the whole signal, because `name` is one
+            // of the two keys whose absence drops an entry: an upstream
+            // written with a `provider` and a `base_url` but no `name` leaves
+            // `upstreams: []`, indistinguishable from hermes-only. The count
+            // is the wider question ("did this config ask for any upstream at
+            // all?") and it is the one core's `gateway_idle_no_upstreams`
+            // diagnostic gates on; the names only decide how the warning
+            // reads.
+            upstreams_configured: configured.count,
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
             // @ref LLP 0066#ephemeral: surface the live opt-out count so an
@@ -80,6 +109,7 @@ export function createStartSource(state) {
             recent_entrypoints: liveState.entrypoints.snapshot(),
           },
         }
+        if (!proxy) status.message = 'idle: no upstreams configured, nothing to proxy'
         if (liveState.lastError) status.lastError = liveState.lastError
         return status
       },
@@ -89,13 +119,14 @@ export function createStartSource(state) {
         // new config. Connections in flight finish through the
         // recorder's drain (called inside stop()) so their rows are not
         // lost across the reload.
-        await proxy.stop()
+        await proxy?.stop()
         state.listen = undefined
         proxy = await launchListener(nextCtx, state, liveState)
+        activeCtx = nextCtx
       },
 
       async stop() {
-        await proxy.stop()
+        await proxy?.stop()
         state.listen = undefined
       },
     }
@@ -108,13 +139,63 @@ export function createStartSource(state) {
  * `AiGatewayCapability.localEndpoint()` returns the bound URL; clears
  * it on stop/reload.
  *
+ * Returns `undefined` when the compiled routing table is empty, leaving the
+ * source idle with no listener at all.
+ *
+ * The gateway plugin does two separable jobs, and a config can legitimately
+ * want only one. At activation it contributes the `ai_gateway_messages`
+ * dataset and the shared `ai_gateway.projected_exchange` materializer; at
+ * source start it runs the proxy. `@hypaware/hermes` wants the first alone:
+ * it reads Hermes's own `state.db` and is "never modified, configured, or
+ * proxied" (LLP 0119), yet the materializer is a hard `requires.plugins`
+ * dependency (LLP 0120), so its picker row composes the gateway plugin while
+ * contributing no upstream. A hermes-only picker run therefore produces
+ * `upstreams: []` with no adapter presets either, and failing the source
+ * start there would take a correct install down over a dataset-only
+ * dependency. Idling instead leaves `state.listen` unset, so
+ * `localEndpoint()` keeps throwing rather than handing an attach a URL
+ * nothing is listening on.
+ *
+ * @ref LLP 0120#consequences [constrained-by]: hermes composes the gateway plugin for the materializer alone, so an upstream-less gateway is a valid config rather than a misconfiguration
+ *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
  * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
- * @returns {Promise<StartedProxy>}
+ * @returns {Promise<StartedProxy | undefined>}
  */
 async function launchListener(ctx, state, liveState) {
   const config = compileConfig(ctx.config)
+  // Hoisted out of `bind` below (which runs twice on the EADDRINUSE fallback
+  // path) because the answer decides whether we bind at all. Pure over
+  // `config.upstreams` and `state.presets`, neither of which moves between
+  // the two binds.
+  const upstreams = mergeUpstreams(config.upstreams, state)
+  if (upstreams.length === 0) {
+    liveState.listenFallbackFrom = undefined
+    // Two configs reach an empty routing table and they are not the same
+    // event. A hermes-only install asked for no upstream at all: idle is the
+    // outcome it wanted, and `info` is the right volume. A config that listed
+    // upstreams and still compiled to none lost every one of them to
+    // `compileUpstreams` (a missing or misspelled `base_url` is dropped
+    // silently), so the operator is going to get ECONNREFUSED from a gateway
+    // that reports itself started. Name the entries that vanished, at `warn`.
+    const configured = readConfiguredUpstreams(ctx)
+    if (configured.count > 0) {
+      ctx.log.warn('aigw.idle_no_upstreams', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        registered_presets: state.presets.size,
+        configured_upstreams: configured.count,
+        configured_upstream_names: configured.names,
+        reason: 'every configured upstream was dropped at compile: check base_url on each entry',
+      })
+    } else {
+      ctx.log.info('aigw.idle_no_upstreams', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        registered_presets: state.presets.size,
+      })
+    }
+    return undefined
+  }
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
@@ -188,7 +269,7 @@ async function launchListener(ctx, state, liveState) {
   /** @param {string} listen */
   const bind = (listen) => startProxy({
     listen,
-    upstreams: mergeUpstreams(config.upstreams, state),
+    upstreams,
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
     // Serve `/_hypaware/*` control requests locally over the gateway's
@@ -288,16 +369,21 @@ export function mergeUpstreams(configUpstreams, state) {
 }
 
 /**
- * Read the names of configured upstreams from the activation config.
- * Defensive: if config has been mutated to a degenerate shape, returns
- * an empty list so status() never throws.
+ * Both halves of "what did the config ask for?": how many upstream entries it
+ * listed at all, and the names among them. The count is the wider signal (an
+ * entry with no `name` still counts), so the idle log and `hyp status` can be
+ * loud about a config that listed upstreams and compiled to none even when the
+ * names are unusable.
+ *
+ * Defensive: if config has been mutated to a degenerate shape, returns a zero
+ * count and an empty list so `status()` never throws.
  *
  * @param {PluginActivationContext} ctx
- * @returns {string[]}
+ * @returns {{ count: number, names: string[] }}
  */
-function readConfiguredUpstreamNames(ctx) {
+function readConfiguredUpstreams(ctx) {
   const raw = /** @type {Record<string, unknown>} */ (ctx.config ?? {}).upstreams
-  if (!Array.isArray(raw)) return []
+  if (!Array.isArray(raw)) return { count: 0, names: [] }
   /** @type {string[]} */
   const out = []
   for (const entry of raw) {
@@ -306,7 +392,7 @@ function readConfiguredUpstreamNames(ctx) {
       if (typeof name === 'string' && name.length > 0) out.push(name)
     }
   }
-  return out
+  return { count: raw.length, names: out }
 }
 
 /**

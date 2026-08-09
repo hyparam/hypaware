@@ -5,13 +5,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { EventEmitter } from 'node:events'
 
-import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
+import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
-// the fork/join loop, phase threading (locked/managed/scoped), the
+// the fork/join loop, phase threading (locked/managed), the
 // non-interactive short-circuit, and the cancel/refusal exits. Phases are
 // scripted through the test seams; each phase's own behavior is covered by
 // its sibling test file.
@@ -31,6 +33,18 @@ async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-index-'))
 }
 
+/**
+ * A catalog with one picker row plus a detector that finds it, so the
+ * express gate (LLP 0201) has rows to list. With nothing detected and
+ * nothing locked the gate is skipped entirely, which is what
+ * `emptyCatalog` gives.
+ */
+function detectableCatalog() {
+  const catalog = emptyCatalog()
+  catalog.pickerDescriptors.set('claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' })
+  return catalog
+}
+
 /** Minimal empty catalog so the orchestrator never discovers real plugins. */
 function emptyCatalog() {
   return /** @type {any} */ ({
@@ -40,6 +54,21 @@ function emptyCatalog() {
     clientDescriptors: new Map(),
     pickerDescriptors: new Map(),
   })
+}
+
+/**
+ * Write a central layer (the join seed slot, LLP 0031) under a wizard
+ * home, so the locked-set computation resolves it from disk exactly as it
+ * does on a real enrolled machine.
+ *
+ * @param {string} home
+ * @param {string[]} plugins
+ */
+async function seedCentralLayer(home, plugins) {
+  const control = path.join(home, '.hyp', 'hypaware', 'config-control')
+  await fs.mkdir(control, { recursive: true })
+  const config = { version: 2, plugins: plugins.map((name) => ({ name, enabled: true, config: {} })) }
+  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify(config))
 }
 
 /** A completed pick result the finale and configure stubs can consume. */
@@ -82,6 +111,11 @@ function wizardOpts(home, over = {}) {
     fork: async () => 'local',
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
+    folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
+    // The express gate (LLP 0201) fronts the lanes on every attended run;
+    // these tests exercise the step-by-step path, so it declines by default.
+    express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'choose' },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
       opts._finaleArgs = args
@@ -99,7 +133,7 @@ function wizardOpts(home, over = {}) {
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
-  for (const name of ['gate', 'fork', 'join', 'pick', 'configure']) {
+  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure']) {
     const inner = opts[name]
     opts[name] = async (/** @type {any[]} */ ...a) => { calls.push(name); return inner(...a) }
   }
@@ -131,20 +165,297 @@ test('runInitWizard: gate status delegates to runStatus and returns its code', a
   assert.deepEqual(calls, ['gate'])
 })
 
-test('runInitWizard: scoped re-entry skips the fork and picks scoped + managed', async () => {
+// A managed machine reconfigures through the same fork as anyone else
+// (LLP 0182). What being managed still buys is the locked set and the
+// `managed` flag the picker labels its rows from - not a pathway.
+// @ref LLP 0182#one-reconfigure [tests]:
+test('runInitWizard: a managed machine reconfigures through the fork, carrying managed into the picker', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
-    gate: async () => ({ action: 'scoped-reconfigure', managed: true, report: {} }),
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.ok(!calls.includes('fork'))
-  assert.ok(!calls.includes('join'))
-  assert.equal(opts._pickOpts.scoped, true)
+  assert.ok(calls.includes('fork'))
   assert.equal(opts._pickOpts.managed, true)
-  assert.equal(result.pathway, 'scoped')
+  assert.equal(result.pathway, 'local')
+})
+
+// LLP 0137 #pathway-defaults keys the 120-day window on the cache being
+// the only copy of history. A managed machine has an org server holding
+// the durable copy, so it takes the 90-day default even when its
+// Reconfigure walks down the local pathway.
+test('runInitWizard: a managed machine on the local pathway keeps the 90-day default, not the local 120', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  await runInitWizard(opts)
+  assert.equal(opts._pickOpts.retentionDefault, undefined)
+})
+
+// A managed machine choosing local is asked once whether it means
+// "disconnect" or "adjust while staying connected" (LLP 0190
+// #fork-disconnect). Yes runs hyp leave; no and cancel keep enrollment.
+// @ref LLP 0190#fork-disconnect [tests]:
+
+test('runInitWizard: managed + local + stay connected keeps the locked rows and the sync lane', async () => {
+  let leaveRan = false
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(leaveRan, false)
+  assert.equal(opts._pickOpts.managed, true)
+  assert.ok(calls.includes('syncScope'), 'still enrolled, so the sync lane still runs')
+})
+
+test('runInitWizard: managed + local + disconnect runs hyp leave and continues as a solo install', async () => {
+  let leaveRan = false
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'disconnect',
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(leaveRan, true)
+  assert.equal(opts._pickOpts.managed, undefined, 'no longer managed after the teardown')
+  assert.equal(opts._pickOpts.locked, undefined, 'no rows left to lock')
+  assert.equal(opts._pickOpts.retentionDefault, 120, 'a solo machine takes the local retention default')
+  assert.ok(!calls.includes('syncScope'), 'no server left to scope syncing for')
+})
+
+test('runInitWizard: a failed hyp leave returns to the fork still connected', async () => {
+  const forkChoices = ['local', 'quit']
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => forkChoices.shift(),
+    confirm: async () => 'disconnect',
+    leave: async () => 1,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(calls.filter((c) => c === 'fork').length, 2, 'the fork is re-presented')
+  assert.ok(!calls.includes('pick'), 'the quit ended the run before any phase')
+  assert.match(stderr.text(), /still connected/)
+})
+
+// Ctrl+C at the disconnect question ends the run: it shares the prompt
+// with the escape that steps back, but not its handling. Re-presenting the
+// fork made "get me out" the first of two keystrokes, which is what
+// LLP 0191 #esc-back separates ctrl+c from escape to avoid. Nothing is
+// disconnected either way, which is all LLP 0190 #fork-disconnect asks of
+// a cancel.
+// @ref LLP 0191#esc-back [tests]: ctrl+c at the disconnect question cancels the run rather than stepping back
+test('runInitWizard: cancelling the disconnect question ends the run without disconnecting', async () => {
+  const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
+  const forkChoices = ['local', 'quit']
+  let leaveRan = false
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => forkChoices.shift(),
+    confirm: async () => { throw new PromptCancelledError() },
+    leave: async () => { leaveRan = true; return 0 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.equal(leaveRan, false, 'a cancel never disconnects')
+  assert.equal(calls.filter((c) => c === 'fork').length, 1, 'the fork is not re-presented')
+  assert.ok(!calls.includes('pick'), 'the cancel ended the run before any phase')
+  assert.match(stderr.text(), /hyp init: cancelled/)
+})
+
+test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {
+  let confirmAsked = false
+  const { opts } = wizardOpts(await tmpHome(), {
+    confirm: async () => { confirmAsked = true; return 'stay' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(confirmAsked, false, 'nothing to disconnect from')
+})
+
+test('runInitWizard: a managed machine can still re-join a team from the gate', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    fork: async () => 'team',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(calls.includes('join'))
+  assert.equal(result.pathway, 'team')
+})
+
+// A managed machine whose merged config no longer validates falls to the
+// first-run path, but the central layer on disk still owns its rows. The
+// locked set has to be computed there too, or the picker offers the org's
+// rows for free composition into the local layer.
+// @ref LLP 0129#join-before-picker [tests]:
+test('runInitWizard: a managed first run locks the org rows from the on-disk central layer', async () => {
+  const home = await tmpHome()
+  await seedCentralLayer(home, ['@hypaware/claude'])
+  const catalog = emptyCatalog()
+  catalog.pickerDescriptors.set('claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude' })
+  const { opts } = wizardOpts(home, {
+    catalog,
+    gate: async () => ({ action: 'first-run', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(opts._pickOpts.locked, ['claude'])
+  assert.equal(opts._pickOpts.managed, true)
 })
 
 // --- the fork/join loop ---
+
+// --- the sync-scope step (LLP 0188 #never-silent) ---
+
+// The express gate (LLP 0201): one yes before the lanes accepts every
+// lane's stated default. The lanes still run - they narrate instead of
+// prompting - so nothing is skipped except the keypresses.
+// @ref LLP 0201#gate [tests]:
+
+test('runInitWizard: accepting the express gate auto-accepts every lane and states no positions', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // Every lane still runs, in order: the gate answers them, it does not
+  // remove them.
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  assert.equal(opts._pickOpts.autoAccept, true)
+  assert.equal(opts._syncOpts.autoAccept, true)
+  assert.equal(opts._folderOpts.autoAccept, true)
+  assert.equal(opts._expressOpts.enrolled, true, 'the gate is told whether it can promise anything about a server')
+  // No lane is answering anything, so no lane states a position.
+  assert.equal(opts._pickOpts.progress, undefined)
+  assert.equal(opts._syncOpts.progress, undefined)
+  assert.equal(opts._folderOpts.progress, undefined)
+  assert.equal(opts._finaleArgs.progress, undefined)
+})
+
+test('runInitWizard: with nothing detected and nothing locked, no express gate is shown', async () => {
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    detect: async () => new Set(),
+    express: async () => { gates += 1; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(gates, 0, 'nothing to accept is nothing to ask about (LLP 0201 #no-default-no-accept)')
+  assert.equal(opts._pickOpts.autoAccept, undefined, 'the lane opens its own menu instead')
+})
+
+test('runInitWizard: declining the express gate leaves the lanes prompting, positions and all', async () => {
+  const { opts } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
+  await runInitWizard(opts)
+  assert.equal(opts._pickOpts.autoAccept, undefined)
+  assert.equal(opts._syncOpts.autoAccept, undefined)
+  assert.equal(opts._folderOpts.autoAccept, undefined)
+  assert.equal(opts._pickOpts.progress, 'Step 2 of 5 · Choose what to collect')
+})
+
+test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
+  const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'cancelled',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(calls, ['gate', 'fork'])
+  assert.match(stderr.text(), /cancelled/)
+})
+
+test('runInitWizard: back at the express gate re-presents the fork', async () => {
+  let forks = 0
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => { forks += 1; return 'local' },
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => { gates += 1; return gates === 1 ? 'back' : 'choose' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(forks, 2, 'the fork is the screen behind the express gate')
+  assert.equal(gates, 2)
+})
+
+test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // The two enrolled-only questions run in order (LLP 0188, then LLP 0200
+  // #wizard) and both precede the acting phases.
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  // Candidates are the pick result's locked-filtered descriptors.
+  assert.deepEqual(opts._syncOpts.candidates, pickResult().descriptors)
+})
+
+test('runInitWizard: the sync-scope step receives the locked descriptors so it can state the whole sync picture', async () => {
+  const catalog = emptyCatalog()
+  const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  catalog.pickerDescriptors.set('claude', claudeDescriptor)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
+})
+
+test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(calls.includes('syncScope'), 'managed gates the step, not the pathway label')
+})
+
+test('runInitWizard: an unmanaged local run never sees the sync-scope step', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome())
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(!calls.includes('syncScope'), 'a solo machine has no server to scope syncing for')
+})
+
+test('runInitWizard: non-interactive picks skip the sync-scope step (default-sync is the scripted outcome)', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(!calls.includes('syncScope'))
+})
+
+test('runInitWizard: a cancelled sync-scope step exits 130 and runs nothing further', async () => {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    syncScope: async () => ({ cancelled: true, optedOut: [] }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.ok(!calls.includes('configure'), 'cancel stops before the configure phase')
+  assert.ok(!calls.includes('finale'))
+})
 
 test('runInitWizard: local pathway runs pick -> configure -> finale, no join', async () => {
   const { opts, calls } = wizardOpts(await tmpHome())
@@ -262,6 +573,114 @@ test('runInitWizard: an overwrite refusal returns the pick phase exit 1', async 
   assert.ok(!calls.includes('finale'))
 })
 
+// --- deferred config commit (LLP 0190 #commit-point) ---
+// The pick lane composes; the orchestrator commits after the sync lane, so
+// the overwrite confirm is the last question and a cancel at the sync lane
+// leaves the existing config untouched.
+// @ref LLP 0190#commit-point [tests]:
+
+test('runInitWizard: a pending config lands on disk after the sync lane, before configure', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  let onDiskDuringSync = true
+  const { opts, calls } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ configPath, configPending: true }),
+    syncScope: async () => {
+      onDiskDuringSync = await fs.access(configPath).then(() => true, () => false)
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(onDiskDuringSync, false, 'the sync lane runs before the config write')
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
+  assert.ok(calls.includes('configure'), 'the acting phases still run after the commit')
+})
+
+test('runInitWizard: a declined commit exits 1, runs nothing further, and narrates on the team pathway', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  const { opts, calls, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ configPath, configPending: true }),
+    confirmOverwrite: async () => false,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.notEqual(result.cancelled, true)
+  assert.ok(calls.includes('syncScope'), 'the questions all ran before the commit refused')
+  assert.ok(!calls.includes('configure'))
+  assert.ok(!calls.includes('finale'))
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n', 'the existing config is untouched')
+  assert.match(stdout.text(), /This machine is enrolled/)
+})
+
+test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ configPath }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(await fs.access(configPath).then(() => true, () => false), false, 'no pending flag, no write')
+})
+
+// A team-pathway abort lands after the join lane already enrolled the
+// machine; the wizard cannot roll that back, so it must say what state the
+// machine is in (default-sync plus the standing control) instead of exiting
+// silently. Narration only, never another prompt.
+// @ref LLP 0190#abort-narration [tests]:
+
+test('runInitWizard: a team-path overwrite refusal narrates the enrolled state and the deadline', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => pickResult({ exitCode: 1 }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  const text = stdout.text()
+  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /hyp policy client <name> local-only/)
+  assert.match(text, /Nothing has been uploaded yet/)
+})
+
+test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hold means no deadline claim', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    pick: async () => pickResult({ exitCode: 130, cancelled: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  const text = stdout.text()
+  assert.match(text, /This machine is enrolled/)
+  assert.doesNotMatch(text, /Nothing has been uploaded yet/)
+})
+
+test('runInitWizard: a team-path sync-scope cancel narrates that default-sync stands', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    syncScope: async () => ({ cancelled: true, optedOut: [] }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 130)
+  assert.match(stdout.text(), /This machine is enrolled/)
+})
+
+test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    pick: async () => pickResult({ exitCode: 1 }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.doesNotMatch(stdout.text(), /This machine is enrolled/)
+})
+
 test('runInitWizard: a cancelled finale returns 130 with the cancel notice', async () => {
   const { opts, stderr } = wizardOpts(await tmpHome(), {
     finaleRunner: async () => /** @type {any} */ ({
@@ -327,10 +746,10 @@ test('runInitWizard: an attended run ends on the first look, before the privacy 
   const { opts, stdout } = wizardOpts(home, { fork: async () => 'team', firstLook: stub.runner })
   await runInitWizard(opts)
   const text = stdout.text()
-  // The window probe, then one query per section: setup shows the same
-  // block as `hyp query overview`.
+  // The window probe, then the two sections setup runs. Repos and tools
+  // are `hyp query overview`'s half (LLP 0198#wizard-sections).
   assert.equal(stub.seen[0], OVERVIEW_PROBE_SQL)
-  assert.equal(stub.seen.length, 5)
+  assert.equal(stub.seen.length, 3)
   // Every number in the block is scoped to the window the probe chose.
   assert.match(text, /2026-07-24 to 2026-07-24 \(1 active day, 40 rows\)/)
   assert.match(text, /First look at what HypAware has recorded/)
@@ -357,6 +776,224 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
   })
   await runInitWizard(dryOpts)
   assert.equal(dry.seen.length, 0)
+})
+
+/**
+ * A first look that finds something, so the closing first ask has data
+ * for its questions to be about (LLP 0198#empty-cache).
+ */
+function firstLookWithRows() {
+  return firstLookStub(
+    [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+    [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }]
+  ).runner
+}
+
+function launchableCatalog() {
+  const catalog = emptyCatalog()
+  catalog.clientDescriptors.set('claude', {
+    plugin: '@hypaware/claude',
+    name: 'claude',
+    skillDir: '.claude/skills',
+    launch: { bin: 'claude', args: ['{prompt}'], label: 'Claude Code' },
+  })
+  return catalog
+}
+
+test('runInitWizard: the first ask comes last, after the privacy narration', async () => {
+  // @ref LLP 0198#first-ask [tests]: placed after the narration, which stays the wizard's last words
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd, /** @type {any} */ args) => {
+        spawned.push({ cmd, args })
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.equal(spawned.length, 1)
+  assert.equal(spawned[0].cmd, '/usr/local/bin/claude')
+  assert.equal(spawned[0].args[0], SUGGESTED_PROMPTS[0].prompt)
+  // Order: rows, then what leaves this machine, then the question.
+  assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
+})
+
+// @ref LLP 0203#offer [tests]: the sync offer sits between the narration it acts on and the first ask that may take the terminal
+test('runInitWizard: an enrolled run is offered the first sync, after the narration and before the first ask', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  /** @type {any[]} */
+  const spawned = []
+  /** @type {any[]} */
+  const asked = []
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    syncNow: {
+      confirm: async (/** @type {any} */ question) => {
+        asked.push(question)
+        // The wizard prints "Starting hyp sync..." on 'now'; this run waits.
+        return 'wait'
+      },
+      spawnFn: () => { throw new Error('a waiting run must not sync') },
+    },
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd, /** @type {any} */ args) => {
+        spawned.push({ cmd, args })
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+
+  assert.equal(asked.length, 1)
+  assert.match(asked[0].title, /Send your recorded history to the server now, or wait\?/)
+  // Asked after the narration that gives the question its meaning, and
+  // before the launch that may never give the terminal back.
+  const text = stdout.text()
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
+  assert.equal(spawned.length, 1)
+})
+
+test('runInitWizard: a local install with no hold is never offered a sync', async () => {
+  /** @type {any[]} */
+  const asked = []
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    syncNow: { confirm: async (/** @type {any} */ q) => { asked.push(q); return 'wait' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked.length, 0)
+})
+
+test('runInitWizard: a first look with no rows suppresses the launch', async () => {
+  // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
+  // is offered no question it has no data to answer
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    // Every section comes back empty: the dataset exists and holds nothing.
+    firstLook: firstLookStub([], []).runner,
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd) => {
+        spawned.push(cmd)
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 0))
+        return child
+      },
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.match(stdout.text(), /Nothing recorded yet/)
+})
+
+test('runInitWizard: a first look with no gateway dataset suppresses the launch too', async () => {
+  /** @type {any[]} */
+  const spawned = []
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: (/** @type {any} */ cmd) => { spawned.push(cmd); return new EventEmitter() },
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.match(stdout.text(), /Nothing recorded yet/)
+})
+
+// --- firstLookHadRows ---
+
+// The mapping from a first-look outcome to the first ask's `hasRows` has
+// three genuinely different answers (`no-dataset` -> false, `slow` -> true,
+// `error`/absent -> undefined, which never withholds the offer). Two of
+// those were reachable by a mutant that still passed the suite: flipping
+// `slow`'s `true` to `false`, and flipping the no-result guard's
+// `undefined` to `false`. Both would wrongly suppress the closing first
+// ask (`hasRows === false` is the one value `runWizardFirstAsk` treats as
+// "skip the launch", per the empty-cache tests above).
+// @ref LLP 0198#empty-cache [tests]: no-dataset, slow, and error/absent each resolve to a distinct hasRows value
+test('firstLookHadRows: a slow first look still reports hasRows true, so the launch is not suppressed', () => {
+  assert.equal(firstLookHadRows({ shown: false, reason: 'slow' }), true)
+})
+
+test('firstLookHadRows: an absent or errored first look reports hasRows undefined, not false, so the offer is never withheld', () => {
+  assert.equal(firstLookHadRows(undefined), undefined)
+  assert.equal(firstLookHadRows({ shown: false, reason: 'error' }), undefined)
+})
+
+test('runInitWizard: a launched client does not change the wizard exit code', async () => {
+  // @ref LLP 0198#real-launch [tests]: the child's exit code is not the install's
+  const { opts } = wizardOpts(await tmpHome(), {
+    catalog: launchableCatalog(),
+    firstLook: firstLookWithRows(),
+    firstAsk: {
+      resolve: async () => '/usr/local/bin/claude',
+      select: async () => SUGGESTED_PROMPTS[0].id,
+      spawnFn: () => {
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('close', 3))
+        return child
+      },
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+})
+
+test('runInitWizard: a non-interactive or dry run never launches anything', async () => {
+  /** @type {any[]} */
+  const spawned = []
+  const firstAsk = {
+    resolve: async () => '/usr/local/bin/claude',
+    select: async () => SUGGESTED_PROMPTS[0].id,
+    spawnFn: (/** @type {any} */ cmd) => {
+      spawned.push(cmd)
+      const child = new EventEmitter()
+      queueMicrotask(() => child.emit('close', 0))
+      return child
+    },
+  }
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    catalog: launchableCatalog(),
+    firstAsk,
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned.length, 0)
+  assert.ok(!stdout.text().includes('Questions worth asking'))
+
+  const { opts: dryOpts } = wizardOpts(await tmpHome(), {
+    finale: { dryRun: true },
+    catalog: launchableCatalog(),
+    firstAsk,
+  })
+  await runInitWizard(dryOpts)
+  assert.equal(spawned.length, 0)
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {

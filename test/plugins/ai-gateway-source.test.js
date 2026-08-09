@@ -6,10 +6,14 @@ import test from 'node:test'
 
 import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
+import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
-// startProxy requires at least one configured upstream even when a test only
-// exercises the control path (never proxies through it), so the R3 tests
-// below carry this unreachable-but-well-formed one.
+// A source with an empty routing table binds no listener at all, so a test
+// that needs a live port must give it something to route even when it only
+// exercises the control path (and never proxies through it). Hence this
+// unreachable-but-well-formed upstream on the R3 tests below.
 const ARBITRARY_UPSTREAM = { name: 'unused', base_url: 'http://127.0.0.1:1', path_prefix: '/' }
 
 test('source starts with only adapter-registered upstream presets', async () => {
@@ -149,8 +153,204 @@ test('restart-drops-state: a fresh GatewayState never carries a previous run\'s 
   }
 })
 
-/** @param {Record<string, unknown>} config */
-function fakeCtx(config) {
+// ---------------------------------------------------------------------------
+// An upstream-less gateway is a valid config, not a misconfiguration.
+// `@hypaware/hermes` reads Hermes's own state.db and is "never modified,
+// configured, or proxied" (LLP 0119), but the shared
+// `ai_gateway.projected_exchange` materializer is a hard `requires.plugins`
+// dependency (LLP 0120), so its picker row composes the gateway plugin while
+// contributing no `gateway_upstream`. Picked alone that wrote a gateway slice
+// with `upstreams: []` whose source start threw, i.e. a reachable first-run
+// choice that produced a broken install rather than a working one (#649).
+// ---------------------------------------------------------------------------
+
+/** @param {string[]} sources */
+async function composePicked(sources) {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  return composePickerConfig({
+    sources: /** @type {any} */ (sources),
+    descriptors: catalog.pickerDescriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: 30,
+    hypHome: '/home/tester/.hyp',
+  })
+}
+
+// @ref LLP 0120#consequences [tests]: hermes composes the gateway plugin for the materializer alone, so the config a hermes-only picker run writes must yield a source that starts
+test('the gateway source a hermes-only picker run composes starts, idle', async () => {
+  const config = await composePicked(['hermes'])
+  const gateway = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway, 'hermes composes the gateway plugin: its materializer is a hard dependency')
+  assert.deepEqual(gateway.config?.upstreams, [], 'and hermes contributes no upstream of its own')
+
+  // Before the fix this rejected with
+  // "ai-gateway: at least one upstream must be configured before start".
+  const source = await createStartSource(createGatewayState())(fakeCtx(/** @type {any} */ (gateway.config)))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.state, 'ready', 'an idle gateway is not an error state')
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, false, 'no listener was bound')
+    assert.equal(status.details.port, undefined, 'and no port is advertised for one')
+    assert.match(String(status.message ?? ''), /no upstreams/, 'status says why it is idle')
+  } finally {
+    await source.stop()
+  }
+})
+
+// Idling must be recoverable, not a dead end: the daemon reloads the source
+// in place when config changes, so adding an upstream has to bind a listener
+// without a restart.
+test('an idle gateway binds once a reload brings an upstream', async () => {
+  // Idle source first, echo upstream second: if starting it ever regresses to
+  // throwing, this fails without leaking a listening server into the run.
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  const upstream = await startEchoUpstream('reloaded-ok')
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    await source.reload(fakeCtx({
+      listen: '127.0.0.1:0',
+      upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+    }))
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, undefined, 'the reloaded source is no longer idle')
+    const body = await fetchText(`http://${status.details.host}:${status.details.port}/anything`)
+    assert.equal(body.status, 200)
+    assert.equal(body.text, 'reloaded-ok')
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// The reverse direction, pinned deliberately: a reload that removes every
+// upstream tears a live listener down and idles, which silently ends capture
+// for clients already attached to that port. It is the same trade #649 made
+// on the way in (an upstream-less gateway is a config, not a failure), and it
+// is why core warns when the config named upstreams and none survived.
+test('a reload that removes every upstream tears the listener down and idles', async () => {
+  const upstream = await startEchoUpstream('still-here')
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    const bound = await source.status()
+    assert.ok(bound.details?.port, 'the source bound a port before the reload')
+    const port = bound.details.port
+
+    // No throw: dropping to zero upstreams is the same valid state a
+    // hermes-only install boots into.
+    assert.equal(await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] })), undefined)
+
+    const idle = await source.status()
+    assert.equal(idle.state, 'ready', 'idling after a reload is not an error state')
+    assert.equal(idle.details?.listening, false, 'the listener is gone')
+    assert.equal(idle.details?.port, undefined, 'and no port is advertised for it')
+    assert.match(String(idle.message ?? ''), /no upstreams/)
+    // The teardown is real, not just unadvertised: an attached client pointed
+    // at the old port now gets a connection error, with nothing proxied.
+    await assert.rejects(fetchText(`http://127.0.0.1:${port}/anything`))
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// `details.upstreams` is what core's `gateway_idle_no_upstreams` diagnostic
+// reads to tell "configured with nothing" from "configured and dropped", so it
+// has to describe the config in force, not the one the source booted with.
+test('status() reports the reloaded config upstreams, not the boot-time ones', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    assert.deepEqual((await source.status()).details?.upstreams, [])
+    // `url` where `base_url` was meant: `compileUpstreams` drops the entry, so
+    // the source stays idle, but the name the user wrote must still show up.
+    await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'anthropic', url: 'https://x' }] }))
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'a dropped upstream leaves the source idle')
+    assert.deepEqual(status.details?.upstreams, ['anthropic'], 'and status names what the config asked for')
+    assert.equal(status.details?.upstreams_configured, 1, 'and counts it')
+  } finally {
+    await source.stop()
+  }
+})
+
+// `name` is the other key `compileUpstreams` drops an entry over, and an entry
+// with no name puts nothing in `details.upstreams` at all. Without the count
+// beside it, this config is indistinguishable from hermes-only and core cannot
+// warn about it.
+test('status() counts a configured upstream it cannot name', async () => {
+  const state = createGatewayState()
+  const source = await createStartSource(state)(fakeCtx({
+    listen: '127.0.0.1:0',
+    // No `name`: the v1 config diagnoser is satisfied by `provider`, the
+    // compiler drops it, and the source idles.
+    upstreams: [{ provider: 'anthropic', base_url: 'https://api.anthropic.com' }],
+  }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'nothing compiled, so nothing is bound')
+    assert.deepEqual(status.details?.upstreams, [], 'there is no name to publish')
+    assert.equal(status.details?.upstreams_configured, 1, 'but the config did ask for one upstream')
+  } finally {
+    await source.stop()
+  }
+})
+
+// The hermes-only shape must stay distinguishable from the above: a config
+// that asked for no upstream counts zero, which is what keeps `hyp status`
+// quiet and healthy for it.
+test('status() counts zero upstreams for a config that named none', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.upstreams_configured, 0)
+  } finally {
+    await source.stop()
+  }
+})
+
+// Two configs reach the same empty routing table and they are not the same
+// event, so they must not log at the same volume: one is what hermes asked
+// for, the other lost every upstream it named.
+test('the idle log is a warning only when configured upstreams were dropped', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const hermesOnly = await createStartSource(createGatewayState())(fakeCtx({ upstreams: [] }, logged))
+  await hermesOnly.stop()
+  const idleLog = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(idleLog, 'the idle boot is logged')
+  assert.equal(idleLog.level, 'info', 'a config that wanted no upstream is not a problem')
+
+  logged.length = 0
+  const dropped = await createStartSource(createGatewayState())(fakeCtx({
+    upstreams: [{ name: 'anthropic', url: 'https://api.anthropic.com' }],
+  }, logged))
+  await dropped.stop()
+  const warned = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(warned, 'the idle boot is logged')
+  assert.equal(warned.level, 'warn', 'losing every configured upstream is a problem')
+  assert.equal(warned.attrs.configured_upstreams, 1)
+  assert.deepEqual(warned.attrs.configured_upstream_names, ['anthropic'])
+})
+
+/**
+ * @param {Record<string, unknown>} config
+ * @param {{ level: string, event: string, attrs: any }[]} [logged]
+ */
+function fakeCtx(config, logged) {
+  /** @param {string} level */
+  const record = (level) => (/** @type {string} */ event, /** @type {any} */ attrs) => {
+    logged?.push({ level, event, attrs })
+  }
   return /** @type {any} */ ({
     config,
     storage: {
@@ -160,10 +360,10 @@ function fakeCtx(config) {
       async appendRows() {},
     },
     log: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
     },
   })
 }

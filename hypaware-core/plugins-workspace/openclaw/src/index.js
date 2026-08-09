@@ -2,6 +2,7 @@
 
 import os from 'node:os'
 
+import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/index.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { createOpenclawAttach } from './attach.js'
@@ -168,23 +169,34 @@ export async function activate(ctx) {
     defaultUpstream: UPSTREAM_NAME,
     // The kernel types the registered `attach()` as `Promise<void>`, so both
     // callers infer success from "did it throw" and a returned outcome reaches
-    // neither of them. Translating a `failed` outcome into a throw is the only
-    // way a refusal is observable at all: in the reconciler it lands in
-    // `perform()`'s existing catch and becomes the `{status:'failed', reason}`
-    // marker that is recorded, warned, and retried next pass, while the
-    // reconciler's other actions for the same join carry on (a failed action is
-    // surfaced, not fatal); on `hyp attach --client openclaw` it becomes exit 1
-    // instead of a refusal printed under exit 0. Returning quietly instead wrote
-    // a `done` marker whose endpoint and assets_key both matched, so
-    // `isCurrent()` called it current forever and the join never re-attached
-    // even after the user removed the conflicting `models.providers` entry.
-    // The effect has already reported the reason on `attachCtx.stdout`; the
-    // throw carries the same text to the caller's error path.
-    // @ref LLP 0172#lane-a-attach [implements]: a refusal is recorded as a
-    //   retryable failure and never aborts the join
+    // neither of them. Translating a non-`done` outcome into a throw is the
+    // only way a refusal is observable at all: in the reconciler it lands in
+    // `perform()`'s existing catch and becomes a marker, while the
+    // reconciler's other actions for the same join carry on (neither a failed
+    // nor a refused action is fatal); on `hyp attach --client openclaw` it
+    // becomes exit 1 instead of a refusal printed under exit 0. Returning
+    // quietly instead wrote a `done` marker whose endpoint and assets_key both
+    // matched, so `isCurrent()` called it current forever and the join never
+    // re-attached even after the user removed the conflicting
+    // `models.providers` entry. The effect has already reported the reason on
+    // `attachCtx.stdout`; the throw carries the same text to the caller's
+    // error path.
+    //
+    // Which marker it becomes is the one bit the throw has to carry across
+    // this void-returning seam, and a bare Error cannot: `failed` is retried
+    // next pass, `refused` is terminal. `markActionRefused` is that bit, read
+    // back by `perform()`'s catch. Without it the ownership conflict of
+    // LLP 0167#attach-detach - a property of the user's config that no pass
+    // changes - retries forever with `attempts` climbing (LLP 0184).
+    // @ref LLP 0172#lane-a-attach [implements]: a refusal never aborts the
+    //   join, it is recorded as a marker on the action alone
+    // @ref LLP 0186#migration-who-calls-markactionrefused [implements]: the
+    //   wrapper marks the refused outcome's Error so perform() can tell a
+    //   terminal refusal from a retryable failure
     async attach(attachCtx) {
       const outcome = await openclawAttach.attach(attachCtx)
       if (outcome.status === 'failed') throw new Error(outcome.reason)
+      if (outcome.status === 'refused') throw markActionRefused(new Error(outcome.reason))
     },
   })
 }

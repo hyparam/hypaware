@@ -32,7 +32,13 @@ class OtlpHttpJsonExporter {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
       signal: controller.signal,
-    }).catch(() => undefined).finally(() => clearTimeout(timer))
+    }).catch(() => undefined).finally(() => {
+      clearTimeout(timer)
+      // Self-drain: without this, a long-lived process that never calls
+      // forceFlush accumulates one settled promise per export forever.
+      const index = this.pending.indexOf(request)
+      if (index !== -1) this.pending.splice(index, 1)
+    })
     this.pending.push(request)
   }
 

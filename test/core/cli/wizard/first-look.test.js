@@ -44,7 +44,7 @@ const ROWS_BY_SQL = {
   [SECTION_SQL.tools]: TOOL_ROWS,
 }
 
-test('runWizardFirstLook: writes every section, names the repeat command, reports row counts', async () => {
+test('runWizardFirstLook: writes the two setup sections, names the fuller command, reports row counts', async () => {
   const stdout = makeBuf()
   /** @type {string[]} */
   const seen = []
@@ -58,19 +58,23 @@ test('runWizardFirstLook: writes every section, names the repeat command, report
       },
     },
   })
-  // Probe first, then the same four sections `hyp query overview` prints.
-  assert.deepEqual(
-    seen,
-    [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily, SECTION_SQL.repos, SECTION_SQL.tools]
-  )
+  // Probe, then models and daily. Repos and tools are not run at all:
+  // setup pays for the two sections that prove capture worked, and
+  // `hyp query overview` is where the other two live.
+  // @ref LLP 0198#wizard-sections [tests]:
+  assert.deepEqual(seen, [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily])
   assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1 })
   const text = stdout.text()
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
-  assert.match(text, /acme\/api\s+3\s+200\s+4,000\s+42/)
-  assert.match(text, /Bash\s+9\s+3/)
-  // One pointer line, not the render's footer plus this one.
-  assert.match(text, /See this again anytime: hyp query overview \(--sql shows the queries\)/)
+  assert.match(text, /2026-07-24/)
+  // The two it does not run are absent, not empty-stated.
+  assert.ok(!text.includes('acme/api'))
+  assert.ok(!text.includes('Bash'))
+  // A section that was never requested is never called unfinished.
+  assert.ok(!text.includes('did not finish'))
+  // One pointer line, and it says the full block is bigger than this one.
+  assert.match(text, /See more anytime: hyp query overview \(adds repos and tools; --sql shows the queries\)/)
   assert.ok(!text.includes('The SQL behind these'))
 })
 
@@ -83,9 +87,8 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
       hasDataset: () => true,
       /** @param {string} sql */
       async run(sql) {
-        // Probe and the first two sections land fast; `repos` stalls past
-        // the budget, so `tools` never starts.
-        if (sql === SECTION_SQL.repos) {
+        // Probe and `models` land fast; `daily` stalls past the budget.
+        if (sql === SECTION_SQL.daily) {
           return new Promise((resolve) => { setTimeout(() => resolve({ columns: [], rows: [] }), 5000).unref() })
         }
         return { columns: [], rows: ROWS_BY_SQL[sql] ?? [] }
@@ -98,10 +101,15 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
   assert.equal(result.partial, true)
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
-  assert.match(text, /2026-07-24/)
-  // The unfinished sections are named as unfinished, not as empty.
-  assert.match(text, /Stopped here to keep setup moving - the repos and tools sections did not finish\./)
-  assert.ok(!text.includes('acme/api'))
+  // The unfinished section is named as unfinished, not as empty - and only
+  // the requested one is named, never repos or tools.
+  const stopped = text.split('\n').find((l) => l.startsWith('Stopped here')) ?? ''
+  assert.match(stopped, /Stopped here to keep setup moving - the daily section did not finish\./)
+  // Only the requested section is named. Repos and tools were never asked
+  // for, so calling them unfinished would be a claim about work nobody
+  // started (the pointer line below mentions them, which is a different
+  // sentence and a different claim).
+  assert.ok(!stopped.includes('repos') && !stopped.includes('tools'))
 })
 
 test('runWizardFirstLook: a slow cache skips within budget and says what to run', async () => {
@@ -202,9 +210,10 @@ test('runWizardFirstLook: a render failure is contained too', async () => {
     runner: {
       hasDataset: () => true,
       async run(sql) {
-        // A row shape the renderer never expects: `repo_root` claims to be a
-        // string but throws when read.
-        if (sql === SECTION_SQL.repos) {
+        // A row shape the renderer never expects: every field throws when
+        // read. On a section setup actually runs, so the containment being
+        // tested is reachable.
+        if (sql === SECTION_SQL.daily) {
           return { columns: [], rows: [new Proxy({}, { get() { throw new Error('bad row') } })] }
         }
         return { columns: [], rows: ROWS_BY_SQL[sql] ?? [] }

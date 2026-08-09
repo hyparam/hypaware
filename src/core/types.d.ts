@@ -2,6 +2,7 @@ import type {
   PickerDetectProbe,
   PluginAttachProbeManifest,
   PluginContributionManifest,
+  PluginClientLaunchManifest,
   PluginManifest,
   PluginName,
   PluginPickerCompose,
@@ -32,6 +33,13 @@ export interface ClientDescriptor {
    * that live in another client's transcript tree.
    */
   transcriptEntrypoints?: string[]
+  /**
+   * How to start this client on a question, from
+   * `contributes.client.launch`. Read by the wizard's first ask and
+   * `hyp ask`; absent for a client that cannot be started on a prompt
+   * (LLP 0198#split).
+   */
+  launch?: PluginClientLaunchManifest
 }
 
 /**
@@ -47,6 +55,13 @@ export interface PickerDescriptor {
   label: string
   summary?: string
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu but
+   * remains a picker source everywhere else (`--source`, read-back,
+   * opt-out identity, dataset ownership). See
+   * `PluginPickerContribution.hidden`.
+   */
+  hidden?: boolean
   needsSetup?: boolean
   configureCommand?: string
   /**

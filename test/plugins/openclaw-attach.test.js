@@ -99,7 +99,9 @@ test('attach writes exactly the two provider entries, bare origin vs +/v1', asyn
     assert.deepEqual(written.models.providers, {
       anthropic: {
         baseUrl: 'http://127.0.0.1:18521',
-        headers: { 'x-hypaware-upstream': 'anthropic' },
+        // The marker routes (gateway upstream preset); the client header
+        // attributes (openclaw exchange projector match, LLP 0175).
+        headers: { 'x-hypaware-upstream': 'anthropic', 'x-hypaware-client': 'openclaw' },
         models: [],
       },
       openai: {
@@ -107,7 +109,7 @@ test('attach writes exactly the two provider entries, bare origin vs +/v1', asyn
         // itself and wants the bare origin, its OpenAI client appends only
         // `/responses` or `/chat/completions` and needs the `/v1` baked in.
         baseUrl: 'http://127.0.0.1:18521/v1',
-        headers: { 'x-hypaware-upstream': 'openai' },
+        headers: { 'x-hypaware-upstream': 'openai', 'x-hypaware-client': 'openclaw' },
         models: [],
       },
     })
@@ -153,13 +155,19 @@ test('attach refuses without writing when a provider key already exists (R2)', a
     try {
       const { outcome, stdout } = await runAttach(staged)
 
-      assert.equal(outcome.status, 'failed')
+      // Terminal, not transient: no reconciler pass changes what the user put
+      // at this key, so the marker must stop rather than climb `attempts`
+      // (LLP 0184 / LLP 0186). The four environmental `errorKind`s below stay
+      // `failed`.
+      assert.equal(outcome.status, 'refused')
       assert.match(
-        outcome.status === 'failed' ? outcome.reason : '',
+        outcome.status === 'refused' ? outcome.reason : '',
         new RegExp(`models\\.providers\\.${existingKey} already exists`)
       )
       // The reason has to be actionable, not just a diagnosis.
-      assert.match(outcome.status === 'failed' ? outcome.reason : '', /hyp detach --client openclaw/)
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /hyp detach --client openclaw/)
+      // The user-facing surface is unchanged by the outcome split: a refusal
+      // still prints as "did not apply", exactly as a hard failure does.
       assert.match(stdout, /did not apply/)
 
       // Pure read-then-decide: the file is byte-identical to what was staged.
@@ -200,11 +208,46 @@ test('a second attach at a moved endpoint rewrites both baseUrls (re-attach on d
     const written = await readConfig(staged.settingsPath)
     assert.equal(written.models.providers.anthropic.baseUrl, moved)
     assert.equal(written.models.providers.openai.baseUrl, `${moved}/v1`)
-    // Still exactly the two entries, still the marker headers, still the rest
+    // Still exactly the two entries, still both headers, still the rest
     // of the file: a rewrite is not a merge.
-    assert.deepEqual(written.models.providers.anthropic.headers, { 'x-hypaware-upstream': 'anthropic' })
+    assert.deepEqual(written.models.providers.anthropic.headers, { 'x-hypaware-upstream': 'anthropic', 'x-hypaware-client': 'openclaw' })
     assert.deepEqual(written.models.providers.openai.models, [])
     assert.equal(written.theme, 'dark')
+  } finally {
+    await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+// Upgrade path from entries written before the client header existed: the
+// ownership predicate keys on the marker header alone, so a pre-fix entry
+// (marker, empty models, no `x-hypaware-client`) is still ours, and a
+// re-attach over it must succeed and add the client header rather than
+// refuse. Without this, every install attached before the LLP 0175 fix would
+// keep misattributing until a manual detach/attach cycle.
+// @ref LLP 0175#root-cause [tests]: re-attach upgrades a pre-client-header entry in place
+test('re-attach over a pre-client-header entry succeeds and adds the header', async () => {
+  const staged = await stage({
+    models: {
+      providers: {
+        anthropic: {
+          baseUrl: 'http://127.0.0.1:4000',
+          headers: { 'x-hypaware-upstream': 'anthropic' },
+          models: [],
+        },
+        openai: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          headers: { 'x-hypaware-upstream': 'openai' },
+          models: [],
+        },
+      },
+    },
+  })
+  try {
+    const { outcome } = await runAttach(staged)
+    assert.deepEqual(outcome, { status: 'done' })
+    const written = await readConfig(staged.settingsPath)
+    assert.equal(written.models.providers.anthropic.headers['x-hypaware-client'], 'openclaw')
+    assert.equal(written.models.providers.openai.headers['x-hypaware-client'], 'openclaw')
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }
@@ -241,8 +284,8 @@ test('an entry that is not ours still refuses, however close it looks (R2)', asy
     const staged = await stage(before)
     try {
       const { outcome } = await runAttach(staged)
-      assert.equal(outcome.status, 'failed', label)
-      assert.match(outcome.status === 'failed' ? outcome.reason : '', /models\.providers\.anthropic already exists/)
+      assert.equal(outcome.status, 'refused', label)
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /models\.providers\.anthropic already exists/)
       // Pure read-then-decide still: nothing partially written over a refusal.
       assert.deepEqual(await readConfig(staged.settingsPath), before, label)
     } finally {
@@ -260,8 +303,18 @@ test('attach never throws on refusal, so attach-on-join warns instead of failing
     // throw fails the test outright, which is the assertion. The reconciler's
     // `perform()` turns a throw into a `failed` outcome for the *whole join*
     // action, so the refusal has to come back as a value.
-    const { outcome } = await runAttach(staged, { json: true })
-    assert.equal(outcome.status, 'failed')
+    const { outcome, stdout } = await runAttach(staged, { json: true })
+    assert.equal(outcome.status, 'refused')
+
+    // The outcome split stops at the reconciler seam. `--json` is a wire
+    // contract a scripted caller already parses, so the refusal still reports
+    // `status: "failed"` there, byte-for-byte as before: the terminal/transient
+    // distinction is about how the reconciler schedules a retry, not about what
+    // this attach did.
+    const payload = JSON.parse(stdout.trim())
+    assert.equal(payload.status, 'failed')
+    assert.equal(payload.changed, false)
+    assert.match(payload.reason, /models\.providers\.openai already exists/)
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }
@@ -318,7 +371,7 @@ test('attach --dry-run reports the refusal it would hit, not a write it would no
   })
   try {
     const { outcome } = await runAttach(staged, { dryRun: true })
-    assert.equal(outcome.status, 'failed')
+    assert.equal(outcome.status, 'refused')
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
   }

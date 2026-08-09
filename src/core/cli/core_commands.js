@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportGet, runReportList, runReportPublish } from './report_commands.js'
+import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
 import { makeGroupCommand } from './group_help.js'
@@ -34,6 +34,7 @@ import {
   runDaemonStop,
   runDaemonUninstall,
 } from '../commands/daemon.js'
+import { runAsk } from '../commands/ask.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkMaintain } from '../commands/sink.js'
@@ -48,7 +49,7 @@ import {
   runSkillsInstall,
   runUnignore,
 } from '../commands/clients.js'
-import { runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
 
 /**
  * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -257,6 +258,26 @@ function buildCoreCommands(registry) {
       run: runInit,
     },
     {
+      name: 'ask',
+      summary: 'Start your AI client on a question about your recorded sessions',
+      usage: 'hyp ask ["question"] [--list]',
+      help: [
+        'With no argument, offers a short list of questions worth asking of what',
+        'HypAware has recorded, and starts an attached client on the one you',
+        'pick: the client takes over the terminal and opens on that question.',
+        '',
+        'With a question, skips the menu and starts straight on it:',
+        '  hyp ask "which sessions touched the auth module last week"',
+        '',
+        '  --list   print the suggested questions and exit, launching nothing',
+        '',
+        'Only clients that are attached (hyp status) and whose CLI is on your',
+        'PATH can be started. Claude Desktop has no prompt argument, so it is',
+        'never offered here.',
+      ].join('\n'),
+      run: runAsk,
+    },
+    {
       name: 'join',
       summary: 'Join a centrally-managed fleet (write seed config + install daemon)',
       usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]',
@@ -354,7 +375,9 @@ function buildCoreCommands(registry) {
         'The class-neutral successor to the hyp ignore --sync/--local-only/--private',
         'flags: writes to the same machine-local, class-per-entry store (never a',
         '.hypignore dotfile). set/show/unset act on one path; list enumerates every',
-        'machine-local entry on this machine.',
+        'machine-local entry on this machine; client and folders set the two',
+        'standing preferences (which clients sync, and whether new folders are',
+        'asked about at all).',
       ].join('\n'),
     }),
     {
@@ -385,6 +408,36 @@ function buildCoreCommands(registry) {
       summary: 'Enumerate machine-local usage-class entries',
       usage: 'hyp policy list [--json]',
       run: runPolicyList,
+    },
+    {
+      name: 'policy client',
+      summary: 'Keep a client local-only, or return it to the sync-by-default',
+      usage: 'hyp policy client [<name>] [sync|local-only] [--json]',
+      help: [
+        'On a machine connected to a server, every configured client syncs by',
+        'default. `policy client <name> local-only` keeps that client\'s rows on',
+        'this machine; `policy client <name> sync` removes the opt-out (future',
+        'rows only - rows withheld while local-only are never uploaded). Clients',
+        'your fleet config carries always sync and cannot be opted out. With no',
+        'arguments, lists the opted-out clients.',
+      ].join('\n'),
+      run: runPolicyClient,
+    },
+    {
+      name: 'policy folders',
+      summary: 'Let new folders sync (default), or be asked once about each',
+      usage: 'hyp policy folders [ask|sync] [--json]',
+      help: [
+        'On a machine connected to a server, folders you have not marked sync',
+        'without asking. `policy folders ask` turns on the per-folder question:',
+        'a session opened somewhere new asks once how to handle it. `policy',
+        'folders sync` returns to the default. With no argument, reports the',
+        'current setting; `hyp init` asks for it in its own step.',
+        '',
+        'This gates the question only. Folders you already marked keep their class,',
+        'and .hypignore files are unaffected, in either setting.',
+      ].join('\n'),
+      run: runPolicyFolders,
     },
     {
       name: 'purge',
@@ -539,15 +592,38 @@ function buildCoreCommands(registry) {
     makeGroupCommand({
       registry,
       name: 'report',
-      summary: "Publish and read reports on a remote server's reports plane",
+      summary: "Build reports locally, and publish or read them on a server's reports plane",
       help:
-        "Reports are server-hosted (there is no local reports plane); every\n" +
-        'subcommand takes --remote <target> and defaults to the default remote\n' +
-        "target, the same resolution as bare --remote on queries. Reads use\n" +
-        'your login session; publish and delete need the publisher role (or an\n' +
-        "operator-minted publish token stored via 'hyp remote login <target>\n" +
-        "--token-file <path>').",
+        "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
+        'a static HTML site and takes no --remote and no credential.\n' +
+        '\n' +
+        'The rest talk to the server. Reports are server-hosted (there is no\n' +
+        'local reports plane), so publish/list/get/delete each take --remote\n' +
+        '<target> and default to the default remote target, the same resolution\n' +
+        'as bare --remote on queries. Reads use your login session; publish and\n' +
+        'delete need the publisher role (or an operator-minted publish token\n' +
+        "stored via 'hyp remote login <target> --token-file <path>').",
     }),
+    {
+      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
+      name: 'report render',
+      summary: 'Build the static HTML site for a local reports tree (no server involved)',
+      usage: 'hyp report render [<dir>] [--no-refresh-assets]',
+      help: [
+        'Renders every top-level <slug>.md (plus its optional <slug>/ section',
+        'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
+        'defaults to ~/hypaware-reports.',
+        '',
+        'html/ is wiped and rebuilt every run, so a deleted or renamed report',
+        'never leaves stale HTML behind. Report .md sources are never modified,',
+        'and assets/theme.css is yours: it is copied into each page but never',
+        'overwritten. Pass --no-refresh-assets to leave the other assets alone',
+        'too.',
+        '',
+        'Requires pandoc.',
+      ].join('\n'),
+      run: runReportRender,
+    },
     {
       name: 'report publish',
       summary: "Publish a report (single .html/.md file, or a folder bundle) to the org's reports plane",

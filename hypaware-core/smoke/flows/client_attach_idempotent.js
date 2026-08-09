@@ -36,11 +36,16 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *    per call, status=ok.
  *  - `client.attach` / `client.detach` spans carry `status=ok` and
  *    `hyp_client=<name>`.
- *  - Missing gateway capability yields exit 1 with a `client.attach`
- *    span whose `status=failed` and `error_kind=cap_missing`.
+ *  - Missing gateway capability yields exit 1 and a `client.attach` span
+ *    with `status=failed`, split by which of LLP 0174's two states the
+ *    requested name is in: a catalog-known client (`claude`) reports
+ *    `error_kind=adapter_not_enabled` and names the adapter to enable; a
+ *    name no plugin contributes keeps `error_kind=cap_missing` and names
+ *    `@hypaware/ai-gateway`.
  *
  * @param {{ harness: any, expect: any }} args
  * @ref LLP 0017#attach-is-idempotent-and-reversible [tests]: re-running attach is a no-op; detach restores prior settings
+ * @ref LLP 0174#detection [tests]: the capability gate reports the enablement layer for a catalog-known client, and only falls back to cap_missing wording for an unknown name
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
@@ -409,8 +414,9 @@ export async function run({ harness, expect }) {
     await kernel.sources.stop('ai-gateway')
 
     // ----------------------------------------------------------------
-    // Kernel #2: NO ai-gateway. `hyp attach --client claude` must
-    // exit 1 and emit a client.attach span with error_kind=cap_missing.
+    // Kernel #2: NO ai-gateway. `hyp attach` must exit 1 at the
+    // capability gate, and the gate reports which enablement state the
+    // requested name is in rather than one message for both.
     // ----------------------------------------------------------------
     const missingRegistry = createCommandRegistry()
     registerCoreCommands(missingRegistry)
@@ -436,9 +442,42 @@ export async function run({ harness, expect }) {
       capMissingCode,
       (v) => v === 1
     )
+    // `claude` is contributed by a bundled plugin, so the capability being
+    // absent means that plugin is not enabled here, not that the install
+    // lacks the gateway. The gate must say so and name the remedy.
+    // @ref LLP 0174#detection [tests]: state 2, client known but adapter not enabled
     expect.that(
-      'attach without ai-gateway prints a clear error',
+      'attach without ai-gateway names the adapter to enable, not the gateway',
       capMissingStderr.text(),
+      (v) =>
+        typeof v === 'string' &&
+        v.includes('the claude adapter is not enabled on this install') &&
+        v.includes('@hypaware/claude')
+    )
+
+    // A name no plugin contributes is state 1: nothing to enable, so the
+    // gate keeps the original "the gateway is not here" wording.
+    // @ref LLP 0174#detection [tests]: state 1, client unknown to the catalog
+    const unknownStdout = makeBuf()
+    const unknownStderr = makeBuf()
+    const unknownCode = await dispatch(
+      ['attach', '--client', 'frobnicator'],
+      {
+        stdout: unknownStdout,
+        stderr: unknownStderr,
+        kernel: missingKernel,
+        registry: missingRegistry,
+        env,
+      }
+    )
+    expect.that(
+      'attach of an uncontributed client without ai-gateway exits 1',
+      unknownCode,
+      (v) => v === 1
+    )
+    expect.that(
+      'attach of an uncontributed client still names @hypaware/ai-gateway',
+      unknownStderr.text(),
       (v) => typeof v === 'string' && v.includes('@hypaware/ai-gateway')
     )
 
@@ -491,6 +530,27 @@ export async function run({ harness, expect }) {
       (rows) => rows.every((/** @type {any} */ s) => s.attributes?.status === 'ok')
     )
 
+    const notEnabledSpans = traces.filter(
+      (/** @type {any} */ t) =>
+        t.name === 'client.attach' &&
+        t.attributes?.error_kind === 'adapter_not_enabled'
+    )
+    expect.that(
+      'traces: exactly one adapter_not_enabled client.attach span',
+      notEnabledSpans,
+      (rows) => rows.length === 1
+    )
+    expect.that(
+      'traces: adapter_not_enabled span has status=failed',
+      notEnabledSpans[0]?.attributes?.status,
+      (v) => v === 'failed'
+    )
+    expect.that(
+      'traces: adapter_not_enabled span has hyp_client=claude (the requested client)',
+      notEnabledSpans[0]?.attributes?.hyp_client,
+      (v) => v === 'claude'
+    )
+
     const capMissingSpans = traces.filter(
       (/** @type {any} */ t) =>
         t.name === 'client.attach' &&
@@ -507,9 +567,9 @@ export async function run({ harness, expect }) {
       (v) => v === 'failed'
     )
     expect.that(
-      'traces: cap_missing span has hyp_client=claude (the requested client)',
+      'traces: cap_missing span has hyp_client=frobnicator (the uncontributed name)',
       capMissingSpans[0]?.attributes?.hyp_client,
-      (v) => v === 'claude'
+      (v) => v === 'frobnicator'
     )
 
     const logs = await expect.logs()

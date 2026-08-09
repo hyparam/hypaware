@@ -177,6 +177,30 @@ export interface PluginClientManifest {
    * and attributes its entrypoints automatically.
    */
   transcript_entrypoints?: string[]
+  /**
+   * How to start this client on a question, for the wizard's closing
+   * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
+   * cannot be started on a prompt at all: Claude Desktop is a GUI app
+   * with no prompt argument, so it is detectable, pickable, and
+   * attachable but never launchable.
+   */
+  launch?: PluginClientLaunchManifest
+}
+
+/**
+ * A client's launch spec: the binary to look for on `$PATH` and the
+ * argv to start it with. Exactly one `args` element must contain the
+ * `{prompt}` placeholder, which is replaced with the user's question;
+ * a spec without it would start the client mute, which looks like the
+ * feature working (LLP 0198#split).
+ */
+export interface PluginClientLaunchManifest {
+  /** Executable name resolved against `$PATH` (e.g. `claude`). */
+  bin: string
+  /** Argv template; `{prompt}` in any element is replaced. */
+  args: string[]
+  /** Display name for the launch row (e.g. `Claude Code`). */
+  label?: string
 }
 
 export interface PluginAttachProbeManifest {
@@ -259,6 +283,17 @@ export interface PluginPickerContribution {
    * state. A probe failure means "not present," never an error.
    */
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu while
+   * staying a real picker source everywhere else: `hyp init --source
+   * <id>` still composes it, a config that already collects it still
+   * reads back as collecting it, and the id keeps its identity in the
+   * opt-out/sync store and in the dataset-owner map the export-seam
+   * withholding rules key on. For a row whose audience is narrow enough
+   * that a first-run checkbox costs every other user more than it earns
+   * that one.
+   */
+  hidden?: boolean
   /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
@@ -1911,6 +1946,20 @@ export interface AiGatewayProjectedMessage {
    * otherwise.
    */
   model?: string
+  /**
+   * Per-message provider id, for exchanges that span turns served by
+   * different providers (an OpenClaw session can switch its model, and with
+   * it the provider, mid-session; the backfilled exchange is the whole
+   * session). The gateway prefers this value over the exchange `provider`
+   * when present and falls back to the exchange provider otherwise, the same
+   * precedence `model` carries. Unlike `model`, projectors that supply it
+   * are expected to stamp it on every row of the turn (prompts and tool
+   * results included, via their turn's resolved backend): `provider` is
+   * non-nullable per row, so an unstamped minority-turn prompt would fall
+   * back to the exchange value and misattribute, which is the exact defect
+   * the field exists to fix (LLP 0194).
+   */
+  provider?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string
