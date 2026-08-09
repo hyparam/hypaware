@@ -391,26 +391,35 @@ test('resolve emits a hashed usage_policy.fold_tightened only when folding chang
     logEvent: (name, fields) => events.push({ name, fields: fields ?? {} }),
   })
 
+  // Only the fold signal is under test, and it is the only event this resolver
+  // emits that is a pure function of the fixture. The real case probe is also
+  // live here (no `caseInsensitiveVolume` is injected), and on darwin it stats
+  // a fixture path that does not exist and reports
+  // `usage_policy.case_probe_skipped`. Counting *every* event would make the
+  // assertion pass on ext4 and fail on APFS for a reason this test is not
+  // about, so the counts below are over the fold events alone.
+  const folds = () => events.filter((e) => e.name === 'usage_policy.fold_tightened')
+
   // Same spelling: nothing to report.
   assert.equal(r.resolve(`/root/${NFC}/a`).class, 'local-only')
-  assert.equal(events.length, 0)
+  assert.equal(folds().length, 0)
 
   // Divergent spelling: the fold is what produced the restriction.
   assert.equal(r.resolve(`/root/${NFD}/a`).class, 'local-only')
-  assert.equal(events.length, 1)
-  assert.equal(events[0].name, 'usage_policy.fold_tightened')
-  assert.equal(events[0].fields.hyp_operation, 'match_list')
-  assert.equal(events[0].fields.declared_class, 'none')
-  assert.equal(events[0].fields.folded_class, 'local-only')
-  assert.match(String(events[0].fields.cwd_hash), /^[0-9a-f]{16}$/)
-  for (const value of Object.values(events[0].fields)) {
+  assert.equal(folds().length, 1)
+  const fold = folds()[0]
+  assert.equal(fold.fields.hyp_operation, 'match_list')
+  assert.equal(fold.fields.declared_class, 'none')
+  assert.equal(fold.fields.folded_class, 'local-only')
+  assert.match(String(fold.fields.cwd_hash), /^[0-9a-f]{16}$/)
+  for (const value of Object.values(fold.fields)) {
     assert.ok(!String(value).includes('caf'), `raw path leaked in ${String(value)}`)
   }
 
   // An unrelated cwd nothing governs: still nothing to report.
   events.length = 0
   assert.equal(r.resolve('/elsewhere').class, 'full')
-  assert.equal(events.length, 0)
+  assert.equal(folds().length, 0)
 })
 
 // --- the hot path stays memoized on the lexical key -----------------------
