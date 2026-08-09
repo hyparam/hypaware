@@ -755,9 +755,54 @@ test('restart replay: seeding scans each session lazily and at most once per lis
     storage,
   })
   await projector.projectExchange(exchange())
+  const afterFirst = scanCalls
+  // First projection pays for the shared committed-session index build plus
+  // this session's own committed-row scan; nothing after it re-scans.
+  assert.equal(afterFirst, 2, 'first projection builds the session index and scans the session once')
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
-  assert.equal(scanCalls, 1, 'a session is scanned for committed part_ids at most once per listener')
+  assert.equal(scanCalls, afterFirst, 'later exchanges for the session trigger no further scans')
+})
+
+test('seeding: sessions with no committed rows share one index build and skip the per-session scan', async () => {
+  // Autonomous clients mint fresh session ids constantly; before the index,
+  // EVERY new session paid a whole-table scan that found nothing. Now the
+  // first projection builds one session index, and every fresh session
+  // resolves against it without touching row data again.
+  let discoverCalls = 0
+  let messageScanReads = 0
+  const committed = [{ message_id: 'uuid-old', session_id: 'sess-old' }]
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: committed.length }]
+    },
+    /** @param {string} tablePath @param {string[]=} columns */
+    async *readRows(tablePath, columns) {
+      if (columns?.includes('message_id')) messageScanReads++
+      for (const row of committed) yield row
+    },
+  }))
+  // One listener, two fresh sessions (a listener is per-daemon, sessions churn).
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'fresh', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+  })
+  const a = await projector.projectExchange({ ...exchange(), path: 'sess-new-1' })
+  const b = await projector.projectExchange({ ...exchange(), path: 'sess-new-2' })
+  assert.equal(a.length, 1, 'first fresh session emits its row')
+  assert.equal(b.length, 1, 'second fresh session emits its row')
+  assert.equal(discoverCalls, 1, 'both fresh sessions share a single index build')
+  assert.equal(messageScanReads, 0, 'no fresh session pays the per-session committed-row scan')
 })
 
 test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
@@ -797,7 +842,9 @@ test('restart replay: concurrent first exchanges for one session seed once and e
     projector.projectExchange(exchange()),
     projector.projectExchange(exchange()),
   ])
-  assert.equal(scanCalls, 1, 'concurrent first exchanges share a single committed-row scan')
+  // 2 = one shared session-index build + one shared per-session scan; the
+  // point is that concurrent first exchanges never each run their own.
+  assert.equal(scanCalls, 2, 'concurrent first exchanges share the index build and the committed-row scan')
   assert.equal(a.length + b.length, 0, 'both concurrent replays emit zero duplicate rows')
 })
 

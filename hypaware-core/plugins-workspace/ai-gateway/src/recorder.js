@@ -52,6 +52,12 @@ export function createRecorder(options = {}) {
     startExchange(init) {
       const exchange = new Exchange({ redactSet, init })
       active.add(exchange)
+      // Membership in `active` means "row not yet finalized". Without this
+      // removal every finished exchange (with its buffered bodies and
+      // stream events) is retained for the life of the listener, which on
+      // a busy daemon grows without bound (gigabytes per day).
+      // @ref LLP 0204#fix [implements]: finished exchanges leave the set
+      exchange.finishedSignal.then(() => active.delete(exchange))
       return exchange
     },
     /** @returns {number} */
@@ -323,6 +329,11 @@ export class Exchange {
       Buffer.concat(this.requestChunks),
       headerValue(this._rawRequestHeaders, 'content-encoding')
     )
+    // The decoded strings on the row are the durable copies; drop the raw
+    // chunk buffers so a finalized exchange does not hold every body twice
+    // for as long as anything still references it. @ref LLP 0204#fix
+    this.requestChunks = []
+    this.responseChunks = []
     const responseBody = this.isSse
       ? null
       : (decodedResponse.length > 0 ? decodedResponse : null)
