@@ -349,8 +349,15 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
     // failure in this best-effort path does.
     // @ref LLP 0204#fix [constrained-by]: the seed index is best-effort, so
     //   a scan it cannot complete must degrade the index, never end the process
+    // `error_kind` separates the two ways this message is reached, because
+    // they call for opposite responses and are otherwise indistinguishable
+    // in the log: `discover_failed` is an I/O condition the next rebuild may
+    // well clear on its own, while `scan_rejected` means the scan broke its
+    // documented "resolve, never reject" contract, i.e. a code defect that
+    // will keep degrading the index on every exchange until someone fixes it.
     const ids = scanCommittedSessionIds(storage, log).catch((err) => {
       log?.warn?.('aigw.session_index_scan_failed', {
+        error_kind: 'scan_rejected',
         error: err instanceof Error ? err.message : String(err),
       })
       return undefined
@@ -424,6 +431,7 @@ async function scanCommittedSessionIds(storage, log) {
     partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
   } catch (err) {
     log?.warn?.('aigw.session_index_scan_failed', {
+      error_kind: 'discover_failed',
       error: err instanceof Error ? err.message : String(err),
     })
     return undefined

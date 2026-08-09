@@ -826,8 +826,9 @@ function freshSessionIndexStorage() {
 /**
  * @param {ReturnType<typeof freshSessionIndexStorage>['storage']} storage
  * @param {() => number} now
+ * @param {ReturnType<typeof collectingLogger>} [log]
  */
-function freshSessionProjector(storage, now) {
+function freshSessionProjector(storage, now, log) {
   return createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
@@ -841,6 +842,7 @@ function freshSessionProjector(storage, now) {
     ],
     storage,
     now,
+    log,
   })
 }
 
@@ -927,7 +929,9 @@ test('committed-session index: a scan that throws degrades the index instead of 
         yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
       },
     }))
-    const projector = freshSessionProjector(storage, () => 0)
+    /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+    const logged = []
+    const projector = freshSessionProjector(storage, () => 0, collectingLogger(logged))
 
     const rows = await projector.projectExchange({ ...exchange(), path: 'sess-throwing-index' })
 
@@ -935,6 +939,18 @@ test('committed-session index: a scan that throws degrades the index instead of 
     // per-session scan runs and the row is still emitted.
     assert.equal(rows.length, 1, 'a failed index build errs toward scanning and still emits the row')
     assert.ok(discoverCalls >= 2, 'the failed index build falls back to the per-session committed-row scan')
+
+    // Surviving the rejection must not make it invisible: the daemon now
+    // keeps running on a degraded index, so the log line is the only thing
+    // that says so. `error_kind` distinguishes this (a broken "resolve,
+    // never reject" contract, i.e. a defect) from `discover_failed`, the
+    // I/O condition that reaches the same message and may clear itself.
+    const scanWarns = logged.filter(
+      (entry) => entry.level === 'warn' && entry.message === 'aigw.session_index_scan_failed'
+    )
+    assert.equal(scanWarns.length, 1, 'a rejecting scan warns exactly once, not once per failure branch')
+    assert.equal(scanWarns[0].fields.error_kind, 'scan_rejected')
+    assert.match(String(scanWarns[0].fields.error), /not iterable/)
 
     // Unhandled rejections are only detected once the microtask queue has
     // drained, so give the loop a turn before asserting there were none.
