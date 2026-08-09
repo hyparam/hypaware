@@ -272,6 +272,11 @@ export function createAiGatewayMessageProjector(opts) {
  * `onExchangeFinished` without serializing (proxy.js stores the returned
  * promise but does not await it), so this overlap is real.
  *
+ * This is also where the seed path's "a seeding miss must never cost a row"
+ * guarantee is ENFORCED rather than merely documented: whatever the seed
+ * rejects with is absorbed here, for the whole path, including the parts of
+ * it that reach storage the leaf scan does not own.
+ *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {Map<string, Promise<void>>} seedPromises
@@ -286,7 +291,36 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
   if (!pending) {
     // This body runs to here synchronously (no prior await), so the map is
     // populated before any concurrent caller can observe a missing entry.
-    pending = seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex)
+    //
+    // `projectExchange` awaits this and `source.js` drops the row for
+    // whatever it rejects with, so a seed that could not run must settle as
+    // "seeded nothing", never as a rejection: a seeding miss risks only the
+    // duplicate the seed exists to prevent (which settlement/compaction
+    // still collapse), while a rejection costs a real row.
+    //
+    // Nothing ever REWRITES a memo entry, so absorbing the rejection alone
+    // would cache "could not seed" as this session's verdict for the
+    // listener's lifetime. That is right for a scan that RAN and came back
+    // empty-handed, and wrong for one that broke: every later exchange
+    // would short-circuit onto the memo and inherit a verdict no scan ever
+    // produced. So drop the memo too, and let the next exchange retry and
+    // re-warn. The retry costs a scan that fails the way this one did (the
+    // caching in LLP 0204 is there to spare the daemon whole-table scans
+    // that SUCCEED), and buys back the operator signal whose absence made
+    // this silent: without it, one broken session logged once and then went
+    // quiet while every row for it was dropped.
+    // @ref LLP 0204#fix [constrained-by]: the per-session seed exists to
+    //   save a scan, so nothing in it may end an exchange or outlive itself
+    pending = seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex).catch((err) => {
+      log?.warn?.('aigw.seed_seen_messages_failed', {
+        session_id: sessionId,
+        error_kind: 'seed_rejected',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      // Guarded so a concurrent caller's newer memo is not evicted by this
+      // one's failure.
+      if (seedPromises.get(sessionId) === pending) seedPromises.delete(sessionId)
+    })
     seedPromises.set(sessionId, pending)
   }
   return pending
@@ -429,11 +463,21 @@ async function scanCommittedSessionIds(storage, log) {
  * their `message_id`s into `state.seenMessages`.
  *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
- * missing table, or an unreadable partition degrades to "not seeded" and
- * NEVER throws (a seeding miss only risks the duplicate this guards
- * against (which settlement/compaction can still collapse), whereas
- * throwing would drop a real row). The promise still resolves on a
- * partial/failed scan, so it is cached and not retried on every exchange.
+ * missing table, or an unreadable partition degrades to "not seeded" (a
+ * seeding miss only risks the duplicate this guards against (which
+ * settlement/compaction can still collapse), whereas failing the exchange
+ * would drop a real row). The promise still resolves on a partial/failed
+ * scan, so it is cached and not retried on every exchange.
+ *
+ * It does NOT, however, promise never to throw, and used to claim it did:
+ * only the `discoverCachePartitions` CALL is guarded below, not the walk
+ * over the answer, so a storage that resolves a truthy NON-iterable (a
+ * violation of its own declared return type) throws out of this function.
+ * The guarantee callers actually need is that seeding never costs a row,
+ * and that is enforced one level up in `seedSeenMessagesForSession`, which
+ * absorbs a rejection from anywhere in the seed path (this scan, or the
+ * committed-session index it consults first) rather than resting on a
+ * contract each leaf asserts about itself.
  *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
@@ -451,6 +495,12 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
   } catch (err) {
     log?.warn?.('aigw.seed_seen_messages_failed', {
       session_id: sessionId,
+      // `error_kind` separates the two ways this message is reached,
+      // because they call for opposite responses: `discover_failed` is an
+      // I/O condition this scan handled and the next session may not hit,
+      // while `seed_rejected` (from the caller) means the seed path broke
+      // and will keep breaking until someone fixes it.
+      error_kind: 'discover_failed',
       error: err instanceof Error ? err.message : String(err),
     })
     return
