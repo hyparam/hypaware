@@ -78,16 +78,29 @@ export function createRecorder(options = {}) {
       const settled = Promise.all(
         Array.from(active).map((e) => e.finishedSignal.catch(() => undefined))
       )
+      /** @type {NodeJS.Timeout | undefined} */
+      let handle = undefined
       /** @type {Promise<'timeout'>} */
       const timeout = new Promise((resolve) => {
-        const handle = setTimeout(() => resolve('timeout'), timeoutMs)
-        if (typeof handle.unref === 'function') handle.unref()
+        handle = setTimeout(() => resolve('timeout'), timeoutMs)
       })
-      const outcome = await Promise.race([settled.then(() => 'done'), timeout])
-      if (outcome === 'timeout') {
-        for (const exchange of Array.from(active)) {
-          try { exchange.finalize() } catch { /* swallow */ }
+      // An unref'd timer can be dropped by the event loop before it fires
+      // whenever nothing else is keeping the process alive, leaving this
+      // await pending forever instead of racing to the timeout. drain()
+      // runs while the listener socket is still open in production, but
+      // that's incidental, not a guarantee; ref the timer so the race
+      // always settles, and clear it once it does so drain() doesn't hold
+      // the process open past its own return.
+      // @ref LLP 0204#fix [implements]: drain always settles within timeoutMs
+      try {
+        const outcome = await Promise.race([settled.then(() => 'done'), timeout])
+        if (outcome === 'timeout') {
+          for (const exchange of Array.from(active)) {
+            try { exchange.finalize() } catch { /* swallow */ }
+          }
         }
+      } finally {
+        clearTimeout(handle)
       }
     },
   }
