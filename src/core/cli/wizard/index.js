@@ -367,8 +367,11 @@ export async function runInitWizard(opts) {
       // only question is the pick gate, which offers these same rows
       // itself, so fronting it with this gate asked the same question
       // twice - declining "Record all of these" landed on "Record all".
+      // The condition is the sync lane's own condition (see `pathway ===
+      // 'team' || enrolled()` below), restated here so the two can only
+      // drift apart if someone edits one and forgets the other.
       // @ref LLP 0201#one-lane-no-gate [implements]: the gate is shown only when it collapses more than one lane's gate
-      if (interactive && enrolled()) {
+      if (interactive && (pathway === 'team' || enrolled())) {
         // The rows accepting would record: the pick lane's own default
         // rows, computed once here and listed verbatim on the gate, so
         // "all of these" names something the user can read rather than an

@@ -347,7 +347,7 @@ test('runInitWizard: accepting the express gate auto-accepts every lane and stat
 test('runInitWizard: with nothing detected and nothing locked, no express gate is shown', async () => {
   let gates = 0
   const { opts } = wizardOpts(await tmpHome(), {
-    fork: async () => 'local',
+    fork: async () => 'team',
     detect: async () => new Set(),
     express: async () => { gates += 1; return 'defaults' },
   })
@@ -421,7 +421,7 @@ test('runInitWizard: the unenrolled local pathway shows no express gate; the pic
 // @ref LLP 0201#one-lane-no-gate [tests]: a managed machine's local reconfigure keeps the express gate
 test('runInitWizard: a managed machine reconfiguring down the local pathway still gets the express gate', async () => {
   let gates = 0
-  const { opts } = wizardOpts(await tmpHome(), {
+  const { opts, calls } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
     confirm: async () => 'stay',
     catalog: detectableCatalog(),
@@ -432,6 +432,10 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.equal(result.exitCode, 0)
   assert.equal(gates, 1)
   assert.equal(opts._pickOpts.autoAccept, true)
+  // No `join`: a reconfigure never runs it. The extra lanes (`syncScope`,
+  // `folderAsk`) are what makes this run have several gates for the express
+  // gate to collapse (LLP 0201 #one-lane-no-gate) - the point of this case.
+  assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {

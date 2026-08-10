@@ -71,6 +71,14 @@ disclosure [LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-ga
 put on the happy-path row) plus the new-folder policy that rides with it.
 The alternative row carries no gloss; "Let me choose" needs none.
 
+After [#one-lane-no-gate](#one-lane-no-gate), the orchestrator only ever
+calls this gate from inside its own `enrolled()` guard, so `opts.enrolled`
+is always true at the sole production call site and the solo-machine label
+above is never rendered by a real run. The component still accepts
+`enrolled: false` (and treats a missing `enrolled` the same way) and keeps
+the "Record all of these" branch: that is the defensive default the gate
+falls back to if the predicate ever widens again, not a live path.
+
 Declining runs the lanes exactly as they run today, gates and all.
 
 <a id="narrate"></a>**Accepting skips the prompts, never the statements.**
