@@ -48,7 +48,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
@@ -184,8 +184,11 @@ function gatewaySourceRawDetails(sources) {
  * the configured entries. A partial loss recorded by such a build stays
  * invisible rather than being guessed at.
  *
+ * `attribution` answers the question the bound-gateway message would otherwise
+ * have to hedge on: see `attributeDroppedUpstreams` below.
+ *
  * @param {SourceSnapshot[] | undefined} sources
- * @returns {{ idle: boolean, configured: number, dropped: number, names: string[] } | undefined}
+ * @returns {{ idle: boolean, configured: number, dropped: number, names: string[], attribution: DroppedUpstreamAttribution | undefined } | undefined}
  */
 function gatewayDroppedUpstreams(sources) {
   const details = gatewaySourceRawDetails(sources)
@@ -200,14 +203,151 @@ function gatewayDroppedUpstreams(sources) {
   const dropped = rawDropped ?? (idle ? configured : 0)
   if (dropped <= 0) return undefined
   const droppedNames = stringList(details.upstreams_dropped_names)
+  // On the older status file the dropped names are exactly the configured
+  // ones, since none survived.
+  const reportedNames = droppedNames.length > 0 ? droppedNames : idle ? names : []
   return {
     idle,
     configured,
     dropped,
-    // On the older status file the dropped names are exactly the configured
-    // ones, since none survived.
-    names: droppedNames.length > 0 ? droppedNames : idle ? names : [],
+    names: reportedNames,
+    // Only the bound gateway has a routing table for a preset to have filled,
+    // so only it has this question. An idle one bound nothing, which already
+    // proves no preset covered anything.
+    attribution: idle ? undefined : attributeDroppedUpstreams(details, dropped, reportedNames),
   }
+}
+
+/**
+ * Split the dropped upstream names into the ones an adapter preset is still
+ * proxying and the ones nothing is, or `undefined` when the status file does
+ * not support the split.
+ *
+ * A dropped entry is absent from the compiled config table by definition, and
+ * `mergeUpstreams` (the gateway source) backfills a registered preset into
+ * exactly the names that table is missing. So a dropped name that is also a
+ * registered preset name is still routed, by the preset's own entry rather
+ * than the one the operator wrote; a dropped name that is not has no route of
+ * its own at all. The daemon publishes both halves already
+ * (`registered_presets`, `upstreams_dropped_names`), so the message can say
+ * which one happened rather than hedging over both.
+ *
+ * Two shapes withhold the answer rather than inventing one, because this reads
+ * a *file* that some other build may have written:
+ *
+ * - **No `registered_presets` key.** Absent is not empty. Reading a missing
+ *   field as "no presets are registered" would turn every dropped name into a
+ *   confident claim of silence on a build that never recorded the list.
+ * - **A drop with no name.** `name` is one of the two keys whose absence drops
+ *   an entry, so an unnamed drop has nothing to intersect with, and its
+ *   destination is unknowable from status. Requiring one name per dropped
+ *   entry also covers the deduped case (two same-named entries both dropping
+ *   yield one name for two drops), where the shortfall is real but which entry
+ *   the preset covers is not decidable.
+ *
+ * @param {Record<string, unknown>} details
+ * @param {number} dropped
+ * @param {string[]} names
+ * @returns {DroppedUpstreamAttribution | undefined}
+ */
+function attributeDroppedUpstreams(details, dropped, names) {
+  if (!Array.isArray(details.registered_presets)) return undefined
+  if (names.length !== dropped) return undefined
+  const presets = new Set(stringList(details.registered_presets))
+  return {
+    covered: names.filter((n) => presets.has(n)),
+    silent: names.filter((n) => !presets.has(n)),
+  }
+}
+
+/**
+ * What a bound gateway's dropped upstreams mean for the traffic aimed at them.
+ *
+ * Two fates, and they are not close: a name no preset covers has no entry in
+ * the routing table at all, while a name a preset covers has one, backfilled
+ * from the preset rather than from what the operator wrote. Both are worth
+ * the warning and they call for different fixes, so when `attribution` can
+ * tell them apart the message names each set rather than hedging across both.
+ *
+ * Every clause is a claim about the *routing table*, never about the traffic,
+ * because the table is all a name-set intersection can reach. Routing is by
+ * `path_prefix` and `match()` and then by rank (`matchUpstream` and
+ * `compileUpstreams` in the gateway's `proxy.js` sort on `priority`, then
+ * prefix length, then merge order), and none of that is published:
+ *
+ * - **A dropped name is not a dead path.** A surviving upstream written with
+ *   no `path_prefix` compiles to `/`, which `pathMatchesPrefix` matches every
+ *   path against, so a request aimed at the dropped name can still be proxied
+ *   and recorded - under the *other* upstream's name. The gateway source says
+ *   the same where it logs this fault ("falls through to whatever the
+ *   remaining routes match (or nothing)"). Hence "under the name X", with the
+ *   fall-through spelled out, rather than a flat claim that nothing happens.
+ * - **A covered name is a table entry, not a guarantee of traffic.** The
+ *   backfilled preset can be shadowed outright: `mergeUpstreams` appends
+ *   presets after the config entries, and `compileUpstreams` breaks a rank
+ *   tie on that order, so a surviving config upstream at an equal
+ *   `path_prefix` (or at a higher `priority`) wins every path the preset
+ *   would have taken. Hence "in the routing table only as the preset", plus
+ *   the outranking note, rather than "is still proxied".
+ * - **A covered name loses more than its `base_url`, and not only its
+ *   `path_prefix`.** `mergeUpstreams` backfills the preset's whole entry, so
+ *   its `provider` and `priority` come too, and a preset carrying a `match()`
+ *   (which every bundled adapter preset does) routes by that function while
+ *   `path_prefix` degrades to a sort key `matchUpstream` never consults. The
+ *   claude preset's `match()` takes `/v1/complete` and any anthropic-headered
+ *   path, so naming `path_prefix` as "what is in force" understates its
+ *   reach as badly as it overstates the operator's. Hence "routing rules".
+ *
+ * The hedge survives for the case that still deserves it, where the status
+ * file does not say which of the two happened. It hedges only that question,
+ * though. The catch-all above is a fact about the *routing table*, not about
+ * the preset list, so it holds on the hedged branch identically and the
+ * hedged sentence is bounded to the name in the same way. Hedging the preset
+ * question is not licence to assert the traffic one: the shape that most
+ * often reaches this branch is an entry that lost its `name` (nothing to
+ * intersect), which is an ordinary current-build config, not only an old
+ * status file.
+ *
+ * @ref LLP 0195#visible-when-unintended [constrained-by]: the kind still fires on the configured-vs-compiled comparison alone; this only reports which fate each dropped name met
+ *
+ * @param {number} dropped
+ * @param {string[]} names
+ * @param {DroppedUpstreamAttribution | undefined} attribution
+ * @returns {string}
+ */
+function droppedUpstreamConsequence(dropped, names, attribution) {
+  if (!attribution) {
+    // Labelled, because unlike the idle branch these are not the configured
+    // set: an unlabelled `(openai)` next to "2 configured upstreams" invites
+    // exactly the wrong reading.
+    const named = names.length > 0 ? ` (dropped: ${names.join(', ')})` : ''
+    const oneEntry = dropped === 1
+    // The entry nouns count entries and the name nouns count names, because
+    // the two differ: the dedupe in `readConfiguredUpstreams` prints one name
+    // for two same-named dropped entries, which is one of the shapes that
+    // lands here. With no names to print at all there is nothing to
+    // disagree with, so the entry count stands in.
+    const oneName = (names.length > 0 ? names.length : dropped) === 1
+    return `${oneEntry ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same ${oneName ? 'name' : 'names'}, nothing is proxied or captured under ${oneName ? 'that name' : 'those names'}, and ${oneName ? 'a request' : 'requests'} aimed at ${oneName ? 'it' : 'them'} ${oneName ? 'gets' : 'get'} a 404 or ${oneName ? 'falls' : 'fall'} through to whatever surviving route ${oneName ? 'its path matches' : 'their paths match'}`
+  }
+  /** @type {string[]} */
+  const parts = []
+  const { silent, covered } = attribution
+  // Silence leads: it is the more damaging of the two, and the reason the
+  // operator is reading this line at all.
+  if (silent.length > 0) {
+    const one = silent.length === 1
+    parts.push(
+      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its path matches' : 'their paths match'}`,
+    )
+  }
+  if (covered.length > 0) {
+    const one = covered.length === 1
+    parts.push(
+      `${covered.join(', ')} ${one ? 'is' : 'are'} in the routing table only as the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and routing rules are in force, nothing this config set for ${one ? 'it' : 'them'} took effect, and a surviving upstream can still outrank ${one ? 'the preset' : 'a preset'} on any path`,
+    )
+  }
+  return parts.join('; ')
 }
 
 /** @param {unknown} v @returns {string[]} */
@@ -705,10 +845,17 @@ export async function collectHypAwareStatus(opts = {}) {
     // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway proxies what the config asked for" is readable from status.json steadily, not only from a boot-time log line
     // @ref LLP 0195#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one
     // @ref LLP 0195#consequences [constrained-by]: the warning stays loud in diagnostics and does not flip overall's health verdict
-    const { idle, configured, dropped, names } = droppedGatewayUpstreams
+    const { idle, configured, dropped, names, attribution } = droppedGatewayUpstreams
     // Counts first, names in parentheses when there are any: `name` is itself
     // one of the two keys that drops an entry, so the config that most needs
     // this warning is exactly the one that can supply no name to print.
+    //
+    // The parenthetical stays only on the idle branch, where every configured
+    // entry is also a dropped one, so hanging the names off "are configured"
+    // states a fact. On the bound branch the two sets differ, and the same
+    // placement reads "1 of its 2 configured upstreams (openai)" as if openai
+    // were the configured set; there the names move to the consequence they
+    // actually belong to.
     const named = names.length > 0 ? ` (${names.join(', ')})` : ''
     const message = idle
       // Kept verbatim for the total loss. "Listening on nothing" and
@@ -716,7 +863,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // `hyp status` against a dead gateway needs that sentence, not a
       // count of what a working one is missing.
       ? `the gateway is running but listening on nothing: ${configured} ${configured === 1 ? 'upstream' : 'upstreams'}${named} ${configured === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`
-      : `the gateway is listening, but ${dropped} of its ${configured} configured ${configured === 1 ? 'upstream' : 'upstreams'}${named} did not compile to a route (each needs both a 'name' and a 'base_url') - ${dropped === 1 ? 'that entry is' : 'those entries are'} not in the routing table, so unless an adapter preset already covers the same name, traffic meant for ${dropped === 1 ? 'it' : 'them'} is not proxied and nothing is captured`
+      : `the gateway is listening, but ${dropped} of its ${configured} configured ${configured === 1 ? 'upstream' : 'upstreams'} did not compile to a route (each needs both a 'name' and a 'base_url') - ${droppedUpstreamConsequence(dropped, names, attribution)}`
     diagnostics.push({
       severity: 'warning',
       // Two kinds, one check. They cannot both fire (a gateway is either
