@@ -17,6 +17,7 @@ import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
+import { openStreamingAppend } from './iceberg/stream_append.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
@@ -30,6 +31,7 @@ import { isPlainObject } from '../util/json_util.js'
  *   PartitionCursor,
  *   AppendOptions,
  *   SettleContext,
+ *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
@@ -131,7 +133,7 @@ export async function maintainCache(opts) {
         partition: JSON.stringify(part.partition),
         status: 'ok',
       },
-      async () => {
+      async (span) => {
         /** @type {MaintenancePartitionReport} */
         const r = {
           dataset: part.dataset,
@@ -147,7 +149,21 @@ export async function maintainCache(opts) {
         const cursor = readCursorSync(part.path)
         const settle = resolveSettleContext(opts, part.dataset)
 
-        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
+        const done = await maintainGeneration(
+          r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter
+        )
+        // A compaction that "converged" is only healthy if it also shrank
+        // the file count; publish both sides of that so a run that rewrites
+        // a partition into the same fragmentation is visible in the trace
+        // rather than only in a later disk audit.
+        span.setAttribute('compacted', done.compacted)
+        span.setAttribute('data_files_before', done.dataFilesBefore)
+        span.setAttribute('data_files_after', done.dataFilesAfter)
+        span.setAttribute('rows', done.rowCount)
+        if (done.compactedBytesWritten !== undefined) {
+          span.setAttribute('bytes_written', done.compactedBytesWritten)
+        }
+        return done
       },
       { component: 'cache' }
     )
@@ -290,6 +306,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
         r.rowCount = result.rowCount
         r.dataFilesAfter = result.dataFiles
+        r.compactedBytesWritten = result.bytesWritten
         compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
       }
     } else if (shouldCompact && opts.dryRun) {
@@ -467,18 +484,27 @@ function estimateRowBytes(row) {
  * Compact a partition by rewriting the live generation into a fresh
  * directory named by the layout, then swap the cursor to point at it.
  *
- * Rows are flushed to a data file whenever the batch reaches either
+ * Rows are flushed out of the batch whenever it reaches either
  * `COMPACT_BATCH_SIZE` rows or `cfg.compact_batch_bytes` estimated
  * bytes, whichever comes first. The byte cap keeps peak heap bounded
  * regardless of per-row payload size: without it, a fat denormalized
  * column (e.g. tool definitions repeated on every row) pushes a
  * 10k-row batch into the gigabytes and OOMs the daemon mid-compaction.
  *
+ * A flush is a parquet ROW GROUP, not a data file. Successive row groups
+ * stream into the same open file until the bytes actually written reach
+ * `cfg.target_file_bytes`. Tying the file boundary to the in-memory
+ * estimate instead made every flush its own file, and a column that
+ * compresses 70x turned a 32 MB batch into a 0.5 MB data file, so
+ * `target_file_bytes` was unreachable by construction (LLP 0206).
+ *
+ * @ref LLP 0206#decision [implements]: heap bounds the batch, written
+ *   bytes bound the file.
  * @param {string} partitionDir
  * @param {GenerationLayout} layout
  * @param {MaintenanceConfig} cfg
  * @param {SettleContext | null} [settle]
- * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number } | null>}
+ * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number, bytesWritten?: number } | null>}
  */
 async function compactGeneration(partitionDir, layout, cfg, settle) {
   const oldDir = path.join(partitionDir, layout.liveDir)
@@ -527,6 +553,25 @@ async function compactGeneration(partitionDir, layout, cfg, settle) {
   /** @type {Record<string, unknown>[]} */
   const fallbackBuffer = []
   const emittedPartIds = settle ? new Set() : null
+
+  /** @type {{ current: StreamingTableAppend | null }} */
+  const sink = { current: null }
+  const flushBatch = async () => {
+    if (!columns || batch.length === 0) return
+    if (!sink.current) {
+      sink.current = await openStreamingAppend({
+        tableDir: newDir,
+        columns,
+        targetFileBytes: cfg.target_file_bytes,
+        appendOptions: appendOpts,
+      })
+    }
+    await sink.current.write(batch)
+    totalRows += batch.length
+    batch = []
+    batchBytes = 0
+  }
+
   const emit = async (/** @type {Record<string, unknown>} */ row) => {
     const rowId = row._hyp_cache_row_id
     if (typeof rowId === 'string' && seen.has(rowId)) return
@@ -538,10 +583,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle) {
     batch.push(row)
     batchBytes += estimateRowBytes(row)
     if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
-      await appendRowsToTable(newDir, columns, batch, appendOpts)
-      totalRows += batch.length
-      batch = []
-      batchBytes = 0
+      await flushBatch()
     }
   }
 
@@ -568,12 +610,8 @@ async function compactGeneration(partitionDir, layout, cfg, settle) {
     }
   }
 
-  if (batch.length > 0 && columns) {
-    await appendRowsToTable(newDir, columns, batch, appendOpts)
-    totalRows += batch.length
-    batch = []
-    batchBytes = 0
-  }
+  await flushBatch()
+  const streamed = sink.current ? await sink.current.close() : null
 
   if (!columns) {
     if (!layout.commitEmpty) return null
@@ -603,6 +641,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle) {
     newEpoch: layout.newEpoch,
     rowCount: totalRows,
     dataFiles: newDataFiles,
+    bytesWritten: streamed?.bytesWritten ?? 0,
   }
 }
 

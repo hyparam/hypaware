@@ -12,11 +12,30 @@ import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { loadLatestFileCatalogMetadata } from 'icebird'
+import { parquetMetadata } from 'hyparquet'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
+
+/**
+ * Row-group count of every data file in a table directory, in name order.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<number[]>}
+ */
+async function rowGroupCounts(tableDir) {
+  const dataDir = path.join(tableDir, 'data')
+  const names = (await fs.readdir(dataDir)).filter((n) => n.endsWith('.parquet')).sort()
+  const counts = []
+  for (const name of names) {
+    const bytes = await fs.readFile(path.join(dataDir, name))
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    counts.push(parquetMetadata(buffer).row_groups.length)
+  }
+  return counts
+}
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -592,6 +611,8 @@ test('normalizeMaintenanceConfig honours an explicit compact_batch_bytes', () =>
   assert.equal(cfg.compact_batch_bytes, 1234)
 })
 
+// @ref LLP 0206#row-groups [tests]: the byte budget still bounds a batch, but
+// what it produces is a row group, not a data file.
 test('compaction flushes by byte budget so a fat column cannot blow up one batch', async () => {
   const cacheRoot = await makeTmpDir('maint-bytecap')
   try {
@@ -604,7 +625,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
     }
 
     // A 150KB byte budget forces a flush roughly every two rows, so the
-    // compacted output spans many data files instead of one giant batch.
+    // rewrite never holds more than a couple of rows at once.
     const report = await maintainCache({
       cacheRoot,
       force: true,
@@ -614,13 +635,20 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
 
     assert.ok(report.totalCompacted > 0)
     const p = report.partitions[0]
-    assert.ok(p.dataFilesAfter > 1, `expected multiple flushed files, got ${p.dataFilesAfter}`)
+    // The blob compresses far below `target_file_bytes`, so the many flushes
+    // land as many row groups in ONE file.
+    assert.equal(p.dataFilesAfter, 1)
 
-    // All rows survive the split, and the data round-trips intact.
     const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
     const cursor = readCursorSync(sourceDir)
     assert.equal(cursor.rowCount, 20)
     const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.ok(
+      (await rowGroupCounts(liveDir))[0] > 1,
+      'expected the byte budget to flush more than one row group'
+    )
+
+    // All rows survive the split, and the data round-trips intact.
     const rows = await readRowsFromTable(liveDir)
     assert.equal(rows.length, 20)
     assert.equal(rows.every((r) => r.value === blob), true)
@@ -629,7 +657,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
   }
 })
 
-test('a generous byte budget compacts the same input into a single file', async () => {
+test('a generous byte budget compacts the same input into a single row group', async () => {
   const cacheRoot = await makeTmpDir('maint-bigcap')
   try {
     const blob = 'x'.repeat(40_000)
@@ -648,6 +676,10 @@ test('a generous byte budget compacts the same input into a single file', async 
 
     const p = report.partitions[0]
     assert.equal(p.dataFilesAfter, 1)
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const cursor = readCursorSync(sourceDir)
+    const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.deepEqual(await rowGroupCounts(liveDir), [1])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

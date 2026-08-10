@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-07
 **Related:** LLP 0027
+**Extended-by:** LLP 0206
 
 > Maintenance stops re-flagging already-compacted partitions: a partition is
 > only compaction-due when its live data-file count has moved off the count

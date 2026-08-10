@@ -1,4 +1,6 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ParquetWriter } from 'hyparquet-writer'
+import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
@@ -147,6 +149,42 @@ export interface AppendOptions {
   sortOrder?: readonly { column: string, direction?: 'asc' | 'desc' }[]
 }
 
+/**
+ * One data file a streaming compaction currently has open: the parquet
+ * writer accumulating row groups into it, plus the per-file Iceberg
+ * metrics accumulated so far. Bounds are held as the raw minimum and
+ * maximum seen; serialization happens once, at file close.
+ */
+export interface OpenCompactionFile {
+  dataPath: string
+  writer: Writer
+  parquet: ParquetWriter
+  partition: Record<string, unknown>
+  rowGroups: number
+  rows: bigint
+  valueCounts: Record<number, bigint>
+  nullCounts: Record<number, bigint>
+  nanCounts: Record<number, bigint>
+  mins: Record<number, unknown>
+  maxes: Record<number, unknown>
+}
+
+export interface StreamingAppendResult {
+  rowCount: number
+  dataFiles: number
+  bytesWritten: number
+}
+
+/**
+ * A multi-batch append that decides its own file boundaries. Each `write`
+ * lands one bounded batch as a parquet row group; `close` commits every
+ * file the append produced in a single snapshot.
+ */
+export interface StreamingTableAppend {
+  write(rows: Record<string, unknown>[]): Promise<void>
+  close(): Promise<StreamingAppendResult>
+}
+
 export interface MaintenanceConfig {
   enabled: boolean
   interval_minutes: number
@@ -222,6 +260,8 @@ export interface MaintenancePartitionReport {
   rowCount: number
   dataFilesBefore: number
   dataFilesAfter: number
+  /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
+  compactedBytesWritten?: number
 }
 
 export interface MaintenanceReport {
