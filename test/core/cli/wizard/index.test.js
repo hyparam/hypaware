@@ -113,8 +113,9 @@ function wizardOpts(home, over = {}) {
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
     syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
     folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
-    // The express gate (LLP 0201) fronts the lanes on every attended run;
-    // these tests exercise the step-by-step path, so it declines by default.
+    // The express gate (LLP 0201) fronts the lanes on an enrolled attended
+    // run (LLP 0201 #one-lane-no-gate); these tests exercise the step-by-step
+    // path, so it declines by default.
     express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'choose' },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
@@ -415,7 +416,7 @@ test('runInitWizard: the unenrolled local pathway shows no express gate; the pic
   assert.equal(opts._pickOpts.progress, 'Step 1 of 2 · Choose what to collect')
 })
 
-// The other enrolled shape: managed without a join this run. Its local
+// Another enrolled shape: managed without a join this run. Its local
 // itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), so the
 // gate has several questions to collapse and earns its screen.
 // @ref LLP 0201#one-lane-no-gate [tests]: a managed machine's local reconfigure keeps the express gate
