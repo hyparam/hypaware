@@ -313,7 +313,9 @@ async function seedSessionIfCommitted(sessionId, state, storage, log, sessionInd
 
 /**
  * How long a committed-session index stays authoritative for "this session
- * has no committed rows". Within the window a miss is trusted; after it, a
+ * has no committed rows", measured from when its scan COMPLETED (not when
+ * it started, or a scan slower than this window could never serve a hit).
+ * Within the window a miss is trusted; after it, a
  * miss triggers one rebuild before being trusted, so rows committed by a
  * concurrent writer (a `hyp backfill` in another process importing the
  * session this listener is now capturing) are seen at most this late. A
@@ -342,11 +344,15 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
     // `scanCommittedSessionIds` reports a scan it could not run as
     // `undefined` rather than by rejecting, but nothing structural holds it
     // to that. Normalize a rejection into the same "could not scan" outcome
-    // so this promise is total: the self-clearing guard below attaches a
-    // fulfillment handler to a promise nothing else awaits, so a scan that
-    // ever threw would surface as an UNHANDLED rejection and Node would
-    // kill the daemon, instead of the index degrading the way every other
-    // failure in this best-effort path does.
+    // so this promise is total, because everything downstream assumes it is:
+    // the stamp-and-self-clear handler below runs on FULFILLMENT only, so a
+    // rejecting scan would leave `built` pinned to the rejected attempt and
+    // every later caller would re-await the same rejection - a permanently
+    // wedged index that loses every subsequent exchange, rather than the
+    // index degrading the way every other failure in this best-effort path
+    // does. It also keeps the rejection away from any handler nothing
+    // awaits, the shape that reaches Node's default handler and would take
+    // the whole daemon down.
     // @ref LLP 0204#fix [constrained-by]: the seed index is best-effort, so
     //   a scan it cannot complete must degrade the index, never end the process
     // `error_kind` separates the two ways this message is reached, because
@@ -355,23 +361,36 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
     // well clear on its own, while `scan_rejected` means the scan broke its
     // documented "resolve, never reject" contract, i.e. a code defect that
     // will keep degrading the index on every exchange until someone fixes it.
-    const ids = scanCommittedSessionIds(storage, log).catch((err) => {
+    const scan = scanCommittedSessionIds(storage, log).catch((err) => {
       log?.warn?.('aigw.session_index_scan_failed', {
         error_kind: 'scan_rejected',
         error: err instanceof Error ? err.message : String(err),
       })
       return undefined
     })
-    const attempt = { atMs: now(), ids }
-    built = attempt
-    // A build that failed to scan cannot stand in as "no committed rows"
-    // for the rebuild window; clear it once the failure is known so the
-    // NEXT caller retries instead of trusting a stale, un-scanned answer.
-    // Guarded on `built === attempt` so a later, already-succeeded rebuild
-    // (from a concurrent caller) is not clobbered by this one's failure.
-    attempt.ids.then((ids) => {
+    // `atMs` starts at `Infinity` (never stale) and is stamped when the scan
+    // COMPLETES, because the window measures how long the ANSWER is trusted.
+    // Stamped at scan start, a scan slower than SESSION_INDEX_REBUILD_MS
+    // would be stale the moment it resolved, so the next miss would rebuild
+    // at once and the index would rebuild back-to-back without ever serving
+    // a hit - on exactly the table size that makes the index worth having.
+    // The entry is still published to `built` synchronously, so concurrent
+    // callers share this in-flight scan; only the timestamp is deferred.
+    const attempt = { atMs: Infinity, ids: scan }
+    // Chaining (rather than a floating `.then`) is what orders the stamp
+    // before every awaiter: a caller awaits `attempt.ids`, which resolves
+    // only after this handler has run.
+    attempt.ids = scan.then((ids) => {
+      attempt.atMs = now()
+      // A build that failed to scan cannot stand in as "no committed rows"
+      // for the rebuild window; clear it once the failure is known so the
+      // NEXT caller retries instead of trusting a stale, un-scanned answer.
+      // Guarded on `built === attempt` so a later, already-succeeded rebuild
+      // (from a concurrent caller) is not clobbered by this one's failure.
       if (ids === undefined && built === attempt) built = undefined
+      return ids
     })
+    built = attempt
     return attempt
   }
 
@@ -411,10 +430,11 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
  * "the scan could not run" and err toward scanning instead of silently
  * treating a broken index as authoritative.
  *
- * Reports failure by RESOLVING to `undefined`, never by rejecting. Callers
- * may attach handlers to the returned promise that no one awaits, so a
- * rejection escaping here would be unhandled; `rebuild()` normalizes one
- * back to `undefined` rather than assuming this contract holds.
+ * Reports failure by RESOLVING to `undefined`, never by rejecting: the
+ * committed-session index's stamp-and-self-clear handler runs on fulfillment
+ * only, so a rejection here would pin `built` to the failed attempt and wedge
+ * the index for the listener's life. `rebuild()` normalizes one back to
+ * `undefined` rather than assuming this contract holds.
  *
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log

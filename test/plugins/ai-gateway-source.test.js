@@ -342,6 +342,66 @@ test('the idle log is a warning only when configured upstreams were dropped', as
   assert.deepEqual(warned.attrs.configured_upstream_names, ['anthropic'])
 })
 
+// The partial loss is the quiet half of the same fault: the gateway binds, so
+// nothing about the boot looks wrong, and the operator's first move when one
+// provider's rows never arrive is to read the daemon log. It has to say so
+// there, not only in `hyp status`.
+// @ref LLP 0195#visible-when-unintended [tests]: an upstream dropped at compile is reported even when the routing table is not empty
+test('a gateway that lost one of two upstreams warns at boot and reports the drop', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [
+      { name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/anthropic' },
+      // `url` where `base_url` was meant: dropped, silently, per entry.
+      { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+    ],
+  }, logged))
+  try {
+    const warned = logged.find((l) => l.event === 'aigw.upstreams_dropped')
+    assert.ok(warned, 'the drop is logged even though the proxy bound')
+    assert.equal(warned.level, 'warn')
+    assert.equal(warned.attrs.configured_upstreams, 2)
+    assert.equal(warned.attrs.dropped_upstreams, 1)
+    assert.deepEqual(warned.attrs.dropped_upstream_names, ['openai'])
+    assert.equal(warned.attrs.routed_upstreams, 1)
+
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, undefined, 'the gateway is bound, not idle')
+    assert.equal(status.details.upstreams_configured, 2)
+    assert.equal(status.details.upstreams_dropped, 1, 'core reads the loss off this')
+    assert.deepEqual(status.details.upstreams_dropped_names, ['openai'])
+  } finally {
+    await source.stop()
+  }
+})
+
+test('a gateway whose upstreams all compile reports no drop and logs nothing', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/anthropic' }],
+  }, logged))
+  try {
+    assert.equal(logged.find((l) => l.event === 'aigw.upstreams_dropped'), undefined)
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details)
+    assert.equal(status.details.upstreams_dropped, 0, 'reported as 0, not omitted')
+    assert.equal(
+      status.details.upstreams_dropped_names,
+      undefined,
+      'and no empty name list riding along in every healthy status file',
+    )
+  } finally {
+    await source.stop()
+  }
+})
+
 /**
  * @param {Record<string, unknown>} config
  * @param {{ level: string, event: string, attrs: any }[]} [logged]

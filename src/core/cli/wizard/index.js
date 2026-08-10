@@ -25,7 +25,6 @@ import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { LOCAL_INSTALL_RETENTION_DAYS, buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory, defaultPickerDetect, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
-import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { runWizardFirstAsk } from './first_ask.js'
@@ -768,6 +767,7 @@ export function firstLookHadRows(result) {
  * login it wraps cannot pass `--org` - so the fix is the manual login,
  * after which re-running `hyp init` re-enters as an enrolled machine.
  *
+ * @ref LLP 0179#no-prose-control-flow [implements]: the multi-org branch reads the lane's reason code, not its sentence
  * @param {RunInitWizardOptions} opts
  * @param {WizardJoinResult} join
  */
@@ -776,7 +776,7 @@ function printJoinFailure(opts, join) {
     opts.stderr.write('Sign-in did not complete. You can try again, or set up locally for now.\n')
     return
   }
-  if (join.detail?.includes(LOGIN_ORG_SELECTION_MESSAGE)) {
+  if (join.reason === 'org_selection_required') {
     opts.stderr.write('Joining failed: this account belongs to more than one org. Run `hyp remote login --org <name>` first, then re-run `hyp init`.\n')
     return
   }

@@ -330,6 +330,12 @@ transient network error) to `'failed' | 'abandoned'` for
 `runInitWizard`'s retry-or-local-or-quit prompt
 (`@ref LLP 0129#failed-join-returns-to-fork`).
 
+Extended-by: [LLP 0179](./0179-login-lane-returns-its-outcome.decision.md).
+The taxonomy and the classification it feeds are unchanged; how the wizard
+*learns* them is not. The implementation read the login lane's captured
+stderr and substring-matched the messages it printed; the lane now returns
+`{ exitCode, reason }` and `classifyLoginFailure` switches on the code.
+
 ## Pick phase {#pick}
 
 > **Extended-by [LLP 0190](./0190-wizard-defaults-gate.decision.md):**
