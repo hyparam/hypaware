@@ -1187,6 +1187,118 @@ test('committed-session index: a build that could not scan is not cached as "no 
   )
 })
 
+test('seed failure: a storage that breaks its discover contract loses no rows and does not poison the session memo', async () => {
+  // Finding (#692), two halves of one silent failure:
+  //
+  //  - `scanCommittedMessageIds` guards only the `discoverCachePartitions`
+  //    CALL; the walk over the answer sits outside that try/catch, so a
+  //    storage resolving a truthy NON-iterable (a violation of its own
+  //    declared `CachePartitionMeta[]` return type) throws out of a
+  //    function whose whole point is to degrade rather than cost a row.
+  //  - `seedPromises` memoized that rejected promise and never removed it,
+  //    so `projectExchange` rejected, `source.js` caught it and dropped the
+  //    row, and EVERY later exchange for the session short-circuited onto
+  //    the poisoned memo and was dropped with no warn at all. Measured in
+  //    review: five exchanges, two warn lines, zero rows.
+  //
+  // So both properties are asserted per exchange: the row still lands, and
+  // the failure keeps saying so instead of going quiet after the first.
+  //
+  // The index build (discover call 1) is kept WELL-FORMED on purpose. A
+  // storage malformed on that call too rejects inside the committed-session
+  // index, which is issue #685 / PR #690's separate defect; keeping it
+  // well-formed isolates this one and keeps this test independent of that
+  // fix.
+  let discoverCalls = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      if (discoverCalls === 1) {
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+      }
+      return /** @type {never} */ ({ malformed: true })
+    },
+    async *readRows() {
+      // The index must place this session among the committed ones, or the
+      // per-session scan is skipped and the defect never fires.
+      yield { session_id: 'sess-broken-seed', message_id: 'uuid-committed' }
+    },
+  }))
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logged = []
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project: perExchangeMessage })],
+    storage,
+    log: collectingLogger(logged),
+  })
+
+  const first = await settledProjection(
+    projector.projectExchange({ ...exchange(), exchange_id: 'ex-1', path: 'sess-broken-seed' })
+  )
+  assert.equal(
+    first.error === undefined ? undefined : String(first.error),
+    undefined,
+    'exchange 1: a seed that could not run must not fail the projection'
+  )
+  assert.equal(first.rows?.length, 1, 'exchange 1: the row survives a seed that could not run')
+
+  const second = await settledProjection(
+    projector.projectExchange({ ...exchange(), exchange_id: 'ex-2', path: 'sess-broken-seed' })
+  )
+  assert.equal(
+    second.error === undefined ? undefined : String(second.error),
+    undefined,
+    'exchange 2: a memoized failure must not fail every later exchange for the session'
+  )
+  assert.equal(second.rows?.length, 1, 'exchange 2: the session is not permanently poisoned')
+
+  // 3 = one index build + one seed scan per exchange. Exchange 2 having
+  // re-run its scan is the direct evidence that no failed memo survived it.
+  assert.equal(discoverCalls, 3, 'a seed that broke is retried, not cached as this session verdict')
+
+  // Silence was the other half of the defect: a daemon dropping every row
+  // for a session while logging nothing is the failure operators could not
+  // see. Each failing exchange must carry its own signal.
+  const warns = logged.filter((e) => e.level === 'warn' && e.message === 'aigw.seed_seen_messages_failed')
+  assert.equal(warns.length, 2, 'each exchange whose seed failed emits its own operator signal')
+  for (const warn of warns) {
+    assert.equal(warn.fields.error_kind, 'seed_rejected')
+    assert.equal(warn.fields.session_id, 'sess-broken-seed')
+    assert.match(String(warn.fields.error), /not iterable/)
+  }
+})
+
+/**
+ * A projector whose message_id is unique per exchange. Reusing one id
+ * across exchanges would let the seen-set dedup (the very thing the seed
+ * feeds) suppress the second row legitimately, hiding a drop under a zero.
+ *
+ * @param {AiGatewayExchangeInput} input
+ * @returns {AiGatewayProjectedExchange}
+ */
+function perExchangeMessage(input) {
+  return {
+    provider: 'native',
+    session_id: String(input.path),
+    messages: [{ role: 'user', content: 'hi', message_id: `uuid-${input.exchange_id}` }],
+  }
+}
+
+/**
+ * Settle a projection without letting a rejection escape, so a test can
+ * assert on "it rejected" as evidence instead of dying on it.
+ *
+ * @param {Promise<unknown[]>} projecting
+ * @returns {Promise<{ rows: unknown[] | undefined, error: unknown }>}
+ */
+function settledProjection(projecting) {
+  return projecting.then(
+    (rows) => ({ rows, error: undefined }),
+    (/** @type {unknown} */ error) => ({ rows: undefined, error })
+  )
+}
+
 /**
  * Minimal `ExtendedQueryStorageService`-shaped stub exposing only the
  * committed-partition read surface the projector feature-detects:
