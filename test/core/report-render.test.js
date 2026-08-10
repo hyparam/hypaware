@@ -200,6 +200,123 @@ test('theme.css is created once, never overwritten, and reaches every page', () 
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+/** A component block, authored exactly as the vocabulary spells it: raw HTML, indented. */
+const COMPONENT_BLOCK = [
+  '<div class="metric-grid">',
+  '  <div class="metric">',
+  '    <span class="metric-value good">1.2M</span>',
+  '    <span class="metric-label">Opus output tokens / mo</span>',
+  '  </div>',
+  '</div>',
+].join('\n')
+
+/**
+ * One page exercising the authoring vocabulary the renderer has to preserve: a component
+ * block, an aligned table, a fenced block with a language, headings carrying `&`, `'` and
+ * `/`, and in-page links to the ids those headings mint.
+ */
+const VOCABULARY = [
+  '# Cost & Usage',
+  '',
+  '**One sentence thesis.**',
+  '',
+  "Jump to [what's next](#whats-next), the [numbers](#opus-output-tokens--mo), or the [query](#the-hyp-report-render-query).",
+  '',
+  COMPONENT_BLOCK,
+  '',
+  '## Opus output tokens / mo',
+  '',
+  '| Model | Tokens | Share |',
+  '| :--- | ---: | :---: |',
+  '| Opus | 1,200 | 40% |',
+  '',
+  "## What's next",
+  '',
+  '## The `hyp report render` query',
+  '',
+  '```sql',
+  'select count(*) from ai_gateway_messages',
+  '```',
+  '',
+].join('\n')
+
+const VOCAB = 'vocabulary'
+
+/** @returns {string} */
+function vocabularyTree() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-render-vocab-'))
+  fs.writeFileSync(path.join(dir, `${VOCAB}.md`), VOCABULARY)
+  return dir
+}
+
+test('the authoring vocabulary converts to the markup pandoc emitted', () => {
+  // @ref LLP 0208#pure-js [tests]: the swap is only safe if the vocabulary converts the
+  // same, so the constructs are pinned here rather than left to a browser read-through
+  const dir = vocabularyTree()
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', VOCAB, 'index.html'), 'utf8')
+
+  // Component blocks pass through untouched, indentation included. This is the property
+  // the whole authoring contract stands on.
+  assert.ok(html.includes(COMPONENT_BLOCK), 'the component block must survive byte-for-byte')
+
+  // Column alignment must arrive as an inline style. marked's built-in cell renderer
+  // spells it `align="right"`, which loses the cascade to style.css's `th, td` rule, so
+  // every numeric column would silently render left-aligned.
+  assert.ok(
+    html.includes(
+      [
+        '<thead>',
+        '<tr>',
+        '<th style="text-align: left;">Model</th>',
+        '<th style="text-align: right;">Tokens</th>',
+        '<th style="text-align: center;">Share</th>',
+        '</tr>',
+        '</thead>',
+      ].join('\n'),
+    ),
+    'table headers must carry pandoc\'s inline text-align',
+  )
+  assert.ok(
+    html.includes('<td style="text-align: right;">1,200</td>'),
+    'a right-aligned body cell must carry the inline style too',
+  )
+  assert.doesNotMatch(html, /<t[hd] align=/, 'the presentational align attribute loses to the stylesheet')
+
+  // A fenced block keeps its language class, which is what colour can hang off later.
+  assert.ok(
+    html.includes('<pre><code class="language-sql">select count(*) from ai_gateway_messages\n</code></pre>'),
+    'a fenced block must stay verbatim under its language class',
+  )
+
+  // Heading ids are pandoc's, entity-free: `&` drops to nothing between two spaces and
+  // both become hyphens, `'` and `/` drop outright.
+  assert.ok(html.includes('<h1 id="cost--usage">Cost &amp; Usage</h1>'), 'an `&` heading keeps pandoc\'s double hyphen')
+  assert.ok(html.includes('<h2 id="opus-output-tokens--mo">'), 'a `/` heading keeps pandoc\'s double hyphen')
+  assert.ok(html.includes('<h2 id="whats-next">'), 'an apostrophe drops rather than leaving its entity digits')
+  assert.ok(html.includes('<h2 id="the-hyp-report-render-query">'), 'inline code in a heading contributes its text')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('every in-page anchor resolves to an id on the page', () => {
+  // The cheap end-to-end check on the slug rule: an id scheme that drifts from the one
+  // that minted the authored anchors is invisible until a reader clicks a dead link.
+  const dir = vocabularyTree()
+  renderReports({ dir })
+
+  for (const file of builtPages(path.join(dir, 'html'))) {
+    const html = fs.readFileSync(file, 'utf8')
+    const ids = new Set([...html.matchAll(/\bid="([^"]*)"/g)].map((m) => m[1]))
+    const dangling = [...html.matchAll(/href="#([^"]+)"/g)]
+      .map((m) => m[1])
+      .filter((fragment) => !ids.has(fragment))
+    assert.deepEqual(dangling, [], `${path.basename(file)} links to ids it does not define: ${dangling}`)
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 /** @param {string} htmlDir @returns {string[]} */
 function builtPages(htmlDir) {
   /** @type {string[]} */

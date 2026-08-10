@@ -105,6 +105,12 @@ p, ul, ol { margin: 0.55rem 0; }
 li { margin: 0.2rem 0; }
 p { text-wrap: pretty; }
 
+/* A task list carries its own markers. pandoc's template suppressed the bullet via a
+   ul.task-list class it added itself; marked emits a plain <ul> with a checkbox input,
+   so the list is matched by what it contains instead. Without this a checkbox item
+   renders with a bullet AND a checkbox. */
+ul:has(> li > input[type="checkbox"]) { list-style: none; padding-left: 0; }
+
 a {
   color: inherit;
   text-decoration: underline;

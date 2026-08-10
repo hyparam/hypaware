@@ -167,19 +167,43 @@ function escapeHtml(value) {
 }
 
 /**
+ * The inverse of the escaping marked's inline parser has already applied by the time
+ * a renderer override sees heading text. Without it the slug rule sees `&amp;` and
+ * keeps the entity's letters, minting `cost-amp-usage` for `Cost & Usage`.
+ *
+ * @param {string} value
+ */
+function unescapeHtml(value) {
+  return value
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replaceAll('&amp;', '&')
+}
+
+/**
  * pandoc-style heading id: lowercased, markup and punctuation stripped, spaces
  * to hyphens. Existing in-page anchors were minted by pandoc, so the slug rule
  * has to keep producing the same ids or every one of them dangles.
  *
+ * Every step's order is load-bearing, checked against pandoc 3.1.11 `-f gfm -t html5`:
+ * tags come off BEFORE unescaping (or a decoded `<` is eaten by the tag regex);
+ * whitespace runs collapse BEFORE punctuation is dropped (the reader collapsed the
+ * author's runs, but a dropped `&` leaves two spaces and pandoc emits both hyphens);
+ * and the final substitution is per space, not per run, for the same reason.
+ * Letters and digits are matched by Unicode class, since pandoc keeps `Café résumé`
+ * and `日本語` intact and drops emoji.
+ *
  * @param {string} text heading text, possibly carrying inline HTML
  */
 function headingId(text) {
-  return text
+  return unescapeHtml(text.replace(/<[^>]*>/g, ''))
     .toLowerCase()
-    .replace(/<[^>]*>/g, '')
-    .replace(/[^\w\s-]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\p{L}\p{N}_\s-]/gu, '')
     .trim()
-    .replace(/\s+/g, '-')
+    .replace(/\s/g, '-')
 }
 
 /**
@@ -187,7 +211,11 @@ function headingId(text) {
  * what passes the component vocabulary's raw HTML through byte-for-byte
  * (measured, indentation included), which is the property the whole authoring
  * contract stands on. The heading renderer adds the ids pandoc generated and
- * marked does not; a repeated heading gets a `-1` suffix like pandoc's.
+ * marked does not; a repeated heading gets a `-1` suffix like pandoc's. The cell
+ * renderer restates column alignment as pandoc did, because marked's built-in
+ * spells it `align="right"`, and a presentational attribute loses the cascade to
+ * `style.css`'s `th, td { text-align: left }`: every right-aligned number column
+ * would silently render left.
  *
  * @ref LLP 0208#pure-js [implements]: gfm to HTML in process, no subprocess, no binary dependency
  */
@@ -204,6 +232,12 @@ function createConverter() {
         seen.set(base, n + 1)
         const id = n === 0 ? base : `${base}-${n}`
         return `<h${depth} id="${id}">${inner}</h${depth}>\n`
+      },
+      tablecell(token) {
+        const content = this.parser.parseInline(token.tokens)
+        const tag = token.header ? 'th' : 'td'
+        const open = token.align ? `<${tag} style="text-align: ${token.align};">` : `<${tag}>`
+        return `${open}${content}</${tag}>\n`
       },
     },
   })

@@ -40,15 +40,22 @@ pandoc's `-s` emitted is now an explicit template (charset, viewport, escaped
 title, the base stylesheet link, then `assets/head.html` inlined, in that order
 so `theme.css` keeps loading after the base sheet per
 [LLP 0196#theme-layer](./0196-skills-state-constraints-not-procedures.rfc.md#theme-layer)).
-A renderer override reproduces pandoc's heading ids, `-1` suffixes on repeats
-included, so existing in-page anchors keep resolving.
+Two renderer overrides restore what marked spells differently: heading ids,
+`-1` suffixes on repeats included, so existing in-page anchors keep resolving;
+and table cell alignment as pandoc's inline `style="text-align: ..."`, because
+marked's built-in emits the presentational `align` attribute, which loses the
+cascade to `assets/style.css`'s `th, td { text-align: left }` and would render
+every right-aligned number column left.
 
 **The substitution was measured before it was made** (hypaware-server LLP 0110,
 `#gt-spike` in their LLP 0113): all 94 files of a real reports tree converted
 under both engines; 66 structurally identical, 28 differing only in pandoc's
 syntax-highlighting markup, 0 genuine differences. Component blocks survive
 byte-for-byte, fenced artifacts stay verbatim with their `language-*` class,
-tables and links match exactly.
+and links match exactly. Table cells match once the alignment override above is
+in place: unadorned marked emits `align="right"`, which is the same information
+in markup the stylesheet outranks, so the spike's structural comparison rated
+those tables equal while a browser would not have.
 
 <a id="highlighting"></a>**Syntax highlighting is the one visible change, and
 only in light mode.** pandoc emitted per-token spans; marked emits a plain
@@ -68,6 +75,19 @@ as a stylesheet or renderer choice later without touching the contract.
   inside a block) are gfm semantics, not pandoc quirks, and stand unchanged.
 - Output is not byte-identical to pandoc's. Structure and content were measured
   equal; pixel-level review in a browser is part of landing this.
+- <a id="footnotes"></a>**Footnotes stop rendering, and that is accepted.**
+  pandoc's gfm reader enables its `footnotes` extension by default; marked's
+  gfm does not implement footnotes at all, so `A claim.[^1]` now renders the
+  literal `[^1]` as body text. No skill or authoring doc tells a report author
+  to use footnotes and the measured tree contained none, so the exposure is a
+  report that has not been written yet. A footnote extension is a dependency
+  and a divergence of its own; if an author wants one, that is a new request.
+- **Task lists keep their bullet unless the stylesheet suppresses it.** pandoc's
+  template added a `task-list` class and a rule to hide the marker; marked emits
+  a plain `<ul>` whose items start with a checkbox input. `assets/style.css`
+  matches the list by what it contains
+  (`ul:has(> li > input[type="checkbox"])`) rather than by a class the renderer
+  no longer adds, so a checkbox item does not render with a bullet as well.
 
 ## References
 
