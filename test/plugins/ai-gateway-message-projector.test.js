@@ -1000,6 +1000,65 @@ test('restart replay: a throwing storage degrades to not-seeded and never drops 
   assert.equal(rows.length, 1, 'a seeding failure must never throw and never drop a row')
 })
 
+test('committed-session index: a build that could not scan is not cached as "no committed rows"', async () => {
+  // A failed index build is a distinct outcome from a successful empty scan.
+  // When the two were conflated, the failure was cached as "this table has no
+  // committed sessions" for the whole SESSION_INDEX_REBUILD_MS window, so every
+  // session whose first exchange landed in that window skipped its seed scan
+  // and re-emitted its committed rows on a restart replay. The test above
+  // ('a throwing storage degrades to not-seeded') cannot see that: it only
+  // asserts rows are never dropped, which holds either way.
+  //
+  // Here `discoverCachePartitions` throws on call 1 (the index build) and
+  // succeeds afterwards, so both halves of the fallback are observable: the
+  // failing build must fall through to the per-session scan, and the NEXT
+  // session must rebuild the index rather than trust the failed one, which is
+  // what lets its already-committed row be seeded and deduped.
+  let discoverCalls = 0
+  const committed = [{ message_id: 'uuid-sess-committed', session_id: 'sess-committed' }]
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      if (discoverCalls === 1) throw new Error('boom')
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: committed.length }]
+    },
+    async *readRows() {
+      for (const row of committed) yield row
+    },
+  }))
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'one', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+  })
+
+  const first = await projector.projectExchange({ ...exchange(), path: 'sess-fresh' })
+  assert.equal(first.length, 1, 'a fresh session still emits its row when the index build fails')
+  assert.equal(
+    discoverCalls,
+    2,
+    'a failed index build must err toward the per-session scan (build + scan), not skip it'
+  )
+
+  // Same listener, same rebuild window, a session that DOES have a committed
+  // row. Trusting the failed build would skip its seed and re-emit the row.
+  const second = await projector.projectExchange({ ...exchange(), path: 'sess-committed' })
+  assert.equal(second.length, 0, 'the committed row is seeded and deduped, not re-emitted as a duplicate')
+  assert.equal(
+    discoverCalls,
+    4,
+    'the failed build is retried (3) and the session seeds its committed rows (4)'
+  )
+})
+
 /**
  * Minimal `ExtendedQueryStorageService`-shaped stub exposing only the
  * committed-partition read surface the projector feature-detects:
