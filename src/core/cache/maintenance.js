@@ -117,6 +117,7 @@ export async function maintainCache(opts) {
   const reports = []
   let totalSnapshotsExpired = 0
   let totalCompacted = 0
+  let totalRebaselined = 0
 
   for (const part of partitions) {
     // Always work one partition before the budget can cut the tick short:
@@ -134,7 +135,7 @@ export async function maintainCache(opts) {
         partition: JSON.stringify(part.partition),
         status: 'ok',
       },
-      async () => {
+      async (span) => {
         /** @type {MaintenancePartitionReport} */
         const r = {
           dataset: part.dataset,
@@ -150,13 +151,19 @@ export async function maintainCache(opts) {
         const cursor = readCursorSync(part.path)
         const settle = resolveSettleContext(opts, part.dataset)
 
-        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter)
+        const result = await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter)
+        // @ref LLP 0207#re-baseline: the counter proves a rebaseline
+        // happened at all; the span attribute proves which partition, so a
+        // trace query can find it without cross-referencing the counter.
+        span.setAttribute('rebaselined', result.rebaselined === true)
+        return result
       },
       { component: 'cache' }
     )
     reports.push(report)
     totalSnapshotsExpired += report.snapshotsExpired
     if (report.compacted) totalCompacted++
+    if (report.rebaselined) totalRebaselined++
   }
 
   if (!opts.dryRun) {
@@ -167,6 +174,7 @@ export async function maintainCache(opts) {
     partitions: reports,
     totalSnapshotsExpired,
     totalCompacted,
+    totalRebaselined,
     dryRun: opts.dryRun ?? false,
     elapsedMs: Date.now() - startMs,
   }
@@ -275,6 +283,13 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // compact_avg_file_bytes), and the tick budget is burned rewriting the
     // same partitions while the rest of the walk starves.
     const grewSinceCompaction = dataFilesBefore !== resettleBaselineFiles(cursor)
+    // Cheap dueness check first: file-count and byte-size heuristics only,
+    // no metadata load and no row scan. A foreign sorted replace almost
+    // always lands here (its baseline mismatch alone doesn't imply the
+    // size heuristics fire), so gating the expensive re-settle scan behind
+    // this check means the common "recognized, nothing to scan for" tick
+    // never pays for one.
+    const compactionDue = opts.force || (grewSinceCompaction && needsCompaction(liveDir, cfg))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
@@ -283,10 +298,15 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // line never lands (harness aux, wire-only reminders) - from forcing a
     // full rewrite every tick, and skips the attributes scan entirely when
     // nothing new has flushed.
-    const hasResettle = settle
+    // @ref LLP 0207#foreign-replace [constrained-by]: when the cheap check
+    // above already made compaction due, the scan's answer can never
+    // change the outcome (recognition, tested below, still outranks it),
+    // so skip it: only run the scan when it might be the sole reason to
+    // compact.
+    const hasResettle = !compactionDue && settle
       ? grewSinceCompaction && await hasResettleCandidate(liveDir)
       : false
-    const shouldCompact = opts.force || hasResettle || (grewSinceCompaction && needsCompaction(liveDir, cfg))
+    const shouldCompact = compactionDue || hasResettle
     if (shouldCompact) {
       const tableInfo = await loadCompactionTableInfo(liveDir)
       // @ref LLP 0207#foreign-replace [implements]: a baseline mismatch whose

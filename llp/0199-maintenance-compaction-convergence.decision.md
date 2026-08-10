@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-07
 **Related:** LLP 0027
-**Extended-by:** LLP 0207
+**Extended-by:** [LLP 0207](./0207-foreign-sorted-replace-convergence.decision.md) (a second convergence source: a foreign sorted `replace` re-baselines the gate instead of triggering a rewrite)
 
 > Maintenance stops re-flagging already-compacted partitions: a partition is
 > only compaction-due when its live data-file count has moved off the count
