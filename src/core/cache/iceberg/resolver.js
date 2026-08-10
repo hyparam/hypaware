@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
  * @import { AsyncBuffer } from 'hyparquet'
  * @import { Writer } from 'hyparquet-writer/src/types.js'
  * @import { Lister, Resolver, WriterOptions } from 'icebird/src/types.js'
+ * @import { AbortableWriter } from '../../../../src/core/cache/types.js'
  */
 
 /**
@@ -102,15 +103,21 @@ function asyncBufferFromBytes(bytes) {
  * `ByteWriter.offset` stays the cumulative byte count, so every parquet
  * offset recorded in the footer remains file-absolute.
  *
+ * It also implements `abort()`, which `finish()` is not: a streaming
+ * append may hold this writer open across many row groups, and if the
+ * append fails part-way there is no `finish()` coming to close the
+ * descriptor or unlink the temp file. Without it a repeatedly failing
+ * compaction leaks one fd and one `.tmp.*` file per attempt.
+ *
  * @ref LLP 0206#row-groups [implements]: flush-per-row-group is what keeps
  *   a large output file from becoming a large allocation.
  * @param {new (initialSize?: number) => Writer} ByteWriter
  * @param {string} filePath
  * @param {WriterOptions | undefined} options
- * @returns {Writer}
+ * @returns {AbortableWriter}
  */
 function localWriter(ByteWriter, filePath, options) {
-  /** @type {Writer & { index?: number }} */
+  /** @type {AbortableWriter & { index?: number }} */
   const writer = new ByteWriter()
   /** @type {number | null} */
   let fd = null
@@ -132,6 +139,22 @@ function localWriter(ByteWriter, filePath, options) {
     err.status = 412
     err.statusCode = 412
     return err
+  }
+
+  writer.abort = function () {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        // Already closed; the temp file still needs to go.
+      }
+      fd = null
+    }
+    if (tmp !== null) {
+      fs.rmSync(tmp, { force: true })
+      tmp = null
+    }
+    writer.index = 0
   }
 
   writer.flush = function () {

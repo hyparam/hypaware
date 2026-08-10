@@ -150,6 +150,17 @@ export interface AppendOptions {
 }
 
 /**
+ * A `hyparquet-writer` Writer that can also be discarded without being
+ * finished. `finish()` is the only thing that closes the local writer's
+ * file descriptor and renames its temp file into place, which is fine for
+ * a one-shot append but not for a writer held open across many row
+ * groups: an append that fails part-way has no `finish()` coming.
+ */
+export interface AbortableWriter extends Writer {
+  abort?(): void
+}
+
+/**
  * One data file a streaming compaction currently has open: the parquet
  * writer accumulating row groups into it, plus the per-file Iceberg
  * metrics accumulated so far. Bounds are held as the raw minimum and
@@ -157,11 +168,17 @@ export interface AppendOptions {
  */
 export interface OpenCompactionFile {
   dataPath: string
-  writer: Writer
+  writer: AbortableWriter
   parquet: ParquetWriter
   partition: Record<string, unknown>
   rowGroups: number
   rows: bigint
+  /**
+   * Upper bound on the row-group metadata `ParquetWriter` is pinning for
+   * this file (raw min/max values plus per-chunk overhead), charged
+   * against the append's global stats budget.
+   */
+  statsBytes: number
   valueCounts: Record<number, bigint>
   nullCounts: Record<number, bigint>
   nanCounts: Record<number, bigint>
@@ -183,6 +200,12 @@ export interface StreamingAppendResult {
 export interface StreamingTableAppend {
   write(rows: Record<string, unknown>[]): Promise<void>
   close(): Promise<StreamingAppendResult>
+  /**
+   * Discard the append without committing. Releases the file descriptors
+   * and temp files of every still-open output file. Safe to call after a
+   * failed `close`, and a no-op once everything is closed.
+   */
+  abort(): Promise<void>
 }
 
 export interface MaintenanceConfig {

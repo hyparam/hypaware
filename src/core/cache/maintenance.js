@@ -498,8 +498,17 @@ function estimateRowBytes(row) {
  * compresses 70x turned a 32 MB batch into a 0.5 MB data file, so
  * `target_file_bytes` was unreachable by construction (LLP 0206).
  *
+ * Holding a file open is not free: peak heap is the batch, plus one row
+ * group of encoded bytes, PLUS the row-group metadata every open parquet
+ * writer pins until its footer is written (two raw column values per row
+ * group per column). That third term grows with `target_file_bytes`, so
+ * `openStreamingAppend` budgets it and rolls a file early when it binds
+ * before the byte target does.
+ *
  * @ref LLP 0206#decision [implements]: heap bounds the batch, written
  *   bytes bound the file.
+ * @ref LLP 0206#retained-metadata [constrained-by]: a bigger file target
+ *   costs retained row-group metadata, which is separately bounded.
  * @param {string} partitionDir
  * @param {GenerationLayout} layout
  * @param {MaintenanceConfig} cfg
@@ -587,31 +596,44 @@ async function compactGeneration(partitionDir, layout, cfg, settle) {
     }
   }
 
-  for await (const row of scanRowsFromTable(oldDir)) {
-    if (!columns) {
-      columns = Object.keys(row).map((name) => ({
-        name,
-        type: inferColumnType(row[name]),
-        nullable: true,
-      }))
-    }
-    // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
-    // Emit only after the sweep upgrades and de-twins them at end-of-scan.
-    if (settle && isGatewayFallbackRow(row)) {
-      fallbackBuffer.push(row)
-      continue
-    }
-    await emit(row)
-  }
-
-  if (settle && emittedPartIds && fallbackBuffer.length > 0) {
-    for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+  // The sink holds one file descriptor and one `.tmp.*` file per open
+  // output file until it is closed. A throw anywhere in the rewrite - a bad
+  // row mid-scan, a settle hook, a failed roll - used to leave all of them
+  // behind, and maintenance retries the same partition every tick, so a
+  // reliably failing partition leaked descriptors until the daemon died.
+  /** @type {Awaited<ReturnType<StreamingTableAppend['close']>> | null} */
+  let streamed = null
+  try {
+    for await (const row of scanRowsFromTable(oldDir)) {
+      if (!columns) {
+        columns = Object.keys(row).map((name) => ({
+          name,
+          type: inferColumnType(row[name]),
+          nullable: true,
+        }))
+      }
+      // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
+      // Emit only after the sweep upgrades and de-twins them at end-of-scan.
+      if (settle && isGatewayFallbackRow(row)) {
+        fallbackBuffer.push(row)
+        continue
+      }
       await emit(row)
     }
-  }
 
-  await flushBatch()
-  const streamed = sink.current ? await sink.current.close() : null
+    if (settle && emittedPartIds && fallbackBuffer.length > 0) {
+      for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+        await emit(row)
+      }
+    }
+
+    await flushBatch()
+    streamed = sink.current ? await sink.current.close() : null
+  } finally {
+    // `close` resolving is the only proof every file landed. Anything else,
+    // including a `close` that threw part-way, leaves the rest to abort.
+    if (!streamed && sink.current) await sink.current.abort()
+  }
 
   if (!columns) {
     if (!layout.commitEmpty) return null
