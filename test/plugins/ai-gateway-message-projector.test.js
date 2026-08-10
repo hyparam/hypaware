@@ -826,8 +826,9 @@ function freshSessionIndexStorage() {
 /**
  * @param {ReturnType<typeof freshSessionIndexStorage>['storage']} storage
  * @param {() => number} now
+ * @param {ReturnType<typeof collectingLogger>} [log]
  */
-function freshSessionProjector(storage, now) {
+function freshSessionProjector(storage, now, log) {
   return createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
@@ -841,6 +842,7 @@ function freshSessionProjector(storage, now) {
     ],
     storage,
     now,
+    log,
   })
 }
 
@@ -892,6 +894,87 @@ test('committed-session index: N concurrent fresh-session misses past the rebuil
     2,
     `${N} concurrent misses past the rebuild window must share a single rebuild, not one each`
   )
+})
+
+test('committed-session index: a scan that throws degrades the index instead of wedging it', async () => {
+  // Finding (#685): the index's stamp-and-self-clear handler runs on
+  // FULFILLMENT only, so a scan that ever threw was never normalized. The
+  // failed attempt stays published in `built` and never clears itself, so
+  // every later caller re-awaits the same rejection: one throwing scan
+  // wedges the index for the listener's life and loses EVERY subsequent
+  // exchange, rather than degrading the way the rest of this best-effort
+  // path does. (#689 later chained that handler onto the scan, which
+  // incidentally gave the rejection an awaiter and closed the original
+  // unhandled-rejection-kills-the-daemon shape; the assertion below keeps
+  // that closed, since nothing structural holds the chaining in place.)
+  //
+  // Driven here by a storage whose FIRST `discoverCachePartitions` (the
+  // index build) answers with a non-iterable, so the exception escapes
+  // `scanCommittedSessionIds` from outside its try/catch. Later calls are
+  // well-formed, so the per-session fallback scan is unaffected and the
+  // "err toward scanning" degradation is observable on its own.
+  /** @type {unknown[]} */
+  const unhandled = []
+  /** @param {unknown} reason */
+  const onUnhandled = (reason) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    let discoverCalls = 0
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      async discoverCachePartitions() {
+        discoverCalls++
+        // Contract says CachePartitionMeta[]; a malformed answer makes the
+        // `for (const part of partitions ?? [])` loop throw.
+        if (discoverCalls === 1) return /** @type {never} */ ({ malformed: true })
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+      },
+      async *readRows() {
+        yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+      },
+    }))
+    /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+    const logged = []
+    const projector = freshSessionProjector(storage, () => 0, collectingLogger(logged))
+
+    const rows = await projector.projectExchange({ ...exchange(), path: 'sess-throwing-index' })
+
+    // An index that cannot answer must not swallow the session: the
+    // per-session scan runs and the row is still emitted.
+    assert.equal(rows.length, 1, 'a failed index build errs toward scanning and still emits the row')
+    assert.ok(discoverCalls >= 2, 'the failed index build falls back to the per-session committed-row scan')
+
+    // The rejected attempt must not stay published: a second session on the
+    // same listener rebuilds (the scan is well-formed by now) instead of
+    // re-awaiting the rejection forever.
+    const callsAfterFirst = discoverCalls
+    const later = await projector.projectExchange({ ...exchange(), path: 'sess-after-throwing-index' })
+    assert.equal(later.length, 1, 'the next exchange survives a scan that rejected earlier')
+    assert.ok(discoverCalls > callsAfterFirst, 'the failed attempt clears itself, so the next miss rebuilds')
+
+    // Surviving the rejection must not make it invisible: the daemon now
+    // keeps running on a degraded index, so the log line is the only thing
+    // that says so. `error_kind` distinguishes this (a broken "resolve,
+    // never reject" contract, i.e. a defect) from `discover_failed`, the
+    // I/O condition that reaches the same message and may clear itself.
+    const scanWarns = logged.filter(
+      (entry) => entry.level === 'warn' && entry.message === 'aigw.session_index_scan_failed'
+    )
+    assert.equal(scanWarns.length, 1, 'a rejecting scan warns exactly once, not once per failure branch')
+    assert.equal(scanWarns[0].fields.error_kind, 'scan_rejected')
+    assert.match(String(scanWarns[0].fields.error), /not iterable/)
+
+    // Unhandled rejections are only detected once the microtask queue has
+    // drained, so give the loop a turn before asserting there were none.
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(
+      unhandled.map((reason) => (reason instanceof Error ? reason.message : String(reason))),
+      [],
+      'a throwing session-index scan must not produce an unhandled rejection'
+    )
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
 })
 
 test('committed-session index: a scan slower than the rebuild window still serves cache hits', async () => {

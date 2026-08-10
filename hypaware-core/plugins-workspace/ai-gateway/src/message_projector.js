@@ -341,7 +341,33 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
   let built
 
   function rebuild() {
-    const scan = scanCommittedSessionIds(storage, log)
+    // `scanCommittedSessionIds` reports a scan it could not run as
+    // `undefined` rather than by rejecting, but nothing structural holds it
+    // to that. Normalize a rejection into the same "could not scan" outcome
+    // so this promise is total, because everything downstream assumes it is:
+    // the stamp-and-self-clear handler below runs on FULFILLMENT only, so a
+    // rejecting scan would leave `built` pinned to the rejected attempt and
+    // every later caller would re-await the same rejection - a permanently
+    // wedged index that loses every subsequent exchange, rather than the
+    // index degrading the way every other failure in this best-effort path
+    // does. It also keeps the rejection away from any handler nothing
+    // awaits, the shape that reaches Node's default handler and would take
+    // the whole daemon down.
+    // @ref LLP 0204#fix [constrained-by]: the seed index is best-effort, so
+    //   a scan it cannot complete must degrade the index, never end the process
+    // `error_kind` separates the two ways this message is reached, because
+    // they call for opposite responses and are otherwise indistinguishable
+    // in the log: `discover_failed` is an I/O condition the next rebuild may
+    // well clear on its own, while `scan_rejected` means the scan broke its
+    // documented "resolve, never reject" contract, i.e. a code defect that
+    // will keep degrading the index on every exchange until someone fixes it.
+    const scan = scanCommittedSessionIds(storage, log).catch((err) => {
+      log?.warn?.('aigw.session_index_scan_failed', {
+        error_kind: 'scan_rejected',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    })
     // `atMs` starts at `Infinity` (never stale) and is stamped when the scan
     // COMPLETES, because the window measures how long the ANSWER is trusted.
     // Stamped at scan start, a scan slower than SESSION_INDEX_REBUILD_MS
@@ -404,6 +430,12 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
  * "the scan could not run" and err toward scanning instead of silently
  * treating a broken index as authoritative.
  *
+ * Reports failure by RESOLVING to `undefined`, never by rejecting: the
+ * committed-session index's stamp-and-self-clear handler runs on fulfillment
+ * only, so a rejection here would pin `built` to the failed attempt and wedge
+ * the index for the listener's life. `rebuild()` normalizes one back to
+ * `undefined` rather than assuming this contract holds.
+ *
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @returns {Promise<Set<string> | undefined>}
@@ -419,6 +451,7 @@ async function scanCommittedSessionIds(storage, log) {
     partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
   } catch (err) {
     log?.warn?.('aigw.session_index_scan_failed', {
+      error_kind: 'discover_failed',
       error: err instanceof Error ? err.message : String(err),
     })
     return undefined
