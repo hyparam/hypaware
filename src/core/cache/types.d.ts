@@ -218,6 +218,10 @@ export interface MaintenancePartitionReport {
   path: string
   snapshotsExpired: number
   compacted: boolean
+  // The partition was converged by a foreign sorted replace snapshot: the
+  // cursor baseline was moved to the live file count instead of rewriting
+  // (LLP 0207). Mutually exclusive with `compacted`.
+  rebaselined?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number
