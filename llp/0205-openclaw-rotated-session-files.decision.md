@@ -45,8 +45,8 @@ user reset yesterday is history the same way a session they left open is.
 ## Decision {#decision}
 
 The backfill scan accepts `<sessionId>.jsonl` with an OPTIONAL rotation
-marker, and derives the fallback session id from the portion before the first
-`.jsonl`:
+marker, and derives the fallback session id by removing the `.jsonl`
+extension and any rotation marker:
 
 ```js
 /^(.+?)\.jsonl(?:\.(?:reset|deleted)\..+)?$/
@@ -56,12 +56,13 @@ marker, and derives the fallback session id from the portion before the first
   OpenClaw writes. A blanket `*.jsonl*` glob would also swallow editor and
   backup artifacts (`<id>.jsonl.bak`, `<id>.jsonl.swp`), which are not
   sessions and whose contents nothing here can vouch for.
-- **The id is the name up to the FIRST `.jsonl`.** `basename(f, '.jsonl')`
-  strips nothing off a rotated name, so once the scan widened it would have
-  partitioned rows under a `session_id` carrying the rotation marker and its
-  timestamp, splitting one session across as many ids as it was ever rotated
-  to. The header's own `sessionId` still wins wherever the file states one
-  (LLP 0158); this is only the fallback for a file whose header stated none.
+- **The id is the name with its `.jsonl` extension and any rotation marker
+  removed.** `basename(f, '.jsonl')` strips nothing off a rotated name, so
+  once the scan widened it would have partitioned rows under a `session_id`
+  carrying the rotation marker and its timestamp, splitting one session
+  across as many ids as it was ever rotated to. The header's own `sessionId`
+  still wins wherever the file states one (LLP 0158); this is only the
+  fallback for a file whose header stated none.
 - **Rotation changes nothing downstream.** The records inside a rotated file
   are the records OpenClaw wrote, so the LLP 0158 reader reads them
   unchanged, the LLP 0193 CLI-backend exclusion applies unchanged, and the
@@ -99,14 +100,27 @@ them, and a blanket glob would have removed the distinction entirely.
   and the first run after this lands imports their history (subject to the
   retention window and the quiesce gate, both unchanged).
 - The quiesce window (LLP 0170, LLP 0172#45-the-quiesce-window) applies to a
-  rotated file exactly as it does to a live one. A file just rotated has a
-  fresh mtime and waits one sweep, which is correct: the rename is the last
-  write.
+  rotated file exactly as it does to a live one, but `rename(2)` does not
+  touch `mtime`: a rotated file is windowed by its last CONTENT write, not by
+  the rename. An already-quiet session (its last write already outside the
+  window) clears the quiesce window immediately on rotation, not one sweep
+  later; only a session rotated while still inside the window waits out the
+  remainder of it, same as it would have unrotated.
 - The live settlement lane's own enumeration
-  (`listOpenclawSessionFiles` in `session_file.js`) is deliberately
-  unchanged. It exists to enrich rows as they are being written, and a
-  rotated file is by definition finished; its history reaches the cache
-  through this scan instead.
+  (`listOpenclawSessionFiles` in `session_file.js`) now shares
+  `SESSION_FILE_NAME` with this scan rather than its own
+  `endsWith('.jsonl')` filter. That was not optional: because rename
+  preserves mtime, settlement's own mtime-slack candidate filter
+  (`candidateSessionFiles` in `settle.js`) would not have excluded a rotated
+  file either, so a session reset between capture and flush could otherwise
+  yield two rows for the same message once this scan started reading rotated
+  names: one at fallback identity from the live row settlement never
+  enriched (because it was scanning the pre-rotation name that no longer
+  existed) and one at native identity from this backfill scan, and no
+  `part_id` collapses them since only the settled leg's `message_id` would
+  have matched. Sharing the matcher does not merge the two walks
+  (settlement's stays mtime-unfiltered and unsorted; backfill's still applies
+  the quiesce window and sorts), only what counts as a session-file name.
 - If OpenClaw adds a third rotation marker, the alternation is the one place
   to add it, and a session under an unrecognized marker is skipped rather
   than misread.

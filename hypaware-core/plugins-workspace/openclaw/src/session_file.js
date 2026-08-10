@@ -153,19 +153,52 @@ export function defaultOpenclawAgentsDir(env, homeDir) {
 }
 
 /**
+ * The session-file names a scan accepts, capturing the session id as group
+ * 1: `<sessionId>.jsonl`, optionally followed by the marker OpenClaw appends
+ * when it rotates a session in place (`.reset.<ts>`, `.deleted.<ts>`). A
+ * rotated file is the same session's history under a name that no longer
+ * ends in `.jsonl`, so an `endsWith('.jsonl')` scan lost the whole session
+ * silently (#694: 5 of 7 sessions on a live install).
+ *
+ * Deliberately not a `*.jsonl*` glob. The rotation alternatives are named
+ * rather than open, so an unrelated `sess.jsonl.bak` is not a session file at
+ * all; a `sess.trajectory.jsonl` sibling keeps `sess.trajectory` as its own
+ * identity instead of collapsing into the session's, since the capture is
+ * lazy but `$`-anchored: the group backtracks to the LAST `.jsonl` in the
+ * name, not the first.
+ *
+ * Exported so every OpenClaw session-file scan, live settlement enumeration
+ * and backfill's directory walk alike, agrees on what counts as a session
+ * file: the two walks are not the same function (settlement's is
+ * mtime-unfiltered and unsorted, backfill's applies the quiesce window and
+ * sorts), but the filename contract they apply is one place, not two private
+ * copies that can drift.
+ *
+ * @ref LLP 0205#decision [implements]: the widened session-filename contract,
+ * rotation markers included, trajectory siblings still distinguishable
+ * @type {RegExp}
+ */
+export const SESSION_FILE_NAME = /^(.+?)\.jsonl(?:\.(?:reset|deleted)\..+)?$/
+
+/**
  * Enumerate the session files under an OpenClaw `agents/` root
- * (`<agentsDir>/<agentId>/sessions/*.jsonl`), each with its `mtimeMs` so a
- * caller can order or window candidates by recency without a second stat
- * pass.
+ * (`<agentsDir>/<agentId>/sessions/*.jsonl`, rotated names included per
+ * {@link SESSION_FILE_NAME}), each with its `mtimeMs` so a caller can order
+ * or window candidates by recency without a second stat pass.
  *
  * Best-effort throughout, like every other read here: a missing root, an
  * unreadable agent directory, or a file that vanished between the readdir
  * and the stat contributes nothing instead of aborting the enumeration.
  * The result is unsorted (directory order); callers that care sort it.
  *
- * @ref LLP 0158#decision [implements]: the shared enumeration both the
- * settlement enricher and the backfill provider walk, so neither grows its
- * own copy of the `agents/<id>/sessions/*.jsonl` layout
+ * @ref LLP 0158#decision [implements]: the session-file layout
+ * (`agents/<id>/sessions/*.jsonl`) is part of the one reader's knowledge
+ * @ref LLP 0205#decision [implements]: this settlement-lane enumeration
+ * shares {@link SESSION_FILE_NAME} with the backfill scan, so a session
+ * rotated between capture and flush is still a candidate here too; `rename`
+ * preserves mtime (LLP 0205#consequences), so the mtime-slack filter the
+ * caller applies would not have excluded a rotated file even before this
+ * changed
  * @param {string} agentsDir
  * @returns {Promise<Array<{ path: string, mtimeMs: number }>>}
  */
@@ -191,7 +224,7 @@ export async function listOpenclawSessionFiles(agentsDir) {
       continue
     }
     for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue
+      if (!SESSION_FILE_NAME.test(name)) continue
       const filePath = path.join(sessionsDir, name)
       try {
         const stat = await fsp.stat(filePath)

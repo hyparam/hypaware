@@ -1184,10 +1184,11 @@ test('a session file rotated by a delete is scanned the same way', async () => {
 })
 
 // The header states the session id here, so the fallback is what is under
-// test: it reads the name up to the FIRST `.jsonl`, not `basename(f, '.jsonl')`,
-// which strips nothing off a rotated name and would make `session_id` (the
-// non-null partition key) carry the rotation marker and timestamp.
-test('a headerless rotated file takes its session id from the name before the first .jsonl', async () => {
+// test: it strips the `.jsonl` extension and the rotation marker, not
+// `basename(f, '.jsonl')`, which strips nothing off a rotated name and would
+// make `session_id` (the non-null partition key) carry the rotation marker
+// and timestamp.
+test('a headerless rotated file takes its session id with the .jsonl extension and rotation marker removed', async () => {
   const env = await stageEnv()
   try {
     const filePath = await writeSession(env, {
@@ -1237,6 +1238,30 @@ test('a trajectory sibling stays distinguishable, and a non-rotation suffix is s
     // The trajectory sibling is scanned exactly as it is today; the `.bak` is
     // not a session file under any spelling.
     assert.equal(complete.fields.files_seen, 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0205#trajectory-siblings [tests]: the whole point of keeping a
+// trajectory file distinguishable is that it keeps ITS OWN identity rather
+// than folding into the session beside it. The test above never exercises
+// that: its fixture trajectory file holds a non-message record, so it
+// projects zero rows and no derived id ever surfaces. This one gives the
+// trajectory file real `type: "message"` records (a header-less rotated-
+// looking name is exactly the shape a greedy or `basename`-stripping matcher
+// would fold into `sess-1`) and checks the id that comes out.
+test('a headerless trajectory file resolves its own id, not the session it sits beside', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      sessionId: 'sess-1.trajectory',
+      header: null,
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).session_id, 'sess-1.trajectory')
   } finally {
     await env.cleanup()
   }
