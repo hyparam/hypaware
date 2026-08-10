@@ -327,8 +327,7 @@ export async function runQueryMaintain(argv, ctx) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
-  const rebaselined = report.partitions.filter((p) => p.rebaselined).length
-  const rebaselineNote = rebaselined > 0 ? `, ${rebaselined} rebaselined` : ''
+  const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
   ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote} (${report.elapsedMs}ms)\n`)
   return 0
 }
