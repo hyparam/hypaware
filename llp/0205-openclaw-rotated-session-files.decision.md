@@ -88,11 +88,15 @@ nothing out of it and it projects zero rows. That is its behavior today and
 this decision does not change it.
 
 What the decision does have to protect is that a trajectory file stays
-DISTINGUISHABLE from the session beside it. The lazy capture is what does it:
-`sess.trajectory.jsonl` resolves its own id as `sess.trajectory`, not `sess`,
-so no future reader can quietly fold a trajectory file's records into the
-session's identity. A greedy or `.jsonl`-stripping match would have merged
-them, and a blanket glob would have removed the distinction entirely.
+DISTINGUISHABLE from the session beside it. Its `.jsonl` is terminal, not a
+rotation marker, so `sess.trajectory.jsonl` resolves its own id as
+`sess.trajectory` under this matcher exactly as it did under the old
+`basename` behavior, not `sess`. What actually needed protecting was that a
+trajectory file (and a `.bak` or `.swp` sibling) not get read as a rotation
+of the session file beside it once the matcher started accepting more than a
+bare `.jsonl` suffix; the named `reset|deleted` alternation is what keeps
+that door shut, and a blanket glob would have removed the distinction
+entirely.
 
 ## Consequences {#consequences}
 

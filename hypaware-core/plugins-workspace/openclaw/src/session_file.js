@@ -162,10 +162,13 @@ export function defaultOpenclawAgentsDir(env, homeDir) {
  *
  * Deliberately not a `*.jsonl*` glob. The rotation alternatives are named
  * rather than open, so an unrelated `sess.jsonl.bak` is not a session file at
- * all; a `sess.trajectory.jsonl` sibling keeps `sess.trajectory` as its own
- * identity instead of collapsing into the session's, since the capture is
- * lazy but `$`-anchored: the group backtracks to the LAST `.jsonl` in the
- * name, not the first.
+ * all, and a `sess.trajectory.jsonl` sibling keeps `sess.trajectory` as its
+ * own identity instead of collapsing into the session's: group 1 is the name
+ * up to the earliest `.jsonl` whose remainder is either empty or one of the
+ * named rotation markers, and it is that named alternation, not the lazy
+ * capture, doing the distinguishing. The capture stays lazy so a rotation
+ * timestamp does not get pulled into the id instead, e.g.
+ * `a.jsonl.reset.b.jsonl` resolves to `a`, not `a.jsonl.reset.b`.
  *
  * Exported so every OpenClaw session-file scan, live settlement enumeration
  * and backfill's directory walk alike, agrees on what counts as a session

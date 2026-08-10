@@ -1248,9 +1248,13 @@ test('a trajectory sibling stays distinguishable, and a non-rotation suffix is s
 // than folding into the session beside it. The test above never exercises
 // that: its fixture trajectory file holds a non-message record, so it
 // projects zero rows and no derived id ever surfaces. This one gives the
-// trajectory file real `type: "message"` records (a header-less rotated-
-// looking name is exactly the shape a greedy or `basename`-stripping matcher
-// would fold into `sess-1`) and checks the id that comes out.
+// trajectory file real `type: "message"` records and checks the id that
+// comes out. This is not a regression test for the original bug: a plain
+// `basename(name, '.jsonl')` already resolves `sess-1.trajectory.jsonl` to
+// `sess-1.trajectory`, same as today. What it pins forward is that the
+// widened matcher, now that it also accepts `.jsonl.reset.<ts>` and
+// `.jsonl.deleted.<ts>`, must not newly start reading `.trajectory` as a
+// rotation marker and absorb it into `sess-1`.
 test('a headerless trajectory file resolves its own id, not the session it sits beside', async () => {
   const env = await stageEnv()
   try {
