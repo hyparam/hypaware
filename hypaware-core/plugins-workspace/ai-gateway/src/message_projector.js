@@ -347,7 +347,9 @@ async function seedSessionIfCommitted(sessionId, state, storage, log, sessionInd
 
 /**
  * How long a committed-session index stays authoritative for "this session
- * has no committed rows". Within the window a miss is trusted; after it, a
+ * has no committed rows", measured from when its scan COMPLETED (not when
+ * it started, or a scan slower than this window could never serve a hit).
+ * Within the window a miss is trusted; after it, a
  * miss triggers one rebuild before being trusted, so rows committed by a
  * concurrent writer (a `hyp backfill` in another process importing the
  * session this listener is now capturing) are seen at most this late. A
@@ -373,16 +375,30 @@ function createCommittedSessionIndex(storage, log, now = Date.now) {
   let built
 
   function rebuild() {
-    const attempt = { atMs: now(), ids: scanCommittedSessionIds(storage, log) }
-    built = attempt
-    // A build that failed to scan cannot stand in as "no committed rows"
-    // for the rebuild window; clear it once the failure is known so the
-    // NEXT caller retries instead of trusting a stale, un-scanned answer.
-    // Guarded on `built === attempt` so a later, already-succeeded rebuild
-    // (from a concurrent caller) is not clobbered by this one's failure.
-    attempt.ids.then((ids) => {
+    const scan = scanCommittedSessionIds(storage, log)
+    // `atMs` starts at `Infinity` (never stale) and is stamped when the scan
+    // COMPLETES, because the window measures how long the ANSWER is trusted.
+    // Stamped at scan start, a scan slower than SESSION_INDEX_REBUILD_MS
+    // would be stale the moment it resolved, so the next miss would rebuild
+    // at once and the index would rebuild back-to-back without ever serving
+    // a hit - on exactly the table size that makes the index worth having.
+    // The entry is still published to `built` synchronously, so concurrent
+    // callers share this in-flight scan; only the timestamp is deferred.
+    const attempt = { atMs: Infinity, ids: scan }
+    // Chaining (rather than a floating `.then`) is what orders the stamp
+    // before every awaiter: a caller awaits `attempt.ids`, which resolves
+    // only after this handler has run.
+    attempt.ids = scan.then((ids) => {
+      attempt.atMs = now()
+      // A build that failed to scan cannot stand in as "no committed rows"
+      // for the rebuild window; clear it once the failure is known so the
+      // NEXT caller retries instead of trusting a stale, un-scanned answer.
+      // Guarded on `built === attempt` so a later, already-succeeded rebuild
+      // (from a concurrent caller) is not clobbered by this one's failure.
       if (ids === undefined && built === attempt) built = undefined
+      return ids
     })
+    built = attempt
     return attempt
   }
 

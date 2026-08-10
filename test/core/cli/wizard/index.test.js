@@ -507,11 +507,12 @@ test('runInitWizard: a failed join explains and returns to the fork', async () =
 })
 
 test('runInitWizard: a multi-org join failure points at hyp remote login --org', async () => {
-  const { LOGIN_ORG_SELECTION_MESSAGE } = await import('../../../../src/core/cli/remote_commands.js')
   const forkChoices = ['team', 'local']
   const { opts, stderr } = wizardOpts(await tmpHome(), {
     fork: async () => forkChoices.shift(),
-    join: async () => ({ status: 'failed', detail: `hyp remote login: ${LOGIN_ORG_SELECTION_MESSAGE}\n` }),
+    // The reason picks the branch; `detail` is the lane's own prose, echoed
+    // but never matched (LLP 0179#no-prose-control-flow).
+    join: async () => ({ status: 'failed', reason: 'org_selection_required', detail: 'hyp remote login: more than one org\n' }),
   })
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'local')
