@@ -99,6 +99,9 @@ export async function maintainCache(opts) {
   const compactionsCounter = meter.createCounter('hyp_compactions', {
     description: 'Partitions compacted by maintenance',
   })
+  const rebaselinesCounter = meter.createCounter('hyp_rebaselines', {
+    description: 'Partitions recognized as foreign-sorted-replace converged and rebaselined without a rewrite',
+  })
 
   const scope = opts.dataset ? { datasets: [opts.dataset] } : {}
   const discovered = await discoverCachePartitions(opts.cacheRoot, scope)
@@ -147,7 +150,7 @@ export async function maintainCache(opts) {
         const cursor = readCursorSync(part.path)
         const settle = resolveSettleContext(opts, part.dataset)
 
-        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
+        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter)
       },
       { component: 'cache' }
     )
@@ -243,9 +246,10 @@ function generationLayout(cursor) {
  * @param {SettleContext | null} settle
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} snapshotsExpiredCounter
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
+ * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} rebaselinesCounter
  * @returns {Promise<MaintenancePartitionReport>}
  */
-async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
+async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter) {
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
   if (!tableExists(liveDir)) return r
@@ -297,6 +301,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         r.rebaselined = true
         if (!opts.dryRun) {
           await writeCursor(r.path, rebaselineCursor(cursor, dataFilesBefore))
+          rebaselinesCounter.add(1, { [Attr.DATASET]: r.dataset })
         }
       } else if (opts.dryRun) {
         r.compacted = true

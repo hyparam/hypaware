@@ -320,11 +320,16 @@ export async function runQueryMaintain(argv, ctx) {
     const actions = []
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
+    // rewrite; without this line the run reads as "nothing due".
+    if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
-  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
+  const rebaselined = report.partitions.filter((p) => p.rebaselined).length
+  const rebaselineNote = rebaselined > 0 ? `, ${rebaselined} rebaselined` : ''
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote} (${report.elapsedMs}ms)\n`)
   return 0
 }
 

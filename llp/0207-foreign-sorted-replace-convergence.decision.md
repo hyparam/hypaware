@@ -67,6 +67,13 @@ explicit `--force` still rewrites (and sweeps).
   keeps them provisional until data next flushes into it; closed days keep
   them indefinitely. Same accepted shape as the LLP 0199 gate's treatment
   of unmatchable fallbacks.
+- The pre-replace data files stay on disk until day eviction: snapshot
+  expiry never deletes data files, and the orphan sweep only reclaims
+  non-live generation dirs, so a recognized partition holds both file
+  sets (roughly 2x the day's data) for the cache-resident window. The
+  kernel's shredding rewrite used to mask this by retiring the whole
+  generation nightly; unreferenced-file reclamation is
+  hyparam/hypaware#704.
 - Cache partitions are each their own Iceberg table, so the
   snapshot-level test IS partition-level here; the shared-archive
   table-level blindness (hypaware-server LLP 0135) does not apply.

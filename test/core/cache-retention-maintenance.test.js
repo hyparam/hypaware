@@ -888,6 +888,75 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
   }
 })
 
+test('foreign sorted replace recognition works on the source-table layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-source')
+  try {
+    // Same recognition claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: the server's day
+    // compactor resolves and rewrites both layouts in prod.
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const tableDir = path.join(partDir, 'table')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(tableDir, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(tableDir)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+      layout: 'source-table',
+      tableDir: 'table',
+      retention: { lastCutoffDate: '2026-05-01' },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.tableDir, 'table', 'no generation swap: the cursor keeps pointing at the foreign rewrite')
+    assert.equal(cursor.retention?.lastCutoffDate, '2026-05-01', 'the rebaseline preserves the retention state')
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, report.partitions[0].dataFilesBefore)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('recognition outranks the re-settle force: a fallback row does not undo the sorted layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-resettle')
+  try {
+    // A committed provisional fallback row (LLP 0027 marker) normally
+    // forces a rewrite so the sweep can re-settle it. Under a foreign
+    // sorted replace that force must lose, or one leftover unmatchable
+    // fallback re-shreds the sorted layout every night (LLP 0207).
+    /** @type {ColumnSpec[]} */
+    const columns = [...COLUMNS, { name: 'attributes', type: 'STRING', nullable: true }]
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, columns, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString(), attributes: JSON.stringify({ gateway: { identity_source: 'gateway_fallback' } }) },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => () => {
+        throw new Error('the sweep must not run: recognition should skip the rewrite entirely')
+      },
+    })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 0, 'the fallback row must not force a shredding rewrite')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('a foreign replace without a declared sort order is not blessed', async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-unsorted')
   try {
