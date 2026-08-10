@@ -368,7 +368,7 @@ test('runInitWizard: declining the express gate leaves the lanes prompting, posi
 
 test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
   const { opts, calls, stderr } = wizardOpts(await tmpHome(), {
-    fork: async () => 'local',
+    fork: async () => 'team',
     catalog: detectableCatalog(),
     detect: async () => new Set(['claude']),
     express: async () => 'cancelled',
@@ -376,7 +376,7 @@ test('runInitWizard: a cancelled express gate exits 130 before any lane runs', a
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
   assert.equal(result.cancelled, true)
-  assert.deepEqual(calls, ['gate', 'fork'])
+  assert.deepEqual(calls, ['gate', 'fork', 'join'])
   assert.match(stderr.text(), /cancelled/)
 })
 
@@ -384,7 +384,7 @@ test('runInitWizard: back at the express gate re-presents the fork', async () =>
   let forks = 0
   let gates = 0
   const { opts } = wizardOpts(await tmpHome(), {
-    fork: async () => { forks += 1; return 'local' },
+    fork: async () => { forks += 1; return 'team' },
     catalog: detectableCatalog(),
     detect: async () => new Set(['claude']),
     express: async () => { gates += 1; return gates === 1 ? 'back' : 'choose' },
@@ -393,6 +393,45 @@ test('runInitWizard: back at the express gate re-presents the fork', async () =>
   assert.equal(result.exitCode, 0)
   assert.equal(forks, 2, 'the fork is the screen behind the express gate')
   assert.equal(gates, 2)
+})
+
+// The gate exists to collapse several questions into one, and a solo
+// local run has only one: the pick gate, which offers the same rows
+// itself. Showing the express screen there asked the same question
+// twice - declining "Record all of these" landed on "Record all".
+// @ref LLP 0201#one-lane-no-gate [tests]: the solo local pathway opens with the pick gate, not the express gate
+test('runInitWizard: the unenrolled local pathway shows no express gate; the pick gate is the one question', async () => {
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'local',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => { gates += 1; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(gates, 0, 'one gate to collapse is nothing to collapse (LLP 0201 #one-lane-no-gate)')
+  assert.equal(opts._pickOpts.autoAccept, undefined, 'the pick lane keeps its own gate')
+  assert.equal(opts._pickOpts.progress, 'Step 1 of 2 · Choose what to collect')
+})
+
+// The other enrolled shape: managed without a join this run. Its local
+// itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), so the
+// gate has several questions to collapse and earns its screen.
+// @ref LLP 0201#one-lane-no-gate [tests]: a managed machine's local reconfigure keeps the express gate
+test('runInitWizard: a managed machine reconfiguring down the local pathway still gets the express gate', async () => {
+  let gates = 0
+  const { opts } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => { gates += 1; return 'defaults' },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(gates, 1)
+  assert.equal(opts._pickOpts.autoAccept, true)
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
