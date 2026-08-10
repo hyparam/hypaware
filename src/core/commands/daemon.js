@@ -235,11 +235,19 @@ export async function runDaemonInstall(argv, ctx) {
 }
 
 /**
- * `hyp daemon uninstall`: remove the persistent service while
- * leaving config, recordings, and logs in place.
+ * `hyp daemon uninstall`: remove the persistent service and detach the
+ * clients it was serving, while leaving config, recordings, and logs in
+ * place.
+ *
+ * The detach sweep is the exception to "each connection level exits with its
+ * own verb" (LLP 0063 #connection-levels): an attached client points at the
+ * local gateway port, and once the service is gone that port answers nothing,
+ * so leaving the attach in place leaves Claude and Codex broken rather than
+ * merely unmonitored.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @ref LLP 0206#d1 [implements]: uninstall reaches down to level 1 so it cannot leave clients pointed at a dead port
  */
 export async function runDaemonUninstall(argv, ctx) {
   for (const token of argv) {
@@ -255,12 +263,35 @@ export async function runDaemonUninstall(argv, ctx) {
   try {
     await uninstallDaemon({ ...(homeDir !== undefined ? { homeDir } : {}) })
     ctx.stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
-    return 0
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: ${message}\n`)
     return 1
   }
+  // Only reached once the service is actually gone: a failed uninstall leaves a
+  // daemon still serving that port, and detaching from it would break capture
+  // for no reason.
+  const { detachAllClientsFromDisk } = await import('./clients.js')
+  /** @type {Awaited<ReturnType<typeof detachAllClientsFromDisk>>} */
+  let sweep
+  try {
+    sweep = await detachAllClientsFromDisk(ctx)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)
+    ctx.stderr.write("  the service is gone; run 'hyp detach claude' / 'hyp detach codex' by hand\n")
+    return 1
+  }
+  for (const client of sweep.detached) {
+    ctx.stdout.write(
+      `  Detached ${client.name}${client.settingsPath !== undefined ? ` (${client.settingsPath})` : ''}\n`
+    )
+  }
+  for (const failure of sweep.failed) {
+    ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
+    ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
+  }
+  return sweep.failed.length > 0 ? 1 : 0
 }
 
 /**

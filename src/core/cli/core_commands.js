@@ -485,8 +485,13 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'daemon uninstall',
-      summary: 'Uninstall the persistent user service (keeps config, recordings, logs)',
+      summary: 'Uninstall the persistent user service and detach its clients (keeps config, recordings, logs)',
       usage: 'hyp daemon uninstall',
+      help: [
+        'Removes the launchd / systemd service, then detaches every attached',
+        'client (Claude, Codex) so none is left pointing at a gateway port that',
+        'no longer answers. Config, recordings, and logs stay.',
+      ].join('\n'),
       run: runDaemonUninstall,
     },
     {

@@ -50,7 +50,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
- * @import { ClientEnableResult } from '../../../src/core/config/types.js'
+ * @import { ClientEnableResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -1058,17 +1058,23 @@ function resolveExpectedGatewayBaseUrl(ctx) {
  * reversal alike - because the read-then-remove lives here, next to the clear,
  * rather than in one caller (LLP 0138 #marker-undo).
  *
+ * `quiet` suppresses this routine's own stdout prose (never its stderr
+ * warnings, which name files left behind) and hands the result back instead,
+ * for a caller sweeping every client at once and rendering one summary of the
+ * few that had anything to reverse.
+ *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
+ *   quiet?: boolean,
  *   ctx: CommandRunContext,
  * }} args
- * @returns {Promise<void>}
+ * @returns {Promise<DetachFromDiskResult | undefined>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -1125,7 +1131,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             changed: true,
           })
         }
-        writeCoreDetachOutput({ ctx, name, json, result })
+        if (!quiet) writeCoreDetachOutput({ ctx, name, json, result })
         const stateRoot = readObservabilityEnv(ctx.env).stateDir
 
         // Retract the attach marker so the CLI undo and the marker store stay in
@@ -1179,7 +1185,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
               installedAssets,
               clientAssetBaseDirs(descriptor, homeDir)
             )
-            if (removed.length > 0 && !json) {
+            if (removed.length > 0 && !json && !quiet) {
               ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
             }
             const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
@@ -1215,6 +1221,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
           }
         }
         if (assetFailure.length > 0) throw new Error(assetFailure)
+        return result
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)
@@ -1223,6 +1230,59 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
     },
     { component: 'cmd-detach' }
   )
+}
+
+/**
+ * Reverse every known client's attach from disk, quietly, and report only what
+ * actually changed.
+ *
+ * This is the sweep `hyp daemon uninstall` runs. Removing the service strands
+ * every attached client on a gateway port that stops answering, and a client
+ * pointed at a dead `ANTHROPIC_BASE_URL` does not degrade to talking to
+ * Anthropic directly - it fails every request. So the level-4 exit finishes the
+ * level-1 exit rather than leaving the machine in that state.
+ *
+ * Every known client is asked, not just the ones this process can prove are
+ * attached: the core undo is already an honest no-op on a client that was never
+ * attached (`changed: false`), so asking is cheaper and more truthful than a
+ * second probe, and the returned `detached` list is exactly the set that had
+ * something to reverse. Per-client failures are collected rather than thrown so
+ * one wedged client cannot strand the rest still attached.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{
+ *   detached: { name: string, settingsPath?: string }[],
+ *   failed: { name: string, message: string }[],
+ * }>}
+ * @ref LLP 0206#d1 [implements]: uninstalling the service detaches the clients it was serving
+ */
+export async function detachAllClientsFromDisk(ctx) {
+  /** @type {{ name: string, settingsPath?: string }[]} */
+  const detached = []
+  /** @type {{ name: string, message: string }[]} */
+  const failed = []
+  const descriptors = await buildClientDescriptorMap(ctx)
+  for (const [name, descriptor] of descriptors) {
+    try {
+      const result = await detachClientViaCore({
+        name,
+        descriptor,
+        dryRun: false,
+        json: false,
+        quiet: true,
+        ctx,
+      })
+      if (result?.changed === true) {
+        detached.push({
+          name,
+          ...(result.settingsPath !== undefined ? { settingsPath: result.settingsPath } : {}),
+        })
+      }
+    } catch (err) {
+      failed.push({ name, message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return { detached, failed }
 }
 
 /**
