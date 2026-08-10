@@ -1119,6 +1119,159 @@ test('reruns are deterministic: the same session yields byte-identical row ident
 })
 
 // ---------------------------------------------------------------------------
+// LLP 0205: rotated session files (`.jsonl.reset.<ts>`, `.jsonl.deleted.<ts>`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rename a written session file in place the way OpenClaw rotates one on
+ * reset or delete: the `.jsonl` name keeps its position and a `.reset.<ts>` /
+ * `.deleted.<ts>` marker is appended after it. `fs.rename` preserves mtime, so
+ * the fixture's backdate (`FIXTURE_MTIME_MARGIN_MS`) survives the move.
+ *
+ * @param {string} filePath
+ * @param {string} suffix
+ * @returns {Promise<string>}
+ */
+async function rotate(filePath, suffix) {
+  const rotated = filePath + suffix
+  await fs.rename(filePath, rotated)
+  return rotated
+}
+
+// @ref LLP 0205#decision [tests]: a session OpenClaw reset or deleted keeps
+// its history in a renamed file, and the scanner has to accept that name or
+// the whole session is silently lost (#694: 5 of 7 sessions on a real
+// install).
+test('a session file rotated by a reset is scanned, and projects what it projected before the rotation', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    const before = await collect(provider(env).run(runContext().ctx))
+    const beforeRows = await materialize(before.items[0])
+
+    await rotate(filePath, '.reset.2026-08-05T17-28-41.908Z')
+
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1, 'a rotated session file is still scanned')
+    assert.equal(value(items[0]).session_id, 'sess-1')
+    assert.equal(items[0].provenance?.native_id, 'sess-1')
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map((r) => r.part_id), beforeRows.map((r) => r.part_id))
+    assert.deepEqual(rows.map((r) => r.message_id), ['msg-user-1', 'msg-asst-1'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session file rotated by a delete is scanned the same way', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, {
+      sessionId: 'probe-anthropic-1',
+      header: { cwd: '/work/repo' },
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    await rotate(filePath, '.deleted.2026-07-31T17-26-46.386Z')
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).session_id, 'probe-anthropic-1')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The header states the session id here, so the fallback is what is under
+// test: it strips the `.jsonl` extension and the rotation marker, not
+// `basename(f, '.jsonl')`, which strips nothing off a rotated name and would
+// make `session_id` (the non-null partition key) carry the rotation marker
+// and timestamp.
+test('a headerless rotated file takes its session id with the .jsonl extension and rotation marker removed', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, {
+      sessionId: 'e10e0488-2f6b-4b1f-9a55-0f6d2c8a11ca',
+      header: null,
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    await rotate(filePath, '.reset.2026-08-05T17-28-41.908Z')
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).session_id, 'e10e0488-2f6b-4b1f-9a55-0f6d2c8a11ca')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0205#trajectory-siblings [tests]: the widened matcher is not a
+// `*.jsonl*` glob. A `.trajectory.jsonl` sibling keeps the classification it
+// has today (scanned, its own name-derived identity, no rows of its own), and
+// a rotated-looking name that is not a rotation marker stays out entirely.
+test('a trajectory sibling stays distinguishable, and a non-rotation suffix is still skipped', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    const dir = path.join(env.homeDir, '.openclaw', 'agents', 'main', 'sessions')
+    // The trajectory file records the same turns in its own schema: no
+    // `type: "session"` header and no `type: "message"` records, so the LLP
+    // 0158 reader resolves nothing out of it.
+    const trajectory = path.join(dir, 'sess-1.trajectory.jsonl')
+    await fs.writeFile(
+      trajectory,
+      [JSON.stringify({ type: 'request', api: 'anthropic-messages', provider: 'claude-cli' })].join('\n') + '\n',
+      'utf8'
+    )
+    await ageFile(trajectory, FIXTURE_MTIME_MARGIN_MS)
+    // Neither a session file nor a rotation of one: an editor or backup
+    // artifact must not be read as either.
+    const backup = path.join(dir, 'sess-1.jsonl.bak')
+    await fs.writeFile(backup, 'not json\n', 'utf8')
+    await ageFile(backup, FIXTURE_MTIME_MARGIN_MS)
+
+    const { ctx, entries } = runContext()
+    const { items } = await collect(provider(env).run(ctx))
+    // One item, from `sess-1.jsonl`: the trajectory file contributes none.
+    assert.deepEqual(items.map((item) => value(item).session_id), ['sess-1'])
+    const complete = entries.find((e) => e.message === 'openclaw.backfill.scan_complete')
+    // The trajectory sibling is scanned exactly as it is today; the `.bak` is
+    // not a session file under any spelling.
+    assert.equal(complete.fields.files_seen, 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0205#trajectory-siblings [tests]: the whole point of keeping a
+// trajectory file distinguishable is that it keeps ITS OWN identity rather
+// than folding into the session beside it. The test above never exercises
+// that: its fixture trajectory file holds a non-message record, so it
+// projects zero rows and no derived id ever surfaces. This one gives the
+// trajectory file real `type: "message"` records and checks the id that
+// comes out. This is not a regression test for the original bug: a plain
+// `basename(name, '.jsonl')` already resolves `sess-1.trajectory.jsonl` to
+// `sess-1.trajectory`, same as today. What it pins forward is that the
+// widened matcher, now that it also accepts `.jsonl.reset.<ts>` and
+// `.jsonl.deleted.<ts>`, must not newly start reading `.trajectory` as a
+// rotation marker and absorb it into `sess-1`.
+test('a headerless trajectory file resolves its own id, not the session it sits beside', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      sessionId: 'sess-1.trajectory',
+      header: null,
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    assert.equal(value(items[0]).session_id, 'sess-1.trajectory')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Lane B: sweep scheduling metadata (LLP 0172#lane-b-sweep, LLP 0173 T7)
 // ---------------------------------------------------------------------------
 
