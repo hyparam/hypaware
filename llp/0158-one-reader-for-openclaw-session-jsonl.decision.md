@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-30
 **Related:** LLP 0003, LLP 0027, LLP 0144, LLP 0150, LLP 0157, LLP 0159
+**Extended-by:** [LLP 0205](./0205-openclaw-rotated-session-files.decision.md) (the backfill scan also accepts the rotated names OpenClaw renames a session file to on reset or delete, `<sessionId>.jsonl.reset.<ts>` / `.deleted.<ts>`; the parse rules here are unchanged)
 
 > OpenClaw writes one JSONL file per session under
 > `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`. Two consumers

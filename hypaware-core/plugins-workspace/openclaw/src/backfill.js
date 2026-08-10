@@ -768,8 +768,29 @@ function setNumber(target, key, source, aliases) {
 }
 
 /**
- * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, sorted so a run
- * is deterministic. A missing or unreadable directory at any level is an empty
+ * The session-file names the scan accepts, capturing the session id as group
+ * 1: `<sessionId>.jsonl`, optionally followed by the marker OpenClaw appends
+ * when it rotates a session in place (`.reset.<ts>`, `.deleted.<ts>`). A
+ * rotated file is the same session's history under a name that no longer ends
+ * in `.jsonl`, so an `endsWith('.jsonl')` scan lost the whole session silently
+ * (#694: 5 of 7 sessions on a live install).
+ *
+ * Deliberately not a `*.jsonl*` glob. The capture is lazy, so the id is the
+ * name up to the FIRST `.jsonl`, and the rotation alternatives are named
+ * rather than open: a `sess.trajectory.jsonl` sibling keeps `sess.trajectory`
+ * as its own identity instead of collapsing into the session's, and an
+ * unrelated `sess.jsonl.bak` is not a session file at all.
+ *
+ * @ref LLP 0205#decision [implements]: the widened session-filename contract,
+ * rotation markers included, trajectory siblings still distinguishable
+ * @type {RegExp}
+ */
+const SESSION_FILE_NAME = /^(.+?)\.jsonl(?:\.(?:reset|deleted)\..+)?$/
+
+/**
+ * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, rotated names
+ * included ({@link SESSION_FILE_NAME}), sorted so a run is deterministic. A
+ * missing or unreadable directory at any level is an empty
  * result, never a throw: a machine with no OpenClaw install must scan to zero
  * sessions, not fail the whole `hyp backfill` run.
  *
@@ -797,7 +818,7 @@ async function listSessionFiles(agentsDir, quiesceBeforeMs) {
   for (const agentId of await readDirNames(agentsDir, 'dir')) {
     const sessionsDir = path.join(agentsDir, agentId, 'sessions')
     for (const name of await readDirNames(sessionsDir, 'file')) {
-      if (!name.endsWith('.jsonl')) continue
+      if (!SESSION_FILE_NAME.test(name)) continue
       const filePath = path.join(sessionsDir, name)
       if (quiesceBeforeMs !== undefined && !(await isOutsideQuiesceWindow(filePath, quiesceBeforeMs))) continue
       out.push({ agentId, filePath })
@@ -887,11 +908,18 @@ async function readDirNames(dir, kind) {
  * path rather than the line, so it never conflicts with the LLP 0158 reader's
  * "unconfirmable is unresolvable" rule for the header's own fields.
  *
+ * The id is the name up to the first `.jsonl`, which is what makes a rotated
+ * file resolve to the session it holds: `basename(f, '.jsonl')` strips nothing
+ * off `<id>.jsonl.reset.<ts>` and would partition the run's rows under an id
+ * carrying the rotation marker and its timestamp.
+ *
+ * @ref LLP 0205#decision [implements]: the fallback id is the portion before
+ * the first `.jsonl`, so a rotation marker never reaches `session_id`
  * @param {string} filePath
  * @returns {string}
  */
 function sessionIdFromPath(filePath) {
-  const base = path.basename(filePath, '.jsonl')
+  const base = SESSION_FILE_NAME.exec(path.basename(filePath))?.[1] ?? ''
   return base.length > 0 ? base : hashShort(filePath)
 }
 
