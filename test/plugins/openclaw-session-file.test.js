@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  listOpenclawSessionFiles,
   OPENCLAW_SESSION_HEADER_PREFIX_BYTES,
   openclawSessionCwd,
   parseOpenclawSessionHeader,
@@ -451,4 +452,32 @@ test('readOpenclawSessionMessages resolves to an empty list for a missing or emp
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-openclaw-session-'))
   assert.deepEqual(await readOpenclawSessionMessages(path.join(dir, 'absent.jsonl')), [])
   assert.deepEqual(await readOpenclawSessionMessages(tempSessionFile('')), [])
+})
+
+/* ------------------------------------------------------------------ */
+/* listOpenclawSessionFiles: rotated names (LLP 0205)                  */
+/* ------------------------------------------------------------------ */
+
+// @ref LLP 0205#decision [tests]: the settlement lane's own enumeration
+// shares `SESSION_FILE_NAME` with the backfill scan, so a session OpenClaw
+// rotated in place (reset or delete) is still a candidate for settlement's
+// mtime-slack filter, not just for backfill. Before this, `endsWith('.jsonl')`
+// excluded a rotated file from settlement even though `rename(2)` preserves
+// mtime, which left it inside any window backfill's scan would also see it
+// in, a straight path to a duplicate row (one fallback-identity, one native).
+test('listOpenclawSessionFiles scans a rotated session file the same way it scans a live one', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-openclaw-session-'))
+  const agentsDir = path.join(dir, 'agents')
+  const sessionsDir = path.join(agentsDir, 'main', 'sessions')
+  fs.mkdirSync(sessionsDir, { recursive: true })
+  fs.writeFileSync(path.join(sessionsDir, 'sess-1.jsonl.reset.2026-08-05T17-28-41.908Z'), headerLine({ id: 'sess-1' }))
+  fs.writeFileSync(path.join(sessionsDir, 'sess-2.jsonl.deleted.2026-07-31T17-26-46.386Z'), headerLine({ id: 'sess-2' }))
+  // Not a session file under any spelling: must stay excluded.
+  fs.writeFileSync(path.join(sessionsDir, 'sess-3.jsonl.bak'), headerLine({ id: 'sess-3' }))
+
+  const files = await listOpenclawSessionFiles(agentsDir)
+  assert.deepEqual(
+    files.map((f) => path.basename(f.path)).sort(),
+    ['sess-1.jsonl.reset.2026-08-05T17-28-41.908Z', 'sess-2.jsonl.deleted.2026-07-31T17-26-46.386Z']
+  )
 })

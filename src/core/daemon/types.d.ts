@@ -101,6 +101,7 @@ export type StatusDiagnosticKind =
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
+  | 'gateway_upstreams_dropped'
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
@@ -118,6 +119,34 @@ export interface StatusDiagnostic {
   message: string
   repair: string[]
   pointer?: string
+}
+
+/**
+ * Which of a bound gateway's dropped upstream names an adapter preset
+ * backfilled into the routing table, and which nothing did. Produced by
+ * intersecting the dropped names with `details.registered_presets`, both of
+ * which the gateway source publishes; the two lists together always account
+ * for every dropped name.
+ *
+ * Both lists are claims about the *table*, not about traffic, because that is
+ * the most an intersection of names can support. Routing is by `path_prefix`
+ * and `match()`, and then by rank, and none of those are published:
+ *
+ * `covered` is not "fine" and it is not "proxied" either. The operator's entry
+ * did not take effect at all, so the preset's own `base_url`, `provider`,
+ * `priority` and routing surface are in force - and where that surface is a
+ * `match()` (as it is for every bundled adapter preset) the preset's
+ * `path_prefix` is only a sort key, never consulted at match time. The
+ * backfilled entry can also be shadowed outright by a surviving config
+ * upstream that outranks it, in which case the preset routes nothing.
+ *
+ * `silent` is scoped to the name, not to the path. A surviving upstream
+ * written with no `path_prefix` is the `/` catch-all, so traffic aimed at a
+ * silent name can still be proxied and recorded under another upstream's name.
+ */
+export interface DroppedUpstreamAttribution {
+  covered: string[]
+  silent: string[]
 }
 
 /**

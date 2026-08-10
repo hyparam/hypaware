@@ -127,3 +127,40 @@ export interface RemoteOidcRecord {
  * dropped by the same `removeToken`.
  */
 export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
+
+/**
+ * Why a `hyp remote login` ended the way it did (LLP 0179#outcome). A code,
+ * never a message: the login lane prints its own English, and a caller that
+ * has to branch reads this instead of the prose.
+ *
+ * `no_membership` / `org_not_permitted` / `org_selection_required` are the
+ * server-surfaced LLP 0058 D7 refusals, definitive in the sense that the same
+ * bare login cannot fix them. `denied` is a provider denial and `login_failed`
+ * a transient or local failure (timeout, network, an abandoned browser flow);
+ * both are worth retrying. The rest name a step that failed after the sign-in
+ * itself succeeded, which is why they are not folded into one `failed`.
+ */
+export type LoginOutcomeReason =
+  | 'ok'
+  | 'usage'
+  | 'connected_elsewhere'
+  | 'no_membership'
+  | 'org_not_permitted'
+  | 'org_selection_required'
+  | 'denied'
+  | 'login_failed'
+  | 'store_failed'
+  | 'seed_failed'
+  | 'enroll_failed'
+  | 'daemon_incomplete'
+
+/**
+ * What the login lane returns: the exit code `hyp remote login` reports, and
+ * the reason behind it. `exitCode === 0` iff `reason === 'ok'`, except for
+ * `daemon_incomplete`, which carries the daemon installer's own non-zero code
+ * (LLP 0179#outcome).
+ */
+export interface LoginOutcome {
+  exitCode: number
+  reason: LoginOutcomeReason
+}

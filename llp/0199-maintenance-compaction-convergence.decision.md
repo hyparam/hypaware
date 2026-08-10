@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-07
 **Related:** LLP 0027
-**Extended-by:** LLP 0208
+**Extended-by:** LLP 0207 (a baseline mismatch whose current snapshot is a sorted `replace` is a foreign rewrite, not growth: recognize it and re-baseline instead of compacting), LLP 0209 (the rewrite the baseline gate protects now sizes its output files by bytes written rather than by the in-memory batch estimate, so a compacted generation actually reaches `target_file_bytes`)
 
 > Maintenance stops re-flagging already-compacted partitions: a partition is
 > only compaction-due when its live data-file count has moved off the count

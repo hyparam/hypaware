@@ -1,11 +1,11 @@
-# LLP 0208: Compaction file size follows bytes written, not the batch estimate
+# LLP 0209: Compaction file size follows bytes written, not the batch estimate
 
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Cache
 **Author:** Kenny / Claude
 **Date:** 2026-08-10
-**Related:** LLP 0199, LLP 0027
+**Related:** LLP 0199, LLP 0027, LLP 0207 (the sibling extension of LLP 0199: it decides *when* a partition is rewritten, this one decides how the rewrite sizes its files)
 
 > A compaction batch is a heap bound, not a file bound. Batches flush as
 > parquet row groups into an open data file, and the file closes when the bytes

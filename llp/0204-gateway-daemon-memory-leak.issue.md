@@ -76,7 +76,9 @@ All in one change set, code-`@ref`ed to this issue:
 - Seed scan: a lazily-built committed-session-id index (one
   `session_id`-column scan, shared per listener) answers "does this
   session have committed rows at all"; unseen sessions skip the
-  per-session scan outright. A miss older than 10 minutes rebuilds the
+  per-session scan outright. A miss more than 10 minutes after the index's
+  scan COMPLETED (not after it started, or a scan slower than the window
+  could never serve a hit) rebuilds the
   index once, so rows committed by a concurrent writer (`hyp backfill` in
   another process) are seen at most that late; a stale miss only risks
   the duplicate seeding guards against, which settlement/compaction still

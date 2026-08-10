@@ -101,6 +101,9 @@ export async function maintainCache(opts) {
   const compactionsCounter = meter.createCounter('hyp_compactions', {
     description: 'Partitions compacted by maintenance',
   })
+  const rebaselinesCounter = meter.createCounter('hyp_rebaselines', {
+    description: 'Partitions recognized as foreign-sorted-replace converged and rebaselined without a rewrite',
+  })
 
   const scope = opts.dataset ? { datasets: [opts.dataset] } : {}
   const discovered = await discoverCachePartitions(opts.cacheRoot, scope)
@@ -150,7 +153,7 @@ export async function maintainCache(opts) {
         const settle = resolveSettleContext(opts, part.dataset)
 
         const done = await maintainGeneration(
-          r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter
+          r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter
         )
         // A compaction that "converged" is only healthy if it also shrank
         // the file count; publish both sides of that so a run that rewrites
@@ -259,9 +262,10 @@ function generationLayout(cursor) {
  * @param {SettleContext | null} settle
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} snapshotsExpiredCounter
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
+ * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} rebaselinesCounter
  * @returns {Promise<MaintenancePartitionReport>}
  */
-async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
+async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter) {
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
   if (!tableExists(liveDir)) return r
@@ -299,18 +303,35 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       ? grewSinceCompaction && await hasResettleCandidate(liveDir)
       : false
     const shouldCompact = opts.force || hasResettle || (grewSinceCompaction && needsCompaction(liveDir, cfg))
-    if (shouldCompact && !opts.dryRun) {
-      const result = await compactGeneration(r.path, layout, cfg, settle)
-      if (result) {
+    if (shouldCompact) {
+      const tableInfo = await loadCompactionTableInfo(liveDir)
+      // @ref LLP 0207#foreign-replace [implements]: a baseline mismatch whose
+      // current snapshot is a `replace` committed under the table's declared
+      // default sort order is a foreign sorted rewrite (the server's
+      // export-time day compaction), not growth. Rewriting it would shred
+      // the sorted big-file layout back into per-batch files, so record the
+      // live count as the new baseline and skip. Recognition outranks the
+      // re-settle force: a leftover unmatchable fallback row must not undo
+      // the sorted layout every night. An explicit --force still rewrites.
+      if (!opts.force && foreignSortedReplace(tableInfo)) {
+        r.rebaselined = true
+        if (!opts.dryRun) {
+          await writeCursor(r.path, rebaselineCursor(cursor, dataFilesBefore))
+          rebaselinesCounter.add(1, { [Attr.DATASET]: r.dataset })
+        }
+      } else if (opts.dryRun) {
         r.compacted = true
-        if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
-        r.rowCount = result.rowCount
-        r.dataFilesAfter = result.dataFiles
-        r.compactedBytesWritten = result.bytesWritten
-        compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
+      } else {
+        const result = await compactGeneration(r.path, layout, cfg, settle, tableInfo)
+        if (result) {
+          r.compacted = true
+          if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
+          r.rowCount = result.rowCount
+          r.dataFilesAfter = result.dataFiles
+          r.compactedBytesWritten = result.bytesWritten
+          compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
+        }
       }
-    } else if (shouldCompact && opts.dryRun) {
-      r.compacted = true
     }
   }
 
@@ -429,6 +450,64 @@ function needsCompaction(tableDir, cfg) {
   return false
 }
 
+/**
+ * Load the live table metadata that the compaction decision and the
+ * rewrite share: the current schema and partition spec (carried into the
+ * replacement generation), the declared default sort order, and the raw
+ * metadata for snapshot inspection. Loaded once per compaction-due
+ * partition; null when the metadata is unreadable, in which case the
+ * rewrite falls back to inferring the schema from scanned rows.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<{
+ *   metadata: TableMetadata,
+ *   schemaColumns: ColumnSpec[] | null,
+ *   partitionSpec: PartitionSpec | undefined,
+ *   sortColumns: { column: string, direction: 'asc' | 'desc' }[] | undefined,
+ * } | null>}
+ */
+async function loadCompactionTableInfo(tableDir) {
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+    const schema = currentSchema(metadata)
+    return {
+      metadata,
+      schemaColumns: schema ? columnsFromIcebergSchema(schema) : null,
+      partitionSpec: currentPartitionSpec(metadata),
+      sortColumns: sortColumnsFromMetadata(metadata),
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is the table's current snapshot a `replace` committed under its
+ * declared default sort order? That combination identifies a deliberate
+ * foreign sorted rewrite (the central server's export-time day
+ * compaction commits exactly this shape), and the `replace` still being
+ * current means nothing has been appended since - a later append flips
+ * the current snapshot's operation and makes the partition genuinely
+ * due again. A replace on a table with no declared sort order is not
+ * blessed: only a rewrite that carries the layout declaration counts as
+ * convergence.
+ *
+ * @ref LLP 0207#foreign-replace [implements]: the recognition test, the
+ * kernel-side mirror of the server day compactor's alreadyCompacted +
+ * sortOrderDeclared skip.
+ * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} tableInfo
+ * @returns {boolean}
+ */
+function foreignSortedReplace(tableInfo) {
+  if (!tableInfo?.sortColumns?.length) return false
+  const { metadata } = tableInfo
+  const currentId = metadata['current-snapshot-id']
+  if (currentId === undefined || currentId === null || Number(currentId) === -1) return false
+  const snapshot = (metadata.snapshots ?? []).find((s) => BigInt(s['snapshot-id']) === BigInt(currentId))
+  return snapshot?.summary?.operation === 'replace'
+}
+
 const COMPACT_BATCH_SIZE = 10_000
 
 /**
@@ -496,7 +575,7 @@ function estimateRowBytes(row) {
  * `cfg.target_file_bytes`. Tying the file boundary to the in-memory
  * estimate instead made every flush its own file, and a column that
  * compresses 70x turned a 32 MB batch into a 0.5 MB data file, so
- * `target_file_bytes` was unreachable by construction (LLP 0208).
+ * `target_file_bytes` was unreachable by construction (LLP 0209).
  *
  * Holding a file open is not free: peak heap is the batch, plus one row
  * group of encoded bytes, PLUS the row-group metadata every open parquet
@@ -505,39 +584,26 @@ function estimateRowBytes(row) {
  * `openStreamingAppend` budgets it and rolls a file early when it binds
  * before the byte target does.
  *
- * @ref LLP 0208#decision [implements]: heap bounds the batch, written
+ * @ref LLP 0209#decision [implements]: heap bounds the batch, written
  *   bytes bound the file.
- * @ref LLP 0208#retained-metadata [constrained-by]: a bigger file target
+ * @ref LLP 0209#retained-metadata [constrained-by]: a bigger file target
  *   costs retained row-group metadata, which is separately bounded.
  * @param {string} partitionDir
  * @param {GenerationLayout} layout
  * @param {MaintenanceConfig} cfg
  * @param {SettleContext | null} [settle]
+ * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
  * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number, bytesWritten?: number } | null>}
  */
-async function compactGeneration(partitionDir, layout, cfg, settle) {
+async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   const oldDir = path.join(partitionDir, layout.liveDir)
   if (!tableExists(oldDir)) return null
 
-  /** @type {PartitionSpec | undefined} */
-  let existingSpec
-  /** @type {ColumnSpec[] | null} */
-  let schemaColumns = null
-  /** @type {{ column: string, direction: 'asc' | 'desc' }[] | undefined} */
-  let sortColumns
-  try {
-    const { resolver, lister } = await createLocalIcebergIO()
-    const url = tableUrlForDir(oldDir)
-    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-    const schema = currentSchema(metadata)
-    if (schema) schemaColumns = columnsFromIcebergSchema(schema)
-    existingSpec = currentPartitionSpec(metadata)
-    // Carry the table's declared sort order into the replacement
-    // generation, or the swap would silently drop it.
-    sortColumns = sortColumnsFromMetadata(metadata)
-  } catch {
-    // Fall back to inference if metadata is unreadable
-  }
+  const existingSpec = tableInfo?.partitionSpec
+  const schemaColumns = tableInfo?.schemaColumns ?? null
+  // Carry the table's declared sort order into the replacement
+  // generation, or the swap would silently drop it.
+  const sortColumns = tableInfo?.sortColumns
 
   const newDirName = layout.nextDirName()
   const newDir = path.join(partitionDir, newDirName)
@@ -846,6 +912,25 @@ function resettleBaselineFiles(cursor) {
   const c = cursor.compaction
   if (isPlainObject(c) && typeof c.resettleBaselineFiles === 'number') return c.resettleBaselineFiles
   return undefined
+}
+
+/**
+ * Cursor for a partition converged by a foreign sorted rewrite: same
+ * generation, same rows, only the re-settle baseline moves to the live
+ * data-file count so the LLP 0199 gate reads the partition as converged.
+ * Everything else is preserved - in particular `compactedAt` still names
+ * the kernel's own last rewrite, because this is a recognition, not a
+ * compaction.
+ *
+ * @ref LLP 0207#re-baseline [implements]: the cursor write without a
+ * rewrite; the whole point is to keep the foreign layout.
+ * @param {PartitionCursor} cursor
+ * @param {number} liveDataFiles
+ * @returns {PartitionCursor}
+ */
+function rebaselineCursor(cursor, liveDataFiles) {
+  const compaction = isPlainObject(cursor.compaction) ? cursor.compaction : {}
+  return { ...cursor, compaction: { ...compaction, resettleBaselineFiles: liveDataFiles } }
 }
 
 /** @param {string} value */
