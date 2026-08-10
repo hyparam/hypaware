@@ -11,7 +11,7 @@ import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../sr
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { loadLatestFileCatalogMetadata } from 'icebird'
+import { fileCatalog, icebergRewrite, loadLatestFileCatalogMetadata } from 'icebird'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -810,6 +810,120 @@ test('an already-compacted partition is not recompacted until new data flushes',
     const third = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(third.totalCompacted, 1)
     assert.equal(readCursorSync(partDir).epoch, 2)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- foreign sorted replace recognition (LLP 0207) ---
+
+/**
+ * Commit the central server's export-time rewrite shape onto a live
+ * generation dir: an in-place `replace` snapshot through icebird, no
+ * cursor touch (the server knows nothing about kernel cursors).
+ *
+ * @param {string} tableDir
+ */
+async function commitForeignReplace(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  await icebergRewrite({ catalog, tableUrl: tableUrlForDir(tableDir), targetFileRows: 100_000 })
+}
+
+test('a foreign sorted replace re-baselines the cursor instead of being rewritten', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // A kernel cursor whose baseline no longer matches the live count: the
+    // replace read as growth before LLP 0207.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // A dry run predicts the recognition without writing anything.
+    const preview = await maintainCache({ cacheRoot, compactOnly: true, dryRun: true })
+    assert.equal(preview.totalCompacted, 0)
+    assert.equal(preview.partitions[0].rebaselined, true)
+    assert.equal(
+      /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction).resettleBaselineFiles,
+      99,
+      'dry run must not touch the cursor'
+    )
+
+    const first = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(first.totalCompacted, 0)
+    assert.equal(first.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.epoch, 0, 'no rewrite: the generation must not advance')
+    const compaction = /** @type {{ compactedAt: string, resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, first.partitions[0].dataFilesBefore, 're-baselined to the live data-file count')
+    assert.equal(compaction.compactedAt, '2026-08-08T00:00:00.000Z', 'recognition is not a compaction')
+    assert.equal((await readRowsFromTable(epoch0)).length, 3, 'the foreign generation keeps its rows')
+
+    // Converged: the baseline gate now blocks before any metadata load.
+    const second = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(second.totalCompacted, 0)
+    assert.notEqual(second.partitions[0].rebaselined, true)
+
+    // A late append flips the current snapshot off `replace` and moves the
+    // count off the baseline: genuinely due again, unchanged behavior.
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 99, value: 'fresh', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    const third = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(third.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign replace without a declared sort order is not blessed', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-unsorted')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an arbitrary replace earns no convergence credit')
+    assert.notEqual(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('force still rewrites a foreign sorted replace', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-force')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an explicit force is an operator override')
+    assert.equal(readCursorSync(partDir).epoch, 1)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
