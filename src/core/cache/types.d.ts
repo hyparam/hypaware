@@ -155,9 +155,15 @@ export interface AppendOptions {
  * file descriptor and renames its temp file into place, which is fine for
  * a one-shot append but not for a writer held open across many row
  * groups: an append that fails part-way has no `finish()` coming.
+ *
+ * `park()` is the other half of that: it hands the descriptor and the
+ * buffer back while keeping the half-written file, so a writer can stay
+ * logically open without costing a descriptor. A writer that does not
+ * implement it can only be retired by closing the file.
  */
 export interface AbortableWriter extends Writer {
   abort?(): void
+  park?(): void
 }
 
 /**

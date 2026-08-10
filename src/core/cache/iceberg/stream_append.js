@@ -28,12 +28,37 @@ import { rowsToIcebergRecords } from './schema.js'
  */
 
 /**
- * How many output files a streaming append will keep open at once. Only
- * a table whose partition spec fans a rewrite across many tuples ever
- * reaches this; the cap is what keeps file descriptors and encode
- * buffers bounded when it does.
+ * How many output files hold a file DESCRIPTOR at once. Not how many are
+ * open: a file past this is parked (flushed, its descriptor released and
+ * its encode buffer dropped) and reopened in append mode the next time a
+ * row group for its partition tuple arrives.
+ *
+ * The distinction is the whole point. Retiring the oldest file instead,
+ * as this cap used to, is Belady-cyclic against the access pattern a
+ * compaction actually has: the scan walks the old generation's data
+ * files in manifest order, each old file holds exactly one tuple, and a
+ * tuple recurs about every N files for N distinct tuples. Once
+ * N exceeded the cap, every file was retired before its tuple came round
+ * again, so every output file closed holding exactly one row group and
+ * the rewrite emitted one file per input row group: the same count the
+ * pre-streaming code produced. Measured through `maintainCache` with
+ * identity partitioning on one column, 3000 fat rows in 10 ingest waves:
+ * 30 tuples compacted 300 files to 30 and 64 compacted 640 to 64, but
+ * 100 compacted 1000 to 1000. Parking removes the cliff rather than
+ * moving it, because a parked file is still the file that tuple's next
+ * row group appends to.
+ *
+ * 64 is left where it was because it is now bounding the thing it is
+ * good at bounding, and because raising it is no longer a way to buy
+ * anything: a rewrite's file count no longer depends on it. The daemon
+ * shares one descriptor limit across its listeners, spool writers and
+ * readers, and 64 stays well inside the soft limits it runs under
+ * (commonly 1024 on Linux, 256 under macOS launchd).
+ *
+ * @ref LLP 0206#descriptor-parking [implements]: cap descriptors, not
+ *   open files.
  */
-const MAX_OPEN_FILES = 64
+const MAX_OPEN_DESCRIPTORS = 64
 
 /**
  * Budget, across every file open at once, for the row-group metadata
@@ -54,14 +79,21 @@ const MAX_OPEN_FILES = 64
  * 128 MB file would have pinned ~40 MB, more than `compact_batch_bytes`.
  *
  * The budget is global rather than per-file on purpose. A per-file cap
- * has to be divided by `MAX_OPEN_FILES` to bound the aggregate, which
- * would force files down to a few megabytes for fat rows: the exact
- * defect LLP 0206 set out to fix. A global budget spends itself on
- * whichever files are actually open, so a single-tuple rewrite reaches
- * `target_file_bytes` and a 64-tuple fan-out rolls earlier instead.
+ * has to be divided by the number of files that may be open to bound the
+ * aggregate, which would force files down to a few megabytes for fat
+ * rows: the exact defect LLP 0206 set out to fix. A global budget spends
+ * itself on whichever files are actually open, so a single-tuple rewrite
+ * reaches `target_file_bytes` and a wide fan-out rolls earlier instead.
  * 32 MiB matches the default `compact_batch_bytes`, so the streaming
  * append's retained metadata costs at most about what the batch feeding
  * it does.
+ *
+ * This is also the only bound on how many output files a rewrite holds
+ * open at once, now that a descriptor is no longer one of the things an
+ * open file costs. Every row group charges at least
+ * `ROW_GROUP_STATS_OVERHEAD_BYTES` per column, so a fan-out wide enough
+ * to matter is closed out by the budget long before the open files
+ * themselves become a heap term.
  *
  * @ref LLP 0206#retained-metadata [implements]: bound the row-group
  *   metadata an open file pins.
@@ -165,6 +197,10 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
 
   /** @type {Map<string, OpenCompactionFile>} */
   const open = new Map()
+  // The subset of `open` currently holding a file descriptor, in
+  // least-recently-written order.
+  /** @type {Map<string, OpenCompactionFile>} */
+  const withDescriptor = new Map()
   /** @type {any[]} */
   const dataFiles = []
   /** @type {string[]} */
@@ -175,29 +211,21 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
   // units `MAX_OPEN_STATS_BYTES` is expressed in.
   let openStatsBytes = 0
   let statsRolls = 0
+  let parks = 0
   let openFileRetires = 0
 
   /**
-   * The open file for a partition tuple, opening one if needed. A table
-   * whose spec splits the rewrite across many tuples would otherwise hold
-   * one descriptor and one encode buffer per tuple for the whole
-   * compaction, so the oldest open file is retired once the cap is
-   * reached. Retiring early only produces a smaller file, which is what
-   * every file used to be.
+   * The open file for a partition tuple, opening one if needed. A file
+   * stays open for the whole append unless its bytes or the stats budget
+   * close it: the descriptor cap is enforced by {@link reserveDescriptor}
+   * instead, which is what keeps a wide fan-out from costing one
+   * descriptor per tuple.
    *
+   * @param {string} key
    * @param {Record<string, unknown>} partition
-   * @returns {Promise<OpenCompactionFile>}
+   * @returns {OpenCompactionFile}
    */
-  async function openFileFor(partition) {
-    const key = JSON.stringify(partition)
-    const found = open.get(key)
-    if (found) return found
-    while (open.size >= MAX_OPEN_FILES) {
-      const oldest = open.values().next().value
-      if (!oldest) break
-      openFileRetires++
-      await closeFile(oldest, 'open_file_cap')
-    }
+  function openFileFor(key, partition) {
     const dataPath = `${tableUrl}/data/${uuid4()}.parquet`
     const writer = /** @type {AbortableWriter} */ (openWriter(dataPath))
     /** @type {OpenCompactionFile} */
@@ -223,6 +251,45 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
     open.set(key, file)
     logger.debug('cache.compaction_file_open', { ...baseAttrs, open_files: open.size })
     return file
+  }
+
+  /**
+   * Make room for `file` to hold a descriptor while its next row group is
+   * written, parking the least recently written file until the descriptor
+   * cap has room.
+   *
+   * Parking is not closing: the parked file keeps its temp file, its byte
+   * offset and its accumulated metrics, and the next row group for its
+   * tuple reopens it in append mode. So the number of output files a
+   * rewrite produces is a function of the partition tuples and the byte
+   * target, never of how the scan happens to interleave them.
+   *
+   * A writer that cannot park (not the local one; nothing reaches this
+   * module with another today) can only be retired by closing its file,
+   * which is the old behaviour and the old cliff.
+   *
+   * @ref LLP 0206#descriptor-parking [implements]: park the descriptor,
+   *   keep the file.
+   * @param {string} key
+   * @param {OpenCompactionFile} file
+   * @returns {Promise<void>}
+   */
+  async function reserveDescriptor(key, file) {
+    withDescriptor.delete(key)
+    while (withDescriptor.size >= MAX_OPEN_DESCRIPTORS) {
+      const oldestKey = withDescriptor.keys().next().value
+      if (oldestKey === undefined) break
+      const oldest = /** @type {OpenCompactionFile} */ (withDescriptor.get(oldestKey))
+      withDescriptor.delete(oldestKey)
+      if (typeof oldest.writer.park === 'function') {
+        parks++
+        oldest.writer.park()
+      } else {
+        openFileRetires++
+        await closeFile(oldest, 'open_file_cap')
+      }
+    }
+    withDescriptor.set(key, file)
   }
 
   /**
@@ -252,7 +319,9 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
    * @returns {Promise<void>}
    */
   async function closeFile(file, reason) {
-    open.delete(JSON.stringify(file.partition))
+    const key = JSON.stringify(file.partition)
+    open.delete(key)
+    withDescriptor.delete(key)
     openStatsBytes -= file.statsBytes
     // `ParquetWriter.finish` writes the footer and finishes the underlying
     // writer, which is what lands the file on disk. A failure here has
@@ -303,8 +372,9 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
       for (const group of groups) {
         if (group.records.length === 0) continue
         const sorted = comparator ? [...group.records].sort(comparator) : group.records
-        const file = await openFileFor(group.partition)
-        const statsBytes = accumulateStats(file, sorted, schema)
+        const key = JSON.stringify(group.partition)
+        const file = open.get(key) ?? openFileFor(key, group.partition)
+        await reserveDescriptor(key, file)
         await file.parquet.write({
           columnData: columnNames.map((name, index) => ({
             name,
@@ -315,6 +385,9 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
           // stats granularity.
           rowGroupSize: sorted.length,
         })
+        // After the write, not before: a `write` that throws must not
+        // leave the file's metrics counting a row group it never wrote.
+        const statsBytes = accumulateStats(file, sorted, schema)
         file.rowGroups++
         file.rows += BigInt(sorted.length)
         file.statsBytes += statsBytes
@@ -333,6 +406,7 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
         row_count: totalRows,
         bytes_written: totalBytes,
         stats_rolls: statsRolls,
+        descriptor_parks: parks,
         open_file_retires: openFileRetires,
       })
       if (dataFiles.length === 0) {
@@ -344,11 +418,13 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
       return { rowCount: totalRows, dataFiles: dataFiles.length, bytesWritten: totalBytes }
     },
     async abort() {
-      // Every open file holds an fd on a `.tmp.*` sibling that only
-      // `finish()` closes. Nothing here is committed, so drop the
-      // descriptors and the temp files rather than finishing them into
-      // data files no snapshot will ever reference.
+      // Every open file holds a `.tmp.*` sibling (and, unless it is
+      // parked, an fd on it) that only `finish()` disposes of. Nothing
+      // here is committed, so drop the descriptors and the temp files
+      // rather than finishing them into data files no snapshot will ever
+      // reference.
       const abandoned = open.size
+      withDescriptor.clear()
       for (const file of [...open.values()]) {
         open.delete(JSON.stringify(file.partition))
         try {
@@ -628,16 +704,34 @@ function accumulateStats(file, records, schema) {
 }
 
 /**
- * Heap a single retained bound value costs. Mirrors `estimateRowBytes` in
- * the maintenance batch sizer: strings are charged at the UTF-16 upper
- * bound, and anything hyparquet's statistics would skip (objects, byte
- * arrays) is charged nothing because nothing is retained.
+ * Heap a single retained bound value costs. Anything hyparquet's
+ * statistics would skip (objects, byte arrays) is charged nothing,
+ * because nothing is retained.
+ *
+ * Strings are charged by how V8 actually stores them, not at the UTF-16
+ * upper bound `estimateRowBytes` uses in the batch sizer. V8 keeps a
+ * string one byte per character unless it holds a character above
+ * U+00FF, and a UTF-8 byte length equal to the character count proves
+ * every character is below U+0080. So a payload that is entirely ASCII -
+ * which `ai_gateway_messages` bodies are - is charged what it costs
+ * instead of twice what it costs. That is not cosmetic: the budget is
+ * what rolls a file for fat rows, so a 2x overcharge halved how many row
+ * groups an open file could absorb. Measured at 200 tuples x 10 batches
+ * x 35 K-character ASCII values: 811 output files and 11.4 MB peak
+ * retained before, 503 files and 18.6 MB after, against a 32 MiB budget.
+ * The same shape with two-byte values is unchanged at 811 files, so the
+ * charge did not slip on the values it exists for.
+ * The test is conservative in the safe direction: a Latin-1 character
+ * (U+0080 to U+00FF) is one byte in V8 but two in UTF-8, so such a string
+ * is still charged double.
  *
  * @param {unknown} value
  * @returns {number}
  */
 function retainedValueBytes(value) {
-  if (typeof value === 'string') return value.length * 2
+  if (typeof value === 'string') {
+    return Buffer.byteLength(value, 'utf8') === value.length ? value.length : value.length * 2
+  }
   if (typeof value === 'object') return 0
   if (typeof value === 'bigint') return 16
   return 8
