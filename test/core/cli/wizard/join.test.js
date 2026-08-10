@@ -4,11 +4,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { classifyLoginFailure, runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
-import {
-  LOGIN_NO_MEMBERSHIP_MESSAGE,
-  LOGIN_ORG_NOT_PERMITTED_MESSAGE,
-  LOGIN_ORG_SELECTION_MESSAGE,
-} from '../../../../src/core/cli/remote_commands.js'
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
@@ -88,26 +83,38 @@ function joinOpts(cat, over) {
 // --- classifyLoginFailure: the D7 taxonomy split ---
 
 test('classifyLoginFailure: no_membership is a definitive rejection -> failed', () => {
-  assert.equal(classifyLoginFailure({ stderr: `hyp remote login: ${LOGIN_NO_MEMBERSHIP_MESSAGE}\n` }), 'failed')
+  assert.equal(classifyLoginFailure({ reason: 'no_membership' }), 'failed')
 })
 
 test('classifyLoginFailure: org_not_permitted is a definitive rejection -> failed', () => {
-  assert.equal(classifyLoginFailure({ stderr: `hyp remote login: ${LOGIN_ORG_NOT_PERMITTED_MESSAGE}\n` }), 'failed')
+  assert.equal(classifyLoginFailure({ reason: 'org_not_permitted' }), 'failed')
 })
 
 // A multi-org account is definitive *for the wizard*: its bare login can
 // never pass --org, so retrying the fork's "Join a team" is futile; the fix
 // is a manual `hyp remote login --org <name>` then re-entering `hyp init`.
 test('classifyLoginFailure: org_selection_required (multi-org account) -> failed', () => {
-  assert.equal(classifyLoginFailure({ stderr: `hyp remote login: ${LOGIN_ORG_SELECTION_MESSAGE}\n` }), 'failed')
+  assert.equal(classifyLoginFailure({ reason: 'org_selection_required' }), 'failed')
 })
 
-test('classifyLoginFailure: a transient network error is retriable -> abandoned', () => {
-  assert.equal(classifyLoginFailure({ stderr: 'hyp remote login: connect ETIMEDOUT 10.0.0.1:443\n' }), 'abandoned')
+test('classifyLoginFailure: retriable reasons -> abandoned', () => {
+  for (const reason of /** @type {const} */ (['login_failed', 'denied', 'store_failed', 'seed_failed', 'enroll_failed'])) {
+    assert.equal(classifyLoginFailure({ reason }), 'abandoned', reason)
+  }
 })
 
-test('classifyLoginFailure: an empty/absent stderr defaults to abandoned', () => {
-  assert.equal(classifyLoginFailure({ stderr: '' }), 'abandoned')
+// The lane's prose is narration now, not a signal: a stderr that reads like a
+// definitive refusal classifies on the reason it carries, not on its words.
+// @ref LLP 0179#no-prose-control-flow [tests]:
+test('classifyLoginFailure: the message text is not consulted', () => {
+  const rejectionProse = 'hyp remote login: this account is not a member of any org on this server - ask an admin to invite you\n'
+  assert.equal(
+    classifyLoginFailure(/** @type {any} */ ({ reason: 'login_failed', stderr: rejectionProse })),
+    'abandoned'
+  )
+})
+
+test('classifyLoginFailure: a missing reason defaults to abandoned', () => {
   assert.equal(classifyLoginFailure(/** @type {any} */ ({})), 'abandoned')
 })
 
@@ -117,11 +124,11 @@ test('runWizardJoin: a non-zero login exit returns the classified failure and ne
   const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
   let waited = false
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 1, stderr: `hyp remote login: ${LOGIN_NO_MEMBERSHIP_MESSAGE}\n` }),
+    runLogin: async () => ({ exitCode: 1, reason: 'no_membership', stderr: 'hyp remote login: not a member\n' }),
     waitForConverge: async () => { waited = true; return { ok: true, attached: ['claude'] } },
   })
   const out = await runWizardJoin(opts)
-  assert.deepEqual(out, { status: 'failed', detail: `hyp remote login: ${LOGIN_NO_MEMBERSHIP_MESSAGE}\n` })
+  assert.deepEqual(out, { status: 'failed', detail: 'hyp remote login: not a member\n', reason: 'no_membership' })
   assert.equal(waited, false, 'must not wait for convergence after a failed login')
   assert.match(opts.stdout.text(), /Joining your team/)
 })
@@ -129,7 +136,7 @@ test('runWizardJoin: a non-zero login exit returns the classified failure and ne
 test('runWizardJoin: a transient login failure returns abandoned', async () => {
   const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 1, stderr: 'hyp remote login: request timed out\n' }),
+    runLogin: async () => ({ exitCode: 1, reason: 'login_failed', stderr: 'hyp remote login: request timed out\n' }),
   })
   const out = await runWizardJoin(opts)
   assert.equal(out.status, 'abandoned')
@@ -152,7 +159,7 @@ test('runWizardJoin: on convergence, locks exactly the central-layer picker rows
     ['@hypaware/claude', '@hypaware/otel', '@hypaware/codex']
   )
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 0, stderr: '' }),
+    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
     waitForConverge: async () => ({ ok: true, attached: ['claude'] }),
     resolveLayered: async () => lc,
   })
@@ -167,7 +174,7 @@ test('runWizardJoin: convergence with no central-owned rows locks nothing', asyn
   // A central layer exists but owns a different plugin; codex stays local.
   const lc = layered(['@hypaware/claude'], ['@hypaware/claude', '@hypaware/codex'])
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 0, stderr: '' }),
+    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
     waitForConverge: async () => ({ ok: true, attached: ['claude'] }),
     resolveLayered: async () => lc,
   })
@@ -183,7 +190,7 @@ test('runWizardJoin: a convergence timeout narrates and returns an empty lock se
   const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
   let resolved = false
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 0, stderr: '' }),
+    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
     waitForConverge: async () => ({ ok: false, attached: [] }),
     // resolveLayered must never run on the timeout path (nothing to lock).
     resolveLayered: async () => { resolved = true; return layered([], []) },
@@ -199,7 +206,7 @@ test('runWizardJoin: passes the org-config wait budget through to the converge h
   /** @type {any} */
   let sawWaitOpts = null
   const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 0, stderr: '' }),
+    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
     waitForConverge: async (_o, waitOpts) => { sawWaitOpts = waitOpts; return { ok: false, attached: [] } },
   })
   await runWizardJoin(opts)

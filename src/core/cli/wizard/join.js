@@ -9,10 +9,7 @@ import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../../runtime/boot.js'
 import {
-  LOGIN_NO_MEMBERSHIP_MESSAGE,
-  LOGIN_ORG_NOT_PERMITTED_MESSAGE,
-  LOGIN_ORG_SELECTION_MESSAGE,
-  runRemoteLogin,
+  remoteLogin,
   waitForCentralConverge,
 } from '../remote_commands.js'
 import { classifyClientProvenance } from './provenance.js'
@@ -28,7 +25,7 @@ export const ORG_CONFIG_WAIT_MS = 60000
 /**
  * The wizard's join phase (LLP 0135 #join). A thin narration wrapper around
  * the existing `hyp remote login` machinery, never a second enrollment
- * mechanism (`@ref LLP 0134#login-lane`): it runs `runRemoteLogin`, waits
+ * mechanism (`@ref LLP 0134#login-lane`): it runs the login lane, waits
  * (bounded) for the daemon to converge on the org config, and computes the
  * set of picker source ids the central layer owns so the pick phase can
  * lock them (`@ref LLP 0129#join-before-picker`).
@@ -43,7 +40,7 @@ export const ORG_CONFIG_WAIT_MS = 60000
  *   empty lock set rather than blocking - nothing is pinned, so the picker
  *   composes freely (LLP 0129).
  *
- * @ref LLP 0134#login-lane [implements]: "Join a team" wraps `runRemoteLogin`; the wizard adds narration and the locked-row computation, not a second enrollment path.
+ * @ref LLP 0134#login-lane [implements]: "Join a team" wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
  *
  * @param {RunWizardJoinOptions} opts
  * @returns {Promise<WizardJoinResult>}
@@ -93,7 +90,7 @@ async function runJoinFlow(opts, span) {
     const status = classifyLoginFailure(login)
     setSpanAttr(span, 'status', 'error')
     setSpanAttr(span, Attr.ERROR_KIND, status === 'failed' ? 'login_rejected' : 'login_abandoned')
-    return { status, detail: login.stderr }
+    return { status, detail: login.stderr, ...(login.reason ? { reason: login.reason } : {}) }
   }
 
   opts.stdout.write("Applying your org's configuration...\n")
@@ -141,39 +138,42 @@ export async function computeCentralLockedSources(opts) {
 
 /**
  * Map an incomplete login to the fork-returning outcome (LLP 0129
- * #failed-join-returns-to-fork). The login lane already wrote the human
- * explanation to stderr via `explainLoginError`; we only classify by
- * matching the *definitive* D7 rejection phrases it emits:
- * `no_membership` and `org_not_permitted` mean an admin has to act, and
- * `org_selection_required` (a multi-org account) needs an explicit
- * `hyp remote login --org <name>` the wizard's bare login cannot supply.
- * Retrying the same login is futile for all three -> `'failed'`.
- * Anything else - a transient network error, a login timeout, an
- * abandoned browser flow, a store/seed failure - is retriable, so ->
- * `'abandoned'`.
+ * #failed-join-returns-to-fork), reading the login lane's reason code.
+ * The *definitive* D7 rejections are `no_membership` and
+ * `org_not_permitted` (an admin has to act) and `org_selection_required`
+ * (a multi-org account needs an explicit `hyp remote login --org <name>`
+ * the wizard's bare login cannot supply). Retrying the same login is
+ * futile for all three -> `'failed'`. Anything else - a provider denial,
+ * a transient network error, a login timeout, an abandoned browser flow,
+ * a store/seed failure - is retriable, so -> `'abandoned'`.
  *
- * @ref LLP 0058#d7 [constrained-by]: reuses the login lane's existing membership/permission taxonomy rather than re-encoding it
- * @param {Pick<LoginLaneResult, 'stderr'>} login
+ * A lane result with no reason (an old-shaped test double) classifies as
+ * retriable, which is the same answer the stderr matcher gave when it
+ * recognized nothing.
+ *
+ * @ref LLP 0058#d7 [constrained-by]: the three definitive reasons are the D7 refusal codes verbatim, so the split is the server's taxonomy and not a wizard-local one
+ * @ref LLP 0179#no-prose-control-flow [implements]: classify on the reason code, never on the lane's English
+ * @param {Pick<LoginLaneResult, 'reason'>} login
  * @returns {'failed' | 'abandoned'}
  */
 export function classifyLoginFailure(login) {
-  const stderr = login?.stderr ?? ''
-  if (
-    stderr.includes(LOGIN_NO_MEMBERSHIP_MESSAGE) ||
-    stderr.includes(LOGIN_ORG_NOT_PERMITTED_MESSAGE) ||
-    stderr.includes(LOGIN_ORG_SELECTION_MESSAGE)
-  ) {
-    return 'failed'
+  switch (login?.reason) {
+    case 'no_membership':
+    case 'org_not_permitted':
+    case 'org_selection_required':
+      return 'failed'
+    default:
+      return 'abandoned'
   }
-  return 'abandoned'
 }
 
 /**
  * The production login lane: run `hyp remote login` (bare, so it resolves
  * the default target and the browser flow, `@ref LLP 0134#no-token-join`
- * - the wizard never passes a token) against the wizard's command context,
- * teeing its stderr so `classifyLoginFailure` can read the D7 phrase while
- * the user still sees the login lane's own output.
+ * - the wizard never passes a token) against the wizard's command context.
+ * `remoteLogin` reports the outcome, so classification reads a code; the
+ * stderr tee stays for `detail`, which echoes the lane's own explanation
+ * back to the user (LLP 0179#no-prose-control-flow).
  *
  * @param {RunWizardJoinOptions} opts
  * @returns {Promise<LoginLaneResult>}
@@ -185,8 +185,8 @@ async function defaultRunLogin(opts) {
   }
   const capture = teeWriter(ctx.stderr)
   const teed = /** @type {CommandRunContext} */ ({ ...ctx, stderr: capture.stream })
-  const exitCode = await runRemoteLogin([], teed, {})
-  return { exitCode, stderr: capture.text() }
+  const { exitCode, reason } = await remoteLogin([], teed, {})
+  return { exitCode, reason, stderr: capture.text() }
 }
 
 /**
@@ -211,7 +211,7 @@ async function defaultResolveLayered(opts) {
 /**
  * A write-through capture over a stream's `write`: every chunk is recorded
  * and forwarded to the underlying stream, so the login lane's stderr is both
- * shown to the user and available to `classifyLoginFailure`.
+ * shown to the user and available as the failure `detail`.
  *
  * @param {{ write(chunk: string): unknown }} target
  * @returns {{ stream: { write(chunk: string): unknown }, text(): string }}
