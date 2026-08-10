@@ -395,7 +395,10 @@ that installed it before LLP 0142 stops advertising it.
 
 ## Open questions
 
-1. **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
+1. **Superseded-by: LLP 0208** (2026-08-10: the renderer converts in process via
+   `marked`; server-side generation made the binary dependency and its blocking
+   subprocess a problem, exactly the escape hatch named below).
+   **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
    whether `hyp report render` should keep pandoc as a hard dependency or
    render Markdown in-process. `.github/workflows/ci.yml` runs on
    `ubuntu-latest` (Node 22 and 24), so adding pandoc is a one-line

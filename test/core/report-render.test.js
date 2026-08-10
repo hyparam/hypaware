@@ -9,8 +9,8 @@
  * The shell original could not be covered at all: it is macOS-only and CI is
  * `ubuntu-latest`. These assertions are the skill's step-6 checklist, promoted to code.
  *
- * pandoc is a hard dependency (LLP 0196 open question 1). CI installs it, so these run
- * there; a contributor without it gets a skip rather than a failure.
+ * Rendering is in-process (LLP 0208), so these run everywhere with no skip guard:
+ * a renderer with no external dependency has no excuse for untested paths.
  */
 
 import test from 'node:test'
@@ -19,9 +19,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { discoverSections, docLabel, hasPandoc, masthead, pageTitle, renderReports } from '../../src/core/reports/render.js'
-
-const skip = hasPandoc() ? false : 'pandoc not installed'
+import { discoverSections, docLabel, masthead, pageTitle, renderReports } from '../../src/core/reports/render.js'
 
 const SLUG = '2026-08-02-usage-review'
 const OTHER = '2026-07-21-usage-review'
@@ -92,7 +90,7 @@ function fixtureTree() {
   return dir
 }
 
-test('renderReports builds every report and no stale output', { skip }, () => {
+test('renderReports builds every report and no stale output', () => {
   const dir = fixtureTree()
   const result = renderReports({ dir })
 
@@ -112,7 +110,7 @@ test('renderReports builds every report and no stale output', { skip }, () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('no built page keeps a .md href', { skip }, () => {
+test('no built page keeps a .md href', () => {
   const dir = fixtureTree()
   renderReports({ dir })
 
@@ -128,7 +126,7 @@ test('no built page keeps a .md href', { skip }, () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('every page carries a copy action, and every report a full.md payload', { skip }, () => {
+test('every page carries a copy action, and every report a full.md payload', () => {
   const dir = fixtureTree()
   renderReports({ dir })
 
@@ -148,7 +146,7 @@ test('every page carries a copy action, and every report a full.md payload', { s
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('one-pagers link back to the landing page, sections back to their report', { skip }, () => {
+test('one-pagers link back to the landing page, sections back to their report', () => {
   const dir = fixtureTree()
   renderReports({ dir })
 
@@ -164,7 +162,7 @@ test('one-pagers link back to the landing page, sections back to their report', 
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('theme.css is created once, never overwritten, and reaches every page', { skip }, () => {
+test('theme.css is created once, never overwritten, and reaches every page', () => {
   // @ref LLP 0196#theme-layer [tests]: the base sheet is the command's and the theme is
   // the user's, which is what removes the "customization or rot?" guess
   const dir = fixtureTree()

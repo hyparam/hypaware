@@ -8,15 +8,19 @@
  *
  * The shell original is macOS-only (`sed -E -i ''` is the BSD spelling, and `sips`
  * regenerates the PNG favicon), which meant the renderer could not run in CI at all:
- * `.github/workflows/ci.yml` is `ubuntu-latest`. Nothing here shells out to either.
- * pandoc is still a hard dependency (LLP 0196 open question 1, resolved: keep it, and
- * install it in CI).
+ * `.github/workflows/ci.yml` is `ubuntu-latest`. Nothing here shells out to anything:
+ * Markdown converts in process via `marked` (LLP 0208, superseding LLP 0196 open
+ * question 1's keep-pandoc resolution). The one pandoc property the component
+ * vocabulary relied on, gfm passing raw HTML through untouched, is marked's default
+ * behavior, measured across a real reports tree before the swap
+ * (hypaware-server LLP 0110).
  */
 
-import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import url from 'node:url'
+
+import { Marked } from 'marked'
 
 import { renderLandingPage } from './landing.js'
 
@@ -30,9 +34,9 @@ const ASSET_DIR = path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'a
 const TREE_ASSETS = ['style.css', 'copy-md.js', 'head.html', 'favicon.svg', 'favicon.png']
 
 /**
- * Copied beside every built page. `head.html` is deliberately absent: pandoc inlines it
- * into each page's `<head>` via `-H`, so shipping it as a page asset would be dead
- * weight in every output directory.
+ * Copied beside every built page. `head.html` is deliberately absent: it is inlined
+ * into each page's `<head>` at render time, so shipping it as a page asset would be
+ * dead weight in every output directory.
  */
 const PAGE_ASSETS = ['style.css', 'favicon.svg', 'favicon.png', 'copy-md.js']
 
@@ -153,25 +157,84 @@ export function discoverSections(dir, slug) {
     .sort()
 }
 
+/** @param {string} value */
+function escapeHtml(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
+
 /**
+ * pandoc-style heading id: lowercased, markup and punctuation stripped, spaces
+ * to hyphens. Existing in-page anchors were minted by pandoc, so the slug rule
+ * has to keep producing the same ids or every one of them dangles.
+ *
+ * @param {string} text heading text, possibly carrying inline HTML
+ */
+function headingId(text) {
+  return text
+    .toLowerCase()
+    .replace(/<[^>]*>/g, '')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+}
+
+/**
+ * One converter instance, configured once. gfm is the load-bearing option: it is
+ * what passes the component vocabulary's raw HTML through byte-for-byte
+ * (measured, indentation included), which is the property the whole authoring
+ * contract stands on. The heading renderer adds the ids pandoc generated and
+ * marked does not; a repeated heading gets a `-1` suffix like pandoc's.
+ *
+ * @ref LLP 0208#pure-js [implements]: gfm to HTML in process, no subprocess, no binary dependency
+ */
+function createConverter() {
+  const marked = new Marked({ gfm: true, breaks: false })
+  /** @type {Map<string, number>} */
+  const seen = new Map()
+  marked.use({
+    renderer: {
+      heading({ tokens, depth }) {
+        const inner = this.parser.parseInline(tokens)
+        const base = headingId(inner)
+        const n = seen.get(base) ?? 0
+        seen.set(base, n + 1)
+        const id = n === 0 ? base : `${base}-${n}`
+        return `<h${depth} id="${id}">${inner}</h${depth}>\n`
+      },
+    },
+  })
+  return marked
+}
+
+/**
+ * Render one page: masthead plus converted Markdown, wrapped in the standalone
+ * document pandoc's `-s` used to emit. The base stylesheet is linked before the
+ * inlined `head.html` on purpose: head.html links `theme.css`, and the theme
+ * must load after the base sheet so user overrides win (LLP 0196#theme-layer).
+ *
  * @param {string} markdown
  * @param {string} nav
  * @param {string} label
  * @param {string} title
- * @param {string} cwd
+ * @param {string} dir the reports tree root, where `assets/head.html` lives
  */
-function pandocPage(markdown, nav, label, title, cwd) {
-  return execFileSync(
-    'pandoc',
-    [
-      '-f', 'gfm',
-      '-t', 'html5',
-      '-s',
-      '--css', 'assets/style.css',
-      '-H', 'assets/head.html',
-      '--metadata', `pagetitle=${title}`,
-    ],
-    { cwd, input: masthead(nav, label) + markdown, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+function htmlPage(markdown, nav, label, title, dir) {
+  const head = fs.readFileSync(path.join(dir, 'assets', 'head.html'), 'utf8').trimEnd()
+  const body = createConverter().parse(masthead(nav, label) + markdown)
+  return (
+    '<!doctype html>\n<html lang="en">\n<head>\n' +
+    '<meta charset="utf-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+    `<title>${escapeHtml(title)}</title>\n` +
+    '<link rel="stylesheet" href="assets/style.css">\n' +
+    `${head}\n` +
+    '</head>\n<body>\n' +
+    body +
+    '</body>\n</html>\n'
   )
 }
 
@@ -184,8 +247,6 @@ function pandocPage(markdown, nav, label, title, cwd) {
  */
 export function renderReports(options) {
   const dir = path.resolve(options.dir)
-
-  if (!hasPandoc()) throw new Error('pandoc not found (brew install pandoc / apt-get install pandoc)')
 
   const assetsDir = path.join(dir, 'assets')
   fs.mkdirSync(assetsDir, { recursive: true })
@@ -288,7 +349,7 @@ function buildReport(dir, htmlDir, slug) {
   const indexNav =
     '<a href="../../index.html">&#8592; All reports</a> ' +
     '<a href="#" class="copy-md" data-src="full.md">Copy report as Markdown</a>'
-  const indexHtml = pandocPage(source, indexNav, label, pageTitle(source, slug), dir)
+  const indexHtml = htmlPage(source, indexNav, label, pageTitle(source, slug), dir)
   fs.writeFileSync(path.join(out, 'index.html'), rewriteHrefs(indexHtml, slug, 'index'))
 
   for (const section of sections) {
@@ -298,17 +359,7 @@ function buildReport(dir, htmlDir, slug) {
     const nav =
       '<a href="index.html">&#8592; Back to the report</a> ' +
       `<a href="#" class="copy-md" data-src="${base}.md">Copy page as Markdown</a>`
-    const html = pandocPage(text, nav, label, pageTitle(text, base), dir)
+    const html = htmlPage(text, nav, label, pageTitle(text, base), dir)
     fs.writeFileSync(path.join(out, `${base}.html`), rewriteHrefs(html, slug, 'section'))
-  }
-}
-
-/** @returns {boolean} */
-export function hasPandoc() {
-  try {
-    execFileSync('pandoc', ['--version'], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
   }
 }

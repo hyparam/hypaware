@@ -619,8 +619,6 @@ function buildCoreCommands(registry) {
         'and assets/theme.css is yours: it is copied into each page but never',
         'overwritten. Pass --no-refresh-assets to leave the other assets alone',
         'too.',
-        '',
-        'Requires pandoc.',
       ].join('\n'),
       run: runReportRender,
     },
