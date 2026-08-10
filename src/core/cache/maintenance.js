@@ -496,7 +496,7 @@ function estimateRowBytes(row) {
  * `cfg.target_file_bytes`. Tying the file boundary to the in-memory
  * estimate instead made every flush its own file, and a column that
  * compresses 70x turned a 32 MB batch into a 0.5 MB data file, so
- * `target_file_bytes` was unreachable by construction (LLP 0206).
+ * `target_file_bytes` was unreachable by construction (LLP 0208).
  *
  * Holding a file open is not free: peak heap is the batch, plus one row
  * group of encoded bytes, PLUS the row-group metadata every open parquet
@@ -505,9 +505,9 @@ function estimateRowBytes(row) {
  * `openStreamingAppend` budgets it and rolls a file early when it binds
  * before the byte target does.
  *
- * @ref LLP 0206#decision [implements]: heap bounds the batch, written
+ * @ref LLP 0208#decision [implements]: heap bounds the batch, written
  *   bytes bound the file.
- * @ref LLP 0206#retained-metadata [constrained-by]: a bigger file target
+ * @ref LLP 0208#retained-metadata [constrained-by]: a bigger file target
  *   costs retained row-group metadata, which is separately bounded.
  * @param {string} partitionDir
  * @param {GenerationLayout} layout

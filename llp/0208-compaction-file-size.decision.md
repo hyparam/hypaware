@@ -1,4 +1,4 @@
-# LLP 0206: Compaction file size follows bytes written, not the batch estimate
+# LLP 0208: Compaction file size follows bytes written, not the batch estimate
 
 **Type:** Decision
 **Status:** Accepted

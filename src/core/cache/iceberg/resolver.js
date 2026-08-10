@@ -117,9 +117,9 @@ function asyncBufferFromBytes(bytes) {
  * streaming append keep one output file per partition tuple open across
  * a whole rewrite without one descriptor per tuple.
  *
- * @ref LLP 0206#row-groups [implements]: flush-per-row-group is what keeps
+ * @ref LLP 0208#row-groups [implements]: flush-per-row-group is what keeps
  *   a large output file from becoming a large allocation.
- * @ref LLP 0206#descriptor-parking [implements]: the descriptor is
+ * @ref LLP 0208#descriptor-parking [implements]: the descriptor is
  *   reclaimable; the open file is not the thing being capped.
  * @param {new (initialSize?: number) => Writer} ByteWriter
  * @param {string} filePath

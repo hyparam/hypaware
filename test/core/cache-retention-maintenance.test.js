@@ -611,7 +611,7 @@ test('normalizeMaintenanceConfig honours an explicit compact_batch_bytes', () =>
   assert.equal(cfg.compact_batch_bytes, 1234)
 })
 
-// @ref LLP 0206#row-groups [tests]: the byte budget still bounds a batch, but
+// @ref LLP 0208#row-groups [tests]: the byte budget still bounds a batch, but
 // what it produces is a row group, not a data file.
 test('compaction flushes by byte budget so a fat column cannot blow up one batch', async () => {
   const cacheRoot = await makeTmpDir('maint-bytecap')

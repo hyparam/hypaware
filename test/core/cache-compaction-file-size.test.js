@@ -116,7 +116,7 @@ async function tempWriteFiles(dir) {
   }
 }
 
-// @ref LLP 0206#decision [tests]: one compacted file per byte target, not
+// @ref LLP 0208#decision [tests]: one compacted file per byte target, not
 // one per in-memory batch estimate.
 test('compaction sizes output files by bytes written, not the in-memory batch estimate', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-size-'))
@@ -164,7 +164,7 @@ test('compaction sizes output files by bytes written, not the in-memory batch es
   }
 })
 
-// @ref LLP 0206#decision [tests]: the file boundary follows `target_file_bytes`.
+// @ref LLP 0208#decision [tests]: the file boundary follows `target_file_bytes`.
 test('compaction rolls to a new data file once target_file_bytes is written', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-roll-'))
   try {
@@ -209,7 +209,7 @@ test('compaction rolls to a new data file once target_file_bytes is written', as
   }
 })
 
-// @ref LLP 0206#descriptor-parking [tests]: the fan-out a rewrite converges
+// @ref LLP 0208#descriptor-parking [tests]: the fan-out a rewrite converges
 // to is the tuple count, not the descriptor cap.
 test('compaction converges past the descriptor cap when a partition holds more tuples than it', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-tuples-'))
@@ -262,7 +262,7 @@ test('compaction converges past the descriptor cap when a partition holds more t
   }
 })
 
-// @ref LLP 0206#descriptor-parking [tests]: a parked file is still open, so
+// @ref LLP 0208#descriptor-parking [tests]: a parked file is still open, so
 // the descriptor cap bounds descriptors and nothing else.
 test('a streaming append holds one file per tuple open while capping descriptors', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-parking-'))
@@ -321,7 +321,7 @@ test('a streaming append holds one file per tuple open while capping descriptors
   }
 })
 
-// @ref LLP 0206#retained-metadata [tests]: an open file's retained row-group
+// @ref LLP 0208#retained-metadata [tests]: an open file's retained row-group
 // metadata is budgeted, so an unreachable byte target still rolls.
 test('a streaming append rolls on retained row-group metadata, not only on target_file_bytes', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-stats-'))
@@ -370,7 +370,7 @@ test('a streaming append rolls on retained row-group metadata, not only on targe
   }
 })
 
-// @ref LLP 0206#consequences [tests]: an append that throws part-way must
+// @ref LLP 0208#consequences [tests]: an append that throws part-way must
 // not leave its descriptors and temp files behind for the next tick.
 test('aborting a streaming append releases every open descriptor and temp file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-abort-'))

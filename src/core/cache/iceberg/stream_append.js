@@ -55,7 +55,7 @@ import { rowsToIcebergRecords } from './schema.js'
  * readers, and 64 stays well inside the soft limits it runs under
  * (commonly 1024 on Linux, 256 under macOS launchd).
  *
- * @ref LLP 0206#descriptor-parking [implements]: cap descriptors, not
+ * @ref LLP 0208#descriptor-parking [implements]: cap descriptors, not
  *   open files.
  */
 const MAX_OPEN_DESCRIPTORS = 64
@@ -81,7 +81,7 @@ const MAX_OPEN_DESCRIPTORS = 64
  * The budget is global rather than per-file on purpose. A per-file cap
  * has to be divided by the number of files that may be open to bound the
  * aggregate, which would force files down to a few megabytes for fat
- * rows: the exact defect LLP 0206 set out to fix. A global budget spends
+ * rows: the exact defect LLP 0208 set out to fix. A global budget spends
  * itself on whichever files are actually open, so a single-tuple rewrite
  * reaches `target_file_bytes` and a wide fan-out rolls earlier instead.
  * 32 MiB matches the default `compact_batch_bytes`, so the streaming
@@ -95,7 +95,7 @@ const MAX_OPEN_DESCRIPTORS = 64
  * to matter is closed out by the budget long before the open files
  * themselves become a heap term.
  *
- * @ref LLP 0206#retained-metadata [implements]: bound the row-group
+ * @ref LLP 0208#retained-metadata [implements]: bound the row-group
  *   metadata an open file pins.
  */
 const MAX_OPEN_STATS_BYTES = 32 * 1024 * 1024
@@ -125,9 +125,9 @@ const ROW_GROUP_STATS_OVERHEAD_BYTES = 1024
  * every open file pins until its footer is written - and that third term
  * is what `MAX_OPEN_STATS_BYTES` bounds.
  *
- * @ref LLP 0206#row-groups [implements]: batches become row groups; files
+ * @ref LLP 0208#row-groups [implements]: batches become row groups; files
  *   roll on bytes written.
- * @ref LLP 0206#retained-metadata [implements]: and on retained row-group
+ * @ref LLP 0208#retained-metadata [implements]: and on retained row-group
  *   metadata, so the file bound cannot reintroduce an unbounded heap term.
  * @param {object} options
  * @param {string} options.tableDir
@@ -268,7 +268,7 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
    * module with another today) can only be retired by closing its file,
    * which is the old behaviour and the old cliff.
    *
-   * @ref LLP 0206#descriptor-parking [implements]: park the descriptor,
+   * @ref LLP 0208#descriptor-parking [implements]: park the descriptor,
    *   keep the file.
    * @param {string} key
    * @param {OpenCompactionFile} file
@@ -604,7 +604,7 @@ async function commitDataFiles({
  * icebird's own writer costs one tiny in-memory encode per compaction and
  * is exact by construction.
  *
- * @ref LLP 0206#schema-probe: derive the parquet schema from icebird rather
+ * @ref LLP 0208#schema-probe: derive the parquet schema from icebird rather
  *   than copying its mapping.
  * @param {Schema} schema
  * @param {any} codec
