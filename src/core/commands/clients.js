@@ -1013,7 +1013,7 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
  * @returns {string | undefined}
  * @ref LLP 0172#lane-a-detach [implements]: detachClientViaCore resolves the gateway base URL through the existing AiGatewayCapability lookup plus the manual path's fallbacks, and threads it into the one core undo
  */
-function resolveExpectedGatewayBaseUrl(ctx) {
+export function resolveExpectedGatewayBaseUrl(ctx) {
   // Every rung is wrapped, and the whole walk is optional. Detach is reached
   // with the capability registry, the config, or the state dir missing - that
   // is the point of resolving the undo ahead of the capability gate - so a rung
@@ -1058,10 +1058,15 @@ function resolveExpectedGatewayBaseUrl(ctx) {
  * reversal alike - because the read-then-remove lives here, next to the clear,
  * rather than in one caller (LLP 0138 #marker-undo).
  *
- * `quiet` suppresses this routine's own stdout prose (never its stderr
- * warnings, which name files left behind) and hands the result back instead,
- * for a caller sweeping every client at once and rendering one summary of the
- * few that had anything to reverse.
+ * `quiet` suppresses this routine's own stdout prose, warnings included, and
+ * hands the full result back instead: a quiet caller takes on the duty of
+ * rendering `result.warning` and `result.restoredPaths` itself, because those
+ * lines can be the only surviving copy of what the undo left behind. The
+ * asset-refusal stderr writes stay unconditional either way.
+ *
+ * `expectedBaseUrl` overrides this routine's own gateway-origin resolution,
+ * for a caller that resolved it earlier, while the fact was still resolvable
+ * (the uninstall sweep resolves it before tearing the service down).
  *
  * @param {{
  *   name: string,
@@ -1069,12 +1074,13 @@ function resolveExpectedGatewayBaseUrl(ctx) {
  *   dryRun: boolean,
  *   json: boolean,
  *   quiet?: boolean,
+ *   expectedBaseUrl?: string,
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<DetachFromDiskResult | undefined>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, expectedBaseUrl, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -1118,7 +1124,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
           descriptor,
           homeDir,
           env: ctx.env,
-          expectedBaseUrl: resolveExpectedGatewayBaseUrl(ctx),
+          expectedBaseUrl: expectedBaseUrl ?? resolveExpectedGatewayBaseUrl(ctx),
         })
         const restored = result.changed === true
         span.setAttribute('status', 'ok')
@@ -1249,15 +1255,26 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
  * something to reverse. Per-client failures are collected rather than thrown so
  * one wedged client cannot strand the rest still attached.
  *
+ * Each `detached` entry carries the undo's own `warning` and `restoredPaths`
+ * forward. The sweep runs the undo quiet, so these fields are the only copy of
+ * notices like "overridden externally; leaving in place" - a caller that drops
+ * them reports a detach as clean when the user still has a file to fix.
+ *
+ * `expectedBaseUrl` is the gateway origin the caller resolved while it was
+ * still resolvable. The sweep runs after service teardown, when every rung of
+ * this file's own resolution is dead, so without it the `json_path` undo
+ * cannot judge entry ownership.
+ *
  * @param {CommandRunContext} ctx
+ * @param {string} [expectedBaseUrl]
  * @returns {Promise<{
- *   detached: { name: string, settingsPath?: string }[],
+ *   detached: { name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[],
  *   failed: { name: string, message: string }[],
  * }>}
  * @ref LLP 0206#d1 [implements]: uninstalling the service detaches the clients it was serving
  */
-export async function detachAllClientsFromDisk(ctx) {
-  /** @type {{ name: string, settingsPath?: string }[]} */
+export async function detachAllClientsFromDisk(ctx, expectedBaseUrl) {
+  /** @type {{ name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[]} */
   const detached = []
   /** @type {{ name: string, message: string }[]} */
   const failed = []
@@ -1270,12 +1287,17 @@ export async function detachAllClientsFromDisk(ctx) {
         dryRun: false,
         json: false,
         quiet: true,
+        ...(expectedBaseUrl !== undefined ? { expectedBaseUrl } : {}),
         ctx,
       })
       if (result?.changed === true) {
         detached.push({
           name,
           ...(result.settingsPath !== undefined ? { settingsPath: result.settingsPath } : {}),
+          ...(result.removed !== undefined ? { removed: result.removed } : {}),
+          ...(result.restoredValue !== undefined ? { restoredValue: result.restoredValue } : {}),
+          ...(result.restoredPaths !== undefined ? { restoredPaths: result.restoredPaths } : {}),
+          ...(result.warning !== undefined ? { warning: result.warning } : {}),
         })
       }
     } catch (err) {

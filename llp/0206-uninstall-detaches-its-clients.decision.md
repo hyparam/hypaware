@@ -53,6 +53,24 @@ implementation to drift. It asks every known client rather than probing first:
 the undo is already an honest no-op on a client that was never attached, so a
 machine with nothing attached prints nothing extra.
 
+Ordering has a wrinkle: the one fact the undo needs that dies with the daemon
+is captured before the teardown. The `json_path` format judges provider-entry
+ownership by the gateway's own base origin, and every rung of that resolution
+(a bound capability, a configured `listen`, the live status file behind a
+living pid) stops answering once the service is gone. So the command resolves
+the origin while the daemon can still be asked, then tears down, then hands the
+resolved origin to the sweep. And "honest no-op on a never-attached client"
+holds even when the origin was unresolvable: a config that names the same
+provider keys but carries no HypAware signature (the marker header is
+HypAware's own name) has nothing to reverse, so it is skipped rather than
+failed. Only an entry that is ours by signature but whose origin cannot be
+confirmed fails the sweep, because both guesses there are destructive.
+
+The sweep runs the undo quiet and re-renders its result itself, warnings
+included: a notice like "overridden externally; leaving in place" is the only
+record that a detach reported here still leaves the user a file to fix, so
+dropping it would turn a half-finished detach into a silent one.
+
 Per-client failures are collected, not thrown. One wedged client must not leave
 the rest attached; each failure names the client and the `hyp detach <client>`
 that finishes it, and the command exits nonzero.
@@ -70,8 +88,11 @@ necessary (the port is gone for good), not to daemon lifecycle generally.
   the lower-level state it would leave behind is broken rather than merely
   stale**, and never up.
 - `hyp daemon uninstall` is no longer a pure service-level operation: it edits
-  `~/.claude/settings.json` and `~/.codex/config.toml`. It says which files it
-  touched, by path, for exactly that reason.
+  the settings file of every attached client (`~/.claude/settings.json`,
+  `~/.codex/config.toml`, `~/.openclaw/openclaw.json`, and whatever clients are
+  added later). It says which files it touched, by path, for exactly that
+  reason, and user-facing text names no fixed client list, so a new client
+  adapter joins the sweep without a docs change.
 - A reinstall flow (`uninstall` then `install`) now needs `hyp attach` again.
   That is the honest cost of the trade, and the reason no opt-out flag exists:
   the flow that wants the attach preserved is `hyp daemon restart`, which never

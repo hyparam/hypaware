@@ -780,11 +780,22 @@ async function detachJsonPathProviders({
   // ours; anything else at the key is not.
   const ours = ownedBaseUrls(expectedBaseUrl)
   if (present.length > 0 && ours === undefined) {
-    // Without the gateway's own base URL there is no way to tell our entry from
-    // the user's, and both wrong answers are destructive (delete a value we
-    // never wrote, or leave the client routed at a dead port and report the
-    // undo done). Fail loudly: the reconciler's reverse() keeps the marker and
-    // retries, `hyp detach` prints the reason.
+    // The marker header is a positive HypAware signature independent of the
+    // URL ("nothing else writes that triple"), so when no present entry
+    // carries it this file holds only the user's own providers and there is
+    // nothing to reverse: an honest no-op, not a failure. A client that was
+    // never attached must not fail its detach just because its config names
+    // the same provider keys attach would have used.
+    // @ref LLP 0206#d1 [constrained-by]: the undo stays an honest no-op on a never-attached client even when the gateway origin is unknown
+    const anyOurs = present.some((key) =>
+      isOwnedProviderEntry(/** @type {Record<string, unknown>} */ (providers)[key], key, markerHeader, undefined)
+    )
+    if (!anyOurs) return { changed: false, settingsPath }
+    // An entry that IS ours by signature but whose origin we cannot confirm:
+    // both wrong answers are destructive (delete a value we never wrote, or
+    // leave the client routed at a dead port and report the undo done). Fail
+    // loudly: the reconciler's reverse() keeps the marker and retries,
+    // `hyp detach` prints the reason.
     throw new ClientDetachError(
       `cannot reverse ${settingsPath}: the gateway's base URL is unknown, ` +
       'so a provider entry HypAware wrote cannot be told from one it did not',

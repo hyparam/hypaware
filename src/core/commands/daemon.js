@@ -242,14 +242,15 @@ export async function runDaemonInstall(argv, ctx) {
  * The detach sweep is the exception to "each connection level exits with its
  * own verb" (LLP 0063 #connection-levels): an attached client points at the
  * local gateway port, and once the service is gone that port answers nothing,
- * so leaving the attach in place leaves Claude and Codex broken rather than
- * merely unmonitored.
+ * so leaving the attach in place leaves every attached client broken rather
+ * than merely unmonitored.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ uninstallDaemon?: typeof import('../daemon/install.js').uninstallDaemon }} [deps] test seam for the service teardown
  * @ref LLP 0206#d1 [implements]: uninstall reaches down to level 1 so it cannot leave clients pointed at a dead port
  */
-export async function runDaemonUninstall(argv, ctx) {
+export async function runDaemonUninstall(argv, ctx, deps = {}) {
   for (const token of argv) {
     if (token === '--help' || token === '-h') {
       ctx.stdout.write('usage: hyp daemon uninstall\n')
@@ -259,9 +260,18 @@ export async function runDaemonUninstall(argv, ctx) {
     return 2
   }
   const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
+  const { detachAllClientsFromDisk, resolveExpectedGatewayBaseUrl } = await import('./clients.js')
   const homeDir = ctx.env.HOME
+  // Resolved BEFORE teardown, while the daemon can still answer: the sweep's
+  // json_path undo judges entry ownership by the gateway's own origin, and
+  // every rung of the resolution (bound capability, configured listen, live
+  // status behind a living pid) is dead once the service is gone. Resolving
+  // after teardown is how a sweep fails to detach the very clients it exists
+  // to rescue.
+  // @ref LLP 0206#d1 [implements]: the one fact the undo needs that dies with the daemon is captured while it is alive
+  const expectedBaseUrl = resolveExpectedGatewayBaseUrl(ctx)
   try {
-    await uninstallDaemon({ ...(homeDir !== undefined ? { homeDir } : {}) })
+    await (deps.uninstallDaemon ?? uninstallDaemon)({ ...(homeDir !== undefined ? { homeDir } : {}) })
     ctx.stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -271,27 +281,41 @@ export async function runDaemonUninstall(argv, ctx) {
   // Only reached once the service is actually gone: a failed uninstall leaves a
   // daemon still serving that port, and detaching from it would break capture
   // for no reason.
-  const { detachAllClientsFromDisk } = await import('./clients.js')
   /** @type {Awaited<ReturnType<typeof detachAllClientsFromDisk>>} */
   let sweep
   try {
-    sweep = await detachAllClientsFromDisk(ctx)
+    sweep = await detachAllClientsFromDisk(ctx, expectedBaseUrl)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)
-    ctx.stderr.write("  the service is gone; run 'hyp detach claude' / 'hyp detach codex' by hand\n")
+    ctx.stderr.write("  the service is gone; run 'hyp detach <client>' for each attached client by hand\n")
     return 1
   }
   for (const client of sweep.detached) {
     ctx.stdout.write(
       `  Detached ${client.name}${client.settingsPath !== undefined ? ` (${client.settingsPath})` : ''}\n`
     )
+    // The undo ran quiet, so these lines exist nowhere else: a warning here
+    // ("overridden externally; leaving in place") is the difference between a
+    // detach that finished and one the user still has to finish by hand.
+    if (client.removed !== undefined) ctx.stdout.write(`    Removed ${client.removed}\n`)
+    if (client.restoredValue !== undefined) ctx.stdout.write(`    Restored ${client.restoredValue}\n`)
+    for (const restoredPath of client.restoredPaths ?? []) {
+      ctx.stdout.write(`    Restored ${restoredPath} from the marker's malformed-block backup\n`)
+    }
+    if (client.warning !== undefined) ctx.stdout.write(`    warning: ${client.warning}\n`)
   }
   for (const failure of sweep.failed) {
     ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
     ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
   }
-  return sweep.failed.length > 0 ? 1 : 0
+  if (sweep.failed.length > 0) {
+    // Exit 1 here means the sweep, not the teardown: without this line a
+    // partly-failed sweep reads as an uninstall that did not happen.
+    ctx.stderr.write('  the service itself was removed; only the client detach needs finishing\n')
+    return 1
+  }
+  return 0
 }
 
 /**
