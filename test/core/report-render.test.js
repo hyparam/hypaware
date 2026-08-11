@@ -317,6 +317,157 @@ test('every in-page anchor resolves to an id on the page', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+/**
+ * A minimal single-file reports tree: one report, no sections. Used by the round-2
+ * pinning tests below, which each exercise one isolated construct rather than the
+ * shared VOCABULARY page.
+ *
+ * @param {string} slug
+ * @param {string} markdown
+ * @returns {string} the tree's root dir
+ */
+function onePageTree(slug, markdown) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-render-round2-'))
+  fs.writeFileSync(path.join(dir, `${slug}.md`), markdown)
+  return dir
+}
+
+test('heading ids NFC-normalize and keep combining marks, matching pandoc 3.1.11', () => {
+  // Measured against a real pandoc 3.1.11 binary (`-f gfm -t html5`): a heading spelled
+  // with a decomposed base letter plus a trailing combining acute mints the SAME id as
+  // the precomposed spelling, because pandoc normalizes to NFC before slugging; and
+  // Devanagari combining marks (vowel signs, anusvara) survive rather than being
+  // stripped as "not a letter or digit", which is what the pre-fix `[^\p{L}\p{N}_\s-]`
+  // class did to them.
+  const eDecomposed = 'e' + '́' // "e" + COMBINING ACUTE ACCENT, i.e. a decomposed "é"
+  const decomposedHeading = 'Caf' + eDecomposed + ' r' + eDecomposed + 'sum' + eDecomposed
+  const devanagariWord = 'हिंदी' // हिंदी
+
+  const dir = onePageTree(
+    'nfc',
+    ['# ' + decomposedHeading, '', '## Devanagari ' + devanagariWord, ''].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'nfc', 'index.html'), 'utf8')
+
+  assert.ok(
+    html.includes('<h1 id="café-résumé">'),
+    'a decomposed heading must mint the precomposed id pandoc mints, not "cafe-resume"',
+  )
+  assert.ok(
+    html.includes(`<h2 id="devanagari-${devanagariWord}">`),
+    'Devanagari combining marks must survive intact, not be stripped down to bare base letters',
+  )
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('numeric and named HTML entities decode before the slug rule runs, matching pandoc 3.1.11', () => {
+  // Each pairing measured against a real pandoc 3.1.11 binary. marked passes any entity
+  // it does not itself emit straight through as literal text, so without a general
+  // decoder the slug rule keeps the entity's own letters and digits.
+  const dir = onePageTree(
+    'entities',
+    [
+      '## Fees &mdash; and more',
+      '',
+      '## A &nbsp; B',
+      '',
+      '## 3 &times; 4',
+      '',
+      '## &#x27;apostrophe&#x27;',
+      '',
+      '## &#039;padded&#039;',
+      '',
+      '## Cost &AMP; usage',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'entities', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="fees--and-more">'), '&mdash; must decode, leaving pandoc\'s double hyphen')
+  assert.ok(html.includes('<h2 id="a---b">'), '&nbsp; must decode to a space pandoc then collapses and re-hyphenates')
+  assert.ok(html.includes('<h2 id="3--4">'), '&times; must decode and drop, not survive as the word "times"')
+  assert.ok(html.includes('<h2 id="apostrophe">'), '&#x27; (hex numeric) must decode to a quote, not survive as "x27"')
+  assert.ok(html.includes('<h2 id="padded">'), '&#039; (decimal numeric) must decode, not survive as "039"')
+  assert.ok(html.includes('<h2 id="cost--usage">'), '&AMP; (legacy uppercase alias) must decode like &amp; does')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('an authored &rsquo; heading resolves its own in-page anchor', () => {
+  // The finding this pins: `## What&rsquo;s next` next to a hand-written
+  // `[link](#whats-next)` used to dangle silently, verbatim the round-1 blocker's
+  // symptom, with a narrower trigger (an entity marked does not itself emit).
+  const dir = onePageTree(
+    'rsquo-anchor',
+    ['# Report', '', "Jump to [what's next](#whats-next).", '', "## What&rsquo;s next", ''].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'rsquo-anchor', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="whats-next">'), 'the &rsquo; heading must mint the same id the plain apostrophe link expects')
+
+  const ids = new Set([...html.matchAll(/\bid="([^"]*)"/g)].map((m) => m[1]))
+  const dangling = [...html.matchAll(/href="#([^"]+)"/g)].map((m) => m[1]).filter((fragment) => !ids.has(fragment))
+  assert.deepEqual(dangling, [], `the in-page link must resolve, not dangle: ${dangling}`)
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('a heading that reduces to nothing emits no id attribute, matching pandoc 3.1.11', () => {
+  // `## <emoji>` measured against pandoc 3.1.11: the first instance carries no id
+  // attribute at all; a repeat still gets pandoc's own de-dup counter running against
+  // the empty base (id="-1"), since an unauthorable anchor is still worth
+  // disambiguating from a real one.
+  const dir = onePageTree('emoji', ['# Report', '', '## \u{1F389}', '', '## \u{1F389}', ''].join('\n'))
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'emoji', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2>\u{1F389}</h2>'), 'the first empty-slug heading must carry no id attribute at all')
+  assert.doesNotMatch(html, /<h2 id="">/, 'an empty id="" attribute must never be emitted')
+  assert.ok(html.includes('<h2 id="-1">\u{1F389}</h2>'), 'a repeat of the empty heading still gets the de-dup counter')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('a loose task list still loses its bullet, matching pandoc\'s suppressed marker', () => {
+  // marked emits two different shapes depending on whether the list is "tight" (no
+  // blank line between items: the checkbox is a direct child of li) or "loose" (a
+  // blank line between items: each item's content is wrapped in a p, so the checkbox
+  // sits at li > p > input instead). The pre-fix selector only matched the tight shape.
+  const dir = onePageTree(
+    'tasklists',
+    ['# Tasks', '', '## Tight', '', '- [ ] tight one', '- [x] tight two', '', '## Loose', '', '- [ ] loose one', '', '- [x] loose two', ''].join(
+      '\n',
+    ),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'tasklists', 'index.html'), 'utf8')
+
+  assert.ok(
+    html.includes('<li><input disabled="" type="checkbox"> tight one</li>'),
+    'a tight task list keeps the checkbox as a direct child of li',
+  )
+  assert.ok(
+    html.includes('<li><p><input disabled="" type="checkbox"> loose one</p>'),
+    'a loose task list wraps the checkbox in a p, which is the shape the pre-fix selector missed',
+  )
+
+  // The stylesheet is what actually suppresses the bullet in a browser (there is no
+  // headless-browser layout check in this test tree), so the fix is pinned by asserting
+  // its selector reaches both shapes rather than only the tight one.
+  const css = fs.readFileSync(path.join(dir, 'html', 'tasklists', 'assets', 'style.css'), 'utf8')
+  assert.match(
+    css,
+    /ul:has\(> li > input\[type="checkbox"\], > li > p > input\[type="checkbox"\]\)/,
+    'the :has() selector must reach both the tight and the loose task-list shape',
+  )
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 /** @param {string} htmlDir @returns {string[]} */
 function builtPages(htmlDir) {
   /** @type {string[]} */

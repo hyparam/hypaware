@@ -167,19 +167,77 @@ function escapeHtml(value) {
 }
 
 /**
+ * name -> Unicode codepoint, for the named character references pandoc's reader
+ * recognizes. This is the classic bounded "HTML4" set (Latin-1, Greek, general
+ * punctuation and symbols), not the full ~2200-entry HTML5 spec table, which is
+ * mostly MathML additions nobody hand-types in report prose. Matching is
+ * case-sensitive against pandoc, checked against pandoc 3.1.11: `&AMP;` decodes
+ * (a legacy dual-case alias pandoc's own table carries) but `&MDASH;` and
+ * `&RSQUO;` do not, so a blind case-fold would wrongly decode those AND collide
+ * distinct entries that only differ by case (`&Alpha;` U+0391 vs `&alpha;`
+ * U+03B1). Values are codepoints, not literal characters, so no entity's
+ * decoded character needs to appear as a literal in this source file.
+ */
+const NAMED_ENTITIES = {
+  // Latin-1
+  nbsp: 160, iexcl: 161, cent: 162, pound: 163, curren: 164, yen: 165, brvbar: 166, sect: 167,
+  uml: 168, copy: 169, ordf: 170, laquo: 171, not: 172, shy: 173, reg: 174, macr: 175,
+  deg: 176, plusmn: 177, sup2: 178, sup3: 179, acute: 180, micro: 181, para: 182, middot: 183,
+  cedil: 184, sup1: 185, ordm: 186, raquo: 187, frac14: 188, frac12: 189, frac34: 190, iquest: 191,
+  Agrave: 192, Aacute: 193, Acirc: 194, Atilde: 195, Auml: 196, Aring: 197, AElig: 198, Ccedil: 199,
+  Egrave: 200, Eacute: 201, Ecirc: 202, Euml: 203, Igrave: 204, Iacute: 205, Icirc: 206, Iuml: 207,
+  ETH: 208, Ntilde: 209, Ograve: 210, Oacute: 211, Ocirc: 212, Otilde: 213, Ouml: 214, times: 215,
+  Oslash: 216, Ugrave: 217, Uacute: 218, Ucirc: 219, Uuml: 220, Yacute: 221, THORN: 222, szlig: 223,
+  agrave: 224, aacute: 225, acirc: 226, atilde: 227, auml: 228, aring: 229, aelig: 230, ccedil: 231,
+  egrave: 232, eacute: 233, ecirc: 234, euml: 235, igrave: 236, iacute: 237, icirc: 238, iuml: 239,
+  eth: 240, ntilde: 241, ograve: 242, oacute: 243, ocirc: 244, otilde: 245, ouml: 246, divide: 247,
+  oslash: 248, ugrave: 249, uacute: 250, ucirc: 251, uuml: 252, yacute: 253, thorn: 254, yuml: 255,
+  // Greek and symbols
+  fnof: 402, Alpha: 913, Beta: 914, Gamma: 915, Delta: 916, Epsilon: 917, Zeta: 918, Eta: 919,
+  Theta: 920, Iota: 921, Kappa: 922, Lambda: 923, Mu: 924, Nu: 925, Xi: 926, Omicron: 927,
+  Pi: 928, Rho: 929, Sigma: 931, Tau: 932, Upsilon: 933, Phi: 934, Chi: 935, Psi: 936,
+  Omega: 937, alpha: 945, beta: 946, gamma: 947, delta: 948, epsilon: 949, zeta: 950, eta: 951,
+  theta: 952, iota: 953, kappa: 954, lambda: 955, mu: 956, nu: 957, xi: 958, omicron: 959,
+  pi: 960, rho: 961, sigmaf: 962, sigma: 963, tau: 964, upsilon: 965, phi: 966, chi: 967,
+  psi: 968, omega: 969, thetasym: 977, upsih: 978, piv: 982, bull: 8226, hellip: 8230, prime: 8242,
+  Prime: 8243, oline: 8254, frasl: 8260, weierp: 8472, image: 8465, real: 8476, trade: 8482,
+  alefsym: 8501, larr: 8592, uarr: 8593, rarr: 8594, darr: 8595, harr: 8596, crarr: 8629,
+  lArr: 8656, uArr: 8657, rArr: 8658, dArr: 8659, hArr: 8660, forall: 8704, part: 8706, exist: 8707,
+  empty: 8709, nabla: 8711, isin: 8712, notin: 8713, ni: 8715, prod: 8719, sum: 8721, minus: 8722,
+  lowast: 8727, radic: 8730, prop: 8733, infin: 8734, ang: 8736, and: 8743, or: 8744, cap: 8745,
+  cup: 8746, int: 8747, there4: 8756, sim: 8764, cong: 8773, asymp: 8776, ne: 8800, equiv: 8801,
+  le: 8804, ge: 8805, sub: 8834, sup: 8835, nsub: 8836, sube: 8838, supe: 8839, oplus: 8853,
+  otimes: 8855, perp: 8869, sdot: 8901, lceil: 8968, rceil: 8969, lfloor: 8970, rfloor: 8971,
+  lang: 9001, rang: 9002, loz: 9674, spades: 9824, clubs: 9827, hearts: 9829, diams: 9830,
+  // Typography and legacy uppercase aliases
+  quot: 34, amp: 38, lt: 60, gt: 62, OElig: 338, oelig: 339, Scaron: 352, scaron: 353,
+  Yuml: 376, circ: 710, tilde: 732, ensp: 8194, emsp: 8195, thinsp: 8201, zwnj: 8204, zwj: 8205,
+  lrm: 8206, rlm: 8207, ndash: 8211, mdash: 8212, lsquo: 8216, rsquo: 8217, sbquo: 8218,
+  ldquo: 8220, rdquo: 8221, bdquo: 8222, dagger: 8224, Dagger: 8225, permil: 8240, lsaquo: 8249,
+  rsaquo: 8250, euro: 8364,
+  AMP: 38, LT: 60, GT: 62, QUOT: 34, COPY: 169, REG: 174,
+}
+
+/**
  * The inverse of the escaping marked's inline parser has already applied by the time
- * a renderer override sees heading text. Without it the slug rule sees `&amp;` and
- * keeps the entity's letters, minting `cost-amp-usage` for `Cost & Usage`.
+ * a renderer override sees heading text, generalized to every entity form pandoc's
+ * reader decodes rather than the five marked itself emits. Without it the slug rule
+ * either keeps an entity's letters (`&amp;` -> `cost-amp-usage` for `Cost & Usage`) or,
+ * for an entity marked never emits but an author writes by hand (`&rsquo;`, `&#x27;`),
+ * lets the whole entity's letters and digits leak into the slug
+ * (`what&rsquo;s next` -> `whatrsquos-next` instead of pandoc's `whats-next`).
  *
  * @param {string} value
  */
 function unescapeHtml(value) {
-  return value
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&#39;', "'")
-    .replaceAll('&amp;', '&')
+  return value.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (entity, body) => {
+    if (body[0] === '#') {
+      const codePoint = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10)
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : entity
+    }
+    const codePoint = NAMED_ENTITIES[body]
+    return codePoint === undefined ? entity : String.fromCodePoint(codePoint)
+  })
 }
 
 /**
@@ -189,19 +247,38 @@ function unescapeHtml(value) {
  *
  * Every step's order is load-bearing, checked against pandoc 3.1.11 `-f gfm -t html5`:
  * tags come off BEFORE unescaping (or a decoded `<` is eaten by the tag regex);
- * whitespace runs collapse BEFORE punctuation is dropped (the reader collapsed the
- * author's runs, but a dropped `&` leaves two spaces and pandoc emits both hyphens);
- * and the final substitution is per space, not per run, for the same reason.
- * Letters and digits are matched by Unicode class, since pandoc keeps `Café résumé`
- * and `日本語` intact and drops emoji.
+ * AUTHORED whitespace runs collapse BEFORE entities decode, and so BEFORE
+ * punctuation is dropped: pandoc's reader collapses adjacent literal space
+ * characters, but a decoded entity never merges with a real space next to it, so
+ * `A  &nbsp;  B` (two real spaces on each side) mints `a---b`, three separate
+ * hyphens for three separate whitespace tokens (space, the decoded &nbsp;, space),
+ * not one. Collapsing before decode is what keeps a multi-word entity name like
+ * `&nbsp;` from ever being mistaken for a run of authored spaces: entity
+ * references never contain whitespace themselves, so the collapse is safe to run
+ * on the pre-decode text. A dropped bare `&` (not an entity) leaves two adjacent
+ * spaces where it stood and pandoc emits both hyphens, which is why the final
+ * substitution is per space, not per run. text is NFC-normalized BEFORE
+ * lowercasing: pandoc normalizes too, so a heading spelled with a decomposed base
+ * letter plus combining mark still mints the same id as the precomposed spelling,
+ * matching whichever form an authored in-page anchor used. Letters, digits AND
+ * combining marks are kept: pandoc keeps `Café résumé`, `日本語`, and
+ * Indic/Thai/Arabic/Hebrew/Vietnamese text, whose marks are `\p{M}` codepoints and
+ * not decorative, intact; only emoji and ASCII punctuation are dropped. A decoded
+ * space-like entity (`&nbsp;`, `&ensp;`, ...) is itself kept by the `\s` branch of
+ * the retained class, same as a real space, so it survives to the final
+ * per-space-to-hyphen step rather than being silently dropped.
  *
  * @param {string} text heading text, possibly carrying inline HTML
  */
 function headingId(text) {
-  return unescapeHtml(text.replace(/<[^>]*>/g, ''))
+  return unescapeHtml(
+    text
+      .replace(/<[^>]*>/g, '')
+      .replace(/\s+/g, ' '),
+  )
+    .normalize('NFC')
     .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/[^\p{L}\p{N}_\s-]/gu, '')
+    .replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '')
     .trim()
     .replace(/\s/g, '-')
 }
@@ -231,7 +308,13 @@ function createConverter() {
         const n = seen.get(base) ?? 0
         seen.set(base, n + 1)
         const id = n === 0 ? base : `${base}-${n}`
-        return `<h${depth} id="${id}">${inner}</h${depth}>\n`
+        // A heading that reduces to nothing (an emoji-only heading, a `<br>` or an HTML
+        // comment with no other text) mints an empty id. pandoc emits no id attribute at
+        // all in that case; only a later duplicate of the same empty heading gets one
+        // (pandoc's own de-dup counter running against the empty base, e.g. id="-1"),
+        // since an unauthorable anchor is still worth disambiguating from a real one.
+        const idAttr = id === '' ? '' : ` id="${id}"`
+        return `<h${depth}${idAttr}>${inner}</h${depth}>\n`
       },
       tablecell(token) {
         const content = this.parser.parseInline(token.tokens)

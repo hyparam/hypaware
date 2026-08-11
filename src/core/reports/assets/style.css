@@ -105,11 +105,23 @@ p, ul, ol { margin: 0.55rem 0; }
 li { margin: 0.2rem 0; }
 p { text-wrap: pretty; }
 
-/* A task list carries its own markers. pandoc's template suppressed the bullet via a
-   ul.task-list class it added itself; marked emits a plain <ul> with a checkbox input,
-   so the list is matched by what it contains instead. Without this a checkbox item
-   renders with a bullet AND a checkbox. */
-ul:has(> li > input[type="checkbox"]) { list-style: none; padding-left: 0; }
+/* A task list carries its own markers, in two shapes marked emits depending on whether
+   the list is "tight" (the checkbox is a direct child of li) or "loose" (a blank line
+   between items wraps each item's content in a p, so the checkbox sits at li > p > input
+   instead). pandoc's template suppressed the bullet via a ul.task-list class it added
+   itself, then pulled the checkbox out to where the bullet would have sat with a negative
+   margin, keeping the list's normal indent; marked emits a plain <ul> with a checkbox
+   input in one of the two positions above and no class to key off of, so the list is
+   matched by what it contains, and the checkbox's position is restated the same way
+   pandoc's template did. Without the loose branch a blank-line-separated checklist still
+   renders a bullet AND a checkbox. */
+ul:has(> li > input[type="checkbox"], > li > p > input[type="checkbox"]) {
+  list-style: none;
+}
+ul:has(> li > input[type="checkbox"], > li > p > input[type="checkbox"]) input[type="checkbox"] {
+  margin: 0 0.8em 0.2em -1.6em;
+  vertical-align: middle;
+}
 
 a {
   color: inherit;

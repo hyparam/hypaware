@@ -84,10 +84,14 @@ as a stylesheet or renderer choice later without touching the contract.
   and a divergence of its own; if an author wants one, that is a new request.
 - **Task lists keep their bullet unless the stylesheet suppresses it.** pandoc's
   template added a `task-list` class and a rule to hide the marker; marked emits
-  a plain `<ul>` whose items start with a checkbox input. `assets/style.css`
-  matches the list by what it contains
-  (`ul:has(> li > input[type="checkbox"])`) rather than by a class the renderer
-  no longer adds, so a checkbox item does not render with a bullet as well.
+  a plain `<ul>` whose items start with a checkbox input, in one of two shapes: a
+  "tight" list (no blank line between items) puts the checkbox directly in the
+  `li`, a "loose" one (a blank line between items) wraps each item's content in a
+  `p`, putting the checkbox at `li > p > input` instead. `assets/style.css`
+  matches the list by what it contains, both shapes
+  (`ul:has(> li > input[type="checkbox"], > li > p > input[type="checkbox"])`)
+  rather than by a class the renderer no longer adds, so a checkbox item does not
+  render with a bullet as well regardless of which shape it came in as.
 
 ## References
 
