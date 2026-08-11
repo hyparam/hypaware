@@ -165,13 +165,20 @@ test('json_path undo does not touch or remark on a config that was never attache
   const home = await stageHome()
   try {
     // A user-authored provider at a key attach manages, wrong-marker variant
-    // included: nothing here is ours, so nothing moves and nothing is warned.
+    // included: nothing here is ours, so nothing moves and nothing is warned,
+    // and the derived caches those entries feed are not edited either
+    // (LLP 0210 D2).
     const impostor = { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'openai' }, models: [] }
     const theirs = { baseUrl: 'https://api.anthropic.com', models: ['claude-x'] }
     const settingsPath = await writeOpenclawConfig(home, {
       models: { providers: { anthropic: impostor, openai: theirs } },
     })
     const before = await fs.readFile(settingsPath, 'utf8')
+    const cacheContent = JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: 'https://api.anthropic.com' },
+    }, null, 2) + '\n'
+    const cachePath = await writeAgentCache(home, 'main', cacheContent)
 
     const result = await detachClientFromDisk({
       descriptor: OPENCLAW_DESCRIPTOR,
@@ -182,6 +189,29 @@ test('json_path undo does not touch or remark on a config that was never attache
     assert.equal(result.changed, false)
     assert.equal(result.warning, undefined)
     assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.equal(await fs.readFile(cachePath, 'utf8'), cacheContent)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo rerun finishes a cache purge the first pass left behind', async () => {
+  // Retryability (LLP 0210 D2): the settings half of an earlier detach landed
+  // (managed surface empty), the cache half did not. The caches do not
+  // self-heal, so the rerun must purge the residue rather than gate on a
+  // deletion that already happened last time.
+  const home = await stageHome()
+  try {
+    await writeOpenclawConfig(home, { models: { providers: {} } })
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

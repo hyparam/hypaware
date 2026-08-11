@@ -78,13 +78,17 @@ it where it is, warn by path (never by value, LLP 0163) - and warn only when
 the same file also held entries of ours, so a partial undo is named while a
 never-attached config passes untouched and unremarked. LLP 0163's "never
 discard a user value" is satisfied the strong way: the value is not moved at
-all. The cache purge is gated on that deletion (only a file that just gave up
-an entry of ours proves an attach happened, so a never-attached machine's
-derived caches are never edited), and once proven it covers every managed key
-except one a user value still holds in the settings, because a stale cache
-row can outlive the settings entry it was derived from. Backup keys written
-by earlier versions are left as they are; nothing reads or writes that key
-anymore.
+all. The cache purge mirrors that disposal: a key the user's settings entry
+holds keeps its cache row too, so a never-attached machine's own providers
+are never edited in either file. Every other managed key purges whenever the
+settings undo deleted an entry or found the managed surface already empty.
+The empty case is deliberate, and is what keeps a partially failed purge
+retryable: these caches do not self-heal, a detach whose settings half landed
+but whose cache half did not must be finishable by rerunning it, and an
+orphaned cache row at a managed key with nothing in the settings is
+indistinguishable from that residue, which is exactly how the unconditional
+purge this refines already treated it. Backup keys written by earlier
+versions are left as they are; nothing reads or writes that key anymore.
 
 ## Consequences {#consequences}
 

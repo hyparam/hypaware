@@ -253,29 +253,25 @@ behalf wherever the graph is enabled.
 Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
-hyp attach claude
-hyp attach codex
+hyp attach <client>             # claude, codex, openclaw, ...
 # Equivalent flag form:
-hyp attach --client claude
-hyp attach --client codex
+hyp attach --client <client>
 ```
 
 Detach (removes only HypAware-managed settings):
 
 ```sh
-hyp detach claude
-hyp detach codex
+hyp detach <client>
 # Equivalent aliases:
-hyp detach --client claude
-hyp detach --client codex
-hyp unattach claude
-hyp unattach codex
+hyp detach --client <client>
+hyp unattach <client>
 ```
 
 Both commands support `--dry-run` and `--json` for inspection and
-scripting. Claude writes only HypAware-related keys to
-`~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
-`~/.codex/config.toml`. Unrelated keys in either file are preserved.
+scripting. Each adapter writes only HypAware-managed settings to its
+client's own config file (for example `~/.claude/settings.json` for
+Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
+Codex); unrelated keys in every file are preserved.
 
 ### Desktop apps
 

@@ -706,12 +706,14 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  *    about only when the same file also held ours - the same disposal the
  *    `json` undo makes for an externally overridden value, and a config that
  *    was never attached stays untouched and unremarked.
- * 3. If any entry was deleted (proof an attach happened), the managed keys are
- *    best-effort purged from the client's derived caches (`cacheGlob`), except
- *    a key a user value still holds in the settings, whose cache entry stays
- *    with it. Those caches do not self-heal, so a partial purge is strictly
- *    better than none, and one unreadable cache file must not fail a detach
- *    whose settings half already landed.
+ * 3. The managed keys are then best-effort purged from the client's derived
+ *    caches (`cacheGlob`), except a key a user value still holds in the
+ *    settings, whose cache row stays with it; the purge runs when an entry
+ *    was deleted or the managed surface was already empty, so a partial
+ *    detach can be rerun to finish the cache half. Those caches do not
+ *    self-heal, so a partial purge is strictly better than none, and one
+ *    unreadable cache file must not fail a detach whose settings half
+ *    already landed.
  *
  * @param {{
  *   settingsPath: string,
@@ -807,13 +809,17 @@ async function detachJsonPathProviders({
 
   if (changed) await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
-  // Purge is gated on deletion: only a file that just gave up an entry of
-  // ours proves an attach happened, so a never-attached machine's caches are
-  // never edited. Once proven, the purge covers every managed key except one a
-  // user value still holds in the settings (their live entry keeps its cache),
-  // because caches do not self-heal and a stale cache row can outlive the
-  // settings entry it was derived from (an earlier detach, a hand edit).
-  if (deleted.length > 0) {
+  // The purge is withheld only from a key a user value holds in the settings:
+  // their live entry keeps its cache row, so a never-attached machine's own
+  // providers are never edited in either file. Every other managed key purges
+  // whenever the settings undo deleted an entry OR found the managed surface
+  // already empty. The empty case is what keeps a failed purge retryable - a
+  // detach whose settings half landed but whose cache half did not can be
+  // rerun to finish the job, and these caches do not self-heal - at the cost
+  // of treating an orphaned cache row at a managed key as detach residue,
+  // which is what it was under the unconditional purge this refines.
+  // @ref LLP 0210#d2 [implements]: the purge skips keys the user's settings entries hold and stays retryable through the empty-surface case
+  if (deleted.length > 0 || present.length === 0) {
     warnings.push(...await purgeProviderCaches({
       cacheGlob,
       configHome: clientConfigHome(settingsPath, settingsFile),
