@@ -275,6 +275,15 @@ function unescapeHtml(value) {
  * to hyphens. Existing in-page anchors were minted by pandoc, so the slug rule
  * has to keep producing the same ids or every one of them dangles.
  *
+ * @ref LLP 0208#heading-id-gaps [constrained-by]: parity is exact except for
+ * Unicode separators/BOM and image alt text. The entity spellings of both
+ * separators and BOM are reachable here, decoded by unescapeHtml above, and a
+ * literal U+FEFF reaches here intact too, so the BOM case is fully fixable in
+ * the rule below. The literal U+2028/U+2029 spellings are not: they break ABOVE
+ * this function, in marked's block parser, which splits the block so no heading
+ * is produced at all, and no rule-only fix can close that half. Image alt text
+ * needs token types this function only sees as rendered HTML
+ *
  * Every step's order is load-bearing, checked against pandoc 3.1.11 `-f gfm -t html5`:
  * tags come off BEFORE unescaping (or a decoded `<` is eaten by the tag regex);
  * AUTHORED whitespace runs collapse FIRST OF ALL, and so before entities decode,
@@ -305,10 +314,23 @@ function unescapeHtml(value) {
  * a `<br>`-only heading mints `-` rather than going without an id. The substitution
  * runs AFTER the collapse for the same reason a decoded entity does: the injected
  * space is its own token and must not merge with the authored spaces around it, so
- * `## A <br /> B` mints `a---b`, three hyphens. The match is deliberately
- * case-SENSITIVE and deliberately not `<br...` prefix-matching: pandoc recognizes
- * only lowercase `br` as a line break and passes `<BR>` through as raw inline HTML
- * contributing nothing, so `## A <BR> B` mints `a--b`, one hyphen fewer (measured).
+ * `## A <br /> B` mints `a---b`, three hyphens. The match IS deliberately
+ * `<br` PREFIX-matching, and it is deliberately case-SENSITIVE. Both halves are
+ * measured, and the prefix half corrects an earlier reading of pandoc that had this
+ * regex spelled `<br(?:\s[^>]*)?\/?>` "so it does not swallow `<brand>`": pandoc
+ * swallows `<brand>` too. What pandoc's stringify actually keys on is the raw
+ * inline's LEADING TEXT, not a parsed tag name, so ANY raw inline HTML token whose
+ * text starts with `<br` becomes a space: `## A <brand> B`, `## A <bra> B`,
+ * `## A <br-x> B` and `## A <breakfast time> B` all mint `a---b`, and only the open
+ * tag counts, so `## A <brand>x</brand> B` mints `a--x-b` (the close tag's text
+ * starts `</b`). The case-sensitivity is the other half of the same rule: `<BR>`,
+ * `<Br>` and `<bR>` do not start with the lowercase prefix, so they stay raw inline
+ * HTML contributing nothing and `## A <BR> B` mints `a--b`, one hyphen fewer. A tag
+ * that merely starts with `b` is untouched too: `## A <b> B` and `## A <bold> B`
+ * both mint `a--b`. The regex is safe to widen this far because it never sees a
+ * string marked did not already accept as a tag: marked escapes invalid tag syntax
+ * to entities before this runs (`## A <br@> B` arrives as `A &lt;br@&gt; B`, and
+ * pandoc likewise leaves it as text, minting `a-br-b`).
  * Every OTHER tag still vanishes without a trace, which is why the collapse is what
  * moved ahead of the tag strip rather than the strip becoming a space: `<span>a</span>b`
  * must stay `ab` and `A<em>B</em>C` must stay `abc`. Running the collapse first also
@@ -333,7 +355,7 @@ function headingId(text) {
   return unescapeHtml(
     text
       .replace(/\s+/g, ' ')
-      .replace(/<br(?:\s[^>]*)?\/?>/g, ' ')
+      .replace(/<br[^>]*>/g, ' ')
       .replace(/<[^>]*>/g, ''),
   )
     .normalize('NFC')
