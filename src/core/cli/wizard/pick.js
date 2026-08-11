@@ -295,8 +295,6 @@ export async function runWizardPick(opts) {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
     const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
 
-    opts.stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
-
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
@@ -551,8 +549,7 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
   // default to take, so the menu opens as it always would.
   // @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
   if (hasGate && opts.autoAccept) {
-    // No leading blank: the welcome banner printed one already.
-    narrateAcceptedGate({ stdout: opts.stdout, title: 'HypAware will record:', items: gateItems, lead: false })
+    narrateAcceptedGate({ stdout: opts.stdout, title: 'HypAware will record:', items: gateItems })
     return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
   let screen = hasGate ? 'gate' : 'menu'

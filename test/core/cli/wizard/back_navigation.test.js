@@ -786,11 +786,11 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-wizard-e2e-'))
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
-    '1',    // fork: Join a team
+    '1',    // fork: Collect shared agent logs
     '2',    // express gate: No, take me through the steps
     'b',    // pick menu: step back one screen - the express gate
     'b',    // express gate: step back one screen - the fork
-    '2',    // fork: Local install and configuration
+    '2',    // fork: Collect agent logs locally
     '1',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): step by step
     'all',  // pick menu: record everything offered
@@ -834,7 +834,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const out = io.stdout.text()
   // The back edge: the fork was presented twice, the second time after
   // `b` at the pick menu.
-  assert.equal(out.split('Join a team, or set up HypAware locally?').length - 1, 2)
+  assert.equal(out.split('How do you want to collect agent logs?').length - 1, 2)
   // Enrolled-state decisions survive the walk to the local pathway.
   assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
   assert.match(out, /These will sync to your server:/)

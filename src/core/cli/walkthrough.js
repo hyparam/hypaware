@@ -646,7 +646,7 @@ export async function runPickerWalkthrough(opts) {
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
 
-    stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
+    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
 
     try {
       const sourceRaw = await ask({

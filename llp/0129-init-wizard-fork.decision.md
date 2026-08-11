@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-22
 **Related:** LLP 0011, LLP 0031, LLP 0058, LLP 0063, LLP 0128
-**Extended-by:** [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md) (§returning-gate below: the managed machine's separate scoped row and `'scoped'` pathway are withdrawn in favour of one `Reconfigure` for every machine; being managed now only pre-locks the org's picker rows)
+**Extended-by:** [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md) (§returning-gate below: the managed machine's separate scoped row and `'scoped'` pathway are withdrawn in favour of one `Reconfigure` for every machine; being managed now only pre-locks the org's picker rows); [LLP 0211](./0211-fork-copy-collect-first.decision.md) (§fork below: the fork's copy is re-worded to lead with what gets collected, shared listed first with per-row summaries, and an intro line explaining the product precedes it; the fork's mechanics and quit default are unchanged)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on
 > acceptance. Amends [LLP 0011](./0011-setup-and-onboarding.decision.md):
@@ -19,6 +19,13 @@
 <a id="fork"></a>**The wizard's first question is the pathway fork**:
 "Join a team" or "Local install and configuration". Both paths converge on
 pick, configure, finale. An enrolled machine never sees the fork.
+
+> **Extended-by: [LLP 0211](./0211-fork-copy-collect-first.decision.md).**
+> The fork's copy is re-worded: "Collect shared agent logs" leads,
+> "Collect agent logs locally" follows, each with a one-line summary
+> (reversing the bare-labels rationale for this menu), and a
+> product-explaining intro line precedes the question. The fork's
+> position, values, and quit default are unchanged.
 
 <a id="join-before-picker"></a>**The team path enrolls, then waits for the
 org's config, then shows the picker.** The enrollment seed names only

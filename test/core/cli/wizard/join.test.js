@@ -91,7 +91,7 @@ test('classifyLoginFailure: org_not_permitted is a definitive rejection -> faile
 })
 
 // A multi-org account is definitive *for the wizard*: its bare login can
-// never pass --org, so retrying the fork's "Join a team" is futile; the fix
+// never pass --org, so retrying the fork's shared-collection row is futile; the fix
 // is a manual `hyp remote login --org <name>` then re-entering `hyp init`.
 test('classifyLoginFailure: org_selection_required (multi-org account) -> failed', () => {
   assert.equal(classifyLoginFailure({ reason: 'org_selection_required' }), 'failed')

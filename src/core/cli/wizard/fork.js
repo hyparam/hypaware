@@ -16,26 +16,33 @@ import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { shouldUseTui } from '../tui-router.js'
 import { useColor } from '../stdio.js'
 
-const FORK_TITLE = 'Join a team, or set up HypAware locally?'
+const FORK_TITLE = 'How do you want to collect agent logs?'
+
+const FORK_INTRO =
+  'HypAware records the sessions, logs, and telemetry from your AI agents (Claude, Codex) into one queryable history.'
 
 /**
  * The wizard's top-level pathway fork.
  *
- * "Join a team" or "Local install and configuration", with quit as the
- * safe default on a bare enter or a cancelled prompt - the wizard never
- * reconfigures by accident. Every machine reaches this prompt, enrolled
- * or not (LLP 0182): a managed machine's Reconfigure comes through here
- * too, carrying its org rows in as a locked set.
+ * Collect locally or collect shared, with quit as the safe default on a
+ * bare enter or a cancelled prompt - the wizard never reconfigures by
+ * accident. Every machine reaches this prompt, enrolled or not
+ * (LLP 0182): a managed machine's Reconfigure comes through here too,
+ * carrying its org rows in as a locked set.
  *
  * @ref LLP 0129#fork [implements]: the wizard's first question is the
- *   pathway fork ("Join a team" / "Local install and configuration");
- *   quit is the safe default on a bare enter.
+ *   pathway fork (local vs shared collection); quit is the safe default
+ *   on a bare enter.
  *
  * @param {RunWizardForkOptions} opts
  * @returns {Promise<WizardForkChoice>}
  */
 export async function runWizardFork(opts) {
   const log = getLogger('wizard')
+  // @ref LLP 0211#explain-first [implements]: the fork is the wizard's
+  //   first screen, and its question only makes sense once the user
+  //   knows what HypAware does, so one intro line precedes it.
+  opts.stdout.write(`${FORK_INTRO}\n\n`)
   const options = buildForkOptions()
   const choice = await withSpan(
     'wizard.fork',
@@ -56,18 +63,33 @@ export async function runWizardFork(opts) {
  * so both the TUI and legacy prompts, and tests, share one source of
  * truth for the choices and their default.
  *
- * Bare labels, no per-row summaries, matching the returning gate's menu
- * below: the fork title already glosses both real options ("Join a
- * team, or set up HypAware locally?"), so a summary under each row
- * could only restate the label or the title, and doubling the menu's
- * height for that made the choice harder to scan, not easier.
+ * Shared leads: it is the pathway that pays off across machines and
+ * harnesses, not just for teams, and a menu that lists it second reads
+ * as the advanced option. (An explicit "recommended" tag is held back
+ * while shared collection is in beta; the ordering and summaries do
+ * the guiding.) Each real row carries a one-line summary because the
+ * labels alone cannot both guide the choice and disclose its cost:
+ * the shared row's summary states the value and the sign-in it will
+ * ask for, the local row's states the boundary and that the choice is
+ * revisitable. Quit stays bare.
+ *
+ * @ref LLP 0211#collect-labels [implements]: shared first, with row
+ *   summaries carrying the guidance and the sign-in disclosure.
  *
  * @returns {ConfiguredMenuOption[]}
  */
 export function buildForkOptions() {
   return [
-    { value: 'team', label: 'Join a team' },
-    { value: 'local', label: 'Local install and configuration' },
+    {
+      value: 'team',
+      label: 'Collect shared agent logs',
+      summary: 'One history that follows you across machines and harnesses, and can be shared with your team. You will be asked to sign in.',
+    },
+    {
+      value: 'local',
+      label: 'Collect agent logs locally',
+      summary: 'Everything stays on this machine. You can switch to shared later by re-running hyp init.',
+    },
     { value: 'quit', label: 'Quit' },
   ]
 }
@@ -337,7 +359,8 @@ const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
 
 /**
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and
- * `legacyReturningGatePrompt`: prints the title and each option, reads one
+ * `legacyReturningGatePrompt`: prints the title and each option (with its
+ * summary indented beneath, when the option carries one), reads one
  * line, and resolves to `quit` on an empty, unparseable, or out-of-range
  * answer so a non-TTY caller never reconfigures by accident. With
  * `allowBack`, a `b` answer resolves to `back` (the readline form of the
@@ -356,7 +379,10 @@ async function legacyMenuPrompt(opts, options, title, allowBack = false) {
   const rl = readline.createInterface({ input, output, terminal: false })
   try {
     output.write(`${title}\n`)
-    options.forEach((opt, i) => output.write(`  ${i + 1}) ${opt.label}\n`))
+    options.forEach((opt, i) => {
+      output.write(`  ${i + 1}) ${opt.label}\n`)
+      if (opt.summary) output.write(`     ${opt.summary}\n`)
+    })
     const answer = await rl.question(
       `Choose [1-${options.length}, default ${defaultIdx + 1}${allowBack ? ', b back' : ''}]: `
     )
