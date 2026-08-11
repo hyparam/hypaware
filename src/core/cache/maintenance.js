@@ -293,7 +293,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // line never lands (harness aux, wire-only reminders) - from forcing a
     // full rewrite every tick, and skips the attributes scan entirely when
     // nothing new has flushed.
-    // @ref LLP 0207#foreign-replace [constrained-by]: when the cheap check
+    // @ref LLP 0207#outranks-resettle [constrained-by]: when the cheap check
     // above already made compaction due, the scan's answer can never
     // change the outcome (recognition, tested below, still outranks it),
     // so skip it: only run the scan when it might be the sole reason to
@@ -314,10 +314,10 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       if (!opts.force && foreignSortedReplace(tableInfo)) {
         r.rebaselined = true
-        // @ref LLP 0207#re-baseline: the counter proves a rebaseline happened
-        // at all, but it carries only the dataset; tagging the enclosing
-        // maintenance.partition span names the partition, so a trace query
-        // finds which day re-baselined without cross-referencing the counter.
+        // The counter proves a rebaseline happened at all, but it carries
+        // only the dataset; tagging the enclosing maintenance.partition span
+        // names the partition, so a trace query finds which day re-baselined
+        // without cross-referencing the counter.
         getActiveSpan()?.setAttribute('rebaselined', true)
         if (!opts.dryRun) {
           await writeCursor(r.path, rebaselineCursor(cursor, dataFilesBefore))

@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -11,11 +12,13 @@ import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../sr
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { fileCatalog, icebergRewrite, loadLatestFileCatalogMetadata } from 'icebird'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
+ * @import { Span } from '../../src/core/observability/runtime.js'
  */
 
 /** @param {string} prefix */
@@ -853,6 +856,7 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
     // A dry run predicts the recognition without writing anything.
     const preview = await maintainCache({ cacheRoot, compactOnly: true, dryRun: true })
     assert.equal(preview.totalCompacted, 0)
+    assert.equal(preview.totalRebaselined, 1, 'the report-level rebaseline count mirrors totalCompacted')
     assert.equal(preview.partitions[0].rebaselined, true)
     assert.equal(
       /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction).resettleBaselineFiles,
@@ -862,6 +866,7 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
 
     const first = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(first.totalCompacted, 0)
+    assert.equal(first.totalRebaselined, 1, 're-baselining one partition must be reflected in the report total')
     assert.equal(first.partitions[0].rebaselined, true)
     const cursor = readCursorSync(partDir)
     assert.equal(cursor.epoch, 0, 'no rewrite: the generation must not advance')
@@ -873,6 +878,7 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
     // Converged: the baseline gate now blocks before any metadata load.
     const second = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(second.totalCompacted, 0)
+    assert.equal(second.totalRebaselined, 0, 'converged: no rebaseline happened this tick')
     assert.notEqual(second.partitions[0].rebaselined, true)
 
     // A late append flips the current snapshot off `replace` and moves the
@@ -993,6 +999,91 @@ test('force still rewrites a foreign sorted replace', async () => {
     const report = await maintainCache({ cacheRoot, force: true, compactOnly: true })
     assert.equal(report.totalCompacted, 1, 'an explicit force is an operator override')
     assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign sorted replace tags the maintenance.partition span with rebaselined', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-span')
+  /** @type {Span[]} */
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(/** @type {Span[]} */ spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.partitions[0].rebaselined, true, 'sanity: this tick recognized the foreign replace')
+
+    const partitionSpan = captured.find((span) => span.name === 'maintenance.partition')
+    assert.ok(partitionSpan, 'maintenance.partition span must be exported')
+    assert.equal(
+      partitionSpan?.attributes.rebaselined,
+      true,
+      'the span, not just the hyp_rebaselines counter, must name which partition re-baselined'
+    )
+  } finally {
+    await provider.shutdown()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a partition already due for compaction skips the resettle-candidate row scan', async (t) => {
+  // @ref LLP 0207#outranks-resettle [tests]: once the cheap file-count/size
+  // check alone makes compaction due, the resettle scan's answer cannot
+  // change `shouldCompact`, so it must not run at all. Observed here by
+  // counting `readFileSync` calls against the partition's one data file:
+  // unskipped, the resettle scan and the compaction rewrite each open it
+  // once (two reads); skipped, only the rewrite does (one read).
+  const cacheRoot = await makeTmpDir('maint-scan-skip')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ])
+    // Never compacted: `grewSinceCompaction` is true unconditionally, so the
+    // only thing standing between the old code and a resettle scan is the
+    // `compactionDue` gate under test.
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const spy = t.mock.method(fsSync, 'readFileSync')
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      // compact_file_count: 0 makes `needsCompaction` (and so
+      // `compactionDue`) true on file count alone, with no size heuristic
+      // involved: dueness is settled before the resettle scan would run.
+      config: { compact_file_count: 0 },
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => async (rows) => rows,
+    })
+    assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
+
+    const dataFileReads = spy.mock.calls.filter((call) => String(call.arguments[0]).endsWith('.parquet')).length
+    assert.equal(
+      dataFileReads,
+      1,
+      'the data file must be read once, by the rewrite; a resettle scan would read it a second time first'
+    )
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
