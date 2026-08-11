@@ -59,7 +59,8 @@ and the rows are:
    shared later by re-running hyp init."
 3. `quit`: **Quit** (no summary)
 
-Shared leads because listing it second read as the advanced option.
+Shared keeps the lead position "Join a team" held: listed second, it
+would read as the advanced option.
 An explicit "(recommended)" tag on the shared row is deferred while
 shared collection is in beta; the ordering and the summaries carry the
 steer until the tag is earned.

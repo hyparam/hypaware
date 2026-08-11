@@ -21,10 +21,10 @@ HypAware requires **Node 22.12 or newer**. Run:
 npx hypaware
 ```
 
-This opens a guided setup. The first question is whether to join your team
-or set up locally. Select **Join a team**.
+This opens a guided setup. The first question is how you want to collect
+agent logs. Select **Collect shared agent logs**.
 
-<img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Join a team selected: Join a team, Local install and configuration, or Quit.">
+<img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Collect shared agent logs selected: Collect shared agent logs, Collect agent logs locally, or Quit.">
 
 ## Follow the prompts
 
