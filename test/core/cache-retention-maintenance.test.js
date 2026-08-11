@@ -1048,10 +1048,15 @@ test('a foreign sorted replace tags the maintenance.partition span with rebaseli
 test('a partition already due for compaction skips the resettle-candidate row scan', async (t) => {
   // @ref LLP 0207#outranks-resettle [tests]: once the cheap file-count/size
   // check alone makes compaction due, the resettle scan's answer cannot
-  // change `shouldCompact`, so it must not run at all. Observed here by
-  // counting `readFileSync` calls against the partition's one data file:
-  // unskipped, the resettle scan and the compaction rewrite each open it
-  // once (two reads); skipped, only the rewrite does (one read).
+  // change `shouldCompact`, so it must not run at all. `hasResettleCandidate`
+  // is module-private and its `scanRowsFromTable` is an unpatchable ESM named
+  // import, so there is no direct call-count hook to assert against; instead
+  // this mocks `readFileSync` and captures a stack trace per `.parquet` read,
+  // then asserts none of those stacks pass through `hasResettleCandidate`.
+  // That frame name survives the async boundary between the scan and the
+  // read, so it attributes each read to its caller instead of only counting
+  // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
+  // footer-stats probe, would not falsely implicate the scan).
   const cacheRoot = await makeTmpDir('maint-scan-skip')
   try {
     const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
@@ -1064,7 +1069,13 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     // `compactionDue` gate under test.
     await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
 
-    const spy = t.mock.method(fsSync, 'readFileSync')
+    /** @type {string[]} */
+    const stacks = []
+    const original = fsSync.readFileSync
+    t.mock.method(fsSync, 'readFileSync', function (p, ...rest) {
+      if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
+      return original.call(this, p, ...rest)
+    })
 
     const report = await maintainCache({
       cacheRoot,
@@ -1078,11 +1089,11 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     })
     assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
 
-    const dataFileReads = spy.mock.calls.filter((call) => String(call.arguments[0]).endsWith('.parquet')).length
-    assert.equal(
-      dataFileReads,
-      1,
-      'the data file must be read once, by the rewrite; a resettle scan would read it a second time first'
+    assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
+    assert.deepEqual(
+      stacks.filter((s) => s.includes('hasResettleCandidate')),
+      [],
+      'the resettle scan must not read the data file'
     )
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
