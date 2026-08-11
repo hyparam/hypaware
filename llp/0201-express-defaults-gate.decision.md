@@ -47,6 +47,7 @@ HypAware found these on this machine:
 > Record and sync all of these
     Configures each to record through HypAware; new folders sync too.
   Let me choose
+    Step through what to record, what syncs, and new-folder behavior.
 ```
 
 **The list is the explanation.** An earlier draft asked "Set up with
@@ -69,7 +70,10 @@ forwards, so the label drops to "Record all of these". The accept row keeps
 a single line of consequence: what accepting does to the machine (the
 disclosure [LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate)
 put on the happy-path row) plus the new-folder policy that rides with it.
-The alternative row carries no gloss; "Let me choose" needs none.
+The alternative row glosses the path it opens ("Step through what to
+record, what syncs, and new-folder behavior"): a bare "Let me choose"
+priced the longer path at zero screens, and the gloss is what tells the
+user the trade they are making.
 
 After [#one-lane-no-gate](#one-lane-no-gate), the orchestrator only ever
 calls this gate from inside its own `enrolled()` guard, so `opts.enrolled`
@@ -98,10 +102,8 @@ the prompts that used to separate the statements are exactly what was
 removed: without the spacing the run reads as one paragraph of mixed
 subjects. A lane whose answer is a single fact prints it as one more
 indented line of its own block rather than as a second flush-left sentence
-repeating the subject ("New folders you work in:" / "  Syncing them all;
-change later with `hyp policy folders ask`"). The one block that follows
-the welcome banner suppresses its leading blank, since the banner already
-supplied one.
+repeating the subject ("When you start a session in a new folder:" /
+"  Syncing them all; change later with `hyp policy folders ask`").
 
 <a id="no-default-no-accept"></a>**Nothing found means no gate.** With
 nothing detected and nothing locked there is no list to show and nothing to

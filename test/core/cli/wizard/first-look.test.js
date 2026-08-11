@@ -104,7 +104,7 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
   // The unfinished section is named as unfinished, not as empty - and only
   // the requested one is named, never repos or tools.
   const stopped = text.split('\n').find((l) => l.startsWith('Stopped here')) ?? ''
-  assert.match(stopped, /Stopped here to keep setup moving - the daily section did not finish\./)
+  assert.match(stopped, /Stopped here to keep setup moving: the daily section did not finish\./)
   // Only the requested section is named. Repos and tools were never asked
   // for, so calling them unfinished would be a claim about work nobody
   // started (the pointer line below mentions them, which is a different

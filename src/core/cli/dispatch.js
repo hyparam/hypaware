@@ -747,7 +747,8 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   const names = [...rows.keys()].sort()
 
-  stdout.write('hyp - HypAware kernel CLI (also installed as `hypaware`; same binary)\n')
+  stdout.write("hyp - HypAware: your AI agents' sessions, logs, and telemetry in one queryable history\n")
+  stdout.write('      (also installed as `hypaware`; same binary)\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')

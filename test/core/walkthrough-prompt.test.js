@@ -40,7 +40,7 @@ test('picker prompt prints context under source options and defaults export to l
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /3\) OpenTelemetry\n     Logs, traces, and metrics over local OTLP HTTP/)
+  assert.match(text, /3\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
   assert.doesNotMatch(text, /Anthropic API/)
   assert.doesNotMatch(text, /OpenAI API/)
   // The export question is no longer rendered.
@@ -63,7 +63,7 @@ test('picker prompt prints context under source options and defaults export to l
 function syncMenuQuestion(/** @type {Record<string, unknown>} */ extra = {}) {
   return /** @type {any} */ ({
     pickType: 'clients',
-    title: 'Choose what syncs - unchecked sources stay on this machine.',
+    title: 'Choose what syncs. Unchecked sources stay on this machine.',
     options: [
       { value: 'claude', label: 'capture claude · managed by your fleet', checked: true, disabled: true },
       { value: 'openclaw', label: 'capture openclaw', checked: true },

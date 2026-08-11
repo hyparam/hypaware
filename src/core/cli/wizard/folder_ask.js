@@ -12,7 +12,7 @@ import { narrateAcceptedGate } from './express.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
  */
 
-const FOLDER_ASK_TITLE = 'New folders you work in:'
+const FOLDER_ASK_TITLE = 'When you start a session in a new folder:'
 
 /**
  * The two answers, in display order. Sync leads because it is the default

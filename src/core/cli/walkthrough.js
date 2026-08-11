@@ -507,13 +507,24 @@ function legacyBackfillConsentPromptFactory(opts) {
   }
 }
 
+/** Friendly names for the backfill question; ids pass through unmapped. */
+const BACKFILL_PROVIDER_LABELS = /** @type {Record<string, string>} */ ({
+  claude: 'Claude',
+  codex: 'Codex',
+  openclaw: 'OpenClaw',
+})
+
 /**
  * @param {string[]} providers
  * @param {number} retentionDays
  * @returns {string}
  */
 export function backfillConsentTitle(providers, retentionDays) {
-  return `Import local ${providers.join(', ')} history now (last ${retentionDays} days)?`
+  const names = providers.map((p) => BACKFILL_PROVIDER_LABELS[p] ?? p)
+  const list = names.length > 1
+    ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+    : (names[0] ?? '')
+  return `Import local ${list} history now (last ${retentionDays} days)?`
 }
 
 /**
@@ -646,12 +657,12 @@ export async function runPickerWalkthrough(opts) {
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
 
-    stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
+    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
 
     try {
       const sourceRaw = await ask({
         pickType: 'sources',
-        title: 'What do you want to collect? (space to toggle, enter to confirm)',
+        title: 'What do you want to collect?',
         // Hidden rows are absent from the menu but still pickable via
         // `--source` (which takes the `opts.picks` path above and never
         // reaches this prompt). They are never detected, so nothing is

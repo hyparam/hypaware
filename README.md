@@ -1,20 +1,22 @@
 # HypAware
 
-Modular logs and telemetry collector. Plugin-kernel architecture.
+HypAware records the sessions, logs, and telemetry from your AI agents
+into one queryable history.
 
-HypAware captures conversations and traffic from local AI clients (Claude
+It captures conversations and traffic from local AI clients (Claude
 Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
-logs / traces / metrics into a local query cache and optional Parquet
-exports.
+logs / traces / metrics. Recordings land in a local query cache and can
+stay on your machine or sync to a central server.
 
 There are two ways to run it:
 
+- **Shared.** Each machine signs into your organization on the central
+  server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
+  and forwards its recordings there. One history follows you across
+  machines and harnesses, and usage, spend, and activity can be queried
+  and reported across the whole team.
 - **Solo, fully local.** No central server, no account. Everything stays in
   a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
-- **With your team.** Each machine signs into your organization on the
-  central server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
-  and forwards its recordings there so usage, spend, and activity can be
-  queried and reported across the whole team.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
