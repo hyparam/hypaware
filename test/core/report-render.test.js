@@ -432,6 +432,137 @@ test('a heading that reduces to nothing emits no id attribute, matching pandoc 3
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('an out-of-range numeric entity in a heading renders instead of crashing, matching pandoc 3.1.11', () => {
+  // `String.fromCodePoint` throws above U+10FFFF, and marked's escaper passes numeric
+  // references of up to 7 decimal or 6 hex digits through untouched, so the whole
+  // `&#x110000;`-`&#xFFFFFF;` / `&#1114112;`-`&#9999999;` window reaches the entity
+  // decoder verbatim. Measured against a real pandoc 3.1.11 binary: pandoc substitutes
+  // U+FFFD, which the slug rule then strips like any other symbol, so `A &#x110000; B`
+  // mints `a--b`, the same id an unrenderable character in that position always minted.
+  const dir = onePageTree(
+    'out-of-range',
+    [
+      '# Report',
+      '',
+      '## A &#x110000; B',
+      '',
+      '## C &#1114112; D',
+      '',
+      '## E &#9999999; F',
+      '',
+      '## G &#xFFFFFF; H',
+      '',
+      '## I&#x110000;J',
+      '',
+      '## &#x110000;',
+      '',
+      '## K &#xD800; L',
+      '',
+      '## M &#x10FFFF; N',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'out-of-range', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="a--b">'), 'a hex out-of-range reference must slug like pandoc, not abort the render')
+  assert.ok(html.includes('<h2 id="c--d">'), 'a decimal out-of-range reference must slug like pandoc too')
+  assert.ok(html.includes('<h2 id="e--f">'), 'the top of the reachable decimal window must slug like pandoc')
+  assert.ok(html.includes('<h2 id="g--h">'), 'the top of the reachable hex window must slug like pandoc')
+  assert.ok(html.includes('<h2 id="ij">'), 'with no spaces around it the substituted character leaves no hyphen at all')
+  assert.ok(html.includes('<h2>&#x110000;</h2>'), 'a heading of nothing but the reference gets no id, and its text stays verbatim')
+
+  // Lone surrogates were already safe (`fromCodePoint` accepts them and the `/u` strip
+  // removes them) and must stay that way, as must the last real codepoint.
+  assert.ok(html.includes('<h2 id="k--l">'), 'a lone surrogate must keep slugging to nothing, as pandoc does')
+  assert.ok(html.includes('<h2 id="m--n">'), 'U+10FFFF is a real codepoint and must still decode, not be substituted')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('heading ids do not trim after the punctuation strip, matching pandoc 3.1.11', () => {
+  // Every pairing measured against a real pandoc 3.1.11 binary (`-f gfm -t html5`).
+  // pandoc does not trim at this stage: the space a dropped leading or trailing
+  // character leaves behind becomes a hyphen like any other. Emoji-led headings are
+  // ordinary in model-authored reports, so trimming here dangles every pandoc-era
+  // `#-rollout-plan` anchor, which is exactly the parity LLP 0208 promises to keep.
+  const dir = onePageTree(
+    'no-trim',
+    [
+      '# Report',
+      '',
+      '## \u{1F680} Rollout plan',
+      '',
+      '## \u{2705} Done items',
+      '',
+      '## end &',
+      '',
+      '## & start',
+      '',
+      '## Hello &nbsp;',
+      '',
+      '## ( )',
+      '',
+      '## \u{1F680} A  B \u{2705}',
+      '',
+      '##    Padded   ',
+      '',
+      '## ...',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'no-trim', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="-rollout-plan">'), 'an emoji-led heading keeps pandoc\'s leading hyphen')
+  assert.ok(html.includes('<h2 id="-done-items">'), 'a check-mark-led heading keeps pandoc\'s leading hyphen')
+  assert.ok(html.includes('<h2 id="end-">'), 'a trailing `&` leaves pandoc\'s trailing hyphen')
+  assert.ok(html.includes('<h2 id="-start">'), 'a leading `&` leaves pandoc\'s leading hyphen')
+  assert.ok(html.includes('<h2 id="hello--">'), 'a trailing &nbsp; decodes to a space that becomes its own hyphen')
+  assert.ok(html.includes('<h2 id="-">( )'), 'a heading of nothing but punctuation and a space mints pandoc\'s bare `-`')
+  assert.ok(html.includes('<h2 id="-a-b-">'), 'emoji at both ends hyphenate at both ends, inner runs still collapsing to one')
+
+  // The reader has already trimmed the raw heading line, so authored outer whitespace
+  // never reaches the slug rule and must not produce a stray hyphen.
+  assert.ok(html.includes('<h2 id="padded">'), 'authored outer whitespace is the reader\'s to trim, not the slug rule\'s')
+  // A heading that reduces to the truly empty string still gets no id, as before.
+  assert.ok(html.includes('<h2>...</h2>'), 'a heading with no retained character at all still carries no id')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('a malformed entity in one report does not destroy the pages of the reports after it', () => {
+  // The amplifier that made the crash a blocker rather than one bad page: `renderReports`
+  // wipes `html/` before building and builds in sorted slug order, so a heading that
+  // throws takes out every already-built page from that slug onward AND leaves the
+  // landing page stale, with no signal that the tree is now half a build old.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-render-blast-'))
+  const write = (/** @type {string} */ slug, /** @type {string} */ body) =>
+    fs.writeFileSync(path.join(dir, `${slug}.md`), `# ${slug}\n\n${body}\n`)
+
+  write('aaa-before', 'sorts before the bad report')
+  write('mmm-bad', '## A ok B')
+  write('zzz-after', 'sorts after the bad report')
+  renderReports({ dir })
+
+  // Now the model authors an out-of-range reference into the middle report, and a new
+  // report lands after it. Both must survive the next build.
+  write('mmm-bad', '## A &#x110000; B')
+  write('nnn-new', 'added in the same pass as the bad heading')
+  const result = renderReports({ dir })
+
+  assert.deepEqual(result.slugs, ['aaa-before', 'mmm-bad', 'nnn-new', 'zzz-after'], 'every report must still be built')
+  for (const slug of result.slugs) {
+    assert.ok(fs.existsSync(path.join(dir, 'html', slug, 'index.html')), `${slug} must survive the bad heading`)
+  }
+  assert.ok(
+    fs.readFileSync(path.join(dir, 'index.html'), 'utf8').includes('nnn-new'),
+    'the landing page must be regenerated, not left stale at the pre-crash report set',
+  )
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('a loose task list still loses its bullet, matching pandoc\'s suppressed marker', () => {
   // marked emits two different shapes depending on whether the list is "tight" (no
   // blank line between items: the checkbox is a direct child of li) or "loose" (a

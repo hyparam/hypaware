@@ -233,7 +233,17 @@ function unescapeHtml(value) {
   return value.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (entity, body) => {
     if (body[0] === '#') {
       const codePoint = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10)
-      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : entity
+      if (!Number.isFinite(codePoint)) return entity
+      // Above U+10FFFF is not a codepoint and `String.fromCodePoint` throws on it, which
+      // would abort the whole render, not just this heading. The window is reachable:
+      // marked's escaper passes numeric references of up to 7 decimal or 6 hex digits
+      // through untouched, so every value in `&#x110000;`-`&#xFFFFFF;` and
+      // `&#1114112;`-`&#9999999;` arrives here verbatim from an authored heading.
+      // pandoc 3.1.11 substitutes U+FFFD, which the slug rule below then strips like any
+      // other symbol, so `## A &#x110000; B` mints `a--b`; returning the entity intact
+      // would instead leak its digits into the id. Lone surrogates stay on the
+      // `fromCodePoint` path: it accepts them and pandoc slugs them to the same nothing.
+      return codePoint > 0x10FFFF ? '\uFFFD' : String.fromCodePoint(codePoint)
     }
     const codePoint = NAMED_ENTITIES[body]
     return codePoint === undefined ? entity : String.fromCodePoint(codePoint)
@@ -268,6 +278,18 @@ function unescapeHtml(value) {
  * the retained class, same as a real space, so it survives to the final
  * per-space-to-hyphen step rather than being silently dropped.
  *
+ * NOTHING TRIMS after the strip, because pandoc does not: the space a dropped
+ * leading or trailing character leaves behind becomes a hyphen like any other, so
+ * `## 🚀 Rollout plan` mints `-rollout-plan` and `## end &` mints `end-`
+ * (both measured). Emoji-led headings are ordinary in model-authored reports, so a
+ * trim here would silently dangle every pandoc-era `#-rollout-plan` anchor, which
+ * is exactly the parity LLP 0208 promises to keep. A heading whose retained text is
+ * all whitespace is not special-cased either: pandoc mints `-` for `## ( )` rather
+ * than dropping the id, and only a heading that reduces to the truly empty string
+ * (`## 🚀`) goes without one. Markdown's own reader has already trimmed the raw
+ * heading line by the time this runs, so no authored outer whitespace survives to
+ * be turned into a stray leading hyphen.
+ *
  * @param {string} text heading text, possibly carrying inline HTML
  */
 function headingId(text) {
@@ -279,7 +301,6 @@ function headingId(text) {
     .normalize('NFC')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '')
-    .trim()
     .replace(/\s/g, '-')
 }
 
