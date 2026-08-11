@@ -706,14 +706,13 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  *    about only when the same file also held ours - the same disposal the
  *    `json` undo makes for an externally overridden value, and a config that
  *    was never attached stays untouched and unremarked.
- * 3. The managed keys are then best-effort purged from the client's derived
- *    caches (`cacheGlob`), except a key a user value still holds in the
- *    settings, whose cache row stays with it; the purge runs when an entry
- *    was deleted or the managed surface was already empty, so a partial
- *    detach can be rerun to finish the cache half. Those caches do not
- *    self-heal, so a partial purge is strictly better than none, and one
- *    unreadable cache file must not fail a detach whose settings half
- *    already landed.
+ * 3. The client's derived caches (`cacheGlob`) are then best-effort purged of
+ *    HypAware's rows, judged per row by the same signature: a row whose
+ *    marker header names its key is ours, a marker-less row rides out only on
+ *    this run's settings deletions, and every other row is the user's and
+ *    stays. Those caches do not self-heal, so a partial purge is strictly
+ *    better than none, and one unreadable cache file must not fail a detach
+ *    whose settings half already landed.
  *
  * @param {{
  *   settingsPath: string,
@@ -725,7 +724,7 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  *   fs: typeof fsp,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
- * @ref LLP 0210#d1 [implements]: ownership is the entry's own signature, so the undo runs from disk alone; a not-ours entry is left in place, and only the deleted keys are purged from the derived caches
+ * @ref LLP 0210#d1 [implements]: ownership is the entry's own signature, so the undo runs from disk alone; a not-ours entry is left in place, and the cache purge judges each row by that same signature
  */
 async function detachJsonPathProviders({
   settingsPath,
@@ -809,25 +808,20 @@ async function detachJsonPathProviders({
 
   if (changed) await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
-  // The purge is withheld only from a key a user value holds in the settings:
-  // their live entry keeps its cache row, so a never-attached machine's own
-  // providers are never edited in either file. Every other managed key purges
-  // whenever the settings undo deleted an entry OR found the managed surface
-  // already empty. The empty case is what keeps a failed purge retryable - a
-  // detach whose settings half landed but whose cache half did not can be
-  // rerun to finish the job, and these caches do not self-heal - at the cost
-  // of treating an orphaned cache row at a managed key as detach residue,
-  // which is what it was under the unconditional purge this refines.
-  // @ref LLP 0210#d2 [implements]: the purge skips keys the user's settings entries hold and stays retryable through the empty-surface case
-  if (deleted.length > 0 || present.length === 0) {
-    warnings.push(...await purgeProviderCaches({
-      cacheGlob,
-      configHome: clientConfigHome(settingsPath, settingsFile),
-      containerPath: container,
-      providerKeys: keys.filter((key) => !left.includes(key)),
-      fs,
-    }))
-  }
+  // Always asked, never gated: the purge decides ownership per cache row (a
+  // row carrying the marker header is ours whenever it is seen, a marker-less
+  // row only rides out on this run's settings deletions), so a rerun after a
+  // failed purge still finds our residue, and a never-attached machine's rows
+  // fail the row test rather than depending on this caller to hold back.
+  warnings.push(...await purgeProviderCaches({
+    cacheGlob,
+    configHome: clientConfigHome(settingsPath, settingsFile),
+    containerPath: container,
+    providerKeys: keys,
+    markerHeader,
+    deletedKeys: deleted,
+    fs,
+  }))
 
   const warning = joinWarnings(warnings)
 
@@ -874,10 +868,21 @@ function clientConfigHome(settingsPath, settingsFile) {
 }
 
 /**
- * Best-effort removal of the same provider keys from the client's derived
+ * Best-effort removal of HypAware's provider rows from the client's derived
  * caches. These are files the client regenerates from its config and does not
  * re-derive on its own after the config changes, so leaving them keeps a
  * detached client pointed at a dead gateway.
+ *
+ * Ownership is decided per row, with the same signature the settings undo
+ * trusts: the caches carry each provider entry forward wholesale, headers
+ * included (LLP 0167 verify item 3; `docs/ACCEPTANCE.md` greps these very
+ * files for the marker header as the residue test), so a row whose marker
+ * header names its own key is ours and is purged whenever it is seen. A row
+ * with no marker is purged only when this run deleted the matching settings
+ * entry (the row is then derived from a value that was proven ours); any
+ * other row is the user's and stays. That makes the purge retryable in every
+ * case - a rerun still recognizes our residue by its marker - and makes a
+ * never-attached machine's caches untouchable by construction.
  *
  * Every failure here is a warning, never a throw: the settings undo has
  * already landed by the time this runs, and failing the whole detach over one
@@ -890,11 +895,14 @@ function clientConfigHome(settingsPath, settingsFile) {
  *   configHome: string,
  *   containerPath: string,
  *   providerKeys: string[],
+ *   markerHeader: string,
+ *   deletedKeys: string[],
  *   fs: typeof fsp,
  * }} args
  * @returns {Promise<string[]>} the per-file notices, for the caller's `warning`
+ * @ref LLP 0210#d2 [implements]: the purge decides ownership per cache row by the marker header, falling back to this run's settings deletions for marker-less rows
  */
-async function purgeProviderCaches({ cacheGlob, configHome, containerPath, providerKeys, fs }) {
+async function purgeProviderCaches({ cacheGlob, configHome, containerPath, providerKeys, markerHeader, deletedKeys, fs }) {
   if (typeof cacheGlob !== 'string' || cacheGlob.length === 0) return []
   const log = getLogger('client-detach')
 
@@ -962,6 +970,11 @@ async function purgeProviderCaches({ cacheGlob, configHome, containerPath, provi
       if (!isPlainObject(target)) continue
       for (const key of providerKeys) {
         if (!Object.hasOwn(target, key)) continue
+        const row = target[key]
+        const rowIsOurs = isPlainObject(row) &&
+          isPlainObject(row.headers) &&
+          /** @type {Record<string, unknown>} */ (row.headers)[markerHeader] === key
+        if (!rowIsOurs && !deletedKeys.includes(key)) continue
         delete target[key]
         purged = true
       }
