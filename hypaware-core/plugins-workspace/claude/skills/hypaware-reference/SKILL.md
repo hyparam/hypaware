@@ -1,6 +1,7 @@
 ---
 name: hypaware-reference
 description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-report.
+user-invocable: false
 ---
 
 # HypAware Reference

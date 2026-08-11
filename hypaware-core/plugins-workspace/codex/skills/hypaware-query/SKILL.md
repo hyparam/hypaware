@@ -1,6 +1,7 @@
 ---
 name: hypaware-query
 description: Query this machine's recorded AI session history with the hyp query CLI. Covers every client HypAware records here, including Claude Code, Claude Desktop, Codex, OpenClaw, Hermes, and direct Anthropic/OpenAI API traffic. Use whenever the user refers to something they did before and the answer is not in the current conversation, even when they never say "HypAware", for example "what was I doing yesterday", "my most recent session", "which session did I work on X in", "have I hit this error before", "did I already try that", "what did that cost in tokens". Also use it to search recorded conversations for a topic, file, or repo, and for recorded logs, traces, metrics, AI gateway exchanges, query cache freshness, or SQL over local HypAware data. If you are about to grep or read ~/.claude/projects or ~/.codex/sessions, use this instead. For connections between sessions, files, and tools use hypaware-graph; for team-wide usage reporting use hypaware-report.
+user-invocable: false
 ---
 
 # HypAware Query

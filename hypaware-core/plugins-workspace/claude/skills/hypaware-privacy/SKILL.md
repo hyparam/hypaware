@@ -129,6 +129,10 @@ Present findings as **short, redacted excerpts** and a proposed class per direct
 
 Then **apply nothing without per-item user confirmation.** Propose, wait for a yes on each item, then mark. Do not batch-apply.
 
+Keep the response tight: a clear list of candidate directories with the proposed
+class for each, minimal prose, no restating of the steps. Flag individual
+sessions separately only when a directory is otherwise fine but one session is not.
+
 ## Step 6 - Apply only via `hyp` verbs, and offer purge for every ignore (R6, R7)
 
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
