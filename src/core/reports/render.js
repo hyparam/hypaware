@@ -276,9 +276,11 @@ function unescapeHtml(value) {
  * has to keep producing the same ids or every one of them dangles.
  *
  * @ref LLP 0208#heading-id-gaps [constrained-by]: parity is exact except for
- * Unicode separators/BOM and image alt text, both of which diverge ABOVE this
- * function (marked's block parser, and token types this only sees as rendered
- * HTML), so neither is fixable by changing the rule below
+ * Unicode separators/BOM and image alt text. The entity spellings of the
+ * separators/BOM are reachable here and decoded by unescapeHtml above, but
+ * the literal spellings break ABOVE this function, in marked's block parser,
+ * so fixing the rule below would close only half that class; image alt text
+ * needs token types this function only sees as rendered HTML
  *
  * Every step's order is load-bearing, checked against pandoc 3.1.11 `-f gfm -t html5`:
  * tags come off BEFORE unescaping (or a decoded `<` is eaten by the tag regex);

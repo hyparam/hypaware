@@ -41,8 +41,7 @@ title, the base stylesheet link, then `assets/head.html` inlined, in that order
 so `theme.css` keeps loading after the base sheet per
 [LLP 0196#theme-layer](./0196-skills-state-constraints-not-procedures.rfc.md#theme-layer)).
 Two renderer overrides restore what marked spells differently: heading ids,
-`-1` suffixes on repeats included, so existing in-page anchors keep resolving
-(exactly, but for the two narrow classes at [#heading-id-gaps](#heading-id-gaps));
+`-1` suffixes on repeats included, so existing in-page anchors keep resolving;
 and table cell alignment as pandoc's inline `style="text-align: ..."`, because
 marked's built-in emits the presentational `align` attribute, which loses the
 cascade to `assets/style.css`'s `th, td { text-align: left }` and would render
