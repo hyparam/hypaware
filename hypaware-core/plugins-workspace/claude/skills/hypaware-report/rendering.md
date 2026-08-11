@@ -21,8 +21,8 @@ judgment, and it is what this skill is for.
 
 ## Prerequisites
 
-- **pandoc** (`brew install pandoc`, or `sudo apt-get install pandoc`).
-- **A `hyp` with `report render`.** An older one predates this skill.
+- **A `hyp` with `report render`.** An older one predates this skill. Rendering
+  is in-process (no pandoc or other external tool to install).
 
 ## Procedure
 

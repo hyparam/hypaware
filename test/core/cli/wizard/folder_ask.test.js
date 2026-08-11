@@ -140,7 +140,7 @@ test('autoAccept states the question and records the default without prompting (
   // Never silent: the statement the question would have shown is printed,
   // with the answer as one more line of that block rather than a second
   // flush-left announcement repeating the subject.
-  assert.match(stdout.text(), /New folders you work in:/)
+  assert.match(stdout.text(), /When you start a session in a new folder:/)
   assert.match(stdout.text(), /^ {2}Syncing them all; change later with hyp policy folders ask$/m)
 })
 

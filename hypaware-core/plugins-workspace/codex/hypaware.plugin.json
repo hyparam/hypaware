@@ -34,7 +34,7 @@
       {
         "name": "codex",
         "label": "Codex",
-        "summary": "CLI and Desktop conversations; points Codex at the local gateway and installs helper skills.",
+        "summary": "Records your Codex conversations (CLI and Desktop). Setup points Codex at the local gateway and adds query skills.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },

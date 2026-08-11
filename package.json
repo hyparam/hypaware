@@ -2,7 +2,7 @@
   "name": "hypaware",
   "version": "1.21.1",
   "type": "module",
-  "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Captures Claude Code, Codex, OTEL, and raw AI gateway traffic locally, queryable from a single CLI.",
+  "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
   "bin": {
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
@@ -32,6 +32,10 @@
     "./core/util": {
       "types": "./types/core/util/index.d.ts",
       "import": "./src/core/util/index.js"
+    },
+    "./core/reports": {
+      "types": "./types/core/reports/render.d.ts",
+      "import": "./src/core/reports/render.js"
     },
     "./integration": {
       "types": "./src/core/cli/integration.d.ts",
@@ -68,6 +72,7 @@
     "hyparquet": "1.28.1",
     "hyparquet-compressors": "1.1.1",
     "icebird": "0.8.17",
+    "marked": "18.0.9",
     "squirreling": "0.15.0"
   },
   "optionalDependencies": {

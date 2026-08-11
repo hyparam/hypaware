@@ -40,7 +40,7 @@ export const ORG_CONFIG_WAIT_MS = 60000
  *   empty lock set rather than blocking - nothing is pinned, so the picker
  *   composes freely (LLP 0129).
  *
- * @ref LLP 0134#login-lane [implements]: "Join a team" wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
+ * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Collect shared agent logs") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
  *
  * @param {RunWizardJoinOptions} opts
  * @returns {Promise<WizardJoinResult>}

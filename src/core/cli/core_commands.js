@@ -485,8 +485,13 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'daemon uninstall',
-      summary: 'Uninstall the persistent user service (keeps config, recordings, logs)',
+      summary: 'Uninstall the persistent user service and detach its clients (keeps config, recordings, logs)',
       usage: 'hyp daemon uninstall',
+      help: [
+        'Removes the launchd / systemd service, then detaches every attached',
+        'client so none is left pointing at a gateway port that no longer',
+        'answers. Config, recordings, and logs stay.',
+      ].join('\n'),
       run: runDaemonUninstall,
     },
     {
@@ -619,8 +624,6 @@ function buildCoreCommands(registry) {
         'and assets/theme.css is yours: it is copied into each page but never',
         'overwritten. Pass --no-refresh-assets to leave the other assets alone',
         'too.',
-        '',
-        'Requires pandoc.',
       ].join('\n'),
       run: runReportRender,
     },

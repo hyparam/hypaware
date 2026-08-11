@@ -7,6 +7,7 @@
 **Date:** 2026-08-06
 **Related:** LLP 0074, LLP 0075, LLP 0102, LLP 0107, LLP 0142, LLP 0155
 **Planned-by:** LLP 0197
+**Superseded-in-part-by:** LLP 0208 (open question 1's keep-pandoc resolution)
 
 > The bundled skill surface has grown to 18 `SKILL.md` files across two
 > hand-synced trees, ~290 KB of prose, with the two largest skills at 25 KB
@@ -395,7 +396,10 @@ that installed it before LLP 0142 stops advertising it.
 
 ## Open questions
 
-1. **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
+1. **Superseded-by: LLP 0208** (2026-08-10: the renderer converts in process via
+   `marked`; server-side generation made the binary dependency and its blocking
+   subprocess a problem, exactly the escape hatch named below).
+   **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
    whether `hyp report render` should keep pandoc as a hard dependency or
    render Markdown in-process. `.github/workflows/ci.yml` runs on
    `ubuntu-latest` (Node 22 and 24), so adding pandoc is a one-line

@@ -3,6 +3,7 @@
 **Type:** design
 **Status:** Active
 **Extended-by:** LLP 0193 (the `PROJECTABLE_PROVIDERS` allowlist this design carries is retired for a turn-scoped CLI-backend denylist)
+**Extended-by:** LLP 0210 (#lane-a-detach: the `expectedBaseUrl` threading and the `EXPECTED_BASE_URL_UNKNOWN` refusal are retired; the `json_path` undo judges ownership by the entry's signature alone)
 **Systems:** Plugins, Gateway, Config, Sources
 **Generated-by:** neutral
 **Related:** LLP 0167, LLP 0171, LLP 0168, LLP 0169, LLP 0170

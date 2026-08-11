@@ -234,7 +234,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
             : `${missing[0]} section`
           stdout.write(
             missing.length > 0
-              ? `\nStopped here to keep setup moving - the ${which} did not finish.\n`
+              ? `\nStopped here to keep setup moving: the ${which} did not finish.\n`
               : '\nStopped here to keep setup moving.\n'
           )
         }

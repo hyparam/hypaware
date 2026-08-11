@@ -76,13 +76,20 @@ test('the gate lists the rows it will record, and the accept row names the act o
   const accept = state.question.options[0]
   assert.match(accept.summary, /Configures each to record through HypAware/)
   assert.match(accept.summary, /new folders sync too/)
-  assert.equal(state.question.options[1].summary, undefined, 'the alternative needs no gloss')
+  // The decline row prices the longer path (LLP 0201): it names the
+  // screens choosing walks through.
+  assert.match(state.question.options[1].summary, /what to record, what syncs, and new-folder behavior/)
   // No position line: the gate is what decides how many questions remain,
   // so it can no more state a total than the fork can (LLP 0135 #progress).
   assert.equal(state.question.progress, undefined)
 })
 
-test('an unenrolled run never claims anything about a server', async () => {
+// `opts.enrolled` is only ever `true` at the sole production call site
+// (LLP 0201 #one-lane-no-gate: the orchestrator now guards the gate itself
+// with `enrolled()`), so this pins the component's contract - what the gate
+// would render if ever called with `enrolled` unset or false - not a screen
+// any run reaches.
+test('the gate claims a server only when told it has one', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
@@ -152,7 +159,7 @@ test('the new-folder lane auto-accepts to the default and records it', async () 
 
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  assert.match(stdout.text(), /New folders you work in:/)
+  assert.match(stdout.text(), /When you start a session in a new folder:/)
 })
 
 test('narrateAcceptedGate prints the gate title and its items verbatim, led by a blank line', () => {

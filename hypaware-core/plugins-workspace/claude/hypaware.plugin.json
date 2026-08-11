@@ -37,7 +37,7 @@
       {
         "name": "claude",
         "label": "Claude Code",
-        "summary": "CLI and SDK conversations, including OpenClaw's claude-cli backend; attaches Claude Code, starts a local gateway listener, and installs helper skills.",
+        "summary": "Records your Claude Code conversations (CLI and SDK, including OpenClaw's claude-cli backend). Setup attaches Claude Code, starts a local gateway listener, and adds query skills.",
         "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
           "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },

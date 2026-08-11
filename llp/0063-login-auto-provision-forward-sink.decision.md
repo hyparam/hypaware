@@ -5,6 +5,7 @@
 **Systems:** CLI, Onboarding, Sinks, Gateway
 **Author:** Kenny / Claude
 **Date:** 2026-07-04
+**Extended-by:** LLP 0206 (#connection-levels: `daemon uninstall` cascades down to the client attaches too, since a client left pointed at the removed gateway port is broken, not merely stale)
 **Related:** LLP 0061, LLP 0025, LLP 0031, LLP 0036, LLP 0037, LLP 0044, LLP 0058, LLP 0033, LLP 0041/0043; hypaware-server LLP 0017 (domain→org, design authority), LLP 0020 (login-minted gateway)
 
 > The goal: a member of a domain-claimed org runs **one** command, `hyp remote

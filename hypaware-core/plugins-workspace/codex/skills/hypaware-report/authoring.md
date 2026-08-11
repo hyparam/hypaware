@@ -10,7 +10,7 @@ without the patterns below renders as a plain text document; one written with th
 renders as the intended data report. **The difference is authored here, in the Markdown:
 the renderer cannot add it later.**
 
-Raw-HTML rules (pandoc `gfm`): each HTML block must be **surrounded by blank lines**;
+Raw-HTML rules (gfm): each HTML block must be **surrounded by blank lines**;
 Markdown inside a block is NOT processed, write inner content as HTML
 (`<strong>`, `<code>`, `<em>`); use the component classes verbatim, never invent new ones.
 
