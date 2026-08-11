@@ -20,7 +20,7 @@
       {
         "name": "otel",
         "label": "OpenTelemetry",
-        "summary": "Logs, traces, and metrics over local OTLP HTTP; starts a local receiver.",
+        "summary": "Records logs, traces, and metrics your tools send over local OTLP HTTP; setup starts a local receiver.",
         "compose": {
           "plugin": { "name": "@hypaware/otel", "config": { "listen_host": "127.0.0.1", "listen_port": 4318 } }
         }

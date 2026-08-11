@@ -589,7 +589,10 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
       try {
         const sourceRaw = await ask({
           pickType: 'sources',
-          title: 'What do you want to collect? (space to toggle, enter to confirm)',
+          // No keys in the title: the TUI's hint line and the numbered
+          // fallback's own select instructions each carry their controls,
+          // so a parenthetical here said it twice on every terminal.
+          title: 'What do you want to collect?',
           // Carried on the question rather than composed into the title, so
           // the TUI paints it dim on its own line and the legacy numbered
           // fallback prints the same text as plain text.

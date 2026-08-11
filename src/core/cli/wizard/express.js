@@ -71,7 +71,13 @@ export async function runWizardExpressGate(opts) {
             ? 'Configures each to record through HypAware; new folders sync too.'
             : 'Configures each to record through HypAware.',
         },
-        { value: 'choose', label: 'Let me choose' },
+        {
+          value: 'choose',
+          label: 'Let me choose',
+          // The decline row glosses the path it opens (LLP 0201): a bare
+          // "Let me choose" priced the longer path at zero screens.
+          summary: 'Step through what to record, what syncs, and new-folder behavior.',
+        },
       ],
       default: 'defaults',
       ...(opts.allowBack ? { allowBack: true } : {}),

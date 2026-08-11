@@ -111,7 +111,7 @@ test('the menu checks what syncs: everything checked by default on a fresh run',
 
   assert.deepEqual(result, { optedOut: [] })
   assert.match(state.question.title, /Choose what syncs/)
-  assert.match(state.question.title, /unchecked sources stay on this machine/)
+  assert.match(state.question.title, /unchecked sources stay on this machine/i)
   assert.equal(state.question.progress, 'Step 3 of 4 · Choose what syncs')
   assert.ok(state.question.options.every((/** @type {any} */ o) => o.checked === true), 'default-sync: everything pre-checked on a fresh run')
   assert.equal(state.question.enterKeepsChecked, true, 'the numbered fallback must keep the checked rows on a bare enter')
