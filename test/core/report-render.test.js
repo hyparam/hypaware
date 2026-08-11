@@ -617,6 +617,92 @@ test('a <br> in a heading yields a space, matching pandoc 3.1.11', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('every raw tag whose name starts with `br` yields a space, matching pandoc 3.1.11', () => {
+  // pandoc's stringify keys on the raw inline's LEADING TEXT, not on a parsed tag name,
+  // so ANY raw inline HTML token starting with the case-sensitive prefix `<br` becomes a
+  // space, `<brand>` included. The regex here used to be spelled `<br(?:\s[^>]*)?\/?>`
+  // on the stated rationale that it must not "swallow" `<brand>`; that rationale was
+  // wrong, and every heading below was measured against a real pandoc 3.1.11 binary
+  // (`-f gfm -t html5`), ONE HEADING PER DOCUMENT so no de-dup counter drift can make a
+  // divergence look like parity. Each heading uses its own letters for the same reason.
+  const dir = onePageTree(
+    'br-prefix',
+    [
+      '# Report',
+      '',
+      '## A <brand> B',
+      '',
+      '## C <brand>x</brand> D',
+      '',
+      '## E <bra> F',
+      '',
+      '## G <br-x> H',
+      '',
+      '## I <br2> J',
+      '',
+      '## K <brand attr="y"> L',
+      '',
+      '## M <brand/> N',
+      '',
+      '## O <breakfast time> P',
+      '',
+      '## Q <brand   > R',
+      '',
+      '## S <brand>T',
+      '',
+      '## U <BR> V',
+      '',
+      '## W <Br> Y',
+      '',
+      '## Z </brand> AA',
+      '',
+      '## AB <b> AC',
+      '',
+      '## AD <bold> AE',
+      '',
+      '## AF <span> AG',
+      '',
+      '## AH <custom> AI',
+      '',
+      '## AJ <q> AK',
+      '',
+      '## AL <br@> AM',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'br-prefix', 'index.html'), 'utf8')
+
+  // The `br`-prefix family: all of these are line breaks to pandoc's stringify.
+  assert.ok(html.includes('<h2 id="a---b">'), '<brand> yields a space, exactly as <br> does')
+  assert.ok(html.includes('<h2 id="c--x-d">'), 'only the OPEN tag counts: </brand> starts `</b`, not `<br`')
+  assert.ok(html.includes('<h2 id="e---f">'), 'a truncated <bra> still carries the prefix')
+  assert.ok(html.includes('<h2 id="g---h">'), 'a hyphenated <br-x> still carries the prefix')
+  assert.ok(html.includes('<h2 id="i---j">'), 'a digit-suffixed <br2> still carries the prefix')
+  assert.ok(html.includes('<h2 id="k---l">'), '<brand> carrying an attribute is still a space')
+  assert.ok(html.includes('<h2 id="m---n">'), 'a self-closing <brand/> is still a space')
+  assert.ok(html.includes('<h2 id="o---p">'), 'a two-word <breakfast time> tag still carries the prefix')
+  assert.ok(html.includes('<h2 id="q---r">'), 'trailing space inside the tag does not stop the match')
+  assert.ok(html.includes('<h2 id="s--t">'), 'with no authored space after it the tag still contributes its own')
+
+  // The exclusions, which the widened prefix match must NOT start swallowing. The
+  // prefix is case-sensitive, applies only to the open tag, and requires `br`, not `b`.
+  assert.ok(html.includes('<h2 id="u--v">'), 'uppercase <BR> stays raw HTML contributing nothing')
+  assert.ok(html.includes('<h2 id="w--y">'), 'mixed-case <Br> stays raw HTML too')
+  assert.ok(html.includes('<h2 id="z--aa">'), 'a bare close tag </brand> contributes nothing')
+  assert.ok(html.includes('<h2 id="ab--ac">'), '<b> starts with `b` but not `br`, so it vanishes')
+  assert.ok(html.includes('<h2 id="ad--ae">'), '<bold> starts with `b` but not `br` either')
+  assert.ok(html.includes('<h2 id="af--ag">'), '<span> still vanishes without a trace')
+  assert.ok(html.includes('<h2 id="ah--ai">'), '<custom> still vanishes without a trace')
+  assert.ok(html.includes('<h2 id="aj--ak">'), '<q> still vanishes without a trace')
+  // Widening the regex is safe because it never sees a string marked did not already
+  // accept as a tag: marked escapes invalid tag syntax to entities first, and pandoc
+  // likewise leaves `<br@>` as ordinary text rather than reading it as a line break.
+  assert.ok(html.includes('<h2 id="al-br-am">'), 'invalid tag syntax stays text on both sides')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('heading ids do not trim after the punctuation strip, matching pandoc 3.1.11', () => {
   // Every pairing measured against a real pandoc 3.1.11 binary (`-f gfm -t html5`).
   // pandoc does not trim at this stage: the space a dropped leading or trailing

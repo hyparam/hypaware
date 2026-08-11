@@ -41,7 +41,8 @@ title, the base stylesheet link, then `assets/head.html` inlined, in that order
 so `theme.css` keeps loading after the base sheet per
 [LLP 0196#theme-layer](./0196-skills-state-constraints-not-procedures.rfc.md#theme-layer)).
 Two renderer overrides restore what marked spells differently: heading ids,
-`-1` suffixes on repeats included, so existing in-page anchors keep resolving;
+`-1` suffixes on repeats included, so existing in-page anchors keep resolving
+(exactly, but for the two narrow classes at [#heading-id-gaps](#heading-id-gaps));
 and table cell alignment as pandoc's inline `style="text-align: ..."`, because
 marked's built-in emits the presentational `align` attribute, which loses the
 cascade to `assets/style.css`'s `th, td { text-align: left }` and would render
@@ -100,6 +101,34 @@ as a stylesheet or renderer choice later without touching the contract.
   (`ul:has(> li > input[type="checkbox"], > li > p > input[type="checkbox"])`)
   rather than by a class the renderer no longer adds, so a checkbox item does not
   render with a bullet as well regardless of which shape it came in as.
+- <a id="heading-id-gaps"></a>**Heading-id parity is exact except in two narrow
+  classes, both left as they are on purpose.** The slug rule is pinned case by
+  case against a real pandoc 3.1.11 binary, one heading per document so no
+  de-dup counter drift can make a divergence read as parity. Two classes still
+  diverge, and each is deferred because the fix does not live in the slug rule:
+  - **Unicode separators and the BOM (U+2028, U+2029, U+FEFF).** JavaScript's
+    `\s` matches all three where pandoc treats them as ordinary symbols and
+    drops them, so the entity spellings mint one hyphen too many: `## A &#8232; B`
+    mints `a---b` against pandoc's `a--b`. Fixing the slug rule would close only
+    that half. The literal-authored spellings break further upstream, in marked's
+    block parser, before any renderer override can see them: a literal U+2028 or
+    U+2029 in a heading line splits the block so no heading (and so no id at all)
+    is produced, and a literal U+FEFF welds its neighbours into `k-l`. A half fix
+    that made the entity spelling right while the literal spelling still lost its
+    heading outright would be worse than the honest gap.
+  - **Image alt text.** pandoc slugs a Markdown image's alt text into the id and
+    contributes nothing for a raw-HTML `<img>`: `## X ![alt text](i.png) Y` mints
+    `x-alt-text-y`, while the same image written as `<img>` mints `x--y`. This
+    renderer mints `x--y` for both. It cannot do better at this layer, because
+    marked emits BYTE-IDENTICAL HTML for the two forms (`X <img src="i.png"
+    alt="alt text"> Y`, measured), so no string-level discriminator exists for
+    `headingId` to key on. A correct fix has to read token types in the `heading`
+    renderer instead of slugging rendered HTML, which is a larger change than the
+    exposure warrants: report headings carrying images are not an authored
+    pattern here.
+
+  Both are recorded rather than fixed so that a future in-page anchor that does
+  dangle is diagnosable against a known list instead of re-derived from scratch.
 
 ## References
 
