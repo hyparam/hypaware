@@ -1057,7 +1057,27 @@ test('a partition already due for compaction skips the resettle-candidate row sc
   // read, so it attributes each read to its caller instead of only counting
   // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
   // footer-stats probe, would not falsely implicate the scan).
+  //
+  // A stack-based observation can go blind: the deciding frame sits ~8 frames
+  // below the mock, and V8's default `Error.stackTraceLimit` of 10 leaves only
+  // two frames of headroom. Three more frames anywhere between the mock and
+  // the caller (an icebird refactor, extra node:test mock internals, a wrapper
+  // in `resolver.js`) would drop it, and a negative "no stack mentions
+  // `hasResettleCandidate`" assertion passes vacuously on truncated stacks.
+  // Two guards keep that from happening silently:
+  //   1. raise `Error.stackTraceLimit` while the mock is installed (restored
+  //      below even if the test throws), which removes the hazard outright;
+  //   2. assert positively that some stack names `compactGeneration`, the
+  //      legitimate reader. It calls `scanRowsFromTable` from exactly the same
+  //      depth as `hasResettleCandidate` does, so any truncation deep enough
+  //      to hide the frame the negative assertion hunts for also hides this
+  //      one, and the test fails loudly instead of going quiet. Asserting on
+  //      `scanRowsFromTable` itself would not do: it sits one frame shallower
+  //      and survives truncation that has already blinded the real check.
+  // Guard 2 also catches the `?? ''` fallback below storing an unattributable
+  // empty string.
   const cacheRoot = await makeTmpDir('maint-scan-skip')
+  const originalStackTraceLimit = Error.stackTraceLimit
   try {
     const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
     const epoch0 = path.join(partDir, 'epoch=0')
@@ -1072,6 +1092,7 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     /** @type {string[]} */
     const stacks = []
     const original = fsSync.readFileSync
+    Error.stackTraceLimit = 50
     t.mock.method(fsSync, 'readFileSync', function (p, ...rest) {
       if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
       return original.call(this, p, ...rest)
@@ -1090,12 +1111,17 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
 
     assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
+    assert.ok(
+      stacks.some((s) => s.includes('compactGeneration')),
+      'sanity: captured stacks must be deep enough to name the reader, or the assertion below passes vacuously'
+    )
     assert.deepEqual(
       stacks.filter((s) => s.includes('hasResettleCandidate')),
       [],
       'the resettle scan must not read the data file'
     )
   } finally {
+    Error.stackTraceLimit = originalStackTraceLimit
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
