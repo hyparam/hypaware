@@ -340,12 +340,12 @@ export function createAttachHandler(opts = {}) {
 
       let result
       try {
-        // `ctx.endpoint` is the proven-bound gateway URL `perform()` already
-        // attaches with, so reverse decides ownership against the very origin
-        // the forward action wrote. The `json_path` format needs it (its undo
-        // record is the entry it wrote); the marker-carrying formats ignore it.
-        // @ref LLP 0172#lane-a-detach [implements]: reverse threads the gateway's own base URL into the one core undo, from the ActionContext perform() already uses
-        result = await detach({ descriptor, env: ctx.env, expectedBaseUrl: ctx.endpoint })
+        // No gateway fact is threaded in: every format's undo record lives in
+        // the settings file itself (marker key, managed block, or the entry's
+        // own signature), so reverse works even when the endpoint that
+        // performed the attach no longer exists.
+        // @ref LLP 0210#d1 [constrained-by]: reverse passes no origin; the json_path undo judges ownership by the entry's signature alone
+        result = await detach({ descriptor, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
       }

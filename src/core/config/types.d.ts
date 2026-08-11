@@ -734,14 +734,6 @@ export type ClientDetachFromDisk = (args: {
   descriptor: ClientDescriptor
   homeDir?: string
   env?: NodeJS.ProcessEnv
-  /**
-   * The gateway's own currently-resolved base origin, for the `json_path`
-   * format whose undo record is the entry it wrote: ownership can only be
-   * decided by comparing that entry's `baseUrl` against the URL attach would
-   * have written (LLP 0172 §2.1). The `json`/`toml` formats carry a
-   * HypAware-owned marker and ignore it, so it stays optional.
-   */
-  expectedBaseUrl?: string
 }) => Promise<DetachFromDiskResult>
 
 export interface CreateAttachHandlerOptions {

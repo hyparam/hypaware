@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { ClientDetachError, detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
+import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 // Fixture setup only. The core undo under test imports no plugin code; building
 // the "this entry is ours" case with the real attach is what proves the two
 // halves agree on the shape rather than on a shape this file invented.
@@ -14,9 +14,9 @@ import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/open
 
 /**
  * LLP 0173 T2: the `json_path` undo (`detachJsonPathProviders`). Unlike the
- * `json`/`toml` formats there is no HypAware-owned marker to replay: the
- * entries attach wrote *are* the record, so every outcome here turns on the
- * ownership check (`baseUrl` is the gateway's, `marker_header` names the key).
+ * `json`/`toml` formats there is no separate marker to replay: the entries
+ * attach wrote *are* the record, so every outcome here turns on the signature
+ * check (`marker_header` names the key, the shape is attach's; LLP 0210).
  *
  * @import { ClientDescriptor } from '../../src/core/types.js'
  */
@@ -104,7 +104,6 @@ test('json_path undo deletes the two entries the gateway wrote', async () => {
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: {},
-      expectedBaseUrl: ENDPOINT,
     })
 
     assert.equal(result.changed, true)
@@ -124,9 +123,9 @@ test('json_path undo deletes the two entries the gateway wrote', async () => {
   }
 })
 
-/* ------------------- present but not ours: backed up, kept ------------------ */
+/* ------------------ present but not ours: left in place -------------------- */
 
-test('json_path undo backs a present-but-not-ours entry up instead of discarding it', async () => {
+test('json_path undo leaves a present-but-not-ours entry in place and warns by path', async () => {
   const home = await stageHome()
   try {
     const foreign = {
@@ -142,60 +141,152 @@ test('json_path undo backs a present-but-not-ours entry up instead of discarding
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: {},
-      expectedBaseUrl: ENDPOINT,
     })
 
     assert.equal(result.changed, true)
     const providers = (await readJsonFile(settingsPath)).models.providers
-    // Ours went; theirs did not merely survive, it is still readable in the
-    // same file a human opens after the detach.
+    // Ours went; theirs stayed exactly where the user put it (LLP 0210 D2):
+    // the same disposal the json undo makes for an overridden env value.
     assert.equal('openai' in providers, false)
-    assert.equal('anthropic' in providers, false)
-    assert.deepEqual(providers._hypaware_detach_backup.anthropic, foreign)
+    assert.deepEqual(providers.anthropic, foreign)
+    assert.equal('_hypaware_detach_backup' in providers, false)
     // Reported by path, never by value: a provider entry is exactly where a
     // credential header ends up, and this string is printed and echoed into
     // `hyp detach --json`.
-    assert.match(String(result.warning), /models\.providers\._hypaware_detach_backup\.anthropic/)
+    assert.match(String(result.warning), /models\.providers\.anthropic/)
+    assert.match(String(result.warning), /left in place/)
     assert.equal(String(result.warning).includes('user-secret'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('json_path undo treats a right-URL wrong-marker entry as not ours', async () => {
+test('json_path undo does not touch or remark on a config that was never attached', async () => {
   const home = await stageHome()
   try {
-    // Points at the gateway, but the marker header names the other key: not a
-    // shape attach produces, so it is preserved rather than deleted.
+    // A user-authored provider at a key attach manages, wrong-marker variant
+    // included: nothing here is ours, so nothing moves and nothing is warned,
+    // and the derived caches those entries feed are not edited either
+    // (LLP 0210 D2).
     const impostor = { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'openai' }, models: [] }
-    const settingsPath = await writeOpenclawConfig(home, { models: { providers: { anthropic: impostor } } })
+    const theirs = { baseUrl: 'https://api.anthropic.com', models: ['claude-x'] }
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: impostor, openai: theirs } },
+    })
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const cacheContent = JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: 'https://api.anthropic.com' },
+    }, null, 2) + '\n'
+    const cachePath = await writeAgentCache(home, 'main', cacheContent)
 
     const result = await detachClientFromDisk({
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: {},
-      expectedBaseUrl: ENDPOINT,
     })
 
-    assert.equal(result.changed, true)
-    const providers = (await readJsonFile(settingsPath)).models.providers
-    assert.deepEqual(providers._hypaware_detach_backup.anthropic, impostor)
+    assert.equal(result.changed, false)
+    assert.equal(result.warning, undefined)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.equal(await fs.readFile(cachePath, 'utf8'), cacheContent)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('json_path undo refuses rather than guessing when the gateway base URL is unknown', async () => {
+test('json_path undo rerun finishes a cache purge the first pass left behind', async () => {
+  // Retryability (LLP 0210 D2): the settings half of an earlier detach landed
+  // (managed surface empty), the cache half did not. The residue still
+  // carries the marker header that identifies it, so the rerun purges it
+  // with nothing deleted from the settings this time.
   const home = await stageHome()
   try {
-    await writeOpenclawConfig(home, {
-      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT) } },
+    await writeOpenclawConfig(home, { models: { providers: {} } })
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'anthropic' } },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo rerun purges marked residue beside a user entry it leaves alone', async () => {
+  // The mixed rerun: the user's own openai entry occupies one managed key,
+  // our anthropic residue (marker and all) is stranded in the cache from an
+  // earlier partial detach. The row test purges ours and keeps theirs; a
+  // whole-purge gate on the settings pass would leave the residue forever.
+  const home = await stageHome()
+  try {
+    const theirs = { baseUrl: 'https://their-proxy.example', models: ['claude-x'] }
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { openai: theirs } },
+    })
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'anthropic' } },
+      openai: { baseUrl: 'https://their-proxy.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.deepEqual(await readJsonFile(cachePath), { openai: { baseUrl: 'https://their-proxy.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo leaves a never-attached machine with no managed settings keys and marker-less cache rows untouched', async () => {
+  // The ordinary OpenClaw state: models.providers absent entirely, caches
+  // carrying the user's own rows at the managed keys (merged forward from
+  // their config, no marker). Nothing here is ours, in either file.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeOpenclawConfig(home, { theme: 'dark' })
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const cacheContent = JSON.stringify({
+      anthropic: { baseUrl: 'https://api.anthropic.com', models: [{ id: 'claude-sonnet-4' }] },
+      openai: { baseUrl: 'https://api.openai.com/v1', models: [{ id: 'gpt-5' }] },
+    }, null, 2) + '\n'
+    const cachePath = await writeAgentCache(home, 'main', cacheContent)
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.equal(result.warning, undefined)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.equal(await fs.readFile(cachePath, 'utf8'), cacheContent)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo deletes a stale entry from an old port: the signature is the whole test', async () => {
+  // LLP 0210: the entry's own signature identifies it, whatever URL it
+  // carries. An entry left behind by a daemon that has since rebound (or been
+  // uninstalled) is still ours and still needs to go; under the retired
+  // origin-comparison rule this exact fixture could not be reversed at all
+  // without a live daemon to ask.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: ourEntry('anthropic', 'http://127.0.0.1:9999') } },
     })
 
-    await assert.rejects(
-      detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} }),
-      (err) => err instanceof ClientDetachError && err.code === 'EXPECTED_BASE_URL_UNKNOWN'
-    )
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, true)
+    const providers = (await readJsonFile(settingsPath)).models.providers
+    assert.equal('anthropic' in providers, false)
+    assert.equal('_hypaware_detach_backup' in providers, false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -210,7 +301,6 @@ test('json_path undo is a no-op when the settings file is absent', async () => {
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: {},
-      expectedBaseUrl: ENDPOINT,
     })
 
     assert.equal(result.changed, false)
@@ -222,15 +312,41 @@ test('json_path undo is a no-op when the settings file is absent', async () => {
 
 /* --------------------------- best-effort cache purge ---------------------- */
 
+test('json_path undo keeps the cache row for a user entry it left in the settings', async () => {
+  // The purge mirrors the settings disposal: ours came out of both, the
+  // user's openai entry stayed in the settings so its cache row stays with it.
+  const home = await stageHome()
+  try {
+    const theirs = { baseUrl: 'https://their-proxy.example', models: ['claude-x'] }
+    await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT), openai: theirs } },
+    })
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: 'https://their-proxy.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, true)
+    assert.deepEqual(await readJsonFile(cachePath), { openai: { baseUrl: 'https://their-proxy.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('json_path undo purges the derived caches, skipping one that will not parse', async () => {
   const home = await stageHome()
   try {
     const settingsPath = await writeOpenclawConfig(home, {
       models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT) } },
     })
+    // The anthropic row rides out on this run's settings deletion; the openai
+    // row (carried forward wholesale, marker and all, per LLP 0167 verify
+    // item 3) is recognized as ours by its own signature.
     const good = await writeAgentCache(home, 'main', JSON.stringify({
       anthropic: { baseUrl: ENDPOINT },
-      openai: { baseUrl: `${ENDPOINT}/v1` },
+      openai: { baseUrl: `${ENDPOINT}/v1`, headers: { 'x-hypaware-upstream': 'openai' } },
       google: { baseUrl: 'https://vendor.example' },
     }, null, 2) + '\n')
     const brokenText = '{ this is not json'
@@ -240,7 +356,6 @@ test('json_path undo purges the derived caches, skipping one that will not parse
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: {},
-      expectedBaseUrl: ENDPOINT,
     })
 
     // The settings half landed and the malformed sibling did not fail it.
@@ -287,7 +402,6 @@ test('json_path undo purges the caches under a nested $OPENCLAW_HOME', async () 
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: home,
       env: { OPENCLAW_HOME: openclawHome },
-      expectedBaseUrl: ENDPOINT,
     })
 
     assert.equal(result.changed, true)
