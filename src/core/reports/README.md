@@ -30,7 +30,7 @@ cut the skill from 28 KB to 13 KB (T10 finished the trim).
 | `types.d.ts` | `RenderOptions` / `RenderResult`. |
 | `assets/style.css` | The data-report stylesheet, custom-property driven. Copied into every built page. |
 | `assets/copy-md.js` | The "Copy as Markdown" masthead action. |
-| `assets/head.html` | Favicon links plus the copy-script tag, inlined into every `<head>` by pandoc's `-H`. Not a page asset. |
+| `assets/head.html` | Favicon links plus the copy-script tag, inlined into every `<head>` at render time. Not a page asset. |
 | `assets/favicon.svg` | Theme-aware mark. |
 | `assets/favicon.png` | 64px fallback, shipped prebuilt so nothing needs `sips`. Safari does not render SVG favicons. |
 
@@ -47,10 +47,12 @@ cut the skill from 28 KB to 13 KB (T10 finished the trim).
   rendering misbehaves, fix `render.js` and its tests. Restoring `build.sh`
   restores a macOS-only, untested path that CI cannot run, and a test now
   asserts it stays gone.
-- **pandoc is still a hard dependency** (LLP 0196 open question 1, resolved:
-  keep it, install it in CI). Nothing else shells out: the port dropped the
-  BSD-only `sed -E -i ''` and the macOS-only `sips`, which is what let the
-  renderer be covered by tests at all, since CI is `ubuntu-latest`.
+- **Markdown converts in process via `marked`; nothing shells out**
+  ([LLP 0208](../../../llp/0208-report-renderer-drops-pandoc.decision.md),
+  superseding LLP 0196 open question 1's keep-pandoc resolution). The port had
+  already dropped the BSD-only `sed -E -i ''` and the macOS-only `sips`, which
+  is what let the renderer be covered by tests at all, since CI is
+  `ubuntu-latest`.
 - **`rewriteHrefs` rule order is load-bearing**, and pinned by
   `test/core/report-render-hrefs.test.js`. Its failure mode is silent: a missed
   case ships a dead link that renders fine and breaks only when clicked. Change

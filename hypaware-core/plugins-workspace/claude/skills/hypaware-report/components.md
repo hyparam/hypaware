@@ -44,8 +44,8 @@ list entries, not tiles or cards. Keep that restraint when restyling.
 
 ## Authoring components (raw HTML in the Markdown)
 
-Everything below is plain HTML dropped into the `.md`. In pandoc `gfm`, a raw HTML block
-must be **surrounded by blank lines**, and pandoc will not process Markdown *inside* it:
+Everything below is plain HTML dropped into the `.md`. In gfm, a raw HTML block
+must be **surrounded by blank lines**, and the renderer will not process Markdown *inside* it:
 write inner content as HTML. Reuse these classes verbatim; the stylesheet already styles
 them for light, dark, and print. **Do not invent new class names or add per-report CSS.**
 
