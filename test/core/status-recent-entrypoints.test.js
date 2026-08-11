@@ -15,7 +15,7 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 import {
   formatEntrypointAge,
   renderStatusJson,
-  renderStatusText,
+  renderStatusFull,
 } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -138,7 +138,7 @@ test('hyp status surfaces Codex Desktop traffic from status.json, with no cache 
     assert.deepEqual(report.recentEntrypoints.map((e) => e.entrypoint), ['Codex Desktop', 'codex-tui'])
 
     const stdout = buffer()
-    renderStatusText({
+    renderStatusFull({
       report,
       clientNames: [],
       datasets: [],
@@ -173,7 +173,7 @@ test('an install that has never captured keeps the V1 text surface unchanged', a
     assert.deepEqual(report.recentEntrypoints, [])
 
     const stdout = buffer()
-    renderStatusText({
+    renderStatusFull({
       report,
       clientNames: [],
       datasets: [],
@@ -210,7 +210,7 @@ test('last-seen survives its daemon: a stopped daemon still reports what it saw'
     assert.deepEqual(report.recentEntrypoints.map((e) => e.entrypoint), ['Codex Desktop'])
 
     const stdout = buffer()
-    renderStatusText({
+    renderStatusFull({
       report,
       clientNames: [],
       datasets: [],
@@ -244,7 +244,7 @@ test('a client with no client_name renders without inventing one', async () => {
     })
     const report = await collectHypAwareStatus(collectOpts(hypHome))
     const stdout = buffer()
-    renderStatusText({
+    renderStatusFull({
       report,
       clientNames: [],
       datasets: [],
@@ -316,7 +316,7 @@ test('a rendered recent-clients block cannot be forged by a hostile entrypoint',
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const stdout = buffer()
-  renderStatusText({
+  renderStatusFull({
     report,
     clientNames: [],
     datasets: [],

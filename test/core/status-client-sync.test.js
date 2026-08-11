@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { clientSyncListPath, writeClientSyncEntries } from '../../src/core/usage-policy/client_sync.js'
@@ -93,7 +93,7 @@ test('an opted-out local source shows local-only; a stale central opt-out entry 
   })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.match(stdout.text(), /syncing: claude · raw-anthropic · raw-openai - local-only: codex/)
 })
 
@@ -112,7 +112,7 @@ test('a solo host leaves the split null and the V1 surface unchanged', async () 
   assert.equal(json.client_sync, null)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /syncing:/)
 })
 

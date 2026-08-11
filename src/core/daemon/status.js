@@ -921,7 +921,10 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
-        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker - run '${repair}'`,
+        // The command belongs in `repair` and nowhere else: both text surfaces
+        // render that field, so a message that also embeds it says the same
+        // command twice on one screen (LLP 0212 #attention).
+        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker`,
         repair: [repair],
       })
     } else if (
@@ -940,7 +943,7 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_stale',
-        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
+        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort}`,
         repair: [`hyp attach --client ${clientName}`],
       })
     } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
@@ -961,7 +964,7 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attached_not_configured',
-        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
+        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail`,
         repair: [`hyp detach --client ${clientName}`],
       })
     }

@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-31
 **Related:** LLP 0003, LLP 0017, LLP 0086, LLP 0114, LLP 0130, LLP 0131, LLP 0133, LLP 0141
+**Extended-by:** [LLP 0212](./0212-status-is-a-triage-summary.decision.md) (the rendering only: the recent-clients list is promoted from a trailing section into the summary's `activity` row, top entries first, and an install that has recorded nothing says so there; the tracker, the status-file shape, and `--json` are unchanged)
 
 > Closes the one consequence [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)
 > left deliberately open: `hyp status` could not say "Codex Desktop traffic

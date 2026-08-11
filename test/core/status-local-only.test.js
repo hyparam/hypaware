@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { localOnlyListPath, writeLocalOnlyDirs } from '../../src/core/usage-policy/local_only.js'
 import { writeFolderAskMode } from '../../src/core/usage-policy/folder_ask.js'
@@ -49,7 +49,7 @@ test('no local-only list yet: count is 0 and the text/JSON surfaces stay quiet',
   assert.deepEqual(json.usage_policy, { local_only_dir_count: 0, folder_ask: 'sync' })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /local-only:/)
 })
 
@@ -62,7 +62,7 @@ test('an empty (but present) list also hides the line', async () => {
   assert.deepEqual(report.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'sync' })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /local-only:/)
 })
 
@@ -82,7 +82,7 @@ test('N > 0 renders the withholding line in text and the count in JSON', async (
   assert.deepEqual(json.usage_policy, { local_only_dir_count: 2, folder_ask: 'sync' })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.match(
     stdout.text(),
     /local-only:\s+withholding 2 directories from forwarding \(recorded locally\)/
@@ -113,7 +113,7 @@ test('a corrupt local-only list surfaces a diagnostic and a null usagePolicy, ne
   )
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
   assert.doesNotMatch(text, /local-only:\s+withholding/, 'never renders a count it does not trust')
   assert.match(text, /local_only_list_unreadable/)
@@ -134,14 +134,14 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
   assert.equal(solo.layered, null)
   assert.deepEqual(solo.usagePolicy, { localOnlyDirCount: 0, folderAsk: 'sync' })
   const soloOut = makeBuf()
-  renderStatusText({ report: solo, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: soloOut })
+  renderStatusFull({ report: solo, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: soloOut })
   assert.doesNotMatch(soloOut.text(), /new folders:/)
 
   // An enrolled host states it either way: the default is the mode with
   // data consequences, so it is exactly the one that must not be silent.
   const enrolled = { ...solo, layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }) }
   const syncOut = makeBuf()
-  renderStatusText({ report: enrolled, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: syncOut })
+  renderStatusFull({ report: enrolled, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: syncOut })
   assert.match(syncOut.text(), /new folders:\s+sync without asking/)
   assert.match(syncOut.text(), /hyp policy folders ask/)
 
@@ -152,7 +152,7 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
   assert.deepEqual(json.usage_policy, { local_only_dir_count: 0, folder_ask: 'ask' })
 
   const askOut = makeBuf()
-  renderStatusText({
+  renderStatusFull({
     report: { ...asked, layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }) },
     clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: askOut,
   })

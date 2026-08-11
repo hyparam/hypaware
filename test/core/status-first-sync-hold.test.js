@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import {
   firstSyncHoldMarkerPath,
@@ -51,7 +51,7 @@ test('no hold marker: the deadline is null and text/JSON stay quiet', async () =
   assert.equal(json.first_sync_hold, null)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /first sync:/)
 })
 
@@ -71,7 +71,7 @@ test('a live hold surfaces its deadline in text and JSON (LLP 0100 R9)', async (
   })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
   assert.match(text, /first sync:\s+held until /)
   assert.ok(
@@ -92,7 +92,7 @@ test('an expired hold reads as absent, exactly as the sink driver sees it', asyn
   assert.equal(report.firstSyncHoldDeadline, null)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /first sync:/)
 })
 

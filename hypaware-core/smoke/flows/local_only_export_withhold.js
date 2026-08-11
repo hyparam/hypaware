@@ -329,9 +329,31 @@ export async function run({ harness, expect }) {
         env: process.env,
       })
       expect.that('status: hyp status exited 0', textCode, (v) => v === 0)
+      // The default screen, not `--full`: a withheld folder has to reach the
+      // surface a human lands on (LLP 0212 #never-silent), and there it rides
+      // the `data` row beside what the cache holds and where it goes.
+      //
+      // Compared against the frame and the wrapping flattened out: the summary
+      // lays itself out to the terminal it is printed on, so which line a
+      // phrase lands on is the renderer's business, not this assertion's.
+      const flattened = textStdout.text().replace(/[│╭╮╰╯]/g, ' ').replace(/\s+/g, ' ')
       expect.that(
-        'status: text output reports withholding 1 directory',
-        textStdout.text(),
+        'status: the default screen reports 1 withheld folder',
+        flattened,
+        (v) => v.includes('1 folder withheld') && v.includes('stays on this machine')
+      )
+
+      const fullStdout = makeBuf()
+      await dispatch(['status', '--full'], {
+        stdout: fullStdout,
+        stderr: makeBuf(),
+        kernel,
+        registry,
+        env: process.env,
+      })
+      expect.that(
+        'status: --full still spells the withholding out in full',
+        fullStdout.text(),
         (v) => v.includes('local-only:') && v.includes('withholding 1 directories from forwarding (recorded locally)')
       )
 

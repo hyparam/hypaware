@@ -118,9 +118,12 @@ export async function runInit(argv, ctx) {
         agents: /** @type {any} */ (ctx.agents),
         backfill: buildPickerBackfillRunner(ctx),
         finale: {},
+        // The gate's row says "See full status", and the summary it would
+        // otherwise print is a shorter version of the one the gate just
+        // rendered above it (LLP 0212).
         runStatus: async () => {
           ctx.stdout.write('\n')
-          return runStatus([], ctx)
+          return runStatus(['--full'], ctx)
         },
       })
       return result.exitCode

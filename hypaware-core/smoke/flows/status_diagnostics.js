@@ -127,7 +127,10 @@ export async function run({ harness, expect }) {
 
     const okStdout = makeBuf()
     const okStderr = makeBuf()
-    const okExit = await dispatch(['status'], {
+    // `--full`: the inventory surface. The default screen is a summary that
+    // elides plugin and sink rosters by design (LLP 0212), and the rosters are
+    // what this case is about.
+    const okExit = await dispatch(['status', '--full'], {
       stdout: okStdout,
       stderr: okStderr,
       kernel,
@@ -303,11 +306,11 @@ export async function run({ harness, expect }) {
       )
     )
 
-    /* ---------- Case 4: broken config text rendering ---------- */
+    /* ---------- Case 4: broken config text rendering (--full) ---------- */
 
     const badTextStdout = makeBuf()
     const badTextStderr = makeBuf()
-    const badTextExit = await dispatch(['status'], {
+    const badTextExit = await dispatch(['status', '--full'], {
       stdout: badTextStdout,
       stderr: badTextStderr,
       kernel,
@@ -332,6 +335,54 @@ export async function run({ harness, expect }) {
       (v) => v.includes('repair: hyp attach --client claude')
     )
 
+    /* ---------- Case 5: the default screen is the summary ---------- */
+
+    // The surface a human actually lands on (LLP 0212). A broken install has
+    // to reach them here, not only under a flag: the health word, the problem
+    // in a sentence, and a runnable repair - and none of the inventory the
+    // summary exists to drop.
+    const summaryStdout = makeBuf()
+    const summaryStderr = makeBuf()
+    const summaryExit = await dispatch(['status'], {
+      stdout: summaryStdout,
+      stderr: summaryStderr,
+      kernel,
+      registry,
+      env: smokeEnv({ harness, hypConfig: badConfigPath }),
+    })
+    expect.that('summary: hyp status exited 0', summaryExit, (v) => v === 0)
+    // Frame and wrapping flattened out: the summary lays itself out to the
+    // terminal it is printed on, so which line a phrase lands on is the
+    // renderer's business, not this assertion's.
+    const summaryText = summaryStdout.text().replace(/[│╭╮╰╯]/g, ' ').replace(/\s+/g, ' ')
+    for (const expected of [
+      'HypAware',
+      'degraded',
+      'daemon',
+      'capture',
+      'activity',
+      'data',
+      "client plugin '@hypaware/claude' is enabled",
+      '→ hyp attach --client claude',
+      'hyp status --full',
+    ]) {
+      expect.that(
+        `summary: stdout carries '${expected}'`,
+        summaryText,
+        (v) => v.includes(expected)
+      )
+    }
+    expect.that(
+      'summary: the plugin roster is not on the default screen',
+      summaryText,
+      (v) => !v.includes('active plugins:')
+    )
+    expect.that(
+      'summary: the diagnostic kind stays a --json/--full identifier',
+      summaryText,
+      (v) => !v.includes('client_without_gateway')
+    )
+
     await obs.shutdown()
 
     /* ---------- Span assertions ---------- */
@@ -341,9 +392,19 @@ export async function run({ harness, expect }) {
       (/** @type {any} */ t) => t.name === 'status.render'
     )
     expect.that(
-      'traces: at least four status.render spans (case 1 text + json + case 3 + case 4)',
+      'traces: at least five status.render spans (case 1 full + json + case 3 + case 4 + case 5 summary)',
       statusSpans,
-      (v) => Array.isArray(v) && v.length >= 4
+      (v) => Array.isArray(v) && v.length >= 5
+    )
+    expect.that(
+      'traces: the default screen records format=summary',
+      statusSpans,
+      (v) => Array.isArray(v) && v.some((/** @type {any} */ s) => s.attributes?.format === 'summary')
+    )
+    expect.that(
+      'traces: --full records format=full',
+      statusSpans,
+      (v) => Array.isArray(v) && v.some((/** @type {any} */ s) => s.attributes?.format === 'full')
     )
     // Healthy case attribute contract.
     const okSpan = statusSpans.find(

@@ -9,7 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.
@@ -161,7 +161,7 @@ test('status text renders provenance tags and the dropped-local section', async 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
 
   // Provenance tags on plugin, source, sink, client lines.
@@ -192,6 +192,6 @@ test('a never-joined host renders no provenance tags or layers block', async () 
   assert.ok(!('provenance' in json.active_plugins[0]))
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /\[central · locked\]|\[local\]|local config \(not applied\)/)
 })

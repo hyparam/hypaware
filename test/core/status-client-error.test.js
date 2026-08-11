@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 // A client whose attach probe could not resolve its settings file at all
@@ -72,7 +72,7 @@ test('the text renderer prints a client probe error instead of a bare not-attach
   const report = await reportWithProbeError(hypHome)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
 
   assert.match(text, /- claude-desktop {2}\[not in config, not attached\]/)
@@ -84,7 +84,7 @@ test('a client carrying an error is never collapsed into the clients "(none)" li
   const report = await reportWithProbeError(hypHome)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
 
   assert.doesNotMatch(text, /clients:\n {4}\(none\)/)
@@ -104,7 +104,7 @@ test('an all-clean host keeps the "(none)" clients collapse (surface unchanged)'
   assert.ok(report.clients.every((c) => !c.configured))
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
 
   assert.match(stdout.text(), /clients:\n {4}\(none\)/)
 })

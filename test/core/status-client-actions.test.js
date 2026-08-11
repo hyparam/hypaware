@@ -9,7 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusFull } from '../../src/core/commands/status.js'
 
 /**
  * @import { ClientActionReport } from '../../src/core/daemon/types.js'
@@ -263,7 +263,7 @@ test('an ordinary host with no markers reports clientActions null (V1 surface un
   assert.equal(json.client_actions, null)
 
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /client actions:/)
 })
 
@@ -319,7 +319,7 @@ test('text renderer prints the client actions section with per-state detail', as
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
 
   assert.match(text, /client actions:/)
@@ -351,7 +351,7 @@ test('a refused marker with no reason still renders the repair hint, never a bar
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
 
   assert.match(
     stdout.text(),
@@ -418,7 +418,7 @@ test('attach declared targets read mixed done/failed/pending/n-a cleanly (T9)', 
 
   // The generic done/failed/pending/n-a rendering also reaches the text surface.
   const stdout = makeBuf()
-  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  renderStatusFull({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   const text = stdout.text()
   assert.match(text, /attach acme-done\s+\[done\]/)
   assert.match(text, /attach claude\s+\[pending\]/)

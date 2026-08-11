@@ -15,6 +15,7 @@ import { select } from '../tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { shouldUseTui } from '../tui-router.js'
 import { useColor } from '../stdio.js'
+import { formatBytesShort, friendlyClientLabel } from '../format.js'
 
 const FORK_TITLE = 'How do you want to collect agent logs?'
 
@@ -312,7 +313,7 @@ function summariseCollecting(report) {
     const sync = report.clientSync
     return clients
       .map((c) => {
-        const label = FRIENDLY_CLIENT_LABELS[c.name] ?? c.name.charAt(0).toUpperCase() + c.name.slice(1)
+        const label = friendlyClientLabel(c.name)
         if (sync?.localOnly.includes(c.name)) return `${label} (local only)`
         if (sync?.syncing.includes(c.name)) return `${label} (synced)`
         return label
@@ -336,26 +337,6 @@ function summariseDaemon(daemon) {
   return 'not installed'
 }
 
-/**
- * Short human byte count for the cache line (e.g. `65 MB`). Rounds to
- * whole MB/KB so the summary stays glanceable.
- *
- * @param {number} bytes
- * @returns {string}
- */
-function formatBytesShort(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
-  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${Math.round(bytes)} B`
-}
-
-const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
-  claude: 'Claude',
-  codex: 'Codex',
-  openclaw: 'OpenClaw',
-})
 
 /**
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and

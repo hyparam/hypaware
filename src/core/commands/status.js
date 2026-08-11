@@ -3,6 +3,9 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { ANSI, boxed, paint } from '../cli/style.js'
+import { useColor } from '../cli/stdio.js'
+import { formatBytesShort, formatCount, friendlyClientLabel, wrapToWidth } from '../cli/format.js'
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -11,12 +14,14 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  */
 
 /**
- * `hyp status [--json]`
+ * `hyp status [--full] [--json]`
  *
- * Renders the V1 install state (config path, daemon install/run
- * state, active plugins, source/sink/client status, cache + retention
- * window, recent error count) and any diagnostics + repair
- * suggestions surfaced by the Phase 8 collector.
+ * Default: a fixed-shape summary answering the one question `hyp --help`
+ * sends readers here for - is this install healthy, is it recording, where
+ * does the data go, and what needs the user. `--full` renders the whole
+ * inventory (config path, active plugins, source/sink/client rosters, the
+ * client-action ledger, remote-config state); `--json` is unchanged and
+ * remains the fixed-shape surface for machine consumers.
  *
  * Span: `status.render`. Attributes match the bead contract
  * (`source_count`, `sink_count`, `cache_size_bytes`,
@@ -24,12 +29,15 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  * also carry the legacy attributes (`client_count`, `retention_days`)
  * that earlier smokes assert on.
  *
+ * @ref LLP 0212#decision [implements]: the default screen is a triage summary; the inventory moves behind --full
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
 export async function runStatus(argv, ctx) {
   const json = argv.includes('--json')
+  const full = argv.includes('--full')
 
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
@@ -80,7 +88,7 @@ export async function runStatus(argv, ctx) {
       daemon_state: report.daemon.state ?? (report.daemon.running ? 'running' : 'stopped'),
       diagnostics_count: report.diagnostics.length,
       overall: report.overall,
-      format: json ? 'json' : 'text',
+      format: json ? 'json' : full ? 'full' : 'summary',
       status: 'ok',
     },
     async () => {
@@ -94,12 +102,20 @@ export async function runStatus(argv, ctx) {
         ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
         return 0
       }
-      renderStatusText({
+      if (full) {
+        renderStatusFull({
+          report,
+          clientNames,
+          datasets,
+          cacheRoot: ctx.storage.cacheRoot,
+          stdout: ctx.stdout,
+        })
+        return 0
+      }
+      renderStatusSummary({
         report,
-        clientNames,
-        datasets,
-        cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
+        env: ctx.env,
       })
       return 0
     },
@@ -290,9 +306,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
- * Render the V1 status report as human-friendly text. Mirrors the
- * JSON shape but groups sections and surfaces diagnostics + repair
- * suggestions at the bottom.
+ * Render the whole status report as text: every section, unconditionally,
+ * mirroring the JSON shape. This is `hyp status --full`, and it is the
+ * surface every never-silent requirement can point at without qualification
+ * (LLP 0212 #never-silent). The default screen is
+ * {@link renderStatusSummary}.
  *
  * @param {{
  *   report: HypAwareStatusReport,
@@ -302,7 +320,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
  *   stdout: { write(chunk: string): unknown },
  * }} args
  */
-export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+export function renderStatusFull({ report, clientNames, datasets, cacheRoot, stdout }) {
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
   const configState = report.configExists
@@ -517,6 +535,374 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       }
     }
   }
+}
+
+/** Width of the summary's label gutter; `HypAware` is the longest entry. */
+const LABEL_WIDTH = 10
+
+/** Width of the attention section's severity gutter, indented by two. */
+const SEVERITY_WIDTH = 9
+
+/**
+ * Assumed terminal width when the stream will not say. 80 is the
+ * conventional answer, and it is the right kind of wrong: a summary that
+ * assumed "unbounded" would lay out a 120-column frame that breaks the
+ * moment it is piped into a pager, a CI log, or a chat message. Too narrow
+ * only costs a wrapped line.
+ */
+const ASSUMED_COLUMNS = 80
+
+/** Narrowest frame worth drawing; below this the gutter layout is enough. */
+const MIN_FRAMED_COLUMNS = 34
+
+/**
+ * @param {{ columns?: number }} stdout
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {number}
+ */
+function terminalColumns(stdout, env) {
+  if (typeof stdout.columns === 'number' && stdout.columns > 0) return stdout.columns
+  const declared = Number(env?.COLUMNS)
+  if (Number.isFinite(declared) && declared > 0) return declared
+  return ASSUMED_COLUMNS
+}
+
+/**
+ * The default `hyp status` screen: four rows in one frame, then whatever
+ * needs the reader.
+ *
+ * `hyp --help` sends people here for "whether this install is working", and
+ * the inventory that used to answer alongside it (ten plugin lines, two
+ * rosters, a nine-entry action ledger, a config etag, two absolute paths)
+ * answered something else. Every fact it carried is still one flag away, and
+ * the facts that are *conditional* - a client that is not attached, a folder
+ * being withheld, a refused action - are the ones promoted here, because a
+ * conditional fact is the only kind a reader can act on.
+ *
+ * Nothing here reads the cache or activates a plugin: the report is already
+ * collected, and `activity` comes from the daemon's own status file
+ * (LLP 0164).
+ *
+ * @ref LLP 0212#rows [implements]: healthy / recording / where it goes / what needs me, in that order
+ * @ref LLP 0212#width [implements]: wrap to the terminal before drawing the frame, hang continuations in the value column
+ * @ref LLP 0135#disclosure [constrained-by]: the frame is a shape, not a colour, so it survives NO_COLOR
+ *
+ * @param {{
+ *   report: HypAwareStatusReport,
+ *   stdout: { write(chunk: string): unknown, columns?: number },
+ *   env?: Record<string, string | undefined>,
+ *   nowMs?: number,
+ * }} args
+ */
+export function renderStatusSummary({ report, stdout, env, nowMs = Date.now() }) {
+  const color = useColor(stdout, env)
+  const columns = terminalColumns(stdout, env)
+  const framed = columns >= MIN_FRAMED_COLUMNS
+  // The frame costs four columns (two edges, two pads). Reserving them here,
+  // rather than letting the terminal discover the overflow, is what keeps the
+  // rectangle a rectangle.
+  const rowWidth = (framed ? columns - 4 : columns) - LABEL_WIDTH
+
+  const healthy = report.overall !== 'degraded'
+  /** @type {string[]} */
+  const rows = [
+    ...gutter(
+      paint('HypAware'.padEnd(LABEL_WIDTH), ANSI.bold, color),
+      [paint(report.overall, healthy ? ANSI.green : ANSI.yellow, color)]
+    ),
+    ...labelled('daemon', summariseDaemonShort(report.daemon), rowWidth, color),
+    ...labelled('capture', summariseCapture(report), rowWidth, color),
+    ...labelled('activity', summariseActivity(report, nowMs), rowWidth, color),
+    ...labelled('data', summariseData(report), rowWidth, color),
+  ]
+
+  for (const line of framed ? boxed(rows, { color, columns }) : rows) {
+    stdout.write(`${line}\n`)
+  }
+
+  const attention = collectAttention(report)
+  if (attention.length > 0) {
+    // Floored rather than allowed to go negative: past this the gutter itself
+    // is most of the screen, and a hard-broken word is still better than a
+    // line that runs off it.
+    const textWidth = Math.max(8, columns - 2 - SEVERITY_WIDTH)
+    stdout.write('\n')
+    for (const item of attention) {
+      const sgr = item.severity === 'error' ? ANSI.red : item.severity === 'warning' ? ANSI.yellow : ANSI.dim
+      const lines = gutter(
+        paint(item.severity.padEnd(SEVERITY_WIDTH), sgr, color),
+        wrapToWidth(item.message, textWidth),
+        SEVERITY_WIDTH
+      )
+      for (const repair of item.repair) {
+        // The arrow hangs one line per repair, aligned with the message, so a
+        // long command wraps under itself rather than under the severity.
+        for (const line of gutter('', wrapToWidth(`→ ${repair}`, textWidth), SEVERITY_WIDTH)) {
+          lines.push(paint(line, ANSI.dim, color))
+        }
+      }
+      for (const line of lines) stdout.write(`  ${line}\n`)
+    }
+  }
+
+  stdout.write('\n')
+  for (const line of wrapToWidth('hyp status --full for the full inventory, --json for everything', columns)) {
+    stdout.write(`${paint(line, ANSI.dim, color)}\n`)
+  }
+}
+
+/**
+ * Lay wrapped text against a gutter: the label on the first line, blanks
+ * under it on the rest, so a continuation reads as part of the same row
+ * instead of as a new one.
+ *
+ * @param {string} label already padded and painted; may be empty
+ * @param {string[]} lines already wrapped
+ * @param {number} [width] visible width of the gutter
+ * @returns {string[]}
+ */
+function gutter(label, lines, width = LABEL_WIDTH) {
+  const blank = ' '.repeat(width)
+  return lines.map((line, i) => `${i === 0 && label !== '' ? label : blank}${line}`)
+}
+
+/**
+ * One summary row: dim label in the gutter, value wrapped beside it.
+ *
+ * @param {string} label
+ * @param {string} value
+ * @param {number} width
+ * @param {boolean} color
+ * @returns {string[]}
+ */
+function labelled(label, value, width, color) {
+  return gutter(paint(label.padEnd(LABEL_WIDTH), ANSI.dim, color), wrapToWidth(value, width))
+}
+
+/**
+ * The daemon in one phrase. `installed`, `loaded` and `running` are three
+ * booleans that only ever disagree in one direction that matters to a
+ * reader - it is not running - so the summary reports the disagreement, not
+ * the booleans. `--full` still prints all of them.
+ *
+ * `state` is included only when it is not `healthy`: a running daemon that
+ * says `state=healthy` is saying `running` twice.
+ *
+ * @param {ServiceState | undefined} daemon
+ * @returns {string}
+ */
+function summariseDaemonShort(daemon) {
+  if (!daemon) return 'unknown'
+  if (daemon.running) {
+    const bits = []
+    if (daemon.mode) bits.push(daemon.mode)
+    if (daemon.pid) bits.push(`pid ${daemon.pid}`)
+    if (daemon.state && daemon.state !== 'healthy') bits.push(daemon.state)
+    return bits.length > 0 ? `running (${bits.join(', ')})` : 'running'
+  }
+  const base = daemon.installed ? 'installed, not running' : 'not installed'
+  return daemon.error ? `${base} - ${daemon.error}` : base
+}
+
+/**
+ * What this machine collects, in the names the user picked it by.
+ *
+ * Clients carry their exceptions inline (`not attached`, `local only`) so
+ * one client is one mention: the roster used to state a client's attach gap
+ * in one section and its repair in another, and the reconciler ledger
+ * restated it twice more. Sources that are not clients (OTEL, Hermes) are
+ * appended, minus `ai-gateway` - the gateway is the plumbing behind every
+ * client row, not a separate thing being captured.
+ *
+ * @ref LLP 0188#never-silent [implements]: a local-only client is named where the client is named, never only in a list
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseCapture(report) {
+  const clients = (report.clients ?? []).filter((c) => c.configured)
+  const localOnly = new Set(report.clientSync?.localOnly ?? [])
+  const parts = clients.map((c) => {
+    const marks = []
+    if (!c.attached) marks.push('not attached')
+    if (localOnly.has(c.name)) marks.push('local only')
+    const label = friendlyClientLabel(c.name)
+    return marks.length > 0 ? `${label} (${marks.join(', ')})` : label
+  })
+
+  const named = new Set(clients.map((c) => c.name))
+  for (const s of report.sources ?? []) {
+    if (named.has(s.name) || s.name === 'ai-gateway') continue
+    const label = friendlyClientLabel(s.name)
+    parts.push(s.state === 'started' ? label : `${label} (${s.state})`)
+  }
+
+  if (parts.length === 0) {
+    const sources = (report.sources ?? []).map((s) => s.name)
+    return sources.length > 0 ? sources.join(', ') : 'nothing configured yet'
+  }
+  return parts.join(', ')
+}
+
+/**
+ * Proof of capture, as opposed to the prediction of it every other row
+ * makes. A client can be configured, attached and silent; rows landing is
+ * the only line that says otherwise, and LLP 0164 already put the answer in
+ * the daemon's status file at no query cost.
+ *
+ * Three surfaces at most - the question is "is anything arriving", and the
+ * fourth-most-recent client does not change the answer.
+ *
+ * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the recent-entrypoint list is the summary's activity row
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {number} nowMs
+ * @returns {string}
+ */
+function summariseActivity(report, nowMs) {
+  const entries = report.recentEntrypoints ?? []
+  if (entries.length === 0) return 'nothing recorded yet'
+  const shown = entries.slice(0, 3)
+  const parts = shown.map((e) => {
+    const surface = e.clientName ? `${e.clientName}/${e.entrypoint}` : e.entrypoint
+    return `${surface} ${formatEntrypointAge(e.lastSeen, nowMs)}`
+  })
+  if (entries.length > shown.length) parts.push(`+${entries.length - shown.length} more`)
+  const rows = entries.reduce((sum, e) => sum + (Number.isFinite(e.rows) ? e.rows : 0), 0)
+  return `${parts.join(' · ')} · ${formatCount(rows)} row${rows === 1 ? '' : 's'}`
+}
+
+/**
+ * How much is stored, for how long, and whether any of it leaves.
+ *
+ * The destination is stated on every machine, in both directions: "stays on
+ * this machine" is the claim a privacy-minded reader came to check, and an
+ * absent line is not that claim. Withheld folders are appended whenever the
+ * count is non-zero (LLP 0069 R9), and an `ask` folder policy whenever it is
+ * not the default, since that is the setting that will interrupt a session.
+ *
+ * @ref LLP 0069#requirements [implements]: R9's withheld-directory count is stated on the default screen whenever it is non-zero
+ * @ref LLP 0200#decision [implements]: the non-default new-folder mode is the one that gets said
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseData(report) {
+  const bits = [
+    formatBytesShort(report.cache?.totalBytes ?? 0),
+    `${report.retention?.days ?? '?'}-day retention`,
+    report.layered?.hasCentral ? 'syncing to org' : 'stays on this machine',
+  ]
+  const withheld = report.usagePolicy?.localOnlyDirCount ?? 0
+  if (withheld > 0) bits.push(`${withheld} folder${withheld === 1 ? '' : 's'} withheld`)
+  if (report.usagePolicy?.folderAsk === 'ask') bits.push('asking about new folders')
+  return bits.join(' · ')
+}
+
+/**
+ * What needs the reader, deduplicated and ordered by severity.
+ *
+ * Only conditional states appear: a diagnostic the collector raised, an
+ * action the reconciler will not retry on its own (LLP 0186), a local config
+ * entry the central layer dropped (LLP 0031), a live first-sync hold
+ * (LLP 0100 R9), a rejected central config. A `pending` action is the
+ * reconciler working, and a `done` one is a ledger entry; both stay in
+ * `--full`.
+ *
+ * @ref LLP 0212#attention [implements]: one problem, one mention, with its repair attached
+ * @ref LLP 0186#hyp-status-attention-needed-surface [implements]: refused is loud, with the re-arm command, on the default screen
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {{ severity: 'error' | 'warning' | 'note', message: string, repair: string[] }[]}
+ */
+function collectAttention(report) {
+  /** @type {{ severity: 'error' | 'warning' | 'note', message: string, repair: string[] }[]} */
+  const items = []
+
+  // The `kind` is a stable identifier for support and for grepping `--json`;
+  // it is not what a person reads a warning for, and prefixing every line
+  // with `client_attach_missing:` buries the sentence that says what broke.
+  // `--full` still prints it.
+  for (const d of report.diagnostics ?? []) {
+    items.push({
+      severity: d.severity === 'error' ? 'error' : 'warning',
+      message: d.message,
+      repair: [...d.repair],
+    })
+  }
+
+  // A stopped daemon records nothing, and no collector diagnostic covers the
+  // plain case (`daemon_loaded_no_pid` and `daemon_binary_missing` cover the
+  // broken ones). Warning, not error: a machine mid-install is not degraded.
+  if (report.daemon && !report.daemon.running) {
+    items.push({
+      severity: 'warning',
+      message: 'the daemon is not running, so nothing is being recorded',
+      repair: [report.daemon.installed ? 'hyp daemon start' : 'hyp daemon install'],
+    })
+  }
+
+  for (const a of report.clientActions?.actions ?? []) {
+    if (a.state === 'refused') {
+      items.push({
+        severity: 'warning',
+        message: `${a.kind} ${a.requestKey} refused${a.reason ? `: ${a.reason}` : ''}`,
+        repair: [`hyp attach ${a.requestKey} after fixing the cause`],
+      })
+    } else if (a.state === 'failed') {
+      items.push({
+        severity: 'warning',
+        message: `${a.kind} ${a.requestKey} failed${a.reason ? `: ${a.reason}` : ''}`,
+        repair: [],
+      })
+    }
+  }
+
+  // Wording matters more here than anywhere else on the screen. A collision
+  // drop is about a duplicate *declaration* losing a merge, not about the
+  // thing being off - and the commonest collision by far is
+  // `@hypaware/ai-gateway`, which every enrolled machine that was set up
+  // solo first carries, and without which nothing is recorded at all. So the
+  // line has to say who configures it now, not merely that a local entry
+  // "is not applied", which reads as "the gateway is not applied".
+  for (const d of report.layered?.drops ?? []) {
+    items.push({
+      severity: 'note',
+      message: d.reason === 'collides_with_central'
+        ? `${d.key} is configured by your org, so your local ${d.section} entry for it is ignored`
+        : `your local ${d.section} entry ${d.key} was dropped${
+          d.detail ? ` (${d.detail.replace(/_/g, ' ')})` : ' (it made the merged config invalid)'
+        }`,
+      repair: [],
+    })
+  }
+  if (report.layered?.centralQueryIgnored) {
+    items.push({
+      severity: 'note',
+      message: 'the central config\'s query block is ignored (query is local-only)',
+      repair: [],
+    })
+  }
+
+  const badEtag = report.remoteConfig?.badEtag
+  if (badEtag) {
+    items.push({
+      severity: 'note',
+      message: `central config ${badEtag.etag} was rejected (${badEtag.reason})`,
+      repair: [],
+    })
+  }
+
+  if (report.firstSyncHoldDeadline !== null && report.firstSyncHoldDeadline !== undefined) {
+    items.push({
+      severity: 'note',
+      message: `first sync is held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)}`,
+      repair: ['review with the hypaware-privacy skill, or hyp sync to send it now'],
+    })
+  }
+
+  const rank = { error: 0, warning: 1, note: 2 }
+  return items.sort((a, b) => rank[a.severity] - rank[b.severity])
 }
 
 /**

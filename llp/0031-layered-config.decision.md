@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-16
 **Related:** LLP 0003, LLP 0004, LLP 0009, LLP 0010, LLP 0011, LLP 0013, LLP 0014, LLP 0017, LLP 0025; hypaware-server LLP 0009 (out of tree, design authority)
+**Extended-by:** [LLP 0212](./0212-status-is-a-triage-summary.decision.md) (§Status provenance below: the per-entry tags and the convergence block move to `hyp status --full` and `--json`; the default summary states that the machine is centrally managed and lists dropped local entries, which are the two facts a reader acts on. The merge model, the layer files, and the drop logging are unchanged)
 
 > A joined gateway boots an **effective config that is the merge of two
 > layers**: a server-owned **central** layer (authoritative, locked) and a

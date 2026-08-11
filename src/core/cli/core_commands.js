@@ -90,15 +90,16 @@ function buildCoreCommands(registry) {
   return [
     {
       name: 'status',
-      summary: 'Show kernel status (active plugins, sources, sinks, cache)',
-      usage: 'hyp status [--json]',
+      summary: 'Show whether this install is healthy, recording, and where data goes',
+      usage: 'hyp status [--full] [--json]',
       help: [
-        'The entry point for "is it working?". Reports the config path, daemon',
-        'state, active plugins, sources, sinks, per-client attach state, cache',
-        'location/retention/size, recent error count, and any pending first-sync',
-        'deadline. When something is wrong it adds a diagnostics section whose',
-        'repair: lines are commands you can run directly.',
+        'The entry point for "is it working?". Summarizes daemon state, what is',
+        'being captured, when rows last arrived, and where they go - then lists',
+        'anything that needs you, with repair commands you can run directly.',
         '',
+        '--full adds the inventory: config path, active plugins, source/sink',
+        'rosters, per-client attach state, the client-action ledger, and',
+        'remote-config state.',
         '--json prints the stable machine shape; prefer it for scripting.',
       ].join('\n'),
       run: runStatus,
