@@ -368,7 +368,7 @@ hyp daemon start        # ensure the service is started
 hyp daemon status       # health snapshot
 hyp daemon restart      # bounce after a config change
 hyp daemon stop         # signal the running daemon to shut down
-hyp daemon uninstall    # remove the service file (config + recordings are kept)
+hyp daemon uninstall    # remove the service and detach clients (config + recordings are kept)
 ```
 
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
@@ -421,14 +421,16 @@ To remove HypAware from a machine completely:
 
 ```sh
 hyp leave                     # only if enrolled with a team server: stop forwarding, drop the credential
-hyp detach claude             # restore each attached client's own settings
-hyp detach codex
-hyp daemon uninstall          # remove the launchd / systemd service file
+hyp daemon uninstall          # remove the launchd / systemd service and detach every attached client
 npm uninstall -g hypaware     # remove the CLI
 rm -rf ~/.hyp                 # delete all local recordings, config, and state
 ```
 
-The first four steps are non-destructive and reversible; deleting `~/.hyp`
+`hyp daemon uninstall` restores each attached client's own settings on its
+way out, so no client is left pointing at a gateway that no longer exists;
+to detach a single client without uninstalling, use `hyp detach <client>`.
+
+The first three steps are non-destructive and reversible; deleting `~/.hyp`
 permanently removes every local recording. Note that copies already
 forwarded to a team server or exported to Parquet are not affected; see
 [docs/PRIVACY.md](./docs/PRIVACY.md).

@@ -5,7 +5,7 @@
 **Systems:** CLI, Daemon, Onboarding
 **Author:** Kenny / Claude
 **Date:** 2026-08-10
-**Related:** LLP 0063 (#connection-levels: the ladder this adds a second cascade to), LLP 0045 (#part-3: the one disk undo this reuses), LLP 0138 (#marker-undo: asset reversal comes with that undo), LLP 0017 (daemon service lifecycle)
+**Related:** LLP 0063 (#connection-levels: the ladder this adds a second cascade to), LLP 0045 (#part-3: the one disk undo this reuses), LLP 0138 (#marker-undo: asset reversal comes with that undo), LLP 0017 (daemon service lifecycle), LLP 0210 (#d1: the signature-only ownership rule that lets the sweep run from disk alone)
 
 > Extends [LLP 0063 #connection-levels](./0063-login-auto-provision-forward-sink.decision.md#connection-levels).
 > The ladder and its verbs stand. What changes is that level 4's exit, like
@@ -53,18 +53,15 @@ implementation to drift. It asks every known client rather than probing first:
 the undo is already an honest no-op on a client that was never attached, so a
 machine with nothing attached prints nothing extra.
 
-Ordering has a wrinkle: the one fact the undo needs that dies with the daemon
-is captured before the teardown. The `json_path` format judges provider-entry
-ownership by the gateway's own base origin, and every rung of that resolution
-(a bound capability, a configured `listen`, the live status file behind a
-living pid) stops answering once the service is gone. So the command resolves
-the origin while the daemon can still be asked, then tears down, then hands the
-resolved origin to the sweep. And "honest no-op on a never-attached client"
-holds even when the origin was unresolvable: a config that names the same
-provider keys but carries no HypAware signature (the marker header is
-HypAware's own name) has nothing to reverse, so it is skipped rather than
-failed. Only an entry that is ours by signature but whose origin cannot be
-confirmed fails the sweep, because both guesses there are destructive.
+The sweep depends on nothing from the daemon it just removed. Every format's
+undo record lives in the client's settings file itself: the `json` marker key,
+the `toml` managed block, and the `json_path` entry's own signature
+(LLP 0210, which retired that format's live-origin ownership check precisely
+because this sweep runs when no live origin exists). Teardown and detach are
+therefore independent disk operations with no ordering constraint between
+them beyond D1's teardown-first gate, and the sweep behaves identically
+whether the daemon was running, stopped, or crashed when uninstall was
+invoked.
 
 The sweep runs the undo quiet and re-renders its result itself, warnings
 included: a notice like "overridden externally; leaving in place" is the only

@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0210 (#decision: the "removes an entry only when its `baseUrl` is the gateway's" clause is retired - ownership is the entry's signature alone, so detach needs no live gateway fact - and a present-but-not-ours entry is left in place rather than backed up)
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-31

@@ -8,7 +8,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
-import { isOwnedProviderEntry, ownedBaseUrls } from './provider_entry_ownership.js'
+import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 /**
  * @import { Dirent } from 'node:fs'
@@ -100,19 +100,16 @@ export class ClientDetachError extends Error {
  * `attachProbe` and the settings-file marker. No-op (`{ changed: false }`) when
  * the descriptor has no probe, the file is absent, or it carries no marker.
  *
- * `expectedBaseUrl` is the one fact the dispatcher cannot read off disk: the
- * gateway's own currently-resolved base origin. Only the `json_path` format
- * needs it, and it needs it for a reason no marker can supply - that format's
- * undo record IS the entry it wrote, so "is this entry ours?" can only be
- * answered by comparing the URL it points at against the URL we would have
- * written. The `json`/`toml` formats carry a HypAware-owned marker key or
- * managed block, which answers ownership on its own, so they ignore it.
+ * Every format's undo record lives in the settings file itself: a marker key
+ * (`json`), a managed block (`toml`), or the self-identifying signature on the
+ * entries attach wrote (`json_path`, LLP 0210). So this routine needs nothing
+ * from a running daemon, and works identically whether the gateway is alive,
+ * stopped, or already uninstalled.
  *
  * @param {{
  *   descriptor: ClientDescriptor,
  *   homeDir?: string,
  *   env?: NodeJS.ProcessEnv,
- *   expectedBaseUrl?: string,
  *   fs?: typeof fsp,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
@@ -121,7 +118,6 @@ export async function detachClientFromDisk({
   descriptor,
   homeDir = os.homedir(),
   env,
-  expectedBaseUrl,
   fs = fsp,
 }) {
   const probe = descriptor.attachProbe
@@ -144,7 +140,6 @@ export async function detachClientFromDisk({
       providerKeys: probe.provider_keys,
       markerHeader: probe.marker_header,
       cacheGlob: probe.cache_glob,
-      expectedBaseUrl,
       fs,
     })
   }
@@ -699,35 +694,24 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
 /* ----------------------------- json_path format ---------------------------- */
 
 /**
- * The container-relative key the backup of a present-but-not-ours provider
- * entry lands under, so `models.providers.anthropic` moves to
- * `models.providers._hypaware_detach_backup.anthropic`.
- *
- * A **sibling** of the provider key, not a top-level marker: LLP 0163 ruled a
- * top-level HypAware key out for this client because its own config schema
- * rejects one, which is exactly why that LLP left OpenClaw refusing where the
- * `json`/`toml` formats backed up. Keeping the backup inside the container the
- * undo already navigates converges the *outcome* (never discard a value
- * HypAware did not write) without reintroducing the mechanism that was ruled
- * out.
- *
- * @ref LLP 0163#open-questions [implements]: json_path converges on backup-not-discard without adopting the top-level marker key LLP 0163 ruled out for this client
- */
-const JSON_PATH_BACKUP_KEY = '_hypaware_detach_backup'
-
-/**
  * Reverse a `json_path` attach: the format whose undo record is the entries it
- * wrote. There is no marker to replay, so each provider key is judged on what
- * it points at.
+ * wrote. There is no separate marker to replay, because each entry carries its
+ * own signature (the marker header naming its key, plus the shape attach
+ * produces), and that signature is the whole ownership test.
  *
  * 1. Absent settings file: `{ changed: false }`, like every other format.
  * 2. For each `providerKeys` entry under `containerPath` that is present:
- *    **ours** (its `baseUrl` is the gateway's, its `markerHeader` names the
- *    key) is deleted; anything else is **backed up, never discarded**.
- * 3. The same provider keys are then best-effort purged from the client's
- *    derived caches (`cacheGlob`). Those caches do not self-heal, so a partial
- *    purge is strictly better than none, and one unreadable cache file must
- *    not fail a detach whose settings half already landed.
+ *    **ours** (its `markerHeader` names the key, its shape is attach's) is
+ *    deleted; anything else is the user's and is **left in place**, warned
+ *    about only when the same file also held ours - the same disposal the
+ *    `json` undo makes for an externally overridden value, and a config that
+ *    was never attached stays untouched and unremarked.
+ * 3. If any entry was deleted (proof an attach happened), the managed keys are
+ *    best-effort purged from the client's derived caches (`cacheGlob`), except
+ *    a key a user value still holds in the settings, whose cache entry stays
+ *    with it. Those caches do not self-heal, so a partial purge is strictly
+ *    better than none, and one unreadable cache file must not fail a detach
+ *    whose settings half already landed.
  *
  * @param {{
  *   settingsPath: string,
@@ -736,11 +720,10 @@ const JSON_PATH_BACKUP_KEY = '_hypaware_detach_backup'
  *   providerKeys: string[] | undefined,
  *   markerHeader: string | undefined,
  *   cacheGlob: string | undefined,
- *   expectedBaseUrl: string | undefined,
  *   fs: typeof fsp,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
- * @ref LLP 0169#decision [implements]: delete an entry only when its baseUrl is the gateway's, back up a present-but-not-ours one instead of discarding it, and purge the written provider keys from the derived caches
+ * @ref LLP 0210#d1 [implements]: ownership is the entry's own signature, so the undo runs from disk alone; a not-ours entry is left in place, and only the deleted keys are purged from the derived caches
  */
 async function detachJsonPathProviders({
   settingsPath,
@@ -749,7 +732,6 @@ async function detachJsonPathProviders({
   providerKeys,
   markerHeader,
   cacheGlob,
-  expectedBaseUrl,
   fs,
 }) {
   // `contributes.client` is unvalidated manifest input (the same reason
@@ -775,91 +757,71 @@ async function detachJsonPathProviders({
     ? keys.filter((key) => Object.hasOwn(providers, key))
     : []
 
-  // The two spellings attach writes: the bare origin for the vendor whose
-  // client appends its own path, `+ '/v1'` for the one that does not. Both are
-  // ours; anything else at the key is not.
-  const ours = ownedBaseUrls(expectedBaseUrl)
-  if (present.length > 0 && ours === undefined) {
-    // The marker header is a positive HypAware signature independent of the
-    // URL ("nothing else writes that triple"), so when no present entry
-    // carries it this file holds only the user's own providers and there is
-    // nothing to reverse: an honest no-op, not a failure. A client that was
-    // never attached must not fail its detach just because its config names
-    // the same provider keys attach would have used.
-    // @ref LLP 0206#d1 [constrained-by]: the undo stays an honest no-op on a never-attached client even when the gateway origin is unknown
-    const anyOurs = present.some((key) =>
-      isOwnedProviderEntry(/** @type {Record<string, unknown>} */ (providers)[key], key, markerHeader, undefined)
-    )
-    if (!anyOurs) return { changed: false, settingsPath }
-    // An entry that IS ours by signature but whose origin we cannot confirm:
-    // both wrong answers are destructive (delete a value we never wrote, or
-    // leave the client routed at a dead port and report the undo done). Fail
-    // loudly: the reconciler's reverse() keeps the marker and retries,
-    // `hyp detach` prints the reason.
-    throw new ClientDetachError(
-      `cannot reverse ${settingsPath}: the gateway's base URL is unknown, ` +
-      'so a provider entry HypAware wrote cannot be told from one it did not',
-      { code: 'EXPECTED_BASE_URL_UNKNOWN' }
-    )
-  }
-
   /** @type {Record<string, unknown>} */
   const containerObj = /** @type {Record<string, unknown>} */ (providers)
   /** @type {string[]} */
   const warnings = []
   /** @type {string | undefined} */
   let removed
+  /** @type {string[]} */
+  const deleted = []
+  /** @type {string[]} */
+  const left = []
   let changed = false
 
   for (const key of present) {
     const entry = containerObj[key]
-    // `ours` is always a set here, never the shared predicate's
-    // accept-any-baseUrl `undefined`: the guard above already threw if the
-    // gateway origin was unknown while an entry was present. Deleting is
-    // destructive, so this side never relaxes the origin check.
-    if (isOwnedProviderEntry(entry, key, markerHeader, ours)) {
+    // Deleting on the signature alone is deliberate: the marker header is
+    // HypAware's own name and nothing else writes attach's triple, so a match
+    // is ours whatever URL it carries (an entry from an old port after an
+    // ephemeral rebind is still ours, and still needs to go). This is the same
+    // trust attach itself places in the signature when it overwrites its own
+    // entry, and it is what lets this undo run with the daemon stopped or
+    // uninstalled, when the gateway's live origin no longer exists to compare
+    // against.
+    // @ref LLP 0210#d1 [implements]: the signature is sufficient to delete, so detach works from disk alone like every other format
+    if (isOwnedProviderEntry(entry, key, markerHeader)) {
       if (removed === undefined) removed = providerBaseUrl(entry)
       delete containerObj[key]
+      deleted.push(key)
       changed = true
       continue
     }
+    left.push(key)
+  }
 
-    const backups = isPlainObject(containerObj[JSON_PATH_BACKUP_KEY])
-      ? /** @type {Record<string, unknown>} */ (containerObj[JSON_PATH_BACKUP_KEY])
-      : {}
-    if (Object.hasOwn(backups, key)) {
-      // An earlier detach already parked a value here. Overwriting it would
-      // destroy the older backup to save the newer one, which is the exact
-      // destruction this branch exists to prevent, so the live key stays put
-      // and the user is told which two values are now in play.
-      warnings.push(
-        `${container}.${key} was not written by this gateway and ` +
-        `${container}.${JSON_PATH_BACKUP_KEY}.${key} already holds an earlier backup; ` +
-        'leaving it in place rather than overwriting that backup'
-      )
-      continue
+  // A not-ours entry is the user's value at a key attach manages, and it is
+  // left exactly where it is: the same disposal the `json` undo makes for an
+  // externally overridden env value, and the reason a never-attached config is
+  // untouched. The warning is gated on `changed` so it names a *partial* undo
+  // (ours came out, theirs stayed); a file that held only their entries is an
+  // honest no-op with nothing to remark on. Named by path, never by value: a
+  // provider entry carries headers, and this string is printed to the terminal
+  // and echoed into `hyp detach --json` (LLP 0163).
+  // @ref LLP 0210#d2 [implements]: a not-ours entry is left in place, not backed up; the backup key is retired with the origin check that motivated it
+  if (changed) {
+    for (const key of left) {
+      warnings.push(`${container}.${key} was not written by this gateway; left in place`)
     }
-    backups[key] = entry
-    containerObj[JSON_PATH_BACKUP_KEY] = backups
-    delete containerObj[key]
-    changed = true
-    // Paths, never values: a provider entry carries headers, and this string is
-    // printed to the terminal and echoed into `hyp detach --json` (LLP 0163).
-    warnings.push(
-      `${container}.${key} was not written by this gateway; ` +
-      `backed up to ${container}.${JSON_PATH_BACKUP_KEY}.${key} rather than discarded`
-    )
   }
 
   if (changed) await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
-  warnings.push(...await purgeProviderCaches({
-    cacheGlob,
-    configHome: clientConfigHome(settingsPath, settingsFile),
-    containerPath: container,
-    providerKeys: keys,
-    fs,
-  }))
+  // Purge is gated on deletion: only a file that just gave up an entry of
+  // ours proves an attach happened, so a never-attached machine's caches are
+  // never edited. Once proven, the purge covers every managed key except one a
+  // user value still holds in the settings (their live entry keeps its cache),
+  // because caches do not self-heal and a stale cache row can outlive the
+  // settings entry it was derived from (an earlier detach, a hand edit).
+  if (deleted.length > 0) {
+    warnings.push(...await purgeProviderCaches({
+      cacheGlob,
+      configHome: clientConfigHome(settingsPath, settingsFile),
+      containerPath: container,
+      providerKeys: keys.filter((key) => !left.includes(key)),
+      fs,
+    }))
+  }
 
   const warning = joinWarnings(warnings)
 

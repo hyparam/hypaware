@@ -9,6 +9,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { uninstallDaemon as uninstallDaemonFn } from '../../../src/core/daemon/install.js'
  */
 
 /**
@@ -247,7 +248,7 @@ export async function runDaemonInstall(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ uninstallDaemon?: typeof import('../daemon/install.js').uninstallDaemon }} [deps] test seam for the service teardown
+ * @param {{ uninstallDaemon?: typeof uninstallDaemonFn }} [deps] test seam for the service teardown
  * @ref LLP 0206#d1 [implements]: uninstall reaches down to level 1 so it cannot leave clients pointed at a dead port
  */
 export async function runDaemonUninstall(argv, ctx, deps = {}) {
@@ -260,16 +261,8 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
     return 2
   }
   const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
-  const { detachAllClientsFromDisk, resolveExpectedGatewayBaseUrl } = await import('./clients.js')
+  const { detachAllClientsFromDisk } = await import('./clients.js')
   const homeDir = ctx.env.HOME
-  // Resolved BEFORE teardown, while the daemon can still answer: the sweep's
-  // json_path undo judges entry ownership by the gateway's own origin, and
-  // every rung of the resolution (bound capability, configured listen, live
-  // status behind a living pid) is dead once the service is gone. Resolving
-  // after teardown is how a sweep fails to detach the very clients it exists
-  // to rescue.
-  // @ref LLP 0206#d1 [implements]: the one fact the undo needs that dies with the daemon is captured while it is alive
-  const expectedBaseUrl = resolveExpectedGatewayBaseUrl(ctx)
   try {
     await (deps.uninstallDaemon ?? uninstallDaemon)({ ...(homeDir !== undefined ? { homeDir } : {}) })
     ctx.stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
@@ -284,7 +277,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   /** @type {Awaited<ReturnType<typeof detachAllClientsFromDisk>>} */
   let sweep
   try {
-    sweep = await detachAllClientsFromDisk(ctx, expectedBaseUrl)
+    sweep = await detachAllClientsFromDisk(ctx)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)

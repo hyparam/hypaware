@@ -18,8 +18,9 @@ import { prepareAttach as codexPrepareAttach } from '../../hypaware-core/plugins
  * clients it was serving, because an attach that outlives the gateway port is
  * not a stale preference - it is a client that fails every request. These cover
  * the sweep the command runs, and the command itself through its teardown seam:
- * the teardown-first gate, the pre-teardown base URL capture the json_path undo
- * needs, per-client failure collection, and the warning re-render.
+ * the teardown-first gate, per-client failure collection, the warning
+ * re-render, and that the whole sweep runs from disk alone (LLP 0210), so a
+ * dead or long-gone daemon changes nothing.
  */
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
@@ -135,29 +136,15 @@ async function stageOpenclawAttached(home) {
   return openclawPath
 }
 
-/**
- * A daemon the status rung of the base URL resolution can see: a pid file
- * naming a living process (this one) and a status file recording the gateway
- * source's bound port.
- * @param {string} home
- */
-async function stageLiveDaemonStatus(home) {
-  const runDir = path.join(home, '.hyp', 'hypaware', 'run')
-  await fs.mkdir(runDir, { recursive: true })
-  await fs.writeFile(path.join(runDir, 'hypaware.pid'), JSON.stringify({ pid: process.pid }) + '\n')
-  await fs.writeFile(path.join(runDir, 'status.json'), JSON.stringify({
-    sources: [{ plugin: '@hypaware/ai-gateway', name: 'ai-gateway', details: { host: '127.0.0.1', port: 4123 } }],
-  }) + '\n')
-  return runDir
-}
-
-test('the sweep detaches openclaw when handed the gateway origin the caller resolved', async () => {
+test('the sweep detaches openclaw like any other client, with nothing resolved from a daemon', async () => {
+  // LLP 0210: the json_path undo reads everything off the settings file, so
+  // the sweep needs no gateway origin threaded in and no daemon in any state.
   const home = await stageHome()
   try {
     const openclawPath = await stageOpenclawAttached(home)
 
     const staged = stageCtx(home)
-    const sweep = await detachAllClientsFromDisk(staged.ctx, GATEWAY_ORIGIN)
+    const sweep = await detachAllClientsFromDisk(staged.ctx)
 
     assert.deepEqual(sweep.failed, [], staged.err())
     assert.deepEqual(sweep.detached.map((c) => c.name), ['openclaw'])
@@ -168,11 +155,10 @@ test('the sweep detaches openclaw when handed the gateway origin the caller reso
   }
 })
 
-test('a never-attached openclaw config with its own providers is a no-op, not a failure, even with the origin unknown', async () => {
-  // The false-failure case: the user set up their own anthropic provider and
-  // never ran hyp attach. No entry carries the HypAware marker header, so
-  // there is nothing to reverse, and an unresolvable gateway origin must not
-  // turn that into a failed uninstall.
+test('a never-attached openclaw config with its own providers is an honest no-op, not a failure', async () => {
+  // The user set up their own anthropic provider and never ran hyp attach. No
+  // entry carries the HypAware marker header, so there is nothing to reverse
+  // and the file is untouched.
   const home = await stageHome()
   try {
     const openclawPath = path.join(home, '.openclaw', 'openclaw.json')
@@ -183,7 +169,7 @@ test('a never-attached openclaw config with its own providers is a no-op, not a 
     await fs.writeFile(openclawPath, userConfig)
 
     const staged = stageCtx(home)
-    const sweep = await detachAllClientsFromDisk(staged.ctx, undefined)
+    const sweep = await detachAllClientsFromDisk(staged.ctx)
 
     assert.deepEqual(sweep.failed, [], staged.err())
     assert.deepEqual(sweep.detached, [])
@@ -193,43 +179,21 @@ test('a never-attached openclaw config with its own providers is a no-op, not a 
   }
 })
 
-test('an attached openclaw with the origin unknown is a collected failure, not a silent skip', async () => {
-  // The entries are ours by signature, but without the origin the undo cannot
-  // confirm it; both guesses are destructive, so the sweep must say so rather
-  // than report the machine clean.
+test('uninstall detaches openclaw on a machine whose daemon was already stopped', async () => {
+  // The sequence README teaches (stop, then uninstall): a stale status file
+  // survives on disk, no pid, nothing to ask. The undo must not care - its
+  // record is the entry's own signature, not any daemon fact (LLP 0210).
   const home = await stageHome()
   try {
     const openclawPath = await stageOpenclawAttached(home)
+    const runDir = path.join(home, '.hyp', 'hypaware', 'run')
+    await fs.mkdir(runDir, { recursive: true })
+    await fs.writeFile(path.join(runDir, 'status.json'), JSON.stringify({
+      sources: [{ plugin: '@hypaware/ai-gateway', name: 'ai-gateway', details: { host: '127.0.0.1', port: 4123 } }],
+    }) + '\n')
 
     const staged = stageCtx(home)
-    const sweep = await detachAllClientsFromDisk(staged.ctx, undefined)
-
-    assert.deepEqual(sweep.detached, [])
-    assert.deepEqual(sweep.failed.map((f) => f.name), ['openclaw'])
-    assert.match(sweep.failed[0]?.message ?? '', /base URL is unknown/)
-    const config = JSON.parse(await fs.readFile(openclawPath, 'utf8'))
-    assert.equal(config.models.providers.anthropic.baseUrl, GATEWAY_ORIGIN)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('runDaemonUninstall resolves the gateway origin before teardown kills the status rung', async () => {
-  // The ordering gate for the fact that dies with the daemon: the fake
-  // teardown deletes the pid file, exactly what a real teardown does to the
-  // live-status rung of the base URL resolution. Openclaw still detaches only
-  // if the command captured the origin first.
-  const home = await stageHome()
-  try {
-    const openclawPath = await stageOpenclawAttached(home)
-    const runDir = await stageLiveDaemonStatus(home)
-
-    const staged = stageCtx(home)
-    const code = await runDaemonUninstall([], staged.ctx, {
-      uninstallDaemon: async () => {
-        await fs.rm(path.join(runDir, 'hypaware.pid'))
-      },
-    })
+    const code = await runDaemonUninstall([], staged.ctx, { uninstallDaemon: async () => {} })
 
     assert.equal(code, 0, staged.err())
     assert.match(staged.out(), /Detached openclaw/)
