@@ -141,9 +141,11 @@ test('hyp init first run presents the pathway fork; a bare enter quits untouched
   })
 
   assert.equal(code, 0, stderr.text())
-  assert.match(stdout.text(), /Join a team, or set up HypAware locally\?/)
-  assert.match(stdout.text(), /1\) Join a team/)
-  assert.match(stdout.text(), /2\) Local install and configuration/)
+  // The first-run screen explains the product, then asks (LLP 0211).
+  assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
+  assert.match(stdout.text(), /How do you want to collect agent logs\?/)
+  assert.match(stdout.text(), /1\) Collect shared agent logs/)
+  assert.match(stdout.text(), /2\) Collect agent logs locally/)
   // Quit left no config behind.
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })

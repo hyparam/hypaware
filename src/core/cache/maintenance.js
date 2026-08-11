@@ -17,6 +17,7 @@ import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
+import { openStreamingAppend } from './iceberg/stream_append.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
@@ -30,6 +31,7 @@ import { isPlainObject } from '../util/json_util.js'
  *   PartitionCursor,
  *   AppendOptions,
  *   SettleContext,
+ *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
@@ -135,7 +137,7 @@ export async function maintainCache(opts) {
         partition: JSON.stringify(part.partition),
         status: 'ok',
       },
-      async () => {
+      async (span) => {
         /** @type {MaintenancePartitionReport} */
         const r = {
           dataset: part.dataset,
@@ -151,7 +153,21 @@ export async function maintainCache(opts) {
         const cursor = readCursorSync(part.path)
         const settle = resolveSettleContext(opts, part.dataset)
 
-        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter)
+        const done = await maintainGeneration(
+          r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter
+        )
+        // A compaction that "converged" is only healthy if it also shrank
+        // the file count; publish both sides of that so a run that rewrites
+        // a partition into the same fragmentation is visible in the trace
+        // rather than only in a later disk audit.
+        span.setAttribute('compacted', done.compacted)
+        span.setAttribute('data_files_before', done.dataFilesBefore)
+        span.setAttribute('data_files_after', done.dataFilesAfter)
+        span.setAttribute('rows', done.rowCount)
+        if (done.compactedBytesWritten !== undefined) {
+          span.setAttribute('bytes_written', done.compactedBytesWritten)
+        }
+        return done
       },
       { component: 'cache' }
     )
@@ -332,6 +348,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
           r.rowCount = result.rowCount
           r.dataFilesAfter = result.dataFiles
+          r.compactedBytesWritten = result.bytesWritten
           compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
         }
       }
@@ -566,19 +583,37 @@ function estimateRowBytes(row) {
  * Compact a partition by rewriting the live generation into a fresh
  * directory named by the layout, then swap the cursor to point at it.
  *
- * Rows are flushed to a data file whenever the batch reaches either
+ * Rows are flushed out of the batch whenever it reaches either
  * `COMPACT_BATCH_SIZE` rows or `cfg.compact_batch_bytes` estimated
  * bytes, whichever comes first. The byte cap keeps peak heap bounded
  * regardless of per-row payload size: without it, a fat denormalized
  * column (e.g. tool definitions repeated on every row) pushes a
  * 10k-row batch into the gigabytes and OOMs the daemon mid-compaction.
  *
+ * A flush is a parquet ROW GROUP, not a data file. Successive row groups
+ * stream into the same open file until the bytes actually written reach
+ * `cfg.target_file_bytes`. Tying the file boundary to the in-memory
+ * estimate instead made every flush its own file, and a column that
+ * compresses 70x turned a 32 MB batch into a 0.5 MB data file, so
+ * `target_file_bytes` was unreachable by construction (LLP 0209).
+ *
+ * Holding a file open is not free: peak heap is the batch, plus one row
+ * group of encoded bytes, PLUS the row-group metadata every open parquet
+ * writer pins until its footer is written (two raw column values per row
+ * group per column). That third term grows with `target_file_bytes`, so
+ * `openStreamingAppend` budgets it and rolls a file early when it binds
+ * before the byte target does.
+ *
+ * @ref LLP 0209#decision [implements]: heap bounds the batch, written
+ *   bytes bound the file.
+ * @ref LLP 0209#retained-metadata [constrained-by]: a bigger file target
+ *   costs retained row-group metadata, which is separately bounded.
  * @param {string} partitionDir
  * @param {GenerationLayout} layout
  * @param {MaintenanceConfig} cfg
  * @param {SettleContext | null} [settle]
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
- * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number } | null>}
+ * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number, bytesWritten?: number } | null>}
  */
 async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   const oldDir = path.join(partitionDir, layout.liveDir)
@@ -613,6 +648,25 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   /** @type {Record<string, unknown>[]} */
   const fallbackBuffer = []
   const emittedPartIds = settle ? new Set() : null
+
+  /** @type {{ current: StreamingTableAppend | null }} */
+  const sink = { current: null }
+  const flushBatch = async () => {
+    if (!columns || batch.length === 0) return
+    if (!sink.current) {
+      sink.current = await openStreamingAppend({
+        tableDir: newDir,
+        columns,
+        targetFileBytes: cfg.target_file_bytes,
+        appendOptions: appendOpts,
+      })
+    }
+    await sink.current.write(batch)
+    totalRows += batch.length
+    batch = []
+    batchBytes = 0
+  }
+
   const emit = async (/** @type {Record<string, unknown>} */ row) => {
     const rowId = row._hyp_cache_row_id
     if (typeof rowId === 'string' && seen.has(rowId)) return
@@ -624,41 +678,47 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
     batch.push(row)
     batchBytes += estimateRowBytes(row)
     if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
-      await appendRowsToTable(newDir, columns, batch, appendOpts)
-      totalRows += batch.length
-      batch = []
-      batchBytes = 0
+      await flushBatch()
     }
   }
 
-  for await (const row of scanRowsFromTable(oldDir)) {
-    if (!columns) {
-      columns = Object.keys(row).map((name) => ({
-        name,
-        type: inferColumnType(row[name]),
-        nullable: true,
-      }))
-    }
-    // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
-    // Emit only after the sweep upgrades and de-twins them at end-of-scan.
-    if (settle && isGatewayFallbackRow(row)) {
-      fallbackBuffer.push(row)
-      continue
-    }
-    await emit(row)
-  }
-
-  if (settle && emittedPartIds && fallbackBuffer.length > 0) {
-    for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+  // The sink holds one file descriptor and one `.tmp.*` file per open
+  // output file until it is closed. A throw anywhere in the rewrite - a bad
+  // row mid-scan, a settle hook, a failed roll - used to leave all of them
+  // behind, and maintenance retries the same partition every tick, so a
+  // reliably failing partition leaked descriptors until the daemon died.
+  /** @type {Awaited<ReturnType<StreamingTableAppend['close']>> | null} */
+  let streamed = null
+  try {
+    for await (const row of scanRowsFromTable(oldDir)) {
+      if (!columns) {
+        columns = Object.keys(row).map((name) => ({
+          name,
+          type: inferColumnType(row[name]),
+          nullable: true,
+        }))
+      }
+      // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
+      // Emit only after the sweep upgrades and de-twins them at end-of-scan.
+      if (settle && isGatewayFallbackRow(row)) {
+        fallbackBuffer.push(row)
+        continue
+      }
       await emit(row)
     }
-  }
 
-  if (batch.length > 0 && columns) {
-    await appendRowsToTable(newDir, columns, batch, appendOpts)
-    totalRows += batch.length
-    batch = []
-    batchBytes = 0
+    if (settle && emittedPartIds && fallbackBuffer.length > 0) {
+      for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+        await emit(row)
+      }
+    }
+
+    await flushBatch()
+    streamed = sink.current ? await sink.current.close() : null
+  } finally {
+    // `close` resolving is the only proof every file landed. Anything else,
+    // including a `close` that threw part-way, leaves the rest to abort.
+    if (!streamed && sink.current) await sink.current.abort()
   }
 
   if (!columns) {
@@ -689,6 +749,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
     newEpoch: layout.newEpoch,
     rowCount: totalRows,
     dataFiles: newDataFiles,
+    bytesWritten: streamed?.bytesWritten ?? 0,
   }
 }
 

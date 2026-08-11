@@ -19,7 +19,7 @@ import {
  * @import { ClientSyncEntry } from '../../../../src/core/usage-policy/types.js'
  */
 
-const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs - unchecked sources stay on this machine.'
+const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this machine.'
 
 /**
  * The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190

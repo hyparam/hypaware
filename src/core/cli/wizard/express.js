@@ -25,7 +25,11 @@ const EXPRESS_TITLE = 'HypAware found these on this machine:'
  * these" points at something concrete the user can read, and the alternative
  * is simply "Let me choose". A gate whose rows would be empty is never
  * asked - the orchestrator skips it, because there would be nothing to
- * accept.
+ * accept. Nor is a gate with only one gate behind it (LLP 0201
+ * #one-lane-no-gate): on a solo local run the pick gate is the only
+ * question and already offers these rows itself, so the orchestrator
+ * shows this screen only on an enrolled run, whose itinerary adds the
+ * sync and new-folder lanes.
  *
  * Accepting is never silent (LLP 0188 #never-silent): each lane still
  * narrates the statement its gate would have shown, it simply does not stop
@@ -67,7 +71,13 @@ export async function runWizardExpressGate(opts) {
             ? 'Configures each to record through HypAware; new folders sync too.'
             : 'Configures each to record through HypAware.',
         },
-        { value: 'choose', label: 'Let me choose' },
+        {
+          value: 'choose',
+          label: 'Let me choose',
+          // The decline row glosses the path it opens (LLP 0201): a bare
+          // "Let me choose" priced the longer path at zero screens.
+          summary: 'Step through what to record, what syncs, and new-folder behavior.',
+        },
       ],
       default: 'defaults',
       ...(opts.allowBack ? { allowBack: true } : {}),
@@ -108,9 +118,10 @@ export async function runWizardExpressGate(opts) {
  * A blank line leads each block. On the express path these statements
  * arrive back to back with nothing to break them up - the prompts that
  * used to separate them are exactly what was removed - so without it the
- * run reads as one paragraph of mixed subjects. `lead: false` is for the
- * one block that already has a blank line above it (the pick lane's, which
- * follows the welcome banner), so the run never shows a double gap.
+ * run reads as one paragraph of mixed subjects. `lead: false` exists for
+ * a block that already has a blank line above it, so a run never shows
+ * a double gap; no current caller needs it since the pick lane's welcome
+ * banner (its former blank-line source) was retired with LLP 0211.
  *
  * @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
  * @param {{ stdout: { write(chunk: string): unknown }, title: string, items?: string[], lead?: boolean }} args

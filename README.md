@@ -1,20 +1,22 @@
 # HypAware
 
-Modular logs and telemetry collector. Plugin-kernel architecture.
+HypAware records the sessions, logs, and telemetry from your AI agents
+into one queryable history.
 
-HypAware captures conversations and traffic from local AI clients (Claude
+It captures conversations and traffic from local AI clients (Claude
 Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
-logs / traces / metrics into a local query cache and optional Parquet
-exports.
+logs / traces / metrics. Recordings land in a local query cache and can
+stay on your machine or sync to a central server.
 
 There are two ways to run it:
 
+- **Shared.** Each machine signs into your organization on the central
+  server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
+  and forwards its recordings there. One history follows you across
+  machines and harnesses, and usage, spend, and activity can be queried
+  and reported across the whole team.
 - **Solo, fully local.** No central server, no account. Everything stays in
   a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
-- **With your team.** Each machine signs into your organization on the
-  central server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
-  and forwards its recordings there so usage, spend, and activity can be
-  queried and reported across the whole team.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
@@ -253,29 +255,25 @@ behalf wherever the graph is enabled.
 Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
-hyp attach claude
-hyp attach codex
+hyp attach <client>             # claude, codex, openclaw, ...
 # Equivalent flag form:
-hyp attach --client claude
-hyp attach --client codex
+hyp attach --client <client>
 ```
 
 Detach (removes only HypAware-managed settings):
 
 ```sh
-hyp detach claude
-hyp detach codex
+hyp detach <client>
 # Equivalent aliases:
-hyp detach --client claude
-hyp detach --client codex
-hyp unattach claude
-hyp unattach codex
+hyp detach --client <client>
+hyp unattach <client>
 ```
 
 Both commands support `--dry-run` and `--json` for inspection and
-scripting. Claude writes only HypAware-related keys to
-`~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
-`~/.codex/config.toml`. Unrelated keys in either file are preserved.
+scripting. Each adapter writes only HypAware-managed settings to its
+client's own config file (for example `~/.claude/settings.json` for
+Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
+Codex); unrelated keys in every file are preserved.
 
 ### Desktop apps
 
@@ -368,7 +366,7 @@ hyp daemon start        # ensure the service is started
 hyp daemon status       # health snapshot
 hyp daemon restart      # bounce after a config change
 hyp daemon stop         # signal the running daemon to shut down
-hyp daemon uninstall    # remove the service file (config + recordings are kept)
+hyp daemon uninstall    # remove the service and detach clients (config + recordings are kept)
 ```
 
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
@@ -421,14 +419,16 @@ To remove HypAware from a machine completely:
 
 ```sh
 hyp leave                     # only if enrolled with a team server: stop forwarding, drop the credential
-hyp detach claude             # restore each attached client's own settings
-hyp detach codex
-hyp daemon uninstall          # remove the launchd / systemd service file
+hyp daemon uninstall          # remove the launchd / systemd service and detach every attached client
 npm uninstall -g hypaware     # remove the CLI
 rm -rf ~/.hyp                 # delete all local recordings, config, and state
 ```
 
-The first four steps are non-destructive and reversible; deleting `~/.hyp`
+`hyp daemon uninstall` restores each attached client's own settings on its
+way out, so no client is left pointing at a gateway that no longer exists;
+to detach a single client without uninstalling, use `hyp detach <client>`.
+
+The first three steps are non-destructive and reversible; deleting `~/.hyp`
 permanently removes every local recording. Note that copies already
 forwarded to a team server or exported to Parquet are not affected; see
 [docs/PRIVACY.md](./docs/PRIVACY.md).
