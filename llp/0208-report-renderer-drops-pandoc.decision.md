@@ -104,17 +104,21 @@ as a stylesheet or renderer choice later without touching the contract.
   classes, both left as they are on purpose.** The slug rule is pinned case by
   case against a real pandoc 3.1.11 binary, one heading per document so no
   de-dup counter drift can make a divergence read as parity. Two classes still
-  diverge, and each is deferred because the fix does not live in the slug rule:
+  diverge, and neither is closed by a slug-rule change alone:
   - **Unicode separators and the BOM (U+2028, U+2029, U+FEFF).** JavaScript's
     `\s` matches all three where pandoc treats them as ordinary symbols and
     drops them, so the entity spellings mint one hyphen too many: `## A &#8232; B`
-    mints `a---b` against pandoc's `a--b`. Fixing the slug rule would close only
-    that half. The literal-authored spellings break further upstream, in marked's
-    block parser, before any renderer override can see them: a literal U+2028 or
-    U+2029 in a heading line splits the block so no heading (and so no id at all)
-    is produced, and a literal U+FEFF welds its neighbours into `k-l`. A half fix
-    that made the entity spelling right while the literal spelling still lost its
-    heading outright would be worse than the honest gap.
+    mints `a---b` against pandoc's `a--b`. For the BOM that is the whole story: a
+    literal U+FEFF survives inline parsing and reaches the slug rule intact,
+    where the same `\s` branch welds its neighbours into `k-l` against pandoc's
+    `k--l`, so a single rule change treating U+FEFF as an ordinary symbol moves
+    both its spellings to the pandoc value at once. The separators are the half
+    out of reach: a literal U+2028 or U+2029 in a heading line breaks further
+    upstream, in marked's block parser, before any renderer override can see it,
+    splitting the block so no heading (and so no id at all) is produced. A half
+    fix that made the entity spelling right while the literal spelling still lost
+    its heading outright would be worse than the honest gap, so the class is
+    recorded whole rather than closed for the BOM alone.
   - **Image alt text.** pandoc slugs a Markdown image's alt text into the id and
     contributes nothing for a raw-HTML `<img>`: `## X ![alt text](i.png) Y` mints
     `x-alt-text-y`, while the same image written as `<img>` mints `x--y`. This
