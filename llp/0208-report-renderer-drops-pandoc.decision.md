@@ -78,10 +78,18 @@ as a stylesheet or renderer choice later without touching the contract.
 - <a id="footnotes"></a>**Footnotes stop rendering, and that is accepted.**
   pandoc's gfm reader enables its `footnotes` extension by default; marked's
   gfm does not implement footnotes at all, so `A claim.[^1]` now renders the
-  literal `[^1]` as body text. No skill or authoring doc tells a report author
-  to use footnotes and the measured tree contained none, so the exposure is a
-  report that has not been written yet. A footnote extension is a dependency
-  and a divergence of its own; if an author wants one, that is a new request.
+  literal `[^1]` as body text. The definition line degrades in one of two ways
+  depending on its shape. A multi-token definition (`[^1]: some prose about the
+  claim.`) is not valid link-reference syntax, so it survives as a literal
+  paragraph. A SINGLE-token one (`[^1]: notes.md`) is instead parsed as a link
+  reference definition: the definition line disappears from the output entirely
+  and the `[^1]` reference becomes a live `<a href="notes.md">^1</a>`, which
+  `rewriteHrefs` then rewrites to `notes.html` like any other `.md` link. Both
+  shapes are wrong, and neither is worth a workaround here. No skill or
+  authoring doc tells a report author to use footnotes and the measured tree
+  contained none, so the exposure is a report that has not been written yet. A
+  footnote extension is a dependency and a divergence of its own; if an author
+  wants one, that is a new request.
 - **Task lists keep their bullet unless the stylesheet suppresses it.** pandoc's
   template added a `task-list` class and a rule to hide the marker; marked emits
   a plain `<ul>` whose items start with a checkbox input, in one of two shapes: a

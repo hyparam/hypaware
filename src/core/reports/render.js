@@ -169,8 +169,12 @@ function escapeHtml(value) {
 /**
  * name -> Unicode codepoint, for the named character references pandoc's reader
  * recognizes. This is the classic bounded "HTML4" set (Latin-1, Greek, general
- * punctuation and symbols), not the full ~2200-entry HTML5 spec table, which is
- * mostly MathML additions nobody hand-types in report prose. Matching is
+ * punctuation and symbols) PLUS the HTML5 names for ASCII punctuation, not the
+ * full ~2200-entry HTML5 spec table, whose remainder is mostly MathML additions
+ * nobody hand-types in report prose. The ASCII-punctuation block is the part of
+ * HTML5 an author does reach for: `&apos;` is the standard apostrophe reference
+ * and lands in `What&apos;s next`, the very heading this decoder exists to slug
+ * as pandoc's `whats-next` rather than `whataposs-next`. Matching is
  * case-sensitive against pandoc, checked against pandoc 3.1.11: `&AMP;` decodes
  * (a legacy dual-case alias pandoc's own table carries) but `&MDASH;` and
  * `&RSQUO;` do not, so a blind case-fold would wrongly decode those AND collide
@@ -216,6 +220,15 @@ const NAMED_ENTITIES = {
   ldquo: 8220, rdquo: 8221, bdquo: 8222, dagger: 8224, Dagger: 8225, permil: 8240, lsaquo: 8249,
   rsaquo: 8250, euro: 8364,
   AMP: 38, LT: 60, GT: 62, QUOT: 34, COPY: 169, REG: 174,
+  // ASCII punctuation (HTML5). Every one measured against pandoc 3.1.11: each decodes
+  // to its character and then drops under the slug rule, so `A &excl; B` mints `a--b`,
+  // where leaving the name intact would have leaked the letters as `a-excl-b`. `&Tab;`
+  // and `&NewLine;` decode to whitespace and so mint a hyphen apiece (`a---b`), and
+  // `&lowbar;` decodes to `_`, which the retained class keeps (`a-_-b`).
+  apos: 39, Tab: 9, NewLine: 10, excl: 33, num: 35, dollar: 36, percnt: 37, lpar: 40,
+  rpar: 41, ast: 42, plus: 43, comma: 44, period: 46, sol: 47, colon: 58, semi: 59,
+  quest: 63, commat: 64, lbrack: 91, bsol: 92, rbrack: 93, Hat: 94, lowbar: 95,
+  grave: 96, lbrace: 123, verbar: 124, rbrace: 125,
 }
 
 /**
@@ -227,18 +240,25 @@ const NAMED_ENTITIES = {
  * lets the whole entity's letters and digits leak into the slug
  * (`what&rsquo;s next` -> `whatrsquos-next` instead of pandoc's `whats-next`).
  *
+ * BOTH hex spellings are accepted. HTML and pandoc treat `&#X41;` exactly like
+ * `&#x41;`, and marked's escaper passes the uppercase form through untouched
+ * (its no-encode pattern spells the prefix `#[Xx]`), so an `x`-only alternative
+ * here leaves the uppercase spelling to fall out undecoded and leak its digits:
+ * `## A &#X41; B` minted `a-x41-b` where pandoc mints `a-a-b`.
+ *
  * @param {string} value
  */
 function unescapeHtml(value) {
-  return value.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (entity, body) => {
+  return value.replace(/&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (entity, body) => {
     if (body[0] === '#') {
       const codePoint = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10)
       if (!Number.isFinite(codePoint)) return entity
       // Above U+10FFFF is not a codepoint and `String.fromCodePoint` throws on it, which
       // would abort the whole render, not just this heading. The window is reachable:
       // marked's escaper passes numeric references of up to 7 decimal or 6 hex digits
-      // through untouched, so every value in `&#x110000;`-`&#xFFFFFF;` and
-      // `&#1114112;`-`&#9999999;` arrives here verbatim from an authored heading.
+      // through untouched, so every value in `&#x110000;`-`&#xFFFFFF;` (in either hex
+      // spelling) and `&#1114112;`-`&#9999999;` arrives here verbatim from an authored
+      // heading.
       // pandoc 3.1.11 substitutes U+FFFD, which the slug rule below then strips like any
       // other symbol, so `## A &#x110000; B` mints `a--b`; returning the entity intact
       // would instead leak its digits into the id. Lone surrogates stay on the
@@ -257,9 +277,10 @@ function unescapeHtml(value) {
  *
  * Every step's order is load-bearing, checked against pandoc 3.1.11 `-f gfm -t html5`:
  * tags come off BEFORE unescaping (or a decoded `<` is eaten by the tag regex);
- * AUTHORED whitespace runs collapse BEFORE entities decode, and so BEFORE
- * punctuation is dropped: pandoc's reader collapses adjacent literal space
- * characters, but a decoded entity never merges with a real space next to it, so
+ * AUTHORED whitespace runs collapse FIRST OF ALL, and so before entities decode,
+ * before `<br>` yields its space, and before punctuation is dropped: pandoc's
+ * reader collapses adjacent literal space characters, but a decoded entity or an
+ * injected `<br>` space never merges with a real space next to it, so
  * `A  &nbsp;  B` (two real spaces on each side) mints `a---b`, three separate
  * hyphens for three separate whitespace tokens (space, the decoded &nbsp;, space),
  * not one. Collapsing before decode is what keeps a multi-word entity name like
@@ -278,6 +299,22 @@ function unescapeHtml(value) {
  * the retained class, same as a real space, so it survives to the final
  * per-space-to-hyphen step rather than being silently dropped.
  *
+ * `<br>` is the one tag that yields a SPACE instead of vanishing, because pandoc's
+ * reader turns it into a LineBreak and slugs that like any other whitespace token:
+ * `## Line one<br/>Line two` mints `line-one-line-two`, not `line-oneline-two`, and
+ * a `<br>`-only heading mints `-` rather than going without an id. The substitution
+ * runs AFTER the collapse for the same reason a decoded entity does: the injected
+ * space is its own token and must not merge with the authored spaces around it, so
+ * `## A <br /> B` mints `a---b`, three hyphens. The match is deliberately
+ * case-SENSITIVE and deliberately not `<br...` prefix-matching: pandoc recognizes
+ * only lowercase `br` as a line break and passes `<BR>` through as raw inline HTML
+ * contributing nothing, so `## A <BR> B` mints `a--b`, one hyphen fewer (measured).
+ * Every OTHER tag still vanishes without a trace, which is why the collapse is what
+ * moved ahead of the tag strip rather than the strip becoming a space: `<span>a</span>b`
+ * must stay `ab` and `A<em>B</em>C` must stay `abc`. Running the collapse first also
+ * stops a tag's own inner whitespace from being merged away, matching pandoc, which
+ * counts the space inside `A <span> </span> B` as its own token and mints `a---b`.
+ *
  * NOTHING TRIMS after the strip, because pandoc does not: the space a dropped
  * leading or trailing character leaves behind becomes a hyphen like any other, so
  * `## 🚀 Rollout plan` mints `-rollout-plan` and `## end &` mints `end-`
@@ -295,8 +332,9 @@ function unescapeHtml(value) {
 function headingId(text) {
   return unescapeHtml(
     text
-      .replace(/<[^>]*>/g, '')
-      .replace(/\s+/g, ' '),
+      .replace(/\s+/g, ' ')
+      .replace(/<br(?:\s[^>]*)?\/?>/g, ' ')
+      .replace(/<[^>]*>/g, ''),
   )
     .normalize('NFC')
     .toLowerCase()
@@ -329,8 +367,8 @@ function createConverter() {
         const n = seen.get(base) ?? 0
         seen.set(base, n + 1)
         const id = n === 0 ? base : `${base}-${n}`
-        // A heading that reduces to nothing (an emoji-only heading, a `<br>` or an HTML
-        // comment with no other text) mints an empty id. pandoc emits no id attribute at
+        // A heading that reduces to nothing (an emoji-only heading, or an HTML comment
+        // with no other text) mints an empty id. pandoc emits no id attribute at
         // all in that case; only a later duplicate of the same empty heading gets one
         // (pandoc's own de-dup counter running against the empty base, e.g. id="-1"),
         // since an unauthorable anchor is still worth disambiguating from a real one.

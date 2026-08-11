@@ -480,6 +480,143 @@ test('an out-of-range numeric entity in a heading renders instead of crashing, m
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('an uppercase hex numeric entity decodes like its lowercase spelling, matching pandoc 3.1.11', () => {
+  // HTML and pandoc treat `&#X41;` exactly like `&#x41;`, and marked's escaper passes
+  // the uppercase form through untouched (its no-encode pattern spells the prefix
+  // `#[Xx]`), so it reaches the decoder verbatim. Every pairing measured against a real
+  // pandoc 3.1.11 binary, one heading per document.
+  // Each heading uses its own letters so no two share a base and the de-dup counter
+  // never masks a divergence.
+  const dir = onePageTree(
+    'upper-hex',
+    [
+      '# Report',
+      '',
+      '## A &#X41; B',
+      '',
+      '## C &#X26; D',
+      '',
+      '## E &#XFFFFFF; F',
+      '',
+      '## G &#X110000; H',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'upper-hex', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="a-a-b">'), '&#X41; must decode to "A", not survive as the digits "x41"')
+  assert.ok(html.includes('<h2 id="c--d">'), '&#X26; must decode to an `&` that then drops, not survive as "x26"')
+  // The out-of-range guard has to cover the uppercase spelling too: both of these are
+  // inside the reachable window, so before the fix they leaked their digits into the id
+  // instead of substituting U+FFFD, the exact outcome that guard exists to prevent.
+  assert.ok(html.includes('<h2 id="e--f">'), 'an out-of-range &#X...; must substitute U+FFFD and slug like pandoc')
+  assert.ok(html.includes('<h2 id="g--h">'), 'the bottom of the out-of-range window decodes the same way')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('the HTML5 ASCII-punctuation entity names decode, matching pandoc 3.1.11', () => {
+  // `&apos;` is the standard apostrophe reference and the one that actually shows up in
+  // authored prose: `## What&apos;s next` minted `whataposs-next` where pandoc mints
+  // `whats-next`, silently dangling the anchor while the visible heading rendered fine.
+  // The rest of the ASCII-punctuation block is the same class of hole; every pairing
+  // below was measured against a real pandoc 3.1.11 binary, one heading per document.
+  const names = [
+    'excl', 'num', 'dollar', 'percnt', 'lpar', 'rpar', 'ast', 'plus', 'comma', 'period',
+    'sol', 'colon', 'semi', 'quest', 'commat', 'lbrack', 'bsol', 'rbrack', 'Hat', 'grave',
+    'lbrace', 'verbar', 'rbrace',
+  ]
+  const dir = onePageTree(
+    'ascii-punct',
+    [
+      '# Report',
+      '',
+      '## What&apos;s next',
+      '',
+      '## A &Tab; B',
+      '',
+      '## C &NewLine; D',
+      '',
+      '## E &lowbar; F',
+      '',
+      ...names.flatMap((name) => [`## ${name} &${name}; x`, '']),
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'ascii-punct', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="whats-next">'), '&apos; must decode to a quote, not survive as the word "apos"')
+  assert.ok(html.includes('<h2 id="a---b">'), '&Tab; decodes to whitespace, minting its own hyphen like pandoc')
+  assert.ok(html.includes('<h2 id="c---d">'), '&NewLine; decodes to whitespace too')
+  assert.ok(html.includes('<h2 id="e-_-f">'), '&lowbar; decodes to `_`, which the retained class keeps')
+  // Each remaining name decodes to a punctuation character the slug rule then drops, so
+  // the id keeps only the literal word before it. Leaving the name undecoded would
+  // instead double it into the id (`excl-excl-x`).
+  for (const name of names) {
+    assert.ok(
+      html.includes(`<h2 id="${name.toLowerCase()}--x">`),
+      `&${name}; must decode and drop, not survive as the word "${name.toLowerCase()}"`,
+    )
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('a <br> in a heading yields a space, matching pandoc 3.1.11', () => {
+  // pandoc's reader turns `<br>` into a LineBreak and slugs it like any other whitespace
+  // token, where stripping it as a tag welds the words on either side together. Every
+  // pairing measured against a real pandoc 3.1.11 binary, one heading per document.
+  const dir = onePageTree(
+    'line-break',
+    [
+      '# Report',
+      '',
+      '## Line one<br/>Line two',
+      '',
+      '## A <br /> B',
+      '',
+      '## C <br/><br/> D',
+      '',
+      '## E <br class="x"> F',
+      '',
+      '## G <BR> H',
+      '',
+      '## <br>',
+      '',
+      '## I <span> </span> J',
+      '',
+      '## <span>tagged</span> text',
+      '',
+      '## <span>a</span>b',
+      '',
+      '## A<em>B</em>C',
+      '',
+    ].join('\n'),
+  )
+  renderReports({ dir })
+  const html = fs.readFileSync(path.join(dir, 'html', 'line-break', 'index.html'), 'utf8')
+
+  assert.ok(html.includes('<h2 id="line-one-line-two">'), 'a <br> between words yields pandoc\'s single hyphen')
+  assert.ok(html.includes('<h2 id="a---b">'), 'the <br> space is its own token and must not merge with the spaces around it')
+  assert.ok(html.includes('<h2 id="c----d">'), 'two adjacent <br>s yield two separate spaces')
+  assert.ok(html.includes('<h2 id="e---f">'), 'a <br> carrying attributes is still a line break')
+  assert.ok(html.includes('<h2 id="-">'), 'a <br>-only heading mints pandoc\'s bare `-`, not a missing id')
+  // pandoc recognizes only lowercase `br` as a line break and passes `<BR>` through as
+  // raw inline HTML contributing nothing, so the uppercase spelling is one hyphen fewer.
+  assert.ok(html.includes('<h2 id="g--h">'), 'an uppercase <BR> stays raw HTML and yields no space of its own')
+  // A tag's own inner whitespace is its own token to pandoc, which the collapse running
+  // ahead of the tag strip is what preserves.
+  assert.ok(html.includes('<h2 id="i---j">'), 'the space inside a span pair counts as its own token')
+  // Every OTHER tag must still vanish without a trace: a general tag-to-space rule would
+  // break all three of these, which is why only the collapse moved ahead of the strip.
+  assert.ok(html.includes('<h2 id="tagged-text">'), 'a span still vanishes, keeping only the authored space')
+  assert.ok(html.includes('<h2 id="ab">'), 'a span between two letters welds them, as pandoc does')
+  assert.ok(html.includes('<h2 id="abc">'), 'emphasis between letters welds them too')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('heading ids do not trim after the punctuation strip, matching pandoc 3.1.11', () => {
   // Every pairing measured against a real pandoc 3.1.11 binary (`-f gfm -t html5`).
   // pandoc does not trim at this stage: the space a dropped leading or trailing
