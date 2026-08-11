@@ -35,14 +35,14 @@ doing at each one:
    This completes enrollment: your organization is identified from your
    email address, so there are no codes or keys to enter.
 2. **Select what to record.** A checklist of AI tools. Tools your team
-   manages are already selected; tools detected on your machine are
-   pre-selected as well. Any tool you add yourself is marked **stays on
-   this machine** and is never forwarded to the server.
+   manages are already selected and locked; tools detected on your
+   machine are pre-selected as well. A later step chooses which of your
+   own additions sync to the server and which stay on this machine.
 3. **Complete any additional setup.** Some tools require one further step
    (Claude Desktop, for example, requests your password and an application
    restart). You may defer any of these; the remaining setup continues.
 
-<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on and personal ones marked stays on this machine.">
+<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as managed by your fleet and a detected tool pre-checked.">
 
 The setup then installs the components, imports your recent AI history, and
 reports when the first upload will occur.
