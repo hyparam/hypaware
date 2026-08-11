@@ -71,6 +71,14 @@ disclosure [LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-ga
 put on the happy-path row) plus the new-folder policy that rides with it.
 The alternative row carries no gloss; "Let me choose" needs none.
 
+After [#one-lane-no-gate](#one-lane-no-gate), the orchestrator only ever
+calls this gate from inside its own `enrolled()` guard, so `opts.enrolled`
+is always true at the sole production call site and the solo-machine label
+above is never rendered by a real run. The component still accepts
+`enrolled: false` (and treats a missing `enrolled` the same way) and keeps
+the "Record all of these" branch: that is the defensive default the gate
+falls back to if the predicate ever widens again, not a live path.
+
 Declining runs the lanes exactly as they run today, gates and all.
 
 <a id="narrate"></a>**Accepting skips the prompts, never the statements.**
@@ -101,6 +109,22 @@ accept: "record all of these" over an empty list would be a question about
 nothing, and accepting it would mean "record nothing". The orchestrator
 skips the gate entirely and the pick lane opens its menu, exactly as it
 does today when its own gate has no rows.
+
+<a id="one-lane-no-gate"></a>**One gate to collapse means no gate.**
+The express gate earns its screen by answering several questions at
+once, and only the enrolled runs have several: the team pathway, and
+a managed machine reconfiguring down the local pathway, and a machine
+that joined this run and then chose Local without disconnecting (LLP 0191
+#join-not-undone), whose itineraries add the sync and new-folder lanes. A
+solo local run asks exactly one question, the pick gate, over these same
+rows with the same accept. Fronting it with the express gate asked that
+question twice: declining "Record all of these" landed immediately on
+"Record all", with nothing chosen in between. The orchestrator therefore
+shows the gate only on an enrolled run - the same `enrolled()` read that
+adds the extra lanes - and a solo run opens with the pick gate, whose
+decline is already the menu. The solo happy path stays two questions
+(fork, pick gate, finale), since the pick gate's accept is the same yes
+the express gate offered.
 
 <a id="no-counter"></a>**The gate carries no position line, and an express
 run states none.** The gate is what decides how many questions remain, so
@@ -140,9 +164,11 @@ never-silent objection LLP 0190 raised against skipping the sync step).
 
 ## Consequences {#consequences}
 
-- The attended happy path is: fork, express gate, narration, finale. Two
-  questions, where it was four (five on the team pathway), and the second
-  one names the tools it is about to configure.
+- The attended happy path on an enrolled run is: fork, express gate,
+  narration, finale. Two questions, where it was four (five on the team
+  pathway), and the second one names the tools it is about to configure.
+  A solo local run keeps its own two-question path (fork, pick gate,
+  finale) without the express screen (#one-lane-no-gate).
 - The pick lane's pre-question seeding is now a named, exported step
   (`resolvePickSeeding`). Any future default that a gate would state has
   one place to be computed.

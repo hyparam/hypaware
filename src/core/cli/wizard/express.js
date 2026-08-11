@@ -25,7 +25,11 @@ const EXPRESS_TITLE = 'HypAware found these on this machine:'
  * these" points at something concrete the user can read, and the alternative
  * is simply "Let me choose". A gate whose rows would be empty is never
  * asked - the orchestrator skips it, because there would be nothing to
- * accept.
+ * accept. Nor is a gate with only one gate behind it (LLP 0201
+ * #one-lane-no-gate): on a solo local run the pick gate is the only
+ * question and already offers these rows itself, so the orchestrator
+ * shows this screen only on an enrolled run, whose itinerary adds the
+ * sync and new-folder lanes.
  *
  * Accepting is never silent (LLP 0188 #never-silent): each lane still
  * narrates the statement its gate would have shown, it simply does not stop

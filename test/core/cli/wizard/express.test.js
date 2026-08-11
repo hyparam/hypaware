@@ -82,7 +82,12 @@ test('the gate lists the rows it will record, and the accept row names the act o
   assert.equal(state.question.progress, undefined)
 })
 
-test('an unenrolled run never claims anything about a server', async () => {
+// `opts.enrolled` is only ever `true` at the sole production call site
+// (LLP 0201 #one-lane-no-gate: the orchestrator now guards the gate itself
+// with `enrolled()`), so this pins the component's contract - what the gate
+// would render if ever called with `enrolled` unset or false - not a screen
+// any run reaches.
+test('the gate claims a server only when told it has one', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
