@@ -29,73 +29,30 @@
         "settings_file": ".claude/settings.json",
         "marker_key": "_hypaware"
       },
-      "required_upstreams": [
-        "anthropic"
-      ],
-      "transcript_entrypoints": [
-        "cli",
-        "sdk-cli"
-      ],
-      "launch": {
-        "bin": "claude",
-        "args": [
-          "{prompt}"
-        ],
-        "label": "Claude Code"
-      }
+      "required_upstreams": ["anthropic"],
+      "transcript_entrypoints": ["cli", "sdk-cli"],
+      "launch": { "bin": "claude", "args": ["{prompt}"], "label": "Claude Code" }
     },
     "picker": [
       {
         "name": "claude",
         "label": "Claude Code",
         "summary": "Records your Claude Code conversations (CLI and SDK, including OpenClaw's claude-cli backend). Setup attaches Claude Code, starts a local gateway listener, and adds query skills.",
-        "detect": {
-          "settings_file": ".claude/settings.json"
-        },
+        "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
-          "plugin": {
-            "name": "@hypaware/claude",
-            "config": {
-              "proxy": "@hypaware/ai-gateway"
-            }
-          },
+          "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
           "requires_gateway": true,
-          "gateway_upstream": {
-            "name": "anthropic",
-            "base_url": "https://api.anthropic.com",
-            "path_prefix": "/v1/messages",
-            "provider": "anthropic"
-          }
+          "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
         }
       }
     ],
     "skills": [
-      {
-        "name": "hypaware-query",
-        "clients": [
-          "claude"
-        ]
-      },
-      {
-        "name": "hypaware-reference",
-        "clients": [
-          "claude"
-        ]
-      },
-      {
-        "name": "hypaware-privacy",
-        "clients": [
-          "claude"
-        ]
-      }
+      { "name": "hypaware-query", "clients": ["claude"] },
+      { "name": "hypaware-reference", "clients": ["claude"] },
+      { "name": "hypaware-privacy", "clients": ["claude"] }
     ],
     "agents": [
-      {
-        "name": "hypaware-analyst",
-        "clients": [
-          "claude"
-        ]
-      }
+      { "name": "hypaware-analyst", "clients": ["claude"] }
     ],
     "init_presets": [
       {

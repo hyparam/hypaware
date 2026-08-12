@@ -83,6 +83,8 @@ The same recordings are also projected into an activity graph, read as *relation
 
 **It is built on demand and does not auto-update**, so an empty or thin result usually means the projection has not run, not that the answer is zero. `hyp graph project` is idempotent and cheap; run it first when recency matters. Command mechanics (flags, seed resolution, output shape) are in `hyp graph --help` and `hyp graph neighbors --help`; read those rather than guessing at them.
 
+**Confirm it is here before routing to it.** The graph is composed alongside the AI gateway by `hyp init`, but configs written before that (and some fleet-managed ones) do not name it. If `hyp query status` does not list `node` / `edge`, or `hyp graph` comes back as an unknown command, the graph is not composed on this install: `ai_gateway_messages` is the only surface, so answer from SQL and tell the user to re-run `hyp init` to add it. Do not report a missing graph as an empty one.
+
 ### Which surface answers the question
 
 Ask: does answering require *reading* rows, or only knowing they *exist and connect*? Route to the graph when the question is any of:

@@ -275,12 +275,14 @@ depends on `build.sh` being absent from this repo.
   with the detail in `reviewing.md`, `rendering.md`, `publishing.md`, and
   `applying.md` loaded on entry.
 
-  <a id="t12-graph-was-already-owned"></a>**Superseded-by: LLP 0213** (the graph
-  is now composed wherever the gateway is, so the packaging constraint below no
-  longer holds and the merge landed 2026-08-12). The reasoning stands for the
-  world it was written in.
+  **Superseded-by: LLP 0213** (the graph is now composed wherever the gateway
+  is, so the packaging constraint in the finding below no longer holds and the
+  merge landed 2026-08-12). The reasoning stands for the world it was written
+  in. The anchor stays on the finding itself, not on this note: a live
+  `@ref LLP 0197#t12-graph-was-already-owned` cites the finding, and moving
+  the anchor here would silently resolve that ref to its retraction.
 
-  **`hypaware-graph` was not merged into
+  <a id="t12-graph-was-already-owned"></a>**`hypaware-graph` was not merged into
   `hypaware-query`, and should not have been.** The plan assumed claude and codex
   owned that skill. They did not: `@hypaware/context-graph` ships it, and the
   claude and codex copies were byte-identical duplicates carried unconditionally.

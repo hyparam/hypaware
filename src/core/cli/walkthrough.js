@@ -29,7 +29,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 /**
  * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall } from '../../../src/core/runtime/types.js'
  */
@@ -1193,9 +1193,10 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
   }
 
   const managed = composerManagedPlugins(descriptors, composeWith)
+  const riders = new Set(composeWith?.keys() ?? [])
   const composedNames = new Set((composed.plugins ?? []).map((p) => p.name))
   const plugins = (composed.plugins ?? []).map((entry) =>
-    mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name))
+    mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name), riders.has(entry.name))
   )
   for (const prior of existingPlugins) {
     if (composedNames.has(prior.name)) continue
@@ -1226,11 +1227,15 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
  * already in the config: the user's keys win, except the gateway's
  * pick-derived `upstreams`.
  *
+ * `isRider` marks a plugin composed by `compose_with` rather than by a
+ * pick, which changes what a prior `enabled: false` means (see below).
+ *
  * @param {PluginConfigInstance} composed
  * @param {PluginConfigInstance | undefined} prior
+ * @param {boolean} [isRider]
  * @returns {PluginConfigInstance}
  */
-function mergePlugin(composed, prior) {
+function mergePlugin(composed, prior, isRider = false) {
   if (!prior) return composed
   const config = { ...(composed.config ?? {}), ...(prior.config ?? {}) }
   const upstreams = composed.config?.upstreams
@@ -1240,6 +1245,15 @@ function mergePlugin(composed, prior) {
   // Composing a plugin is what picking its row means, so a prior
   // `enabled: false` does not carry over: the pick would otherwise write a
   // config whose row reads picked and whose plugin never activates.
+  //
+  // A rider is the exception, and it inverts the argument rather than
+  // bending it. Nothing picked it: it has no picker row to read as picked
+  // (LLP 0213 #derived-data-plugins), so `enabled: false` is not a
+  // contradiction the user left behind, it is the *only* way the user can
+  // decline a plugin composition adds unasked. Deleting it would make every
+  // later `hyp init` silently re-enable a plugin its owner switched off.
+  // @ref LLP 0213#derived-data-plugins [constrained-by]: a rider has no picker row, so `enabled: false` is the user's only opt-out and outranks the fold
+  if (isRider) return merged
   if (merged.enabled === false && composed.enabled === undefined) delete merged.enabled
   return merged
 }
@@ -2003,6 +2017,10 @@ export async function loadPickerDescriptors() {
  * Discovery failure yields empty maps rather than blocking init, which
  * degrades to "no riders" instead of a config that cannot be written.
  *
+ * The catalog is built from the excluded manifests too (config validation
+ * and descriptor resolution both need them), but the riders are filtered
+ * back down to the default-activated set: see {@link ridersInDefaultSet}.
+ *
  * @returns {Promise<{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }>}
  */
 export async function loadPickerCatalog() {
@@ -2011,11 +2029,43 @@ export async function loadPickerCatalog() {
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
     return {
       descriptors: orderPickerDescriptors(catalog.pickerDescriptors),
-      composeWith: catalog.composeWith ?? new Map(),
+      composeWith: ridersInDefaultSet(catalog.composeWith ?? new Map(), bundled.loaded),
     }
   } catch {
     return { descriptors: new Map(), composeWith: new Map() }
   }
+}
+
+/**
+ * Keep only the riders that are in the default-activated bundled set.
+ *
+ * `compose_with` composes a plugin with no pick and no prompt, so left
+ * unfiltered it is a way around `V1_EXCLUDED_FROM_DEFAULT` - the boundary
+ * that says a plugin activates only if someone asked for it by name. The
+ * excluded set is not a display preference: `@hypaware/embedder-openai` is
+ * out because enabling an API-backed embedder is the opt-in that lets
+ * captured text leave the machine, and `@hypaware/claude-account` because it
+ * holds a real credential. A one-line manifest edit on any of them would
+ * otherwise compose it into every gateway config.
+ *
+ * Filtering here rather than in `buildPluginCatalog` keeps the catalog a
+ * faithful read of the manifests; it is composition, not cataloguing, that
+ * the allowlist constrains.
+ *
+ * @param {Map<string, string[]>} composeWith
+ * @param {LoadedManifest[]} loaded the default-activated bundled manifests
+ * @returns {Map<string, string[]>}
+ * @ref LLP 0213#d1 [constrained-by]: riding a pick is not a route around the explicit-opt-in boundary
+ */
+export function ridersInDefaultSet(composeWith, loaded) {
+  const defaultActivated = new Set(loaded.map((entry) => entry.manifest.name))
+  /** @type {Map<string, string[]>} */
+  const kept = new Map()
+  for (const [rider, waitsFor] of composeWith) {
+    if (!defaultActivated.has(rider)) continue
+    kept.set(rider, waitsFor)
+  }
+  return kept
 }
 
 /**

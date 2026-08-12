@@ -92,5 +92,30 @@ plugin, and list datasets/commands **before any plugin code is loaded**.
   `compose_with` says "write me down wherever this is written down". They point
   in opposite directions and a plugin may declare either, both, or neither.
 
+  Three bounds, because the field composes a plugin with no pick and no
+  prompt:
+
+  - **It may not name its own plugin.** Such a rider is never composable (its
+    condition can only be met by the composition it is waiting to be part of),
+    and the fixpoint terminates cleanly rather than erroring, so the plugin
+    would simply be absent from every config with nothing to read anywhere.
+    Rejected at manifest validation, the only layer that can name the author's
+    mistake. A *mutual* pair is not rejected: each manifest is valid alone, and
+    whether the pair stalls depends on the config being composed.
+  - **It does not cross the default-activation boundary.** Riders are filtered
+    to the bundled allowlist before composition sees them, so a plugin in
+    `V1_EXCLUDED_FROM_DEFAULT` cannot compose itself in by declaring the field.
+    That set is the explicit-opt-in line (an API-backed embedder sends captured
+    text off the machine; a credential plugin holds a real secret), and it
+    outranks a manifest's own request.
+  - **A rider's `enabled: false` in the config is final.** A picked plugin
+    loses a stale `enabled: false` on reconfigure, because ticking its row is
+    the ask. A rider has no row to tick, so that flag is its owner's only way
+    to decline it and a later `hyp init` must not delete it.
+
+  The names are **not resolved**: a `compose_with` naming a plugin that does
+  not exist validates, and simply never composes. There is no warning for it
+  today.
+
 The category of a plugin (source / sink / client adapter / composition) is
 **emergent from the manifest**, not a declared type.

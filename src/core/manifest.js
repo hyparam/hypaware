@@ -150,6 +150,15 @@ export function validateManifest(value) {
     if (!isStringArray(m.compose_with) || m.compose_with.length === 0) {
       return invalid('compose_with must be a non-empty array of plugin names when present')
     }
+    // A plugin that waits for itself can never be composed: the fixpoint
+    // only adds a rider once every name it waits for is already present,
+    // and this one never will be. That terminates safely, which is exactly
+    // the problem - it composes nothing and reports nothing, so the plugin
+    // is simply missing from every config with no error to read. Rejecting
+    // it here is the only layer that can tell the author.
+    if (m.compose_with.includes(m.name)) {
+      return invalid('compose_with must not name its own plugin: a plugin cannot ride itself')
+    }
   }
   if (m.contributes !== undefined && !isPlainObject(m.contributes)) {
     return invalid('contributes must be an object when present')

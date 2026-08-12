@@ -27,70 +27,29 @@
         "settings_file": ".codex/config.toml",
         "marker_header": "[model_providers.hypaware]"
       },
-      "required_upstreams": [
-        "openai",
-        "chatgpt"
-      ],
-      "launch": {
-        "bin": "codex",
-        "args": [
-          "{prompt}"
-        ],
-        "label": "Codex"
-      }
+      "required_upstreams": ["openai", "chatgpt"],
+      "launch": { "bin": "codex", "args": ["{prompt}"], "label": "Codex" }
     },
     "picker": [
       {
         "name": "codex",
         "label": "Codex",
         "summary": "Records your Codex conversations (CLI and Desktop). Setup points Codex at the local gateway and adds query skills.",
-        "detect": {
-          "settings_file": ".codex/config.toml"
-        },
+        "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
-          "plugin": {
-            "name": "@hypaware/codex",
-            "config": {
-              "proxy": "@hypaware/ai-gateway"
-            }
-          },
+          "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },
           "requires_gateway": true,
           "gateway_upstream": [
-            {
-              "name": "openai",
-              "base_url": "https://api.openai.com",
-              "path_prefix": "/v1",
-              "provider": "openai"
-            },
-            {
-              "name": "chatgpt",
-              "base_url": "https://chatgpt.com",
-              "path_prefix": "/backend-api/codex",
-              "provider": "chatgpt"
-            }
+            { "name": "openai", "base_url": "https://api.openai.com", "path_prefix": "/v1", "provider": "openai" },
+            { "name": "chatgpt", "base_url": "https://chatgpt.com", "path_prefix": "/backend-api/codex", "provider": "chatgpt" }
           ]
         }
       }
     ],
     "skills": [
-      {
-        "name": "hypaware-query",
-        "clients": [
-          "codex"
-        ]
-      },
-      {
-        "name": "hypaware-reference",
-        "clients": [
-          "codex"
-        ]
-      },
-      {
-        "name": "hypaware-privacy",
-        "clients": [
-          "codex"
-        ]
-      }
+      { "name": "hypaware-query", "clients": ["codex"] },
+      { "name": "hypaware-reference", "clients": ["codex"] },
+      { "name": "hypaware-privacy", "clients": ["codex"] }
     ],
     "config_sections": [
       {

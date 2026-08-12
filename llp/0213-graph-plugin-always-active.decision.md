@@ -140,8 +140,11 @@ to collect, and HypAware picks the plugin set.
 LLP 0196 #one-skill-per-question as written, now that its blocker is gone. The
 merged skill carries the routing rule (graph for entities and connections,
 messages for per-message measures), the two-stage strategy, the derived-facet
-rule, and the measured performance tiers. The availability-and-repair section is
-deleted outright: it exists only to explain the gate D1 removes.
+rule, and the measured performance tiers. The availability-and-repair *section*
+is deleted: it exists only to explain the gate D1 removes. One sentence of it
+survives, because D1 governs what `hyp init` writes from now on and not what is
+already on disk (see
+[#availability-is-not-universal](#availability-is-not-universal)).
 
 <a id="skill-implies-graph"></a>**Under D1 the objection is not merely reduced,
 it is unreachable**, and the manifests prove it rather than the prose asserting
@@ -217,9 +220,21 @@ the intent; 0214 is the mechanism, and D2 cannot fully land before it.
   written ones keep whatever they name until their owner re-runs `hyp init`. No
   reconcile pass and no config migration is built for this
   ([resolved question 1](#rq-upgrade)).
-- **`hyp query status` lists `node` and `edge` on every install**, so the
-  availability probe the merged skill would otherwise perform is trivially true
-  and is deleted rather than reworded.
+  "New configs" means every path that writes one, not just the picker fold.
+  `compose_with` is read in `composePickerConfig` alone, so a preset that
+  writes its plugin list literally has to name the pair itself:
+  `hyp init claude-and-otel-local` does, and any future preset must.
+- <a id="availability-is-not-universal"></a>**`hyp query status` lists `node`
+  and `edge` on every install `hyp init` has written since this landed**, which
+  is not the same as every install. Configs predating this decision are
+  deliberately not migrated (above), and a fleet-joined host takes its plugin
+  set from the central layer, which may omit the pair. So the merged skill
+  keeps one diagnostic sentence rather than deleting the check outright: the
+  failure it guards against is the model being told to run `hyp graph project`
+  and read `node` / `edge` on a host that has neither, and reporting the
+  resulting nothing as an empty graph rather than an absent one. What is
+  deleted is the old skill's full availability *gate*; what survives is a
+  sentence naming the symptom and the repair (`re-run hyp init`).
 - <a id="stranding"></a>**Unpicking the gateway strands an existing graph, and
   that is the existing rule, not a new hazard.** Composer-managed plugins "live
   and die by the picks"

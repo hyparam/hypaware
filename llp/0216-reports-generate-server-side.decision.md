@@ -78,28 +78,61 @@ same commit that removes the skill, which is the rule
 [LLP 0197 #t12-constraint-inventory](./0197-skills-state-constraints-not-procedures.plan.md#t12-constraint-inventory)
 sets for a constraint that stops applying, and the guard behaved exactly as
 designed: it failed loudly, eleven times, rather than letting the deletion pass
-unnoticed. **The fixture went 21 to 10.**
+unnoticed. **The fixture went 17 to 10** (eleven removed, four graph
+constraints added by [LLP 0213](./0213-graph-plugin-always-active.decision.md)
+in the same change).
 
 They are recorded here in full, because a harm statement is the expensive part.
 Most were written after something went wrong, and a server that re-derives them
 from first principles will re-derive them from the same incidents.
 
+Each entry gives the fixture's `id`, its **`pattern`** (the guard's own phrasing
+of the rule, and the actionable half: a harm statement says why, a pattern says
+what to do), then the harm. Where the pattern is a `|`-separated alternation it
+is reproduced verbatim, because those alternates are the wordings the rule
+actually shipped under.
+
 **Report authoring and publishing** (six, unambiguously the server's now):
 
-- **numbers-trace-to-source**: Rendering re-expresses numbers already in the report. A renderer that computes its own produces figures no analysis backs.
-- **artifacts-verbatim**: Proposed diffs and full skill files are the deliverable, not display copy. Trimming or rewording them produces an artifact that does not apply cleanly.
-- **no-person-rankings**: The report is a team improvement tool shared in the open. Person-ranking turns it into a monitoring tool, which is the stated non-goal.
-- **tokens-never-dollars**: Capture is partial, so a dollar figure would be a fabricated precision on top of an incomplete denominator.
-- **confirm-before-publish**: Publishing is org-visible and immutable. Without an explicit yes it can happen as a side effect of generating a report.
-- **confirm-before-source-edit**: Enrichment rewrites report `.md` files in place, so without this a model can rewrite a user's reports off a prompt that never asked for it.
+- **numbers-trace-to-source** - pattern: `NEVER invents, recomputes, or reinterprets`. Rendering re-expresses numbers already in the report. A renderer that computes its own produces figures no analysis backs.
+- **artifacts-verbatim** - pattern: `Ready-to-apply artifacts are verbatim`. Proposed diffs and full skill files are the deliverable, not display copy. Trimming or rewording them produces an artifact that does not apply cleanly.
+- **no-person-rankings** - pattern: `never person-rankings|never to individuals|never as an output-per-person`. The report is a team improvement tool shared in the open. Person-ranking turns it into a monitoring tool, which is the stated non-goal.
+- **tokens-never-dollars** - pattern: `Tokens, never dollars|Token volume, never dollars`. Capture is partial, so a dollar figure would be a fabricated precision on top of an incomplete denominator.
+- **confirm-before-publish** - pattern: `Never auto-publish as a side effect|Confirm before publishing`. Publishing is org-visible and immutable. Without an explicit yes it can happen as a side effect of generating a report.
+- **confirm-before-source-edit** - pattern: `it edits the user's source files|Confirm before this step`. Enrichment rewrites report `.md` files in place, so without this a model can rewrite a user's reports off a prompt that never asked for it.
 
 **Query discipline** (five, and see [#accepted-risk](#accepted-risk)):
 
-- **coalesce-token-sums**: A provider that never emits a field (`cache_write_tokens` on OpenAI) makes `sum()` return NULL, and NULL poisons every total built from it. Measured on a real install: 25,581,312 OpenAI cache-read tokens silently became 0. The report is confidently wrong with no error.
-- **no-wide-column-scans**: This query shape has 504'd and then OOM'd the production server. It is a denial of service against the fleet's own infrastructure, caused by a report run.
-- **one-remote-worker-at-a-time**: Concurrent remote queries 502 the production proxy.
-- **ask-which-source-first**: Querying the wrong source silently answers about a different fleet, or hits a production server the user did not intend to touch.
-- **per-change-approval**: Applying changes mutates this machine's skills, subagents, and AGENTS.md. Blanket approval of a mixed list is how unrelated content gets persisted.
+- **coalesce-token-sums** - pattern: `COALESCE every token sum`. A provider that never emits a field (`cache_write_tokens` on OpenAI) makes `sum()` return NULL, and NULL poisons every total built from it. Measured on a real install: 25,581,312 OpenAI cache-read tokens silently became 0. The report is confidently wrong with no error.
+- **no-wide-column-scans** - pattern: `Never GROUP BY / DISTINCT / row-fetch wide content columns`. This query shape has 504'd and then OOM'd the production server. It is a denial of service against the fleet's own infrastructure, caused by a report run. The pattern alone does not say *which* columns are wide; the enforceable form lived only in the skill, and is preserved under [#recovered-rule-text](#recovered-rule-text) below.
+- **one-remote-worker-at-a-time** - pattern: `strictly one at a time against a remote`. Concurrent remote queries 502 the production proxy.
+- **ask-which-source-first** - pattern: `Don't assume which logs to read|ask first`. Querying the wrong source silently answers about a different fleet, or hits a production server the user did not intend to touch.
+- **per-change-approval** - pattern: `per-change approval|explicit per-change selection`. Applying changes mutates this machine's skills, subagents, and AGENTS.md. Blanket approval of a mixed list is how unrelated content gets persisted.
+
+<a id="recovered-rule-text"></a>**Two rules survived only in prose the deletion
+takes with it.** A fixture entry is an id, a pattern, and a harm; neither of
+these is expressible in that shape, and neither has another home. Recorded here
+verbatim so the server does not have to rediscover them.
+
+- **The wide-column list, from `hypaware-report/reviewing.md`.** The actionable
+  form of `no-wide-column-scans`: "Never GROUP BY / DISTINCT / row-fetch wide
+  content columns (`cwd`, `content_text`) on the messages table at scale: that
+  query shape kills servers." Its companions in the same bullet: use
+  `ai_gateway_messages` only for per-message measures (token sums, distinct
+  part/session counts, timestamps and ordering, `is_sidechain`/`agent_id`,
+  `is_error`/stop-reasons, content sampling); slice long windows into
+  server-sized date ranges; capture stderr and check it even on success, since
+  truncation and server-cap notices land there.
+- <a id="never-rm-the-sources"></a>**"The source `.md` files are the record:
+  never `rm` them", from `hypaware-report/rendering.md`.** This one guards a
+  surface that is **not** leaving: [D2](#d2) keeps `hyp report render` local.
+  Its context, also from that file: `index.html` and `html/` are generated, so
+  do not hand-edit them and expect the edits to survive; an archive pass moves
+  the reports, `html/`, and `index.html` into `archive/<timestamp>/` and clears
+  the top level (normal cycle: archive, generate, render, commit, and never
+  render mid-archive). Whatever ends up documenting `hyp report render`, this
+  is the sentence it must carry: it is the difference between a regenerable
+  artifact and an unrecoverable one.
 
 ### D4: the content-boundary list shrinks but is not empty-able {#d4}
 
