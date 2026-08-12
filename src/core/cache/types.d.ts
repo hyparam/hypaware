@@ -301,6 +301,7 @@ export interface MaintenanceReport {
   partitions: MaintenancePartitionReport[]
   totalSnapshotsExpired: number
   totalCompacted: number
+  totalRebaselined: number
   dryRun: boolean
   elapsedMs: number
 }
