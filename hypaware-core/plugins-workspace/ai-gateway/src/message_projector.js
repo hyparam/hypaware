@@ -1126,8 +1126,46 @@ function normalizeContent(content) {
   return []
 }
 
-/** @param {unknown} block */
+// An inline `data:<mime>;base64,<payload>` is the bytes of a file (usually a
+// screenshot a tool handed back), not text: nothing reads it, nothing searches
+// it, and it dwarfs every real value in the column. The array path already
+// dropped it, since `textFromContentBlocks` keeps only `part.text` and an
+// `input_image` block has none, but a tool result that reaches the projector
+// ALREADY STRINGIFIED (Codex `view_image` returns
+// `[{"type":"input_image","image_url":"data:image/png;base64,..."}]` as one
+// string) becomes a single `text` block and was stored whole. Identical content
+// therefore cost either nothing or 12MB per row depending on an upstream
+// serialization choice: one production day held 124.5MB of base64 across 35
+// rows, 98.6% of all `content_text`, and a single 12.67MB value made the search
+// index unbuildable (its 9.3M distinct 5-grams overflow V8's Set cap).
+//
+// Any `;base64,` payload is stripped, not just images: none of them are text.
+// The marker stays so the row still records that an image was there and a
+// search for `input_image` or `image_url` still finds it. Only the pixels go.
+const BASE64_DATA_URI = /data:[a-z0-9.+/-]+;base64,[A-Za-z0-9+/=]+/g
+const STRIPPED_DATA_URI = 'data:image;base64,<stripped>'
+
+/** @param {string | undefined} text */
+function stripBase64DataUris(text) {
+  // Cheap reject first: this runs on every captured part, and almost none of
+  // them carry a payload.
+  if (text === undefined || !text.includes(';base64,')) return text
+  return text.replace(BASE64_DATA_URI, STRIPPED_DATA_URI)
+}
+
+/**
+ * Strip at the one place every branch funnels through (plain string,
+ * `tool_result` string, `tool_result` array, thinking, error), so a branch
+ * added later inherits the rule instead of reopening the hole.
+ *
+ * @param {unknown} block
+ */
 function extractContentText(block) {
+  return stripBase64DataUris(readContentText(block))
+}
+
+/** @param {unknown} block */
+function readContentText(block) {
   if (!isPlainObject(block)) return undefined
   switch (block.type) {
   case 'text':
