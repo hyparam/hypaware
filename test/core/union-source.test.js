@@ -3,12 +3,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { asyncRow, parseSql } from 'squirreling'
+import { parquetMetadataAsync } from 'hyparquet'
+import { parquetWriteBuffer } from 'hyparquet-writer'
+import { asyncRow, collect, executeSql, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
+import { parquetDataSource } from '../../src/core/query/parquet-source.js'
+import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
+ * @import { AsyncBuffer } from 'hyparquet'
  * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -118,6 +124,73 @@ test('unionSources forwards where/columns to sub-sources that have the predicate
     assert.equal(options.where, where, 'where hint forwarded')
     assert.deepEqual(options.columns, ['id'], 'columns hint forwarded')
   }
+})
+
+/** @type {ColumnSpec[]} */
+const PARQUET_PARTITION_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'name', type: 'STRING', nullable: false },
+  { name: 'score', type: 'DOUBLE', nullable: false },
+]
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {AsyncBuffer}
+ */
+function asyncBufferFromBytes(bytes) {
+  return {
+    byteLength: bytes.byteLength,
+    slice(start, end) {
+      const sliced = bytes.subarray(start, end)
+      const out = new ArrayBuffer(sliced.byteLength)
+      new Uint8Array(out).set(sliced)
+      return out
+    },
+  }
+}
+
+/**
+ * Build a real, on-disk-shaped parquet `AsyncDataSource` partition (same
+ * construction as `test/core/parquet-source.test.js`), so the union test
+ * below exercises actual hyparquet reads and pushdown, not a fake source.
+ *
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function makeParquetPartition(rows) {
+  const columnData = rowsToColumnSources(PARQUET_PARTITION_COLUMNS, rows)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
+  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const metadata = await parquetMetadataAsync(file)
+  return parquetDataSource(file, metadata)
+}
+
+// @ref LLP 0098#union-flags [tests]: appliedWhere: false only stays correct end-to-end because
+// squirreling folds WHERE columns into the projection it hands to scan(); pin that at the layer
+// that depends on it, with two real parquet partitions, not a fake source.
+test('unionSources over two real parquet partitions filters correctly through executeSql (WHERE column folded into projection)', async () => {
+  const partitionA = await makeParquetPartition([
+    { id: 1, name: 'alice', score: 1.5 },
+    { id: 2, name: 'bob', score: 2.5 },
+    { id: 3, name: 'carol', score: 3.5 },
+  ])
+  const partitionB = await makeParquetPartition([
+    { id: 4, name: 'dave', score: 4.5 },
+    { id: 5, name: 'eve', score: 5.5 },
+  ])
+  const union = unionSources([partitionA, partitionB])
+
+  // union.scan() always reports appliedWhere: false, handing the predicate
+  // back to the engine to re-apply over the merged stream. That only returns
+  // the right rows here because squirreling's planner folds `score` (the
+  // WHERE column) into the projection it passes to scan(), even though the
+  // query only selects `name`; each parquet partition then emits `score`
+  // alongside `name`, and the engine can actually filter on it. If squirreling
+  // ever stopped folding, this would start silently returning wrong rows
+  // while every other test in this file (and in parquet-source.test.js)
+  // stayed green, since they exercise a single source, not the union path.
+  const rows = await collect(executeSql({ tables: { t: union }, query: 'SELECT name FROM t WHERE score > 3' }))
+  assert.deepEqual(rows, [{ name: 'carol' }, { name: 'dave' }, { name: 'eve' }])
 })
 
 test('unionSources drops where for a partition that lacks a predicate column but keeps it for one that has it', async () => {

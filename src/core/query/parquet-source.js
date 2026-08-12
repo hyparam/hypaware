@@ -58,7 +58,12 @@ export function parquetDataSource(file, metadata) {
       // hyparquet unions its own `columnsNeededForFilter` into the read
       // plan and deletes the extras from the returned rows, so passing the
       // narrow projection is safe. Reading all columns instead would decode
-      // every payload column on any filtered scan.
+      // every payload column on any filtered scan. Because the emitted row
+      // set is now exactly `columns`, a caller that wraps this scan and
+      // reports its own `appliedWhere: false` (letting the engine re-apply
+      // the predicate over rows this scan already returned, as `unionSources`
+      // does) must include the predicate's columns in `columns`, or the
+      // engine has nothing to re-filter on.
       const readColumns = hints.columns
 
       return {
