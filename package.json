@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.21.1",
+  "version": "1.21.2",
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
   "bin": {
@@ -71,13 +71,18 @@
     "@aws-sdk/credential-provider-ini": "3.973.12",
     "hyparquet": "1.28.1",
     "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.17",
+    "icebird": "0.8.19",
     "marked": "18.0.9",
     "squirreling": "0.15.0"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.5",
+    "hyparquet-writer": "0.16.6",
     "hypvector": "0.2.2"
+  },
+  "overrides": {
+    "icebird": {
+      "hyparquet-writer": "0.16.6"
+    }
   },
   "devDependencies": {
     "@types/node": "26.2.0",

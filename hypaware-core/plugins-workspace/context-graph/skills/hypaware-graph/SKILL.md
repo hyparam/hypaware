@@ -1,6 +1,7 @@
 ---
 name: hypaware-graph
 description: Explore the HypAware context graph: the activity graph projected from ai_gateway_messages (Sessions, Apps, Models, Tools, Files, Skills, Programs, and git Repos/Commits, and how they connect), plus optional server-side GitHub enrichment (Repos, PullRequests, Commits, Reviewers) that bridges AI sessions to code review. Use when the user asks what connects to a file/session/tool/model, which sessions ran a skill or invoked a program, wants co-occurrence or N-hop traversal, wants to join AI sessions to GitHub repos/PRs/reviewers, or wants to build/refresh the graph. Covers `hyp graph project` and `hyp graph neighbors`.
+user-invocable: false
 ---
 
 # HypAware Graph
