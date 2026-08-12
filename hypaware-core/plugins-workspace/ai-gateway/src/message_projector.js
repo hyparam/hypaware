@@ -1142,7 +1142,13 @@ function normalizeContent(content) {
 // Any `;base64,` payload is stripped, not just images: none of them are text.
 // The marker stays so the row still records that an image was there and a
 // search for `input_image` or `image_url` still finds it. Only the pixels go.
-const BASE64_DATA_URI = /data:[a-z0-9.+/-]+;base64,[A-Za-z0-9+/=]+/g
+//
+// This bounds only the matched forms, so `content_text` is NOT guaranteed
+// bounded. A line-wrapped or `\n`-escaped payload still has its tail survive
+// as bare base64 text, because the match stops at the newline. A general
+// length cap on `content_text` is a deliberate open question (#718) and is
+// not addressed here.
+const BASE64_DATA_URI = /data:[^\s,]{0,255}?;base64,[A-Za-z0-9+/=_-]+/g
 const STRIPPED_DATA_URI = 'data:image;base64,<stripped>'
 
 /** @param {string | undefined} text */

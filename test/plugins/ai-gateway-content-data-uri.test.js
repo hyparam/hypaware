@@ -105,6 +105,24 @@ test('a non-image mime type is stripped as well', () => {
   assert.equal(text, `report: ${MARKER}`)
 })
 
+test('mime case and mime parameters do not defeat the strip', () => {
+  assertNoPayload(contentTextFor(`shot: data:image/PNG;base64,${PNG_BASE64}`))
+  assertNoPayload(contentTextFor(`doc: data:text/plain;charset=utf-8;base64,${PNG_BASE64}`))
+  assertNoPayload(contentTextFor(`bare: data:;base64,${PNG_BASE64}`))
+})
+
+test('a base64url payload (containing - and _) is fully stripped, no bare tail survives', () => {
+  const urlSafe = PNG_BASE64.replace(/\+/g, '-').replace(/\//g, '_')
+  const text = contentTextFor(`shot: data:image/png;base64,${urlSafe}`)
+  assertNoPayload(text)
+  assert.equal(text, `shot: ${MARKER}`)
+})
+
+test('stripping an already-stripped value is a no-op', () => {
+  const already = `shot: ${MARKER}`
+  assert.equal(contentTextFor(already), already)
+})
+
 test('content with no data URI passes through byte-identical', () => {
   const prose = 'The quick brown fox jumps over the lazy dog. base64 is mentioned, and data: too, but neither is a payload.'
   assert.equal(contentTextFor(prose), prose)
