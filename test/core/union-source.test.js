@@ -165,7 +165,7 @@ async function makeParquetPartition(rows) {
   return parquetDataSource(file, metadata)
 }
 
-// @ref LLP 0098#union-flags [tests]: appliedWhere: false only stays correct end-to-end because
+// @ref LLP 0015#multi-partition-union [tests]: appliedWhere: false only stays correct end-to-end because
 // squirreling folds WHERE columns into the projection it hands to scan(); pin that at the layer
 // that depends on it, with two real parquet partitions, not a fake source.
 test('unionSources over two real parquet partitions filters correctly through executeSql (WHERE column folded into projection)', async () => {
@@ -186,8 +186,9 @@ test('unionSources over two real parquet partitions filters correctly through ex
   // WHERE column) into the projection it passes to scan(), even though the
   // query only selects `name`; each parquet partition then emits `score`
   // alongside `name`, and the engine can actually filter on it. If squirreling
-  // ever stopped folding, this would start silently returning wrong rows
-  // while every other test in this file (and in parquet-source.test.js)
+  // ever stopped folding, this would start throwing `ColumnNotFoundError` at
+  // query time, when the engine re-filters on a column the rows no longer
+  // carry, while every other test in this file (and in parquet-source.test.js)
   // stayed green, since they exercise a single source, not the union path.
   const rows = await collect(executeSql({ tables: { t: union }, query: 'SELECT name FROM t WHERE score > 3' }))
   assert.deepEqual(rows, [{ name: 'carol' }, { name: 'dave' }, { name: 'eve' }])
