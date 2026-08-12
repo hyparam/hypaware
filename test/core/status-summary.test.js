@@ -5,6 +5,10 @@ import assert from 'node:assert/strict'
 
 import { renderStatusSummary } from '../../src/core/commands/status.js'
 
+/**
+ * @import { HypAwareStatusReport } from '../../src/core/daemon/types.js'
+ */
+
 // The default `hyp status` screen (LLP 0212): a triage summary, not an
 // inventory. These drive `renderStatusSummary` directly - it is pure, and the
 // collector's own behaviour is covered by the sibling status-*.test.js files.
@@ -20,8 +24,8 @@ import { renderStatusSummary } from '../../src/core/commands/status.js'
  * A healthy, unenrolled, quiet install. Tests override the fields they are
  * about, so each one reads as its own delta from "nothing interesting".
  *
- * @param {Partial<import('../../src/core/daemon/types.js').HypAwareStatusReport>} [over]
- * @returns {import('../../src/core/daemon/types.js').HypAwareStatusReport}
+ * @param {Partial<HypAwareStatusReport>} [over]
+ * @returns {HypAwareStatusReport}
  */
 function makeReport(over = {}) {
   return /** @type {any} */ ({
@@ -60,7 +64,7 @@ function makeBuf() {
  * Rendered wide enough that nothing wraps, so a content assertion is about
  * the content. Wrapping has its own tests below.
  *
- * @param {Partial<import('../../src/core/daemon/types.js').HypAwareStatusReport>} [over]
+ * @param {Partial<HypAwareStatusReport>} [over]
  * @param {number} [columns]
  * @returns {string}
  */
@@ -139,17 +143,68 @@ test('an enrolled machine says rows leave, and names a client held back', () => 
   assert.match(text, /capture\s+Claude, Codex \(local only\)/)
 })
 
+// LLP 0188's `clientSync.localOnly` is keyed by picker id, not by client
+// name or source name - and a picker id is neither for a source like OTEL,
+// whose picker id (`otel`) differs from its own source contribution's name
+// (`otlp`). A local-only source that never became a `clients` row must
+// still be marked, same as a client is.
+test('a local-only source that is not a client is marked on the capture row too', () => {
+  const text = render({
+    layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
+    clients: [
+      /** @type {any} */ ({ name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true }),
+    ],
+    sources: /** @type {any} */ ([
+      { name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' },
+      { name: 'hermes', plugin: '@hypaware/hermes', state: 'started' },
+      { name: 'otlp', plugin: '@hypaware/otel', state: 'started' },
+    ]),
+    clientSync: { syncing: ['claude'], localOnly: ['hermes', 'otel'] },
+  })
+  assert.match(text, /capture\s+Claude, Hermes \(local only\), Otlp \(local only\)/)
+})
+
+// `raw-anthropic` / `raw-openai` are hidden pickers whose traffic lands
+// under the shared `ai-gateway` source: neither a `clients` row nor a
+// `sources` row names them, so the fact has nowhere to attach on `capture`.
+// It must not go silent - it rides the `data` row as a count instead.
+test('a local-only source with no row of its own is counted on the data row', () => {
+  const text = render({
+    layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
+    clients: [
+      /** @type {any} */ ({ name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true }),
+    ],
+    sources: /** @type {any} */ ([
+      { name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' },
+    ]),
+    clientSync: { syncing: ['claude'], localOnly: ['raw-anthropic', 'raw-openai'] },
+  })
+  assert.match(text, /data\s+808 MB · 120-day retention · syncing to org · 2 local only/)
+  assert.doesNotMatch(text, /raw-anthropic/)
+})
+
 test('an unenrolled machine states the local claim rather than omitting it', () => {
   assert.match(render(), /stays on this machine/)
 })
 
 test('withheld folders and a non-default folder ask ride the data row', () => {
-  const text = render({ usagePolicy: { localOnlyDirCount: 3, folderAsk: 'ask' } })
+  const text = render({
+    layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
+    usagePolicy: { localOnlyDirCount: 3, folderAsk: 'ask' },
+  })
   assert.match(text, /3 folders withheld/)
   assert.match(text, /asking about new folders/)
   // The default mode departs from nothing, so it says nothing.
   assert.doesNotMatch(render(), /new folders/)
   assert.doesNotMatch(render(), /withheld/)
+})
+
+// The new-folder ask only has stakes on an enrolled machine (LLP 0106
+// #enrolled-only): a solo host with no central layer gets no hook and no
+// line, even when its local `folderAsk` field happens to read `ask`.
+test('the new-folder ask is silent on a solo host, same as --full', () => {
+  const text = render({ usagePolicy: { localOnlyDirCount: 0, folderAsk: 'ask' } })
+  assert.doesNotMatch(text, /new folders/)
 })
 
 test('an install that has recorded nothing says so on the activity row', () => {
@@ -273,6 +328,19 @@ test('sources that are not clients are captured too, and the gateway is not a so
 
 test('an install with nothing configured says so rather than rendering an empty row', () => {
   assert.match(render({ clients: [], sources: [] }), /capture\s+nothing configured yet/)
+})
+
+// The gateway is plumbing, not a thing being captured (same rule the loop
+// above applies): a solo `ai-gateway` source with no attached client must
+// still say "nothing configured yet", not leak its own source id through
+// the empty-`parts` fallback.
+test('a lone gateway source with nothing attached still says nothing configured yet', () => {
+  const text = render({
+    clients: [],
+    sources: /** @type {any} */ ([{ name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' }]),
+  })
+  assert.match(text, /capture\s+nothing configured yet/)
+  assert.doesNotMatch(text, /ai-gateway/)
 })
 
 // The frame is only a rectangle if the content was wrapped before it was

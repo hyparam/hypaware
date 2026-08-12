@@ -36,10 +36,10 @@ installed from the package under test, and a working `~/.codex`.
    ```sh
    hyp attach codex
    grep -n 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml"
-   hyp status
+   hyp status --full
    ```
 
-   `hyp status` must show `codex  [configured, attached]` and a running
+   `hyp status --full` must show `codex  [configured, attached]` and a running
    daemon. If the gateway is not running, capture cannot happen and the rest
    of this procedure is meaningless.
 
@@ -82,14 +82,16 @@ installed from the package under test, and a working `~/.codex`.
    hyp status --json | grep -A 6 recent_entrypoints
    ```
 
-   Pass condition: a `recent clients:` line naming the same `entrypoint`
-   string you just observed, with an age of a few minutes. This is read from
-   the running daemon's `status.json`, not from the cache
+   Pass condition: the `activity` row names `codex/<entrypoint>` with the same
+   `entrypoint` string you just observed, at an age of a few minutes. This is
+   read from the running daemon's `status.json`, not from the cache
    ([LLP 0164](../llp/0164-status-names-recent-clients-from-gateway-entrypoints.decision.md)),
    so two things follow and both are expected, not failures: a daemon that
    has been restarted since the conversation shows nothing here (the rows are
-   still in the cache - step 4 is the durable check), and the list is bounded
-   to what this daemon process has seen.
+   still in the cache - step 4 is the durable check), and the row is capped to
+   the three most recent surfaces this daemon process has seen
+   ([LLP 0212](../llp/0212-status-is-a-triage-summary.decision.md)); use
+   `hyp status --full` for the complete, uncapped list.
 
 5. Confirm the backfill route independently. The rollout tree is shared by
    Codex CLI and Codex Desktop, so the session from step 3 must also be
@@ -149,20 +151,21 @@ installed from the package under test, and a working `~/.codex`.
 
 ### If it fails
 
-- No rows at all in step 4: check `hyp status` for `client_attach_missing`
+- No rows at all in step 4: check `hyp status` for a warning that codex
+  settings show no HypAware marker (`client_attach_missing` in `--json`)
   or a stopped daemon, and confirm you fully quit Desktop rather than closing
   its window.
 - Rows arrive but `entrypoint` is null: Codex sent no `originator` header on
   that route. Capture still worked; attribution did not. File that as its own
   issue with the observed request path, and do not paper over it by matching
-  on `client_name` alone. `hyp status`'s `recent clients:` line will also be
-  missing the Desktop entry, for the same one reason: it counts `entrypoint`
-  values and invents nothing for a row that has none.
-- The query in step 4 finds Desktop rows but `hyp status` names no recent
-  client: the daemon that captured them has since restarted (the tracker is
-  in-memory and daemon-scoped by design), or the gateway wrote no status
-  refresh before it exited. Re-run step 3 against the current daemon before
-  filing anything.
+  on `client_name` alone. `hyp status`'s `activity` row will also be missing
+  the Desktop entry, for the same one reason: it counts `entrypoint` values
+  and invents nothing for a row that has none.
+- The query in step 4 finds Desktop rows but `hyp status`'s `activity` row
+  names nothing recent: the daemon that captured them has since restarted
+  (the tracker is in-memory and daemon-scoped by design), or the gateway
+  wrote no status refresh before it exited. Re-run step 3 against the current
+  daemon before filing anything.
 - Step 5 finds no rollout for the session: Desktop wrote its history
   somewhere other than `$CODEX_HOME/sessions`. That would invalidate
   [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)'s
@@ -263,11 +266,11 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    Then confirm the write itself and the daemon's view of it:
 
    ```sh
-   hyp status
+   hyp status --full
    jq '.models.providers | {anthropic, openai}' "${OPENCLAW_HOME:-$HOME/.openclaw}/openclaw.json"
    ```
 
-   Pass condition: `hyp status` shows a running daemon and
+   Pass condition: `hyp status --full` shows a running daemon and
    `openclaw  [configured, attached]` among the clients, with no
    `client_attach_missing` diagnostic (this is the PR #553 re-confirmation:
    a probe-less `openclaw` used to be stuck reading as `attach n/a`

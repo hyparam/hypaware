@@ -375,21 +375,27 @@ verifying what `hyp init` will install.
 
 ## Troubleshooting
 
-`hyp status` is the entry point for any "is HypAware working?" question.
-It prints the active config path, daemon install/run state, active
-plugins, source and sink rows, per-client attach state, retention
-window, cache size, and a recent-error count. Pass `--json` for the
-stable machine-readable shape that smokes and support tools rely on:
+`hyp status` is the entry point for any "is HypAware working?" question. By
+default it prints a fixed-shape summary: whether the install is healthy, the
+daemon's state, what is being captured, when rows last arrived, and where
+they go, then a list of anything that needs you with repair commands you can
+run directly. `--full` adds the inventory this summary elides: config path,
+active plugins, source/sink rosters, per-client attach state, the
+client-action ledger, and remote-config state. `--json` prints the stable
+machine-readable shape that smokes and support tools rely on:
 
 ```sh
 hyp status
+hyp status --full
 hyp status --json
 ```
 
-When something is wrong, `hyp status` surfaces a `diagnostics:` section
-with one row per finding. Each row carries a `kind` (a stable
-machine-readable identifier) and one or more `repair:` lines you can
-run directly. The common Phase 8 conditions:
+When something is wrong, `hyp status` surfaces it in an attention section
+below the summary, one line per finding, each carrying a `warning` / `error`
+/ `note` severity, its message, and one or more repair commands you can run
+directly. `hyp status --full` and `hyp status --json` also carry each
+finding's `kind` (a stable machine-readable identifier). The common
+Phase 8 conditions:
 
 | kind                                  | meaning                                                                            | repair                                                                  |
 |---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|

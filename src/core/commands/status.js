@@ -705,6 +705,39 @@ function summariseDaemonShort(daemon) {
 }
 
 /**
+ * A picker source id (LLP 0188 #never-silent, the key `clientSync.localOnly`
+ * is drawn from) whose source contribution uses a different name. Only
+ * `otel` needs an entry: its picker id is `otel` but the plugin's own
+ * source contribution is named `otlp`. Every other bare source's picker id
+ * and source name already agree.
+ *
+ * @type {Record<string, string>}
+ */
+const SOURCE_PICKER_IDS = { otlp: 'otel' }
+
+/**
+ * Picker ids `clientSync.localOnly` can name that never surface as their
+ * own `clients` or `sources` row: `raw-anthropic` / `raw-openai` are hidden
+ * pickers whose events land under the shared `ai-gateway` source, so there
+ * is no row to hang `(local only)` off of. Shared with `summariseData`,
+ * which states the fact by count instead (LLP 0212 #never-silent).
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {number}
+ */
+function unattributedLocalOnlyCount(report) {
+  const localOnly = report.clientSync?.localOnly ?? []
+  if (localOnly.length === 0) return 0
+  const clientNames = new Set((report.clients ?? []).map((c) => c.name))
+  const sourcePickerIds = new Set(
+    (report.sources ?? [])
+      .filter((s) => s.name !== 'ai-gateway')
+      .map((s) => SOURCE_PICKER_IDS[s.name] ?? s.name)
+  )
+  return localOnly.filter((id) => !clientNames.has(id) && !sourcePickerIds.has(id)).length
+}
+
+/**
  * What this machine collects, in the names the user picked it by.
  *
  * Clients carry their exceptions inline (`not attached`, `local only`) so
@@ -712,9 +745,13 @@ function summariseDaemonShort(daemon) {
  * in one section and its repair in another, and the reconciler ledger
  * restated it twice more. Sources that are not clients (OTEL, Hermes) are
  * appended, minus `ai-gateway` - the gateway is the plumbing behind every
- * client row, not a separate thing being captured.
+ * client row, not a separate thing being captured. They carry the same
+ * `local only` mark as a client would, resolved through
+ * `SOURCE_PICKER_IDS` since a source's own name and its picker id are not
+ * always the same string.
  *
  * @ref LLP 0188#never-silent [implements]: a local-only client is named where the client is named, never only in a list
+ * @ref LLP 0212#never-silent [implements]: a local-only source with no row of its own is counted on the data row instead, via unattributedLocalOnlyCount
  *
  * @param {HypAwareStatusReport} report
  * @returns {string}
@@ -733,12 +770,17 @@ function summariseCapture(report) {
   const named = new Set(clients.map((c) => c.name))
   for (const s of report.sources ?? []) {
     if (named.has(s.name) || s.name === 'ai-gateway') continue
+    const marks = []
+    if (s.state !== 'started') marks.push(s.state)
+    if (localOnly.has(SOURCE_PICKER_IDS[s.name] ?? s.name)) marks.push('local only')
     const label = friendlyClientLabel(s.name)
-    parts.push(s.state === 'started' ? label : `${label} (${s.state})`)
+    parts.push(marks.length > 0 ? `${label} (${marks.join(', ')})` : label)
   }
 
   if (parts.length === 0) {
-    const sources = (report.sources ?? []).map((s) => s.name)
+    const sources = (report.sources ?? [])
+      .filter((s) => s.name !== 'ai-gateway')
+      .map((s) => friendlyClientLabel(s.name))
     return sources.length > 0 ? sources.join(', ') : 'nothing configured yet'
   }
   return parts.join(', ')
@@ -783,6 +825,8 @@ function summariseActivity(report, nowMs) {
  *
  * @ref LLP 0069#requirements [implements]: R9's withheld-directory count is stated on the default screen whenever it is non-zero
  * @ref LLP 0200#decision [implements]: the non-default new-folder mode is the one that gets said
+ * @ref LLP 0106#enrolled-only [implements]: the new-folder ask only has stakes on an enrolled machine, so it is gated the same as `renderStatusFull`
+ * @ref LLP 0212#never-silent [implements]: a local-only source with no `capture` row of its own is stated here by count
  *
  * @param {HypAwareStatusReport} report
  * @returns {string}
@@ -795,7 +839,9 @@ function summariseData(report) {
   ]
   const withheld = report.usagePolicy?.localOnlyDirCount ?? 0
   if (withheld > 0) bits.push(`${withheld} folder${withheld === 1 ? '' : 's'} withheld`)
-  if (report.usagePolicy?.folderAsk === 'ask') bits.push('asking about new folders')
+  if (report.layered?.hasCentral && report.usagePolicy?.folderAsk === 'ask') bits.push('asking about new folders')
+  const unattributedLocalOnly = unattributedLocalOnlyCount(report)
+  if (unattributedLocalOnly > 0) bits.push(`${unattributedLocalOnly} local only`)
   return bits.join(' · ')
 }
 

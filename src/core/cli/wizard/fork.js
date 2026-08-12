@@ -337,7 +337,6 @@ function summariseDaemon(daemon) {
   return 'not installed'
 }
 
-
 /**
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and
  * `legacyReturningGatePrompt`: prints the title and each option (with its
