@@ -25,6 +25,12 @@ export function verbToCommand(verb) {
     ...(verb.plugin ? { plugin: verb.plugin } : {}),
     summary: verb.summary,
     usage: usageForVerb(verb.name, verb.inputSchema),
+    // A verb that needs more than a usage line says so here, and dispatch's
+    // central `--help` interception renders it exactly as it does for a core
+    // command. Without the passthrough a verb could not explain itself at
+    // all, which is what kept `graph neighbors` at one line of help.
+    // @ref LLP 0214#d1 [implements]: verbs carry long help through the registration dispatch already renders
+    ...(verb.help !== undefined ? { help: verb.help } : {}),
     run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
   }
 }

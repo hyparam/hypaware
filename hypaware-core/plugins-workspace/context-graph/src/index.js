@@ -1,8 +1,5 @@
 // @ts-check
 
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 import { runGraphCompact, runGraphProject } from './command.js'
 import { graphNeighborsVerb } from './verb.js'
 import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
@@ -40,9 +37,8 @@ const CAPABILITY_VERSION = '1.0.0'
  *    rewrites affected partitions into sorted tables
  *  - command `graph neighbors` - walks the activity graph from a seed node out
  *    to N hops, reading the published node/edge datasets ([LLP 0064])
- *  - skill `hypaware-graph` - teaches AI clients (Claude, Codex) how to project
- *    and query the graph; installed by `hyp skills install` when this plugin is
- *    active
+ *  - group `graph` - the namespace's own help, so `hyp graph --help` states the
+ *    projection model instead of listing subcommands bare ([LLP 0214])
  *
  * Registration only; the projection runs on demand via the command (no
  * snapshot/commit hook exists, and eventual freshness is acceptable).
@@ -67,11 +63,50 @@ export async function activate(ctx) {
   ctx.query.registerDataset(graphDatasetRegistration(NODE_DATASET))
   ctx.query.registerDataset(graphDatasetRegistration(EDGE_DATASET))
 
+  // The group's own voice. `graph` has no bare command, so without this its
+  // `--help` is a subcommand table with no prose, and the projection model
+  // (derived, on demand, never live) has nowhere to be stated.
+  // @ref LLP 0214#d2 [implements]: a plugin namespace describes itself instead of rendering a bare table
+  ctx.commands.registerGroup({
+    name: 'graph',
+    plugin: PLUGIN_NAME,
+    summary: 'Build and walk the activity graph projected from recorded sessions',
+    help: [
+      'The graph is a derived projection of the recorded AI sessions: the same',
+      'data `hyp query` reads as rows, read instead as relationships. Sessions',
+      'connect to the apps, models, tools, files, skills, programs, repos, and',
+      'commits they touched.',
+      '',
+      'It is built on demand and never updates itself. Run `hyp graph project`',
+      'before querying, and again after new sessions are recorded; projection is',
+      'idempotent, so re-running it is the cheap way to be current.',
+      '',
+      'Two ways to read it, and they answer different questions:',
+      '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
+      '  hyp graph neighbors <node>               what connects to X, N hops',
+      '',
+      '`node` and `edge` are ordinary query datasets, so everything in',
+      "`hyp query --help` applies to them, including --format and --output.",
+    ].join('\n'),
+  })
+
   ctx.commands.register({
     name: 'graph project',
     plugin: PLUGIN_NAME,
     summary: 'Project every registered source contract into the node/edge activity graph',
     usage: 'hyp graph project [--source <dataset>] [--dry-run]',
+    help: [
+      'Reads every registered source contract and writes the node/edge tables.',
+      'Idempotent: running it twice over unchanged recordings changes nothing,',
+      'so re-projecting is always safe and is the fix for a stale answer.',
+      '',
+      'Prints `N node(s), M edge(s) - wrote ...` on success. An empty graph',
+      'after a successful run means there are no recordings to project yet,',
+      'not that the projection failed.',
+      '',
+      '  --source <dataset>  project only this source dataset',
+      '  --dry-run           report what would be written, write nothing',
+    ].join('\n'),
     run: runGraphProject,
   })
 
@@ -80,6 +115,13 @@ export async function activate(ctx) {
     plugin: PLUGIN_NAME,
     summary: 'Merge duplicate graph rows and rewrite affected partitions sorted',
     usage: 'hyp graph compact [--dry-run]',
+    help: [
+      'Maintenance, not a projection step. Merges duplicate node/edge rows left',
+      'by repeated projections and rewrites the affected partitions sorted.',
+      'Querying does not require it; a large graph reads faster after it.',
+      '',
+      '  --dry-run  report what would be merged, write nothing',
+    ].join('\n'),
     run: runGraphCompact,
   })
 
@@ -88,13 +130,11 @@ export async function activate(ctx) {
   // lights up wherever this plugin is active, with no core change.
   ctx.verbs.register(graphNeighborsVerb)
 
-  // Teaches AI clients how to project and query the graph. Registered only
-  // when this plugin is active, so `hyp skills install` copies it into
-  // ~/.claude/skills and ~/.codex/skills only for installs that have the graph.
-  ctx.skills.register({
-    name: 'hypaware-graph',
-    plugin: PLUGIN_NAME,
-    clients: ['claude', 'codex'],
-    sourceDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'hypaware-graph'),
-  })
+  // No skill. `hypaware-graph` was retired into `hypaware-query` (LLP 0213
+  // #d2): the graph is composed wherever the gateway is, and `hypaware-query`
+  // ships only from the two adapters that require the gateway, so the merged
+  // skill can never reach an install without the graph. What was mechanics
+  // here now lives in this plugin's own `--help` (LLP 0214), which appears and
+  // disappears with the commands it documents.
+  // @ref LLP 0213#skill-implies-graph [constrained-by]: the merged skill's reach is bounded by the gateway, so a separate skill buys nothing
 }

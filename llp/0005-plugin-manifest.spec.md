@@ -16,6 +16,15 @@
 > list is plugin-contributed. Normative prose lands here with the
 > implementation.
 
+> **Extended by [LLP 0213](./0213-graph-plugin-always-active.decision.md#d1).**
+> The manifest gains a `compose_with` declaration: a bundled plugin naming
+> others there is composed into the written config whenever all of them are,
+> which is how a derived-data plugin rides a pick it does not contribute.
+> Distinct from `requires.plugins`, which governs activation order and
+> presence, not whether the walkthrough writes the plugin down. Continues
+> LLP 0130's migration of composition rules out of core. Normative prose
+> lands here with the implementation.
+
 ## One shape, no privileged variant
 
 Every plugin, first-party and third-party, ships the **same manifest shape**.
@@ -64,6 +73,49 @@ plugin, and list datasets/commands **before any plugin code is loaded**.
 - **`supports`** on sink contributions: feature tags like `queryable`; see
   [LLP 0014](./0014-sinks.spec.md). Named `supports` (not `capabilities`) to
   avoid clashing with the global capability registry.
+- <a id="compose-with"></a>**`compose_with`**: plugin names whose presence in a
+  composed config pulls this plugin in with them. A non-empty array of plugin
+  names when present. The walkthrough's fold adds a plugin whose every named
+  plugin it has already composed, to a fixpoint, so a rider may itself be
+  ridden. A rider is composer-managed like a picked plugin: it is written when
+  its condition holds and dropped when a reconfigure stops satisfying it
+  ([LLP 0183](./0183-reconfigure-starts-from-the-config-on-disk.decision.md)).
+
+  This is how a **derived-data** plugin reaches a config without a picker row:
+  `@hypaware/context-graph` declares `compose_with: ["@hypaware/ai-gateway"]`
+  because projecting sessions into a graph is not a thing the user is asked and
+  is meaningless without a source to project
+  ([LLP 0213](./0213-graph-plugin-always-active.decision.md#d1)).
+
+  **Distinct from `requires.plugins`**, which is a hard dependency governing
+  activation order and presence. `requires` says "I cannot run without this";
+  `compose_with` says "write me down wherever this is written down". They point
+  in opposite directions and a plugin may declare either, both, or neither.
+
+  Three bounds, because the field composes a plugin with no pick and no
+  prompt:
+
+  - **It may not name its own plugin.** Such a rider is never composable (its
+    condition can only be met by the composition it is waiting to be part of),
+    and the fixpoint terminates cleanly rather than erroring, so the plugin
+    would simply be absent from every config with nothing to read anywhere.
+    Rejected at manifest validation, the only layer that can name the author's
+    mistake. A *mutual* pair is not rejected: each manifest is valid alone, and
+    whether the pair stalls depends on the config being composed.
+  - **It does not cross the default-activation boundary.** Riders are filtered
+    to the bundled allowlist before composition sees them, so a plugin in
+    `V1_EXCLUDED_FROM_DEFAULT` cannot compose itself in by declaring the field.
+    That set is the explicit-opt-in line (an API-backed embedder sends captured
+    text off the machine; a credential plugin holds a real secret), and it
+    outranks a manifest's own request.
+  - **A rider's `enabled: false` in the config is final.** A picked plugin
+    loses a stale `enabled: false` on reconfigure, because ticking its row is
+    the ask. A rider has no row to tick, so that flag is its owner's only way
+    to decline it and a later `hyp init` must not delete it.
+
+  The names are **not resolved**: a `compose_with` naming a plugin that does
+  not exist validates, and simply never composes. There is no warning for it
+  today.
 
 The category of a plugin (source / sink / client adapter / composition) is
 **emergent from the manifest**, not a declared type.

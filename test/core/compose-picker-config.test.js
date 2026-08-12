@@ -3,15 +3,17 @@
 /**
  * @import { PickerDescriptor } from '../../src/core/types.js'
  * @import { PickerSource, PickerExport } from '../../src/core/cli/types.js'
+ * @import { HypAwareV2Config } from '../../hypaware-plugin-kernel-types.js'
  */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
 
-import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { composePickerConfig, ridersInDefaultSet } from '../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { resolvePickSeeding } from '../../src/core/cli/wizard/pick.js'
 
 // The picker table is manifest-sourced now (LLP 0130). These tests pin
 // the exact config shape `composePickerConfig` emitted from the retired
@@ -358,3 +360,277 @@ test('every needs_setup picker row composes the plugin that owns its configure_c
     )
   }
 })
+
+// --- riders (`compose_with`, LLP 0213 #d1) -----------------------------------
+
+/**
+ * The real catalog, descriptors and riders together, so these tests fold
+ * the manifests as shipped rather than a fixture of them.
+ *
+ * @returns {Promise<{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }>}
+ */
+async function realCatalog() {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  return {
+    descriptors: catalog.pickerDescriptors,
+    composeWith: catalog.composeWith ?? new Map(),
+  }
+}
+
+/**
+ * @param {{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }} catalog
+ * @param {PickerSource[]} sources
+ * @param {HypAwareV2Config} [existing]
+ */
+function composeWithRiders(catalog, sources, existing) {
+  return composePickerConfig({
+    sources,
+    descriptors: catalog.descriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: RETENTION,
+    hypHome: HYP_HOME,
+    composeWith: catalog.composeWith,
+    ...(existing ? { existing } : {}),
+  })
+}
+
+const GRAPH_PLUGINS = ['@hypaware/context-graph', '@hypaware/ai-gateway-graph']
+
+// The whole point of LLP 0213: a default install has the graph without ever
+// being asked about it, because the graph rides the gateway it derives from.
+// @ref LLP 0213#d1 [tests]: derived-data plugins ride a pick rather than contributing one
+test('picking a gateway client composes the graph pair with it', async () => {
+  const catalog = await realCatalog()
+  const names = (composeWithRiders(catalog, ['claude']).plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(names.includes(rider), `expected ${rider} to ride the gateway pick`)
+  }
+})
+
+// The engine is not composed alone: an install with no gateway has no
+// contract to project, and a node/edge table that can never fill reads as
+// breakage rather than as an empty graph.
+test('a gateway-free pick composes neither graph plugin', async () => {
+  const catalog = await realCatalog()
+  const config = composeWithRiders(catalog, ['otel'])
+  const names = (config.plugins ?? []).map((p) => p.name)
+  assert.ok(!names.includes('@hypaware/ai-gateway'), 'otel alone needs no gateway')
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} must not appear without the gateway it rides`)
+  }
+})
+
+// Riders are composer-managed, so they live and die by the picks like any
+// composed plugin (LLP 0183 #carry-forward). A reconfigure that drops the
+// gateway drops them too, rather than stranding them in a config whose
+// gateway just went away.
+// @ref LLP 0213#stranding [tests]: unpicking the gateway drops the riders it carried
+test('a reconfigure that unpicks the gateway drops the graph pair', async () => {
+  const catalog = await realCatalog()
+  const before = composeWithRiders(catalog, ['claude'])
+  assert.ok((before.plugins ?? []).some((p) => p.name === '@hypaware/context-graph'))
+
+  const after = composeWithRiders(catalog, ['otel'], before)
+  const names = (after.plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} should be dropped with the pick that carried it`)
+  }
+})
+
+// A hand-added plugin the composer never chose is passed through untouched
+// (LLP 0183). That must stay true of a plugin outside the rider set, so the
+// rider rule does not quietly widen what a reconfigure is entitled to drop.
+test('a hand-added non-rider plugin survives a reconfigure that composes riders', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = [...(existing.plugins ?? []), { name: '@hypaware/gascity' }]
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const names = (after.plugins ?? []).map((p) => p.name)
+  assert.ok(names.includes('@hypaware/gascity'), 'hand-added plugins are not the composer\'s to drop')
+  assert.ok(names.includes('@hypaware/context-graph'), 'and the riders are still composed')
+})
+
+// Riders resolve to a fixpoint, so a manifest may ride a plugin that is
+// itself a rider without the manifests needing an ordering convention.
+test('a rider that rides another rider still composes', async () => {
+  const catalog = await realCatalog()
+  const composeWith = new Map(catalog.composeWith)
+  composeWith.set('@hypaware/test-second-order', ['@hypaware/context-graph'])
+  const config = composePickerConfig({
+    sources: /** @type {PickerSource[]} */ (['claude']),
+    descriptors: catalog.descriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: RETENTION,
+    hypHome: HYP_HOME,
+    composeWith,
+  })
+  const names = (config.plugins ?? []).map((p) => p.name)
+  assert.ok(names.includes('@hypaware/test-second-order'), 'the second-order rider lands too')
+})
+
+// Without a composeWith map nothing rides anything: the fold composes
+// exactly what the picks name, which is what every pre-LLP-0213 caller and
+// test in this file relies on.
+test('no composeWith map means no riders', async () => {
+  const d = await realPickerDescriptors()
+  const names = (compose(d, ['claude']).plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} must not appear when no riders are supplied`)
+  }
+})
+
+// Regression (neutral review of PR #720, finding A): a rider has no picker
+// row by design (LLP 0213 #derived-data-plugins), so `enabled: false` in the
+// config is the only way its owner can decline it. The pick-implies-enabled
+// rule in `mergePlugin` must not reach it: deleting the flag would make every
+// later `hyp init` silently re-enable a plugin the user switched off, which
+// is a consent regression, not a tidy-up.
+// @ref LLP 0213#derived-data-plugins [tests]: a user's `enabled: false` on a rider survives a reconfigure
+test("a user's `enabled: false` on a rider survives a reconfigure", async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) =>
+    p.name === '@hypaware/context-graph' ? { ...p, enabled: false } : p
+  )
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const graph = (after.plugins ?? []).find((p) => p.name === '@hypaware/context-graph')
+  assert.ok(graph, 'the rider entry is still in the config')
+  assert.equal(graph.enabled, false, 'and it is still opted out')
+
+  // The opt-out is per plugin: the other half of the pair is untouched.
+  const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway-graph')
+  assert.ok(gateway, 'the un-declined rider is still composed')
+  assert.equal(gateway.enabled, undefined, 'and is not switched off with it')
+})
+
+// The exception above is scoped to riders. A *picked* plugin still loses a
+// stale `enabled: false`, because ticking its row is what asks for it: the
+// original reason `mergePlugin` deletes the flag at all.
+test('a picked plugin still loses a stale `enabled: false`', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) =>
+    p.name === '@hypaware/claude' ? { ...p, enabled: false } : p
+  )
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const claude = (after.plugins ?? []).find((p) => p.name === '@hypaware/claude')
+  assert.ok(claude)
+  assert.equal(claude.enabled, undefined, 'picking the row is what enables it')
+})
+
+// Regression (neutral review of PR #720, finding B): `compose_with` composes
+// a plugin with no pick and no prompt, so an excluded plugin declaring it
+// would be a way around `V1_EXCLUDED_FROM_DEFAULT` - the boundary that keeps
+// an API-backed embedder or a credential-holding plugin off a machine until
+// its owner names it. `ridersInDefaultSet` drops every excluded rider
+// before composition ever sees them.
+//
+// This pins the filter itself. The test below it pins the caller, which is
+// the half that actually broke: see its comment.
+// @ref LLP 0213#d1 [tests]: riding a pick is not a route around the explicit-opt-in boundary
+test('an excluded plugin declaring compose_with is not composed', async () => {
+  const bundled = await discoverBundledPlugins()
+  assert.ok(bundled.excluded.length > 0, 'the excluded set is non-empty')
+
+  // Stage the one-line manifest edit the filter exists to defeat: an
+  // excluded plugin declaring it rides the gateway.
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const descriptors = catalog.pickerDescriptors
+  const raw = new Map(catalog.composeWith ?? new Map())
+  const smuggled = bundled.excluded[0].manifest.name
+  raw.set(smuggled, ['@hypaware/ai-gateway'])
+  assert.ok(
+    composedNames({ descriptors, composeWith: raw }, ['claude']).includes(smuggled),
+    'unfiltered, the excluded plugin really would ride the gateway pick'
+  )
+
+  const filtered = ridersInDefaultSet(raw)
+  assert.ok(!filtered.has(smuggled), `${smuggled} is excluded from default, so it may not ride`)
+  assert.ok(
+    !composedNames({ descriptors, composeWith: filtered }, ['claude']).includes(smuggled),
+    'and it is not composed'
+  )
+
+  // The filter is a boundary check, not a blanket one: the graph pair is
+  // allowlisted, so it still rides.
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(filtered.has(rider), `${rider} is default-activated and still rides`)
+  }
+})
+
+// Regression (neutral review of PR #720 round 2, finding 1): the round-1
+// fix put the filter inside `loadPickerCatalog`, which `resolvePickSeeding`
+// only reaches when no catalog is injected - and `runInitWizard`, the
+// shipped `hyp init` entry point, ALWAYS injects one, built by
+// `loadWizardCatalog` from the loaded *and* excluded manifests. So the
+// boundary held on the legacy walkthrough and not on the path that ships.
+//
+// A unit test of `ridersInDefaultSet` cannot catch a caller that never
+// calls it, which is why this one goes through `resolvePickSeeding` with an
+// injected catalog and asserts on what composition actually receives.
+// @ref LLP 0213#d1 [tests]: no catalog source routes around the explicit-opt-in boundary
+test('an injected catalog cannot smuggle an excluded rider through resolvePickSeeding', async () => {
+  const bundled = await discoverBundledPlugins()
+  assert.ok(bundled.excluded.length > 0, 'the excluded set is non-empty')
+
+  // `loadWizardCatalog`'s own read, verbatim: loaded plus excluded, with
+  // the one-line manifest edit the filter exists to defeat staged on it.
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const smuggled = bundled.excluded[0].manifest.name
+  catalog.composeWith = new Map(catalog.composeWith ?? new Map())
+  catalog.composeWith.set(smuggled, ['@hypaware/ai-gateway'])
+  assert.ok(
+    composedNames({ descriptors: catalog.pickerDescriptors, composeWith: catalog.composeWith }, ['claude'])
+      .includes(smuggled),
+    'unfiltered, the injected catalog really would ride the excluded plugin onto the gateway pick'
+  )
+
+  const seeding = await resolvePickSeeding(/** @type {any} */ ({
+    stdout: { write() {} },
+    stderr: { write() {} },
+    env: {},
+    catalog,
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: RETENTION },
+  }))
+
+  assert.ok(!seeding.composeWith.has(smuggled), `${smuggled} is excluded from default, so it may not ride`)
+  const names = composedNames(
+    { descriptors: seeding.descriptors, composeWith: seeding.composeWith },
+    ['claude']
+  )
+  assert.ok(!names.includes(smuggled), 'and it does not reach the composed config')
+
+  // Still a boundary check, not a blanket one: the graph pair rides.
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(names.includes(rider), `${rider} is default-activated and still rides`)
+  }
+})
+
+// No bundled manifest may declare `compose_with` from outside the
+// default-activated set. Guards every future manifest, not just today's two.
+test('no excluded bundled manifest declares compose_with', async () => {
+  const bundled = await discoverBundledPlugins()
+  for (const entry of bundled.excluded) {
+    assert.equal(
+      entry.manifest.compose_with,
+      undefined,
+      `${entry.manifest.name} is excluded from default but declares compose_with, `
+      + 'which would compose it with no pick and no prompt'
+    )
+  }
+})
+
+/**
+ * The plugin names one catalog composes for the given picks.
+ *
+ * @param {{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }} catalog
+ * @param {PickerSource[]} sources
+ * @returns {string[]}
+ */
+function composedNames(catalog, sources) {
+  return (composeWithRiders(catalog, sources).plugins ?? []).map((p) => p.name)
+}

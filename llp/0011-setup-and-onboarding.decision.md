@@ -24,6 +24,14 @@
 > the "Cache retention (days)" question is removed; the pathway sets the
 > default instead (90-day team / 120-day local).
 
+> **Amended by [LLP 0213](./0213-graph-plugin-always-active.decision.md#derived-data-plugins)**:
+> composition is not limited to source / client / sink picks. A **derived-data**
+> plugin (the context graph) consumes what another plugin captured, contributes
+> no pick of its own, and rides the pick whose data it derives from, declared in
+> its manifest rather than hardcoded in the composer. What widens is which
+> plugins the composed set may contain; [#no-architectural-names](#no-architectural-names)
+> is unchanged, and is why such a plugin is not given a picker row of its own.
+
 ## Interactive walkthrough
 
 The primary way to get a HypAware install on the ground is the interactive

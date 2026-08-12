@@ -183,7 +183,15 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
   })
   // The report rides failures too: a seed that fails to resolve because its
   // natural_key was suppressed must be explainable, not a bare "no match".
-  return { ...result, localOnly }
+  //
+  // So does emptiness. A graph with no nodes fails every seed, and "no such
+  // node" is the wrong answer to give someone whose graph has simply never
+  // been projected: the fix is a command, not a different seed. The fact is
+  // set here, on the shared operation result, so an MCP caller reads it as
+  // data rather than the CLI inventing the distinction while rendering.
+  // @ref LLP 0213#empty-is-shared [implements]: emptiness is an operation fact, not a rendering flourish
+  const graphEmpty = nodeById.size === 0
+  return { ...result, localOnly, ...(graphEmpty ? { graphEmpty } : {}) }
 }
 
 /**

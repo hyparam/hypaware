@@ -186,6 +186,16 @@ export interface TraversalErr {
   ok: false
   error: string
   candidates?: GraphNode[]
+  /**
+   * True when the failure is "nothing has been projected yet" rather than
+   * "no such node". Without it the two are indistinguishable, and the graph
+   * is empty by default on an install that has never run `hyp graph
+   * project` (LLP 0213 #d3).
+   *
+   * Set on the shared operation result, not in CLI rendering, so an MCP
+   * caller gets the same distinction as the terminal does.
+   */
+  graphEmpty?: boolean
 }
 
 /** Parsed `graph neighbors` argv: one positional seed plus flags. */
