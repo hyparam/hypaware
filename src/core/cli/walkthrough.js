@@ -10,7 +10,7 @@ import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
@@ -29,7 +29,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 /**
  * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ClientDescriptor, LoadedManifest, PickerDescriptor } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall } from '../../../src/core/runtime/types.js'
  */
@@ -2029,7 +2029,7 @@ export async function loadPickerCatalog() {
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
     return {
       descriptors: orderPickerDescriptors(catalog.pickerDescriptors),
-      composeWith: ridersInDefaultSet(catalog.composeWith ?? new Map(), bundled.loaded),
+      composeWith: ridersInDefaultSet(catalog.composeWith ?? new Map()),
     }
   } catch {
     return { descriptors: new Map(), composeWith: new Map() }
@@ -2037,7 +2037,7 @@ export async function loadPickerCatalog() {
 }
 
 /**
- * Keep only the riders that are in the default-activated bundled set.
+ * Drop the riders that are excluded from default activation.
  *
  * `compose_with` composes a plugin with no pick and no prompt, so left
  * unfiltered it is a way around `V1_EXCLUDED_FROM_DEFAULT` - the boundary
@@ -2048,21 +2048,28 @@ export async function loadPickerCatalog() {
  * holds a real credential. A one-line manifest edit on any of them would
  * otherwise compose it into every gateway config.
  *
+ * The filter reads `V1_EXCLUDED_FROM_DEFAULT` itself rather than a list of
+ * loaded manifests handed in by the caller. That is deliberate: the riders
+ * reach composition from three catalog sources (the wizard's own
+ * `loadWizardCatalog`, an injected `opts.catalog`, and `loadPickerCatalog`'s
+ * discovery), and only one of them has a `loaded` array to inject. A filter
+ * that depends on what the caller passes is a filter one caller can skip,
+ * which is how the first version of this guard came to protect the legacy
+ * walkthrough while the shipped `hyp init` path routed around it.
+ *
  * Filtering here rather than in `buildPluginCatalog` keeps the catalog a
  * faithful read of the manifests; it is composition, not cataloguing, that
  * the allowlist constrains.
  *
  * @param {Map<string, string[]>} composeWith
- * @param {LoadedManifest[]} loaded the default-activated bundled manifests
  * @returns {Map<string, string[]>}
  * @ref LLP 0213#d1 [constrained-by]: riding a pick is not a route around the explicit-opt-in boundary
  */
-export function ridersInDefaultSet(composeWith, loaded) {
-  const defaultActivated = new Set(loaded.map((entry) => entry.manifest.name))
+export function ridersInDefaultSet(composeWith) {
   /** @type {Map<string, string[]>} */
   const kept = new Map()
   for (const [rider, waitsFor] of composeWith) {
-    if (!defaultActivated.has(rider)) continue
+    if (V1_EXCLUDED_FROM_DEFAULT.has(rider)) continue
     kept.set(rider, waitsFor)
   }
   return kept

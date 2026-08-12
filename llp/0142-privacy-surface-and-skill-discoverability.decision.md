@@ -115,14 +115,17 @@ these skills still confirms before its consequential step.
 
 - `hypaware-privacy/SKILL.md` (both client plugins): `@ref LLP 0142#any-time`
   on the description, alongside the existing `@ref LLP 0100#skill`.
-Two further bullets stood here, directing `@ref LLP 0142#user-invoked-only`
-onto the `hypaware-ignore` / `hypaware-unignore` `SKILL.md` files and onto the
-report skills' frontmatter. All of those files are gone: the opt-out pair
-retired to `hyp session ignore`
-([LLP 0212 #skills-retired](./0212-session-opt-out-is-a-cli-verb.decision.md#skills-retired))
-and report generation moved server-side
-([LLP 0216](./0216-reports-generate-server-side.decision.md)). No
-`#user-invoked-only` annotation site survives in the tree, so the instructions
-are struck rather than left pointing at deleted files. The decision they
-served is untouched: see [#user-invoked-only](#user-invoked-only) for the rule
-itself, which still governs any future bundled skill.
+- `hypaware-ignore` / `hypaware-unignore` `SKILL.md`: `@ref LLP 0142#user-invoked-only`
+  recording why these two stay model-invocable.
+  **Superseded-by: [LLP 0212 #skills-retired](./0212-session-opt-out-is-a-cli-verb.decision.md#skills-retired)**
+  (2026-08-12): the opt-out pair retired to `hyp session ignore`, so these two
+  annotation sites no longer exist in the tree.
+- The three report skills' `SKILL.md`: `@ref LLP 0142#user-invoked-only` on
+  the frontmatter that carries the key.
+  **Superseded-by: [LLP 0216](./0216-reports-generate-server-side.decision.md)**
+  (2026-08-12): report generation moved server-side and the skills went with
+  it, so these annotation sites no longer exist either.
+
+No `#user-invoked-only` annotation site survives in the tree. The decision
+they served is untouched: see [#user-invoked-only](#user-invoked-only) for the
+rule itself, which still governs any future bundled skill.

@@ -13,6 +13,7 @@ import path from 'node:path'
 import { composePickerConfig, ridersInDefaultSet } from '../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { resolvePickSeeding } from '../../src/core/cli/wizard/pick.js'
 
 // The picker table is manifest-sourced now (LLP 0130). These tests pin
 // the exact config shape `composePickerConfig` emitted from the retired
@@ -525,8 +526,11 @@ test('a picked plugin still loses a stale `enabled: false`', async () => {
 // a plugin with no pick and no prompt, so an excluded plugin declaring it
 // would be a way around `V1_EXCLUDED_FROM_DEFAULT` - the boundary that keeps
 // an API-backed embedder or a credential-holding plugin off a machine until
-// its owner names it. `loadPickerCatalog` filters riders to the
-// default-activated set before composition ever sees them.
+// its owner names it. `ridersInDefaultSet` drops every excluded rider
+// before composition ever sees them.
+//
+// This pins the filter itself. The test below it pins the caller, which is
+// the half that actually broke: see its comment.
 // @ref LLP 0213#d1 [tests]: riding a pick is not a route around the explicit-opt-in boundary
 test('an excluded plugin declaring compose_with is not composed', async () => {
   const bundled = await discoverBundledPlugins()
@@ -544,7 +548,7 @@ test('an excluded plugin declaring compose_with is not composed', async () => {
     'unfiltered, the excluded plugin really would ride the gateway pick'
   )
 
-  const filtered = ridersInDefaultSet(raw, bundled.loaded)
+  const filtered = ridersInDefaultSet(raw)
   assert.ok(!filtered.has(smuggled), `${smuggled} is excluded from default, so it may not ride`)
   assert.ok(
     !composedNames({ descriptors, composeWith: filtered }, ['claude']).includes(smuggled),
@@ -555,6 +559,54 @@ test('an excluded plugin declaring compose_with is not composed', async () => {
   // allowlisted, so it still rides.
   for (const rider of GRAPH_PLUGINS) {
     assert.ok(filtered.has(rider), `${rider} is default-activated and still rides`)
+  }
+})
+
+// Regression (neutral review of PR #720 round 2, finding 1): the round-1
+// fix put the filter inside `loadPickerCatalog`, which `resolvePickSeeding`
+// only reaches when no catalog is injected - and `runInitWizard`, the
+// shipped `hyp init` entry point, ALWAYS injects one, built by
+// `loadWizardCatalog` from the loaded *and* excluded manifests. So the
+// boundary held on the legacy walkthrough and not on the path that ships.
+//
+// A unit test of `ridersInDefaultSet` cannot catch a caller that never
+// calls it, which is why this one goes through `resolvePickSeeding` with an
+// injected catalog and asserts on what composition actually receives.
+// @ref LLP 0213#d1 [tests]: no catalog source routes around the explicit-opt-in boundary
+test('an injected catalog cannot smuggle an excluded rider through resolvePickSeeding', async () => {
+  const bundled = await discoverBundledPlugins()
+  assert.ok(bundled.excluded.length > 0, 'the excluded set is non-empty')
+
+  // `loadWizardCatalog`'s own read, verbatim: loaded plus excluded, with
+  // the one-line manifest edit the filter exists to defeat staged on it.
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const smuggled = bundled.excluded[0].manifest.name
+  catalog.composeWith = new Map(catalog.composeWith ?? new Map())
+  catalog.composeWith.set(smuggled, ['@hypaware/ai-gateway'])
+  assert.ok(
+    composedNames({ descriptors: catalog.pickerDescriptors, composeWith: catalog.composeWith }, ['claude'])
+      .includes(smuggled),
+    'unfiltered, the injected catalog really would ride the excluded plugin onto the gateway pick'
+  )
+
+  const seeding = await resolvePickSeeding(/** @type {any} */ ({
+    stdout: { write() {} },
+    stderr: { write() {} },
+    env: {},
+    catalog,
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: RETENTION },
+  }))
+
+  assert.ok(!seeding.composeWith.has(smuggled), `${smuggled} is excluded from default, so it may not ride`)
+  const names = composedNames(
+    { descriptors: seeding.descriptors, composeWith: seeding.composeWith },
+    ['claude']
+  )
+  assert.ok(!names.includes(smuggled), 'and it does not reach the composed config')
+
+  // Still a boundary check, not a blanket one: the graph pair rides.
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(names.includes(rider), `${rider} is default-activated and still rides`)
   }
 })
 
