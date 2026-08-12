@@ -728,7 +728,7 @@ const SOURCE_PICKER_IDS = { otlp: 'otel' }
 function unattributedLocalOnlyCount(report) {
   const localOnly = report.clientSync?.localOnly ?? []
   if (localOnly.length === 0) return 0
-  const clientNames = new Set((report.clients ?? []).map((c) => c.name))
+  const clientNames = new Set((report.clients ?? []).filter((c) => c.configured).map((c) => c.name))
   const sourcePickerIds = new Set(
     (report.sources ?? [])
       .filter((s) => s.name !== 'ai-gateway')

@@ -161,7 +161,7 @@ test('a local-only source that is not a client is marked on the capture row too'
     ]),
     clientSync: { syncing: ['claude'], localOnly: ['hermes', 'otel'] },
   })
-  assert.match(text, /capture\s+Claude, Hermes \(local only\), Otlp \(local only\)/)
+  assert.match(text, /capture\s+Claude, Hermes \(local only\), OpenTelemetry \(local only\)/)
 })
 
 // `raw-anthropic` / `raw-openai` are hidden pickers whose traffic lands
@@ -319,10 +319,10 @@ test('sources that are not clients are captured too, and the gateway is not a so
     sources: /** @type {any} */ ([
       { name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' },
       { name: 'hermes', plugin: '@hypaware/hermes', state: 'started' },
-      { name: 'otel', plugin: '@hypaware/otel', state: 'error' },
+      { name: 'otlp', plugin: '@hypaware/otel', state: 'error' },
     ]),
   })
-  assert.match(text, /capture\s+Claude, Hermes, Otel \(error\)/)
+  assert.match(text, /capture\s+Claude, Hermes, OpenTelemetry \(error\)/)
   assert.doesNotMatch(text, /ai-gateway/)
 })
 

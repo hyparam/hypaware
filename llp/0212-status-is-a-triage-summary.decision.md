@@ -153,9 +153,10 @@ requirement was ever about.
 
 ## Consequences {#consequences}
 
-- `renderStatusText` becomes the summary; the previous body is preserved
-  verbatim as `renderStatusFull` and reached with `hyp status --full`. Tests
-  asserting inventory lines assert them against `renderStatusFull`.
+- `renderStatusText` is replaced by `renderStatusSummary`; the previous body
+  is preserved verbatim as `renderStatusFull` and reached with
+  `hyp status --full`. Tests asserting inventory lines assert them against
+  `renderStatusFull`.
 - `renderStatusJson` is untouched. No key moves, nothing is dropped, and
   `--json` stays the contract for machine consumers and for anything the
   summary elides.

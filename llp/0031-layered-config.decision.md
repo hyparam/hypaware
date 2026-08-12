@@ -313,7 +313,7 @@ edits with the code" rule:
 - `init` overwrite guard (`prepareLocalConfigWrite` in `schema.js`; the
   `walkthrough.js` and `core_commands.js` write sites) →
   `@ref LLP 0031#local-layer-writers [implements]`.
-- Status provenance (`status.js` collector, `renderStatusText`/`renderStatusJson`) →
+- Status provenance (`status.js` collector, `renderStatusFull`/`renderStatusJson`) →
   `@ref LLP 0031#status-provenance [implements]`.
 
 Local-writer **collision warning** at `attach` time

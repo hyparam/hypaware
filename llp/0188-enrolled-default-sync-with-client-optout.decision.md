@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0132 (superseded), LLP 0070 (export seam), LLP 0031 (layered config), LLP 0100/0101 (first-sync review window), LLP 0135 (export-seam design, extended), LLP 0120 (hermes rows), LLP 0147 (CLI-backend attribution), LLP 0175 (live-capture misattribution, open)
-**Extended-by:** [LLP 0212](./0212-status-is-a-triage-summary.decision.md) (the `hyp status` split line only: the summary's `data` row always says where rows go and names local-only clients whenever any exist, rather than printing both lists unconditionally; the full split stays on `hyp status --full` and `--json`. The policy, store, and seam enforcement are unchanged)
+**Extended-by:** [LLP 0212](./0212-status-is-a-triage-summary.decision.md) (the `hyp status` split line only: the summary always says where rows go on its `data` row and marks each local-only client inline on `capture` (an opted-out picker with no row of its own is stated there by count), rather than printing both lists unconditionally; the full split stays on `hyp status --full` and `--json`. The policy, store, and seam enforcement are unchanged)
 **Extended-by:** [LLP 0190](./0190-wizard-defaults-gate.decision.md) (§never-silent below: the step's prompt shape changes - a defaults gate first, the menu's checkboxes now mark what syncs rather than what stays local, and locked sources appear read-only instead of not at all; the policy, store, and seam enforcement here are unchanged)
 
 > Supersedes [LLP 0132](./0132-managed-local-additions-local-only.decision.md).

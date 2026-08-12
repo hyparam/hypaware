@@ -53,6 +53,8 @@ const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
   openclaw: 'OpenClaw',
+  otel: 'OpenTelemetry',
+  otlp: 'OpenTelemetry',
   'raw-anthropic': 'Anthropic API',
   'raw-openai': 'OpenAI API',
 })
