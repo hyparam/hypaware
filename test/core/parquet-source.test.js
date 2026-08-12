@@ -62,6 +62,32 @@ async function makeSource() {
   return parquetDataSource(file, metadata)
 }
 
+/** @type {ColumnSpec[]} */
+const TIMESTAMP_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'at', type: 'TIMESTAMP', nullable: false },
+]
+
+// Two days either side of the 2026-08-11 window the day-bound tests select, so
+// a bound that silently matched everything (or nothing) is visible.
+const TIMESTAMP_ROWS = [
+  { id: 1, at: '2026-08-10T23:59:59Z' },
+  { id: 2, at: '2026-08-11T00:00:00Z' },
+  { id: 3, at: '2026-08-11T23:59:59Z' },
+  { id: 4, at: '2026-08-12T00:00:00Z' },
+]
+
+/**
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function makeTimestampSource() {
+  const columnData = rowsToColumnSources(TIMESTAMP_COLUMNS, TIMESTAMP_ROWS)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
+  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const metadata = await parquetMetadataAsync(file)
+  return parquetDataSource(file, metadata)
+}
+
 /**
  * @param {string} sql
  * @returns {ExprNode | undefined}
@@ -81,40 +107,71 @@ async function run(source, query) {
 
 // --- pushdown conversion -----------------------------------------------------
 
-test('whereToParquetFilter converts simple comparisons (integers coerced to bigint)', () => {
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 3')), { id: { $eq: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id > 3')), { id: { $gt: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id <= 3')), { id: { $lte: 3n } })
+// Integer literals stay plain numbers: `filterStrict: false` compares with
+// `==` so they still match bigint-decoded INT64 columns, and hyparquet's bloom
+// hashing rejects a bigint for INT32/FLOAT/DOUBLE (LLP 0212).
+test('whereToParquetFilter converts simple comparisons', () => {
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 3')), { id: { $eq: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id > 3')), { id: { $gt: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id <= 3')), { id: { $lte: 3 } })
   assert.deepEqual(whereToParquetFilter(whereOf("SELECT * FROM t WHERE name = 'bob'")), { name: { $eq: 'bob' } })
 })
 
 test('whereToParquetFilter mirrors flipped operands (literal on the left)', () => {
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 < id')), { id: { $gt: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 >= id')), { id: { $lte: 3n } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 < id')), { id: { $gt: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 >= id')), { id: { $lte: 3 } })
 })
 
 test('whereToParquetFilter handles AND / OR / NOT', () => {
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id >= 2 AND id <= 4')),
-    { $and: [{ id: { $gte: 2n } }, { id: { $lte: 4n } }] }
+    { $and: [{ id: { $gte: 2 } }, { id: { $lte: 4 } }] }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 1 OR id = 2')),
-    { $or: [{ id: { $eq: 1n } }, { id: { $eq: 2n } }] }
+    { $or: [{ id: { $eq: 1 } }, { id: { $eq: 2 } }] }
   )
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1)')), { id: { $ne: 1n } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1)')), { id: { $ne: 1 } })
   // De Morgan: NOT (a OR b) -> $nor of the un-negated children
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1 OR id = 2)')),
-    { $nor: [{ id: { $eq: 1n } }, { id: { $eq: 2n } }] }
+    { $nor: [{ id: { $eq: 1 } }, { id: { $eq: 2 } }] }
   )
 })
 
 test('whereToParquetFilter handles IN / NOT IN / IS NULL', () => {
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, 2)')), { id: { $in: [1n, 2n] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, 2)')), { id: { $nin: [1n, 2n] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, 2)')), { id: { $in: [1, 2] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, 2)')), { id: { $nin: [1, 2] } })
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NULL')), { name: { $eq: null } })
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NOT NULL')), { name: { $ne: null } })
+})
+
+// The regression that motivated LLP 0212: squirreling parses a typed literal
+// as a cast over a string, and the pre-icebird converter required a bare
+// literal operand, so every timestamp-bounded predicate converted to undefined
+// and pruned nothing.
+test('whereToParquetFilter folds typed literals (TIMESTAMP casts)', () => {
+  assert.deepEqual(
+    whereToParquetFilter(whereOf("SELECT * FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z'")),
+    { at: { $gte: new Date('2026-08-11T00:00:00Z') } }
+  )
+  // AND is all-or-nothing, so a day window only converts if both sides do
+  assert.deepEqual(
+    whereToParquetFilter(whereOf(
+      "SELECT * FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z' AND at < TIMESTAMP '2026-08-12T00:00:00Z'"
+    )),
+    { $and: [{ at: { $gte: new Date('2026-08-11T00:00:00Z') } }, { at: { $lt: new Date('2026-08-12T00:00:00Z') } }] }
+  )
+  // A cast the engine would evaluate to null must not become a filter
+  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE at >= TIMESTAMP 'not-a-day'")), undefined)
+})
+
+// Unwrapping a cast at boolean position is only sound when the cast preserves
+// truthiness. CAST(<bool> AS TEXT) yields 'false', which is truthy, so pushing
+// the bare comparison down would drop rows the query selects.
+test('whereToParquetFilter only unwraps truthiness-preserving casts', () => {
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE CAST(id = 1 AS INT)')), { id: { $eq: 1 } })
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE CAST(id = 1 AS TEXT)')), undefined)
 })
 
 test('whereToParquetFilter returns undefined for non-convertible predicates', () => {
@@ -157,6 +214,26 @@ test('range WHERE (AND) returns the inclusive window', async () => {
   const source = await makeSource()
   const rows = await run(source, 'SELECT id FROM t WHERE id >= 2 AND id <= 4')
   assert.deepEqual(rows.map((r) => Number(r.id)), [2, 3, 4])
+})
+
+// A converted predicate sets appliedWhere, so the engine does NOT re-filter:
+// a folded literal that compares wrongly against the decoded column would
+// silently drop rows rather than merely lose pruning. This is the check that
+// the TIMESTAMP fold is safe end to end, not just well-shaped.
+test('timestamp day bounds filter correctly through the pushed-down scan', async () => {
+  const source = await makeTimestampSource()
+  const rows = await run(
+    source,
+    "SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z' AND at < TIMESTAMP '2026-08-12T00:00:00Z'"
+  )
+  assert.deepEqual(rows.map((r) => Number(r.id)), [2, 3])
+})
+
+test('a timestamp bound matching no rows returns none (and one matching all returns all)', async () => {
+  const none = await run(await makeTimestampSource(), "SELECT id FROM t WHERE at >= TIMESTAMP '2099-01-01T00:00:00Z'")
+  assert.deepEqual(none, [])
+  const all = await run(await makeTimestampSource(), "SELECT id FROM t WHERE at >= TIMESTAMP '2000-01-01T00:00:00Z'")
+  assert.equal(all.length, 4)
 })
 
 test('LIKE falls back to engine filtering (not pushed down)', async () => {

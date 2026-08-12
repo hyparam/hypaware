@@ -1,190 +1,35 @@
 // @ts-check
 
-/**
- * Convert a squirreling `WHERE` clause AST into a hyparquet
- * `ParquetQueryFilter` (a MongoDB-style predicate) so the scan can push
- * the predicate down to the parquet reader. Returns `undefined` whenever
- * the expression cannot be fully and faithfully converted. The caller
- * must then leave `appliedWhere` false and let the SQL engine filter the
- * rows itself.
- *
- * Ported from the Hyperparam app (`lib/tools/parquetPushdownFilter.ts`),
- * which drives the same squirreling + hyparquet stack. The node-type
- * discriminants match `squirreling@0.12` (`unary`, `binary`,
- * `in valuelist`, `cast`, `identifier`, `literal`).
- *
- * @import { BinaryNode, BinaryOp, ComparisonOp, ExprNode, InValuesNode, SqlPrimitive } from 'squirreling/src/types.js'
- * @import { ParquetQueryFilter } from 'hyparquet'
- */
-
-/**
- * @param {ExprNode | undefined} where
- * @returns {ParquetQueryFilter | undefined}
- */
-export function whereToParquetFilter(where) {
-  if (!where) return undefined
-  return convertExpr(where, false)
-}
-
-/**
- * @param {ExprNode} node
- * @param {boolean} negate
- * @returns {ParquetQueryFilter | undefined}
- */
-function convertExpr(node, negate) {
-  if (node.type === 'unary' && node.op === 'NOT') {
-    return convertExpr(node.argument, !negate)
-  }
-  if (node.type === 'unary' && (node.op === 'IS NULL' || node.op === 'IS NOT NULL')) {
-    if (node.argument.type !== 'identifier') return undefined
-    const isNull = (node.op === 'IS NULL') !== negate
-    return { [node.argument.name]: { [isNull ? '$eq' : '$ne']: null } }
-  }
-  if (node.type === 'binary') {
-    return convertBinary(node, negate)
-  }
-  if (node.type === 'in valuelist') {
-    return convertInValues(node, negate)
-  }
-  if (node.type === 'cast') {
-    return convertExpr(node.expr, negate)
-  }
-  // Non-convertible node types (functions, subqueries, CASE, …) fall
-  // through to undefined so the engine applies the predicate itself.
-  return undefined
-}
-
-/**
- * @param {BinaryNode} node
- * @param {boolean} negate
- * @returns {ParquetQueryFilter | undefined}
- */
-function convertBinary(node, negate) {
-  const { op, left, right } = node
-  if (op === 'AND') {
-    const leftFilter = convertExpr(left, negate)
-    const rightFilter = convertExpr(right, negate)
-    if (!leftFilter || !rightFilter) return undefined
-    // De Morgan: NOT (a AND b) === (NOT a) OR (NOT b)
-    return negate ? { $or: [leftFilter, rightFilter] } : { $and: [leftFilter, rightFilter] }
-  }
-  if (op === 'OR') {
-    // `$nor` already expresses NOT(a OR b), so the children are converted
-    // un-negated and the wrapper carries the negation, propagating
-    // `negate` into them as well would double-negate.
-    const leftFilter = convertExpr(left, false)
-    const rightFilter = convertExpr(right, false)
-    if (!leftFilter || !rightFilter) return undefined
-    return negate ? { $nor: [leftFilter, rightFilter] } : { $or: [leftFilter, rightFilter] }
-  }
-  // LIKE has no parquet-filter equivalent; let the engine handle it.
-  if (op === 'LIKE') return undefined
-
-  const { column, value, flipped } = extractColumnAndValue(left, right)
-  if (column === undefined || value === undefined) return undefined
-
-  const mongoOp = mapOperator(op, flipped, negate)
-  if (!mongoOp) return undefined
-  return { [column]: { [mongoOp]: value } }
-}
-
-/**
- * Pull a `column op literal` (or `literal op column`) shape out of a
- * binary node's operands. Returns `flipped: true` when the literal was
- * on the left so the caller can mirror the comparison operator.
- *
- * @param {ExprNode} left
- * @param {ExprNode} right
- * @returns {{ column: string | undefined, value: SqlPrimitive | undefined, flipped: boolean }}
- */
-function extractColumnAndValue(left, right) {
-  if (left.type === 'identifier' && right.type === 'literal') {
-    return { column: left.name, value: coerceBigInt(right.value), flipped: false }
-  }
-  if (left.type === 'literal' && right.type === 'identifier') {
-    return { column: right.name, value: coerceBigInt(left.value), flipped: true }
-  }
-  return { column: undefined, value: undefined, flipped: false }
-}
-
-/**
- * @param {BinaryOp} op
- * @param {boolean} flipped
- * @param {boolean} negate
- * @returns {'$lt' | '$lte' | '$gt' | '$gte' | '$eq' | '$ne' | undefined}
- */
-function mapOperator(op, flipped, negate) {
-  if (!isComparisonOp(op)) return undefined
-  let mapped = op
-  if (negate) mapped = neg(mapped)
-  if (flipped) mapped = flip(mapped)
-  if (mapped === '<') return '$lt'
-  if (mapped === '<=') return '$lte'
-  if (mapped === '>') return '$gt'
-  if (mapped === '>=') return '$gte'
-  if (mapped === '=' || mapped === '==') return '$eq'
-  return '$ne'
-}
-
-/**
- * @param {ComparisonOp} op
- * @returns {ComparisonOp}
- */
-function neg(op) {
-  if (op === '<') return '>='
-  if (op === '<=') return '>'
-  if (op === '>') return '<='
-  if (op === '>=') return '<'
-  if (op === '=' || op === '==') return '!='
-  // negation of `!=` / `<>` is equality
-  return '='
-}
-
-/**
- * @param {ComparisonOp} op
- * @returns {ComparisonOp}
- */
-function flip(op) {
-  if (op === '<') return '>'
-  if (op === '<=') return '>='
-  if (op === '>') return '<'
-  if (op === '>=') return '<='
-  return op
-}
-
-/**
- * @param {string} op
- * @returns {op is ComparisonOp}
- */
-function isComparisonOp(op) {
-  return op === '=' || op === '==' || op === '!=' || op === '<>' || op === '<' || op === '>' || op === '<=' || op === '>='
-}
-
-/**
- * Coerce integer literals to `bigint` so they compare equal to parquet
- * INT64 columns, which hyparquet decodes as `bigint`. Non-integer and
- * non-number values pass through unchanged.
- *
- * @param {SqlPrimitive} value
- * @returns {SqlPrimitive}
- */
-function coerceBigInt(value) {
-  if (typeof value === 'number' && Number.isInteger(value)) return BigInt(value)
-  return value
-}
-
-/**
- * @param {InValuesNode} node
- * @param {boolean} negate
- * @returns {ParquetQueryFilter | undefined}
- */
-function convertInValues(node, negate) {
-  if (node.expr.type !== 'identifier') return undefined
-  /** @type {SqlPrimitive[]} */
-  const values = []
-  for (const val of node.values) {
-    if (val.type !== 'literal') return undefined
-    values.push(coerceBigInt(val.value))
-  }
-  return { [node.expr.name]: { [negate ? '$nin' : '$in']: values } }
-}
+// icebird's converter, re-exported rather than reimplemented. This module and
+// `icebird/src/sql/whereFilter.js` both began as ports of the Hyperparam app's
+// `lib/tools/parquetPushdownFilter.ts`. icebird's copy kept moving and this one
+// did not, and the drift cost both query time and correctness:
+//
+//  - Typed literals never converted. squirreling parses
+//    `TIMESTAMP '2026-08-11T00:00:00Z'` as a `cast` node wrapping a string
+//    literal. icebird constant-folds it (`staticLiteral`/`foldCast`); the local
+//    copy required a bare `literal` operand and returned `undefined` for the
+//    whole predicate, because AND is all-or-nothing. Every timestamp-bounded
+//    query therefore pushed nothing down. Measured against the production
+//    sessions list: one grouped scan took 11.4s bounded on `message_created_at`
+//    versus 7.3s bounded on `date`, same rows, same projection.
+//  - Any cast unwrapped at boolean position. The local copy rewrote
+//    `WHERE CAST(a = 1 AS TEXT)` to `a = 1`, but the engine evaluates that cast
+//    to the string `'false'`, which is truthy, so the pushdown dropped rows the
+//    query selects. icebird gates the unwrap to the casts that preserve
+//    truthiness (boolean and numeric targets).
+//
+// Dropped along with the local copy: its `coerceBigInt`, which turned every
+// integer literal into a `bigint`. Nothing needed it. `filterStrict: false`
+// (which parquet-source.js and icebird both pass) compares through `==`, so
+// `5n == 5` holds either way, while hyparquet's bloom hashing REJECTS a bigint
+// for INT32, FLOAT and DOUBLE columns: the coercion was quietly buying back
+// nothing and costing bloom pruning on every non-INT64 numeric column.
+//
+// Floor: hyparquet >= 1.28.1, where `$in`/`$nin` match through `equals()`
+// instead of `Array.prototype.includes`. On 1.27.x a number-valued `$in`
+// against an INT64 column (hyparquet decodes those as bigint) matches no rows,
+// which is precisely what `coerceBigInt` used to paper over.
+//
+// @ref LLP 0212 [implements]: one pushdown converter for the whole stack, owned by icebird
+export { whereToParquetFilter } from 'icebird/src/sql/whereFilter.js'
