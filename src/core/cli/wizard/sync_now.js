@@ -14,7 +14,6 @@
  *
  * @ref LLP 0203#offer [implements]: setup offers the release rather than only naming it
  *
- * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { RunWizardSyncNowOptions, WizardSyncNowResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
