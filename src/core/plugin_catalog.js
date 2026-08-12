@@ -40,6 +40,8 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
   const clientDescriptors = new Map()
   /** @type {Map<string, PickerDescriptor>} */
   const pickerDescriptors = new Map()
+  /** @type {Map<PluginName, PluginName[]>} */
+  const composeWith = new Map()
 
   for (const source of [bundledManifests, installedManifests]) {
     for (const entry of source) {
@@ -54,6 +56,10 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
         contributes: entry.manifest.contributes,
       })
       pluginMetadata.set(name, meta)
+
+      // @ref LLP 0213#d1 [implements]: a rider names the plugins whose composition pulls it in
+      const riders = entry.manifest.compose_with
+      if (Array.isArray(riders) && riders.length > 0) composeWith.set(name, [...riders])
 
       const datasets = entry.manifest.contributes?.datasets
       if (Array.isArray(datasets)) {
@@ -127,7 +133,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
     }
   }
 
-  return { plugins, pluginMetadata, knownDatasets, clientDescriptors, pickerDescriptors }
+  return { plugins, pluginMetadata, knownDatasets, clientDescriptors, pickerDescriptors, composeWith }
 }
 
 /**

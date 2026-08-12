@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandGroupRegistration, CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -32,6 +32,8 @@ export function createCommandRegistry() {
   const byName = new Map()
   /** @type {Map<string, string>} */
   const aliasIndex = new Map()
+  /** @type {Map<string, CommandGroupRegistration>} */
+  const groups = new Map()
 
   /** @param {CommandRegistration} command */
   function register(command) {
@@ -71,6 +73,42 @@ export function createCommandRegistry() {
     if (byName.has(name)) return byName.get(name)
     const aliased = aliasIndex.get(name)
     return aliased ? byName.get(aliased) : undefined
+  }
+
+  /**
+   * Describe a command *group* (`graph`, `query`) without registering a
+   * command for it. A core group gets its header and paragraph from the
+   * bare command `makeGroupCommand` builds; a plugin namespace has no bare
+   * command to speak for it, so before this its `--help` was a subcommand
+   * table with no prose at all.
+   *
+   * Registering a group is metadata only: it adds nothing to `list()`, so
+   * it can never shadow a real command or appear as its own subcommand.
+   * Last writer wins, deliberately, so a plugin re-describing its group on
+   * reactivation is not an error.
+   *
+   * @param {CommandGroupRegistration} group
+   * @ref LLP 0214#d2 [implements]: a plugin-owned group carries long help without inventing a bare command
+   */
+  function registerGroup(group) {
+    if (!group || typeof group !== 'object') {
+      throw new TypeError('CommandRegistry.registerGroup: group must be an object')
+    }
+    if (typeof group.name !== 'string' || group.name.length === 0) {
+      throw new TypeError('CommandRegistry.registerGroup: group.name must be a non-empty string')
+    }
+    if (group.summary !== undefined && typeof group.summary !== 'string') {
+      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' summary must be a string when present`)
+    }
+    if (group.help !== undefined && typeof group.help !== 'string') {
+      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' help must be a string when present`)
+    }
+    groups.set(group.name, group)
+  }
+
+  /** @param {string} name */
+  function getGroup(name) {
+    return groups.get(name)
   }
 
   function list() {
@@ -115,5 +153,5 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, get, list, has, size, match }
+  return { register, registerGroup, get, getGroup, list, has, size, match }
 }

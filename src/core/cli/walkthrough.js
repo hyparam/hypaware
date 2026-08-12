@@ -626,7 +626,7 @@ export async function runPickerWalkthrough(opts) {
   // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
   // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
   // options and `composePickerConfig`'s fold read from these descriptors.
-  const pickerDescriptors = await loadPickerDescriptors()
+  const { descriptors: pickerDescriptors, composeWith } = await loadPickerCatalog()
   const descriptorList = [...pickerDescriptors.values()]
 
   await withSpan(
@@ -719,6 +719,7 @@ export async function runPickerWalkthrough(opts) {
     exportChoice: picks.exportChoice,
     retentionDays: picks.retentionDays,
     hypHome,
+    composeWith,
   })
 
   const obsEnv = readObservabilityEnv(env)
@@ -918,6 +919,12 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  * {@link carryForwardExistingConfig} for the split between what the
  * composer manages and what it merely passes through.
  *
+ * Finally, **riders** are folded in: a plugin whose manifest `compose_with`
+ * names only plugins the fold has already composed joins them, even though
+ * no picker row contributes it. That is how the context graph reaches a
+ * default install without being a question the user is asked
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ *
  * @param {{
  *   sources: PickerSource[],
  *   descriptors: Map<string, PickerDescriptor>,
@@ -925,6 +932,7 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  *   retentionDays: number,
  *   hypHome: string,
  *   existing?: HypAwareV2Config | undefined,
+ *   composeWith?: Map<string, string[]> | undefined,
  * }} args
  * @returns {HypAwareV2Config}
  * @ref LLP 0011#no-architectural-names [implements]: user picks what/where; HypAware derives the explicit plugin set, no role labels
@@ -999,6 +1007,8 @@ export function composePickerConfig(args) {
 
   plugins.push(...postExportPlugins)
 
+  for (const rider of ridersFor(plugins, args.composeWith)) plugins.push({ name: rider })
+
   /** @type {HypAwareV2Config} */
   const config = {
     version: 2,
@@ -1011,7 +1021,7 @@ export function composePickerConfig(args) {
   }
   if (Object.keys(sinks).length > 0) config.sinks = sinks
   if (!args.existing) return config
-  return carryForwardExistingConfig(config, args.existing, args.descriptors)
+  return carryForwardExistingConfig(config, args.existing, args.descriptors, args.composeWith)
 }
 
 /** The gateway plugin every `requires_gateway` row composes behind. */
@@ -1048,21 +1058,61 @@ function contributedPlugins(compose) {
 }
 
 /**
+ * Riders to add to an already-composed plugin list: every plugin whose
+ * `compose_with` names are all present. Run to a fixpoint, so a rider that
+ * waits on another rider still lands and the manifests need no ordering
+ * convention between themselves. A plugin already in the list is never
+ * added twice, and one whose condition is unmet is simply absent.
+ *
+ * @param {PluginConfigInstance[]} composed
+ * @param {Map<string, string[]> | undefined} composeWith
+ * @returns {string[]}
+ * @ref LLP 0213#d1 [implements]: derived-data plugins ride a pick rather than contributing one
+ */
+function ridersFor(composed, composeWith) {
+  if (!composeWith || composeWith.size === 0) return []
+  const present = new Set(composed.map((p) => p.name))
+  /** @type {string[]} */
+  const added = []
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [rider, waitsFor] of composeWith) {
+      if (present.has(rider)) continue
+      if (waitsFor.length === 0) continue
+      if (!waitsFor.every((name) => present.has(name))) continue
+      present.add(rider)
+      added.push(rider)
+      grew = true
+    }
+  }
+  return added
+}
+
+/**
  * Every plugin name composition is entitled to add or remove: the gateway,
- * the export half's two plugins, and every plugin any picker row in the
- * catalog contributes. A plugin outside this set is in the config because
- * someone put it there by hand (`@hypaware/gascity`, `@hypaware/central`),
- * so a reconfigure carries it forward untouched.
+ * the export half's two plugins, every plugin any picker row in the
+ * catalog contributes, and every rider that can join them. A plugin outside
+ * this set is in the config because someone put it there by hand
+ * (`@hypaware/gascity`, `@hypaware/central`), so a reconfigure carries it
+ * forward untouched.
+ *
+ * Riders belong here for the same reason picked plugins do: composition put
+ * them in, so composition takes them out when the pick they rode in on goes
+ * away. Leaving them out would strand the graph plugins in a config whose
+ * gateway had just been unchecked.
  *
  * @param {Map<string, PickerDescriptor>} descriptors
+ * @param {Map<string, string[]>} [composeWith]
  * @returns {Set<string>}
  */
-function composerManagedPlugins(descriptors) {
+function composerManagedPlugins(descriptors, composeWith) {
   const managed = new Set([GATEWAY_PLUGIN, LOCAL_FS_PLUGIN, PARQUET_PLUGIN])
   for (const descriptor of descriptors.values()) {
     if (!descriptor.compose) continue
     for (const plugin of contributedPlugins(descriptor.compose)) managed.add(plugin.name)
   }
+  for (const rider of composeWith?.keys() ?? []) managed.add(rider)
   return managed
 }
 
@@ -1098,10 +1148,11 @@ function composerManagedPlugins(descriptors) {
  * @param {HypAwareV2Config} composed
  * @param {HypAwareV2Config} existing
  * @param {Map<string, PickerDescriptor>} descriptors
+ * @param {Map<string, string[]>} [composeWith]
  * @returns {HypAwareV2Config}
  * @ref LLP 0183#carry-forward [implements]: a reconfigure keeps what the composer does not own; only the picked set is recomposed
  */
-function carryForwardExistingConfig(composed, existing, descriptors) {
+function carryForwardExistingConfig(composed, existing, descriptors, composeWith) {
   const existingPlugins = existing.plugins ?? []
   const existingSinks = existing.sinks ?? {}
   const composedSinks = composed.sinks ?? {}
@@ -1141,7 +1192,7 @@ function carryForwardExistingConfig(composed, existing, descriptors) {
     for (const name of sinkPluginNames(sink)) pinnedPlugins.add(name)
   }
 
-  const managed = composerManagedPlugins(descriptors)
+  const managed = composerManagedPlugins(descriptors, composeWith)
   const composedNames = new Set((composed.plugins ?? []).map((p) => p.name))
   const plugins = (composed.plugins ?? []).map((entry) =>
     mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name))
@@ -1941,12 +1992,29 @@ export async function defaultPickerDetect(opts) {
  * @returns {Promise<Map<string, PickerDescriptor>>}
  */
 export async function loadPickerDescriptors() {
+  return (await loadPickerCatalog()).descriptors
+}
+
+/**
+ * The picker descriptors plus the `compose_with` riders, read in one
+ * discovery pass. `composePickerConfig` needs both: the descriptors to fold
+ * the picked rows, the riders to add the plugins that ride those picks
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ * Discovery failure yields empty maps rather than blocking init, which
+ * degrades to "no riders" instead of a config that cannot be written.
+ *
+ * @returns {Promise<{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }>}
+ */
+export async function loadPickerCatalog() {
   try {
     const bundled = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
-    return orderPickerDescriptors(catalog.pickerDescriptors)
+    return {
+      descriptors: orderPickerDescriptors(catalog.pickerDescriptors),
+      composeWith: catalog.composeWith ?? new Map(),
+    }
   } catch {
-    return new Map()
+    return { descriptors: new Map(), composeWith: new Map() }
   }
 }
 

@@ -104,9 +104,15 @@ Two caveats apply to both surfaces:
 ## Pausing a single session
 
 To keep one conversation out of the record without marking any directory,
-run the `hypaware-ignore` skill inside Claude Code or Codex ("don't record
-this session"). It is in-memory, lasts for that session, and is reversible
-with `hypaware-unignore`. Install the skills with `hyp skills install`.
+run `hyp session ignore` from inside that Claude Code or Codex session. It
+resolves the session id itself and refuses rather than guessing when it
+cannot. Reverse it with `hyp session unignore`; `hyp session status` reports
+which state the session is in right now.
+
+The opt-out is in-memory and lasts for that session only. Two things drop it
+while you may still believe it holds: a gateway restart, and a fork
+(`claude --fork-session`, `codex fork`), which mints a new session id the
+opt-out no longer covers. A plain resume reuses the id.
 
 ## Deleting what was already recorded
 

@@ -20,7 +20,7 @@ import {
   defaultPickerDetect,
   defaultPromptFactory,
   derivePickedClients,
-  loadPickerDescriptors,
+  loadPickerCatalog,
   orderPickerDescriptors,
   resolveHypHome,
   visiblePickerDescriptors,
@@ -70,9 +70,14 @@ export async function resolvePickSeeding(opts) {
   const { env } = opts
   const interactive = !opts.picks
 
-  const descriptors = opts.catalog
-    ? orderPickerDescriptors(opts.catalog.pickerDescriptors)
-    : await loadPickerDescriptors()
+  // Riders (`compose_with`) ride the same catalog the descriptors come
+  // from, so an injected catalog and a discovered one agree about them.
+  // @ref LLP 0213#d1 [implements]: the graph plugins are composed by riding the gateway pick
+  const loaded = opts.catalog
+    ? { descriptors: orderPickerDescriptors(opts.catalog.pickerDescriptors), composeWith: opts.catalog.composeWith ?? new Map() }
+    : await loadPickerCatalog()
+  const descriptors = loaded.descriptors
+  const composeWith = loaded.composeWith
   const descriptorList = [...descriptors.values()]
 
   // Locked ids come from the join phase's central-layer classification. A
@@ -179,6 +184,7 @@ export async function resolvePickSeeding(opts) {
 
   return {
     descriptors,
+    composeWith,
     descriptorList,
     visibleList,
     lockedSources,
@@ -258,7 +264,7 @@ export async function runWizardPick(opts) {
   const log = getLogger('wizard')
   const seeding = await resolvePickSeeding(opts)
   const {
-    descriptors, descriptorList, visibleList, lockedSources, lockedSet,
+    descriptors, composeWith, descriptorList, visibleList, lockedSources, lockedSet,
     configPath, existing, configured, detected, seed, carried, interactive, defaultRows,
   } = seeding
 
@@ -345,6 +351,7 @@ export async function runWizardPick(opts) {
     exportChoice,
     retentionDays,
     hypHome,
+    composeWith,
     ...(existing ? { existing } : {}),
   })
 

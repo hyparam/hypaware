@@ -116,6 +116,23 @@ export interface PluginManifest {
   provides?: PluginProvides
   permissions?: PluginPermission[]
   contributes?: PluginContributionManifest
+  /**
+   * Plugins whose presence in a composed config pulls this one in with
+   * them. When the walkthrough composes every plugin named here, it
+   * composes this plugin too; when it composes none of them, this plugin
+   * is not written.
+   *
+   * This is how a **derived-data** plugin rides a pick it does not
+   * contribute: `@hypaware/context-graph` has no picker row of its own,
+   * because "project my sessions into a graph" is not a thing the user is
+   * asked, and it is useless without a source to project.
+   *
+   * Distinct from `requires.plugins`, which is a hard dependency governing
+   * activation order and presence. `requires` says "I cannot run without
+   * this"; `compose_with` says "write me down wherever this is written
+   * down". A plugin may declare either, both, or neither.
+   */
+  compose_with?: PluginName[]
 }
 
 export interface PluginRequirements {
@@ -843,8 +860,29 @@ export interface ValidationError {
 
 export interface CommandRegistry {
   register(command: CommandRegistration): void
+  /**
+   * Describe a command *group* (`graph`, `query`) so its `--help` can
+   * carry a header and a paragraph, not just a subcommand table. Core
+   * groups get this from the bare command `makeGroupCommand` builds; a
+   * plugin namespace has no bare command, so it says so here instead.
+   *
+   * Metadata only: a registered group never appears in `list()`, so it
+   * cannot shadow a command or show up as its own subcommand.
+   */
+  registerGroup(group: CommandGroupRegistration): void
   get(name: string): CommandRegistration | undefined
+  getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
+}
+
+export interface CommandGroupRegistration {
+  /** The group prefix, e.g. `'graph'`. */
+  name: string
+  plugin?: PluginName
+  /** One-line group description, rendered as the help header. */
+  summary?: string
+  /** Long help, rendered between the usage line and the subcommand table. */
+  help?: string
 }
 
 export interface CommandRegistration {
@@ -1582,6 +1620,18 @@ export interface VerbRegistration {
   tool: string
   plugin?: PluginName
   summary: string
+  /**
+   * Long help for the CLI command this verb projects, rendered by
+   * dispatch's central `--help` interception under `summary` and `usage`.
+   * CLI-only, like `render`: the MCP tool describes itself with `summary`
+   * and `inputSchema`.
+   *
+   * This is where a verb's **mechanics** belong (what a flag means, how an
+   * argument resolves, where output is truncated) so a skill does not have
+   * to narrate them. Constraints, the rules with nameable harm, stay in the
+   * skill: the constraint guard reads skill files, not help strings.
+   */
+  help?: string
   inputSchema: VerbInputSchema
   /** Default `'cli+mcp'`. */
   exposure?: VerbExposure

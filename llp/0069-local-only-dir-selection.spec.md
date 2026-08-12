@@ -68,7 +68,7 @@ machinery rather than competing with them:
 | Mechanism | Scope | Class / effect | Lifetime | Where authored |
 |---|---|---|---|---|
 | `.hypignore` ([LLP 0049](./0049-hypignore-usage-policy.spec.md)) | directory subtree | `ignore` (not recorded) | persistent, committable | repo dotfile |
-| session opt-out ([LLP 0066](./0066-session-opt-out.spec.md)) | one client session | ephemeral drop (not recorded) | in-memory | `/hypaware-ignore` skill |
+| session opt-out ([LLP 0066](./0066-session-opt-out.spec.md)) | one client session | ephemeral drop (not recorded) | in-memory | `hyp session ignore` ([LLP 0212](./0212-session-opt-out-is-a-cli-verb.decision.md)) |
 | **this spec** | directory subtree | **`local-only` (recorded, not forwarded)** | **persistent, machine-local** | **login picker + CLI** |
 
 The distinctions that make this a separate mechanism, not a variant:

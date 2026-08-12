@@ -3,6 +3,7 @@
 /**
  * @import { PickerDescriptor } from '../../src/core/types.js'
  * @import { PickerSource, PickerExport } from '../../src/core/cli/types.js'
+ * @import { HypAwareV2Config } from '../../hypaware-plugin-kernel-types.js'
  */
 
 import test from 'node:test'
@@ -356,5 +357,125 @@ test('every needs_setup picker row composes the plugin that owns its configure_c
       + `'${descriptor.configureCommand}' but composes no ${descriptor.plugin}, `
       + 'so that command cannot resolve in the config the row produces'
     )
+  }
+})
+
+// --- riders (`compose_with`, LLP 0213 #d1) -----------------------------------
+
+/**
+ * The real catalog, descriptors and riders together, so these tests fold
+ * the manifests as shipped rather than a fixture of them.
+ *
+ * @returns {Promise<{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }>}
+ */
+async function realCatalog() {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  return {
+    descriptors: catalog.pickerDescriptors,
+    composeWith: catalog.composeWith ?? new Map(),
+  }
+}
+
+/**
+ * @param {{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }} catalog
+ * @param {PickerSource[]} sources
+ * @param {HypAwareV2Config} [existing]
+ */
+function composeWithRiders(catalog, sources, existing) {
+  return composePickerConfig({
+    sources,
+    descriptors: catalog.descriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: RETENTION,
+    hypHome: HYP_HOME,
+    composeWith: catalog.composeWith,
+    ...(existing ? { existing } : {}),
+  })
+}
+
+const GRAPH_PLUGINS = ['@hypaware/context-graph', '@hypaware/ai-gateway-graph']
+
+// The whole point of LLP 0213: a default install has the graph without ever
+// being asked about it, because the graph rides the gateway it derives from.
+// @ref LLP 0213#d1 [tests]: derived-data plugins ride a pick rather than contributing one
+test('picking a gateway client composes the graph pair with it', async () => {
+  const catalog = await realCatalog()
+  const names = (composeWithRiders(catalog, ['claude']).plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(names.includes(rider), `expected ${rider} to ride the gateway pick`)
+  }
+})
+
+// The engine is not composed alone: an install with no gateway has no
+// contract to project, and a node/edge table that can never fill reads as
+// breakage rather than as an empty graph.
+test('a gateway-free pick composes neither graph plugin', async () => {
+  const catalog = await realCatalog()
+  const config = composeWithRiders(catalog, ['otel'])
+  const names = (config.plugins ?? []).map((p) => p.name)
+  assert.ok(!names.includes('@hypaware/ai-gateway'), 'otel alone needs no gateway')
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} must not appear without the gateway it rides`)
+  }
+})
+
+// Riders are composer-managed, so they live and die by the picks like any
+// composed plugin (LLP 0183 #carry-forward). A reconfigure that drops the
+// gateway drops them too, rather than stranding them in a config whose
+// gateway just went away.
+// @ref LLP 0213#stranding [tests]: unpicking the gateway drops the riders it carried
+test('a reconfigure that unpicks the gateway drops the graph pair', async () => {
+  const catalog = await realCatalog()
+  const before = composeWithRiders(catalog, ['claude'])
+  assert.ok((before.plugins ?? []).some((p) => p.name === '@hypaware/context-graph'))
+
+  const after = composeWithRiders(catalog, ['otel'], before)
+  const names = (after.plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} should be dropped with the pick that carried it`)
+  }
+})
+
+// A hand-added plugin the composer never chose is passed through untouched
+// (LLP 0183). That must stay true of a plugin outside the rider set, so the
+// rider rule does not quietly widen what a reconfigure is entitled to drop.
+test('a hand-added non-rider plugin survives a reconfigure that composes riders', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = [...(existing.plugins ?? []), { name: '@hypaware/gascity' }]
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const names = (after.plugins ?? []).map((p) => p.name)
+  assert.ok(names.includes('@hypaware/gascity'), 'hand-added plugins are not the composer\'s to drop')
+  assert.ok(names.includes('@hypaware/context-graph'), 'and the riders are still composed')
+})
+
+// Riders resolve to a fixpoint, so a manifest may ride a plugin that is
+// itself a rider without the manifests needing an ordering convention.
+test('a rider that rides another rider still composes', async () => {
+  const catalog = await realCatalog()
+  const composeWith = new Map(catalog.composeWith)
+  composeWith.set('@hypaware/test-second-order', ['@hypaware/context-graph'])
+  const config = composePickerConfig({
+    sources: /** @type {PickerSource[]} */ (['claude']),
+    descriptors: catalog.descriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: RETENTION,
+    hypHome: HYP_HOME,
+    composeWith,
+  })
+  const names = (config.plugins ?? []).map((p) => p.name)
+  assert.ok(names.includes('@hypaware/test-second-order'), 'the second-order rider lands too')
+})
+
+// Without a composeWith map nothing rides anything: the fold composes
+// exactly what the picks name, which is what every pre-LLP-0213 caller and
+// test in this file relies on.
+test('no composeWith map means no riders', async () => {
+  const d = await realPickerDescriptors()
+  const names = (compose(d, ['claude']).plugins ?? []).map((p) => p.name)
+  for (const rider of GRAPH_PLUGINS) {
+    assert.ok(!names.includes(rider), `${rider} must not appear when no riders are supplied`)
   }
 })

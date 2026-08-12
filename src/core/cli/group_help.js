@@ -72,15 +72,22 @@ export function synthesizeGroupSummary(childNames) {
  * Render help for a command group: header (when a bare command supplies
  * a summary), usage, optional long help, and the subcommand table.
  *
+ * `groupCommand` is the group's own voice: a core group supplies the bare
+ * command `makeGroupCommand` built, and a plugin namespace supplies the
+ * `CommandGroupRegistration` it registered. Both are partial, so a group
+ * with a `help` but no `summary` renders its paragraph and skips the
+ * header rather than printing `hyp graph - undefined`.
+ *
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   group: string,
- *   groupCommand?: Pick<CommandRegistration, 'summary' | 'usage' | 'help'>,
+ *   groupCommand?: Partial<Pick<CommandRegistration, 'summary' | 'usage' | 'help'>>,
  *   children: { name: string, summary: string }[],
  * }} args
+ * @ref LLP 0214#d2 [implements]: plugin-owned groups render the same header/paragraph core groups do
  */
 export function renderGroupHelp({ stdout, group, groupCommand, children }) {
-  if (groupCommand) {
+  if (groupCommand?.summary) {
     stdout.write(`hyp ${group} - ${groupCommand.summary}\n`)
     stdout.write('\n')
   }

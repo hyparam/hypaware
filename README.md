@@ -246,9 +246,10 @@ plus `--depth`, `--direction out|in|both`, `--type <node_type>`, `--edge-type
 and `edge` datasets are queryable through `hyp query sql` like any other
 dataset.
 
-The `hypaware-graph` skill ships with this plugin (along with a
-`graph_neighbors` tool), so an assistant can project and walk the graph on your
-behalf wherever the graph is enabled.
+This plugin ships a `graph_neighbors` tool and the `hyp graph` help that
+explains the traversal, and the `hypaware-query` skill covers when to ask the
+graph rather than the messages, so an assistant can project and walk the graph
+on your behalf.
 
 ## Attaching and detaching AI clients
 
@@ -349,7 +350,8 @@ hyp purge <path> | --session <id> | --ignored | --all   # delete already-cached 
 ```
 
 To pause recording for just the current Claude or Codex session (in-memory,
-reversible) use the `hypaware-ignore` and `hypaware-unignore` skills.
+reversible) run `hyp session ignore` from inside it; `hyp session unignore`
+resumes and `hyp session status` reports the current answer.
 
 The full model, including what enrollment forwards and the first-sync
 privacy review, is in

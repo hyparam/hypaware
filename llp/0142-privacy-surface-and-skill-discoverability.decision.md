@@ -76,6 +76,14 @@ publishing, applying, or editing report sources) rather than onto the skill's
 discoverability. The rest of this document, including the reasoning for why
 `hypaware-ignore` / `hypaware-unignore` were never in this set, stands.
 
+**Superseded-by: [LLP 0212 #skills-retired](./0212-session-opt-out-is-a-cli-verb.decision.md#skills-retired)**
+(2026-08-12), for the following paragraph only. Both skills are retired: they
+predated `hyp session ignore` and had become a second, drifting implementation
+of it. The requirement below (the opt-out must be reachable in the user's own
+words) is unchanged and is now met by `hypaware-reference`'s description; see
+[LLP 0212 §costs](./0212-session-opt-out-is-a-cli-verb.decision.md#costs) for
+what that trade gives up.
+
 It does **not** cover `hypaware-ignore` / `hypaware-unignore`. For the
 session opt-out, being reachable in the user's own words *is* the feature:
 [LLP 0066](./0066-session-opt-out.spec.md) is written around the utterance

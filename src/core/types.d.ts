@@ -77,6 +77,16 @@ export interface PluginCatalog {
   knownDatasets: Set<string>
   clientDescriptors: Map<string, ClientDescriptor>
   pickerDescriptors: Map<string, PickerDescriptor>
+  /**
+   * Plugins that ride other plugins into a composed config, keyed by the
+   * rider and valued by the names it waits for (`compose_with`). Read by
+   * `composePickerConfig` after the picked rows are folded.
+   *
+   * Optional so a hand-built catalog (tests, narrow call sites that only
+   * want descriptors) stays valid; absent means "no riders", which
+   * composes exactly what the picks name.
+   */
+  composeWith?: Map<PluginName, PluginName[]>
 }
 
 // --- dep_graph ---

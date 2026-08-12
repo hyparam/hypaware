@@ -264,12 +264,23 @@ depends on `build.sh` being absent from this repo.
   `hypaware-ignore`, `hypaware-privacy`, `hypaware-query`, `hypaware-reference`,
   `hypaware-report`, `hypaware-unignore`.
 
+  **Superseded-by: LLP 0212, LLP 0213, LLP 0216.** The six-skill outcome held
+  until 2026-08-12 and is now **three** (`hypaware-privacy`, `hypaware-query`,
+  `hypaware-reference`): `hypaware-ignore` / `hypaware-unignore` became CLI
+  verbs (0212), `hypaware-graph` merged into `hypaware-query` (0213), and
+  `hypaware-report` was removed when report generation moved server-side (0216).
+
   The four report skills became one `hypaware-report`: a short router `SKILL.md`
   that names the four stages and carries the rules holding across all of them,
   with the detail in `reviewing.md`, `rendering.md`, `publishing.md`, and
   `applying.md` loaded on entry.
 
-  <a id="t12-graph-was-already-owned"></a>**`hypaware-graph` was not merged into
+  <a id="t12-graph-was-already-owned"></a>**Superseded-by: LLP 0213** (the graph
+  is now composed wherever the gateway is, so the packaging constraint below no
+  longer holds and the merge landed 2026-08-12). The reasoning stands for the
+  world it was written in.
+
+  **`hypaware-graph` was not merged into
   `hypaware-query`, and should not have been.** The plan assumed claude and codex
   owned that skill. They did not: `@hypaware/context-graph` ships it, and the
   claude and codex copies were byte-identical duplicates carried unconditionally.

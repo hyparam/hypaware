@@ -433,7 +433,7 @@ export interface RunWizardPickOptions {
    * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
    * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
    */
-  catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors'>
+  catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors' | 'composeWith'>
   /**
    * Central-layer-locked source ids from the join phase (LLP 0129
    * #join-before-picker). Each renders checked and disabled with the

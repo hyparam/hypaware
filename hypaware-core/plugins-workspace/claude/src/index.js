@@ -264,10 +264,7 @@ export async function activate(ctx) {
   for (const skillName of [
     'hypaware-query',
     'hypaware-reference',
-    'hypaware-ignore',
-    'hypaware-unignore',
     'hypaware-privacy',
-    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,
