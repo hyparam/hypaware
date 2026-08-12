@@ -134,6 +134,28 @@ test('content with no data URI passes through byte-identical', () => {
   assert.equal(contentTextFor(jsonish), jsonish)
 })
 
+test('the prefix class cannot splice a `data:` to an unrelated `;base64,`', () => {
+  // The intermediate is `[^\s,]{0,255}?`. A comma, whitespace, or more than
+  // 255 chars between the two halves means they are not one URI, and the real
+  // text between them has to survive. Every other case in this file that keeps
+  // its input byte-identical exits at the `includes(';base64,')` cheap reject
+  // and never reaches the regex, so relaxing that class breaks nothing else
+  // here. This is the only guard on the widening.
+  const cases = [
+    // a comma ends the URI, so `x;base64,...` is not its payload
+    'ref=data:image/png,x;base64,AAAABBBBCCCC',
+    // prose between the halves, spaces
+    'The scheme is data:image/png and the marker ;base64,AAAABBBBCCCC sit apart.',
+    // prose between the halves, a newline
+    'data:image/png\n;base64,AAAABBBBCCCC',
+    // a plausible prefix, but far longer than any real mime plus parameters
+    `data:${'x'.repeat(300)};base64,AAAABBBBCCCC`,
+  ]
+  for (const s of cases) {
+    assert.equal(contentTextFor(s), s)
+  }
+})
+
 test('the array path still drops image blocks entirely and keeps sibling text', () => {
   // Unchanged behaviour, asserted so the string-path fix cannot be "fixed"
   // later by making the array path retain image parts instead.
