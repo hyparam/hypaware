@@ -9,7 +9,11 @@
  * rows itself. Note that the engine's own filter is two-valued for NULLs,
  * so declining is a correctness *fallback*, not a correctness *guarantee*:
  * on a nullable column it can still return rows SQL's three-valued logic
- * excludes. Prefer a faithful filter over a decline where one exists.
+ * excludes, and it does so for every negation of an UNKNOWN subtree
+ * (`NOT (col LIKE 'a%')` over a nullable column, issue #734). Prefer a
+ * faithful filter over a decline where one exists: a predicate that is
+ * UNKNOWN for every row is faithfully pushable as hyparquet's never-match
+ * even though it looks like nothing worth pushing.
  *
  * Ported from the Hyperparam app (`lib/tools/parquetPushdownFilter.ts`),
  * which drives the same squirreling + hyparquet stack. The node-type
@@ -58,6 +62,11 @@ function convertExpr(node, negate) {
 }
 
 /**
+ * @ref LLP 0098 [constrained-by]: the engine trusts `appliedWhere` and never
+ * re-judges a claimed predicate, so a predicate that matches nothing is worth
+ * converting rather than declining: the decline is not a no-op, it is a
+ * handoff to a two-valued filter that answers the negation wrong.
+ *
  * @param {BinaryNode} node
  * @param {boolean} negate
  * @returns {ParquetQueryFilter | undefined}
@@ -84,17 +93,37 @@ function convertBinary(node, negate) {
     if (!leftFilter || !rightFilter) return undefined
     return negate ? { $and: [leftFilter, rightFilter] } : { $or: [leftFilter, rightFilter] }
   }
-  // LIKE has no parquet-filter equivalent; let the engine handle it.
-  if (op === 'LIKE') return undefined
-
   const { column, value, flipped } = extractColumnAndValue(left, right)
   if (column === undefined || value === undefined) return undefined
-  // A comparison against a NULL literal (`col = NULL`, `col < NULL`) is
-  // UNKNOWN for every row under three-valued logic, so it matches nothing,
-  // NULL rows included. No hyparquet operator says "never match", so hand
-  // the predicate back to the engine rather than push a filter that would
-  // read as `IS NULL`. `IS NULL` itself goes through the unary path.
-  if (value === null) return undefined
+  // A comparison against a NULL literal (`col = NULL`, `col < NULL`,
+  // `NULL >= col`, `col LIKE NULL`) is UNKNOWN for every row under
+  // three-valued logic: no row is TRUE, NULL rows included, and no amount of
+  // negation rescues one, since `NOT UNKNOWN` is UNKNOWN. So it matches
+  // nothing whatever `negate` says, which is `$in: []`, the same never-match
+  // `convertInValues` pushes for `col NOT IN (…, NULL)` (see there for why
+  // hyparquet reads an empty `$in` as "no row, no row group").
+  //
+  // Pushing beats declining even where the engine happens to agree. Its WHERE
+  // is two-valued (a comparison with a NULL operand is FALSE, not UNKNOWN,
+  // and unary `NOT` is JS `!`), so it answers `col = NULL` right by accident
+  // and every negation of it wrong: `NOT (col = NULL)` returned every row
+  // (issue #734). Pushing also prunes on row-group statistics, which the
+  // fallback never can. `IS NULL`, the predicate this shape gets mistaken
+  // for, goes through the unary path and is unaffected.
+  //
+  // Only comparisons and LIKE take this branch. Arithmetic and `||` against a
+  // NULL literal are never TRUE either, but they are values rather than
+  // predicates, and a WHERE made of one is exotic enough not to widen the
+  // claim for.
+  if (value === null) {
+    if (!isComparisonOp(op) && op !== 'LIKE') return undefined
+    return { [column]: { $in: [] } }
+  }
+  // LIKE against anything else has no parquet-filter equivalent; let the
+  // engine handle it. That fallback is only NULL-correct while the LIKE is
+  // not negated (issue #734 tracks the rest, which needs three-valued logic
+  // in the engine itself).
+  if (op === 'LIKE') return undefined
 
   const mongoOp = mapOperator(op, flipped, negate)
   if (!mongoOp) return undefined
@@ -257,9 +286,19 @@ function convertInValues(node, negate) {
   // which is true, so every row group is skipped on statistics alone. Pushing
   // it is also what keeps the answer right: squirreling's own `WHERE` is
   // two-valued for NULLs, so handing the predicate back returns the very rows
-  // it excludes. (`col IN (…, NULL)` is fine: the NULL entry can never make
-  // the disjunction true, and the `$ne: null` guard below stops it from
-  // matching NULL rows.)
+  // it excludes.
   if (negate && values.some((value) => value === null)) return { [node.expr.name]: { $in: [] } }
-  return { [node.expr.name]: { $ne: null, [negate ? '$nin' : '$in']: values } }
+  // A NULL member of a list that is NOT negated is dropped instead. It can
+  // never make the disjunction TRUE (`col = NULL` is UNKNOWN for every row)
+  // and the guard below already excludes NULL rows, so the row set is
+  // identical either way, but carrying it costs pruning: `canSkipStats` orders
+  // every `$in` member against the chunk bounds through `compareParquetValues`,
+  // which returns `undefined` for a non-string against a BYTE_ARRAY bound, and
+  // one undecidable member makes the whole `every` fail. A string column
+  // filtered on `IN ('zz', NULL)` therefore reads every row group it could
+  // have skipped. When every member is NULL the list drops to `$in: []`, which
+  // is exactly what `col IN (NULL)` means. (Nothing is dropped on the negated
+  // path: a negated list holding a NULL returned above.)
+  const pushed = values.filter((value) => value !== null)
+  return { [node.expr.name]: { $ne: null, [negate ? '$nin' : '$in']: pushed } }
 }
