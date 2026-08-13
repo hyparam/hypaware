@@ -141,10 +141,16 @@ test('whereToParquetFilter handles AND / OR / NOT', () => {
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1)')),
     { $and: [{ id: { $ne: null } }, { id: { $ne: 1n } }] }
   )
-  // De Morgan: NOT (a OR b) -> $nor of the un-negated children
+  // De Morgan: NOT (a OR b) -> $and of the negated children, never `$nor`,
+  // whose two-valued complement matches the rows its children left UNKNOWN
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1 OR id = 2)')),
-    { $nor: [{ id: { $eq: 1n } }, { id: { $eq: 2n } }] }
+    {
+      $and: [
+        { $and: [{ id: { $ne: null } }, { id: { $ne: 1n } }] },
+        { $and: [{ id: { $ne: null } }, { id: { $ne: 2n } }] },
+      ],
+    }
   )
 })
 
@@ -188,7 +194,7 @@ test('whereToParquetFilter declines predicates whose SQL result is always UNKNOW
 
 // --- NULL rows must not leak past a pushed-down filter ------------------------
 
-// @ref LLP 0098#wrapper-duties [tests]: the scan claims `appliedWhere` for
+// @ref LLP 0098 [tests]: the scan claims `appliedWhere` for
 // every convertible predicate, so the engine never re-filters. hyparquet
 // evaluates a bare bound with raw JS comparison, where `null <= 300n` is true,
 // so an unguarded filter is a silent wrong answer rather than an error.
@@ -225,6 +231,17 @@ test('pushed-down comparisons do not leak NULL rows (issue #728)', async () => {
     ['ts IS NULL', [2, 4]],
     ['ts IS NOT NULL', [1, 3, 5]],
     ['NOT (ts IS NULL)', [1, 3, 5]],
+    // NOT over an OR: a NULL row is UNKNOWN for every disjunct, which SQL
+    // excludes but a two-valued complement reports as "nothing matched,
+    // therefore true". Only correct while negation reaches the leaves, so
+    // each leaf carries its own guard.
+    ['NOT (ts > 300 OR ts < 100)', [1, 3]],
+    ['NOT (ts >= 300 OR ts <= 100)', []],
+    ['NOT (ts = 100 OR ts = 300)', [5]],
+    ["NOT (ts IN (100) OR label = 'c')", [5]],
+    ['NOT (neg > -400 OR neg < -600)', [1]],
+    ["NOT (label < 'c' OR label > 'c')", [3]],
+    ['NOT (ts IS NULL OR ts > 300)', [1, 3]],
   ]
   assert.deepEqual(await mismatches(cases), [])
 })

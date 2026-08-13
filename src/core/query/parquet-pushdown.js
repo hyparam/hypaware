@@ -69,13 +69,17 @@ function convertBinary(node, negate) {
     return negate ? { $or: [leftFilter, rightFilter] } : { $and: [leftFilter, rightFilter] }
   }
   if (op === 'OR') {
-    // `$nor` already expresses NOT(a OR b), so the children are converted
-    // un-negated and the wrapper carries the negation, propagating
-    // `negate` into them as well would double-negate.
-    const leftFilter = convertExpr(left, false)
-    const rightFilter = convertExpr(right, false)
+    // De Morgan: NOT (a OR b) === (NOT a) AND (NOT b), which holds in Kleene
+    // three-valued logic too. The obvious `$nor` wrapper does not: hyparquet
+    // evaluates it as a two-valued complement, reporting "no child matched"
+    // as a match, so a row that is UNKNOWN for every disjunct sails past
+    // every leaf guard. Pushing the negation into the children instead lets
+    // each leaf carry its own `$ne: null`, and `$and` prunes on row-group
+    // statistics where `$nor` never can.
+    const leftFilter = convertExpr(left, negate)
+    const rightFilter = convertExpr(right, negate)
     if (!leftFilter || !rightFilter) return undefined
-    return negate ? { $nor: [leftFilter, rightFilter] } : { $or: [leftFilter, rightFilter] }
+    return negate ? { $and: [leftFilter, rightFilter] } : { $or: [leftFilter, rightFilter] }
   }
   // LIKE has no parquet-filter equivalent; let the engine handle it.
   if (op === 'LIKE') return undefined
@@ -121,7 +125,13 @@ function convertBinary(node, negate) {
  * `$eq` needs no guard: `equals(null, <non-null>)` is already false, and
  * `$eq: null` is exactly how the `IS NULL` path spells itself.
  *
- * @ref LLP 0098#wrapper-duties [constrained-by]: pushdown may only claim
+ * A per-leaf guard is only sound because every negation is pushed down to a
+ * leaf (`convertBinary` uses De Morgan for both `AND` and `OR`). Any wrapper
+ * that complements a subtree wholesale, such as `$nor`, evaluates two-valued
+ * and hands back the rows its children left UNKNOWN, defeating the guards
+ * underneath it. Keep negation at the leaves.
+ *
+ * @ref LLP 0098 [constrained-by]: pushdown may only claim
  * `appliedWhere` for a filter that is faithful to SQL semantics; the engine
  * never re-filters a claimed predicate, so a leak here is a wrong answer.
  *
@@ -234,8 +244,9 @@ function convertInValues(node, negate) {
     if (val.type !== 'literal') return undefined
     values.push(coerceBigInt(val.value))
   }
-  // `col NOT IN (…, NULL)` is UNKNOWN for every row: no value can be proven
-  // distinct from NULL, so the predicate matches nothing. Unexpressible as a
+  // `col NOT IN (…, NULL)` matches no row: it is FALSE for a row equal to one
+  // of the listed values and UNKNOWN for every other row (no value can be
+  // proven distinct from NULL), so no row is TRUE. Unexpressible as a
   // hyparquet operator, so the engine keeps it. (`col IN (…, NULL)` is fine:
   // the NULL entry can never make the disjunction true, and the `$ne: null`
   // guard below stops it from matching NULL rows.)
