@@ -62,7 +62,7 @@ function convertExpr(node, negate) {
 }
 
 /**
- * @ref LLP 0098 [implements]: the engine trusts `appliedWhere` and never
+ * @ref LLP 0098 [constrained-by]: the engine trusts `appliedWhere` and never
  * re-judges a claimed predicate, so a predicate that matches nothing is worth
  * converting rather than declining: the decline is not a no-op, it is a
  * handoff to a two-valued filter that answers the negation wrong.

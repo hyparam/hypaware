@@ -226,6 +226,11 @@ test('whereToParquetFilter pushes never-match only where the shape proves it', (
   // no column at all, so both keep declining.
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id + 1 = NULL)')), undefined)
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (NULL = 1)')), undefined)
+  // The branch is for predicates, not values: an arithmetic or concat
+  // expression against a NULL literal still declines even though its column
+  // is a bare identifier.
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id + NULL')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name || NULL')), undefined)
   // ...and a negated LIKE over a real pattern stays declined (and, on a
   // nullable column, stays SQL-wrong until the engine speaks three-valued
   // logic: issue #734, option 1).
@@ -328,6 +333,16 @@ test('negated comparisons against a NULL literal match no rows (issue #734)', as
     // BETWEEN desugars to two comparisons, one of them against the NULL
     ['ts BETWEEN NULL AND 500', []],
     ['NOT (ts BETWEEN NULL AND 500)', []],
+    // These three are non-empty on purpose: `ts` maxes at 500, so a bound of
+    // 500 makes every row's non-NULL conjunct FALSE and both cases above
+    // empty by accident of the data, not by the logic. A bound of 50 (or
+    // reversing which side is NULL) leaves rows whose non-NULL conjunct is
+    // FALSE rather than TRUE, so the negation matches and a bug that pushed
+    // never-match for the whole desugared AND, rather than only the
+    // `>= NULL` conjunct, would fail these.
+    ['NOT (ts BETWEEN NULL AND 50)', [1, 3, 5]],
+    ['ts NOT BETWEEN NULL AND 50', [1, 3, 5]],
+    ['NOT (ts BETWEEN 400 AND NULL)', [1, 3]],
     // composition: UNKNOWN AND TRUE is UNKNOWN, UNKNOWN OR TRUE is TRUE
     ['NOT (ts = NULL) AND ts >= 300', []],
     ['NOT (ts = NULL) OR ts >= 300', [3, 5]],
