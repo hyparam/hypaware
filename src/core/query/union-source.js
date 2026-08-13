@@ -50,6 +50,13 @@ import { normalizeScanColumn } from './scan-column.js'
  * at the first such row. `SELECT *` keeps each partition's own row shape, so the
  * key is simply absent. `test/core/union-source.test.js` pins both halves.
  *
+ * Because a sub-source now emits exactly the columns it is asked for (see
+ * `parquet-source.js`), forwarding `columns` also determines what the engine
+ * gets to re-filter on: it relies on squirreling folding the WHERE columns
+ * into the projection it hands to `scan()`, so the predicate's columns are
+ * already present even though `appliedWhere: false` never asks for them
+ * explicitly.
+ *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}
  * @ref LLP 0015#multi-partition-union [constrained-by]: the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy

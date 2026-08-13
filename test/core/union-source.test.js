@@ -122,6 +122,54 @@ test('unionSources forwards where/columns to sub-sources that have the predicate
   }
 })
 
+/** @type {ColumnSpec[]} */
+const PARQUET_PARTITION_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'name', type: 'STRING', nullable: false },
+  { name: 'score', type: 'DOUBLE', nullable: false },
+]
+
+/**
+ * Build a real, on-disk-shaped parquet `AsyncDataSource` partition (the shared
+ * fixture `test/core/parquet-source.test.js` also builds from), so the union
+ * test below exercises actual hyparquet reads and pushdown, not a fake source.
+ *
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function makeParquetPartition(rows) {
+  return parquetSourceFromRows(PARQUET_PARTITION_COLUMNS, rows, { rowGroupSize: 2 })
+}
+
+// @ref LLP 0015#multi-partition-union [tests]: appliedWhere: false only stays correct end-to-end because
+// squirreling folds WHERE columns into the projection it hands to scan(); pin that at the layer
+// that depends on it, with two real parquet partitions, not a fake source.
+test('unionSources over two real parquet partitions filters correctly through executeSql (WHERE column folded into projection)', async () => {
+  const partitionA = await makeParquetPartition([
+    { id: 1, name: 'alice', score: 1.5 },
+    { id: 2, name: 'bob', score: 2.5 },
+    { id: 3, name: 'carol', score: 3.5 },
+  ])
+  const partitionB = await makeParquetPartition([
+    { id: 4, name: 'dave', score: 4.5 },
+    { id: 5, name: 'eve', score: 5.5 },
+  ])
+  const union = unionSources([partitionA, partitionB])
+
+  // union.scan() always reports appliedWhere: false, handing the predicate
+  // back to the engine to re-apply over the merged stream. That only returns
+  // the right rows here because squirreling's planner folds `score` (the
+  // WHERE column) into the projection it passes to scan(), even though the
+  // query only selects `name`; each parquet partition then emits `score`
+  // alongside `name`, and the engine can actually filter on it. If squirreling
+  // ever stopped folding, this would start throwing `ColumnNotFoundError` at
+  // query time, when the engine re-filters on a column the rows no longer
+  // carry, while every other test in this file (and in parquet-source.test.js)
+  // stayed green, since they exercise a single source, not the union path.
+  const rows = await collect(executeSql({ tables: { t: union }, query: 'SELECT name FROM t WHERE score > 3' }))
+  assert.deepEqual(rows, [{ name: 'carol' }, { name: 'dave' }, { name: 'eve' }])
+})
+
 test('unionSources drops where for a partition that lacks a predicate column but keeps it for one that has it', async () => {
   /** @type {ScanOptions[]} */
   const seen = []

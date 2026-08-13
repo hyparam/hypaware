@@ -1145,23 +1145,48 @@ function normalizeContent(content) {
 // index unbuildable (its 9.3M distinct 5-grams overflow V8's Set cap).
 //
 // Any `;base64,` payload is stripped, not just images: none of them are text.
-// The marker stays so the row still records that an image was there and a
-// search for `input_image` or `image_url` still finds it. Only the pixels go.
+// The marker stays so the row still records that a payload was there and a
+// search for `input_image` or `image_url` still finds it. Only the bytes go.
+//
+// The marker echoes the mediatype that was on the wire rather than a fixed
+// `image`, so the row does not assert something false about what was captured:
+// a `data:application/pdf` payload used to be rewritten to claim it was an
+// image, and a search for the real mediatype missed the row (#722). The
+// mediatype is echoed verbatim, not normalized through an allowlist; the
+// prefix class already caps it at 255 characters and excludes whitespace and
+// `,`, and what was actually sent is the honest thing to record.
+//
+// The capture group only changes what the replacement does. It must not change
+// what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
+// splice onto an unrelated `;base64,` across prose, a comma, or 255 characters.
+//
+// Idempotency survives the varying marker on two locks, and the comma is the
+// load-bearing one: `[^\s,]` excludes `,` and every `;base64,` ends in one, so
+// a captured mediatype can never contain a `;base64,`. The emitted marker
+// therefore holds exactly one, always followed by `<`, which the payload class
+// also excludes, so it can neither re-match in place nor splice onto a later
+// `;base64,` by backtracking past `<stripped>`. Admitting `,` to the mediatype
+// class would break idempotency, not just splice safety.
 //
 // This bounds only the matched forms, so `content_text` is NOT guaranteed
 // bounded. A line-wrapped or `\n`-escaped payload still has its tail survive
 // as bare base64 text, because the match stops at the newline. A general
 // length cap on `content_text` is a deliberate open question (#718) and is
 // not addressed here.
-const BASE64_DATA_URI = /data:[^\s,]{0,255}?;base64,[A-Za-z0-9+/=_-]+/g
-const STRIPPED_DATA_URI = 'data:image;base64,<stripped>'
+const BASE64_DATA_URI = /data:([^\s,]{0,255}?);base64,[A-Za-z0-9+/=_-]+/g
+const UNKNOWN_MEDIATYPE = 'application/octet-stream'
 
 /** @param {string | undefined} text */
 function stripBase64DataUris(text) {
   // Cheap reject first: this runs on every captured part, and almost none of
   // them carry a payload.
   if (text === undefined || !text.includes(';base64,')) return text
-  return text.replace(BASE64_DATA_URI, STRIPPED_DATA_URI)
+  // A replacer function, not a `$1` template: the empty mediatype
+  // (`data:;base64,`) has to fall back to `application/octet-stream`, and a
+  // template string cannot express that. A `$1` template would be safe against
+  // a `$` in the mediatype (a substituted capture is never re-scanned for
+  // replacement patterns), so that is not the reason.
+  return text.replace(BASE64_DATA_URI, (_match, mediatype) => `data:${mediatype || UNKNOWN_MEDIATYPE};base64,<stripped>`)
 }
 
 /**
