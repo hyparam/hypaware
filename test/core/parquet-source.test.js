@@ -174,17 +174,21 @@ test('whereToParquetFilter returns undefined for non-convertible predicates', ()
   assert.equal(whereToParquetFilter(undefined), undefined)
 })
 
-test('whereToParquetFilter declines predicates whose SQL result is always UNKNOWN', () => {
+test('whereToParquetFilter handles predicates whose SQL result is always UNKNOWN', () => {
   // Comparison against a NULL literal never matches a row, not even a NULL
-  // one; there is no hyparquet operator for "never match", so the engine
-  // keeps the predicate rather than the scan claiming a filter that reads
-  // like IS NULL.
+  // one. The engine keeps the predicate rather than the scan claiming a
+  // filter that reads like IS NULL.
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL')), undefined)
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id != NULL')), undefined)
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id < NULL')), undefined)
-  // NOT IN over a list containing NULL is UNKNOWN for every row too.
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, NULL)')), undefined)
-  // IN over such a list is expressible: the NULL entry cannot make the
+  // NOT IN over a list containing NULL matches no row either, and that one is
+  // expressible: `$in: []` is hyparquet's never-match, and pushing it beats
+  // declining, whose fallback (squirreling's two-valued WHERE) returns rows.
+  assert.deepEqual(
+    whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, NULL)')),
+    { id: { $in: [] } }
+  )
+  // IN over such a list is expressible too: the NULL entry cannot make the
   // disjunction true, and the guard keeps NULL rows out.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, NULL)')),
@@ -253,6 +257,7 @@ test('comparison against a NULL literal matches no rows (issue #728)', async () 
     ['ts != NULL', []],
     ['ts < NULL', []],
     ['ts IN (300, NULL)', [3]],
+    ['ts NOT IN (300, NULL)', []],
   ]
   assert.deepEqual(await mismatches(cases), [])
 })

@@ -6,7 +6,10 @@
  * the predicate down to the parquet reader. Returns `undefined` whenever
  * the expression cannot be fully and faithfully converted. The caller
  * must then leave `appliedWhere` false and let the SQL engine filter the
- * rows itself.
+ * rows itself. Note that the engine's own filter is two-valued for NULLs,
+ * so declining is a correctness *fallback*, not a correctness *guarantee*:
+ * on a nullable column it can still return rows SQL's three-valued logic
+ * excludes. Prefer a faithful filter over a decline where one exists.
  *
  * Ported from the Hyperparam app (`lib/tools/parquetPushdownFilter.ts`),
  * which drives the same squirreling + hyparquet stack. The node-type
@@ -126,7 +129,9 @@ function convertBinary(node, negate) {
  * `$eq: null` is exactly how the `IS NULL` path spells itself.
  *
  * A per-leaf guard is only sound because every negation is pushed down to a
- * leaf (`convertBinary` uses De Morgan for both `AND` and `OR`). Any wrapper
+ * leaf: `convertBinary` uses De Morgan for both `AND` and `OR`, and each leaf
+ * absorbs the negation itself (`mapOperator` for comparisons, `convertExpr`
+ * for `IS NULL` / `IS NOT NULL`, `convertInValues` for `IN`). Any wrapper
  * that complements a subtree wholesale, such as `$nor`, evaluates two-valued
  * and hands back the rows its children left UNKNOWN, defeating the guards
  * underneath it. Keep negation at the leaves.
@@ -246,10 +251,15 @@ function convertInValues(node, negate) {
   }
   // `col NOT IN (…, NULL)` matches no row: it is FALSE for a row equal to one
   // of the listed values and UNKNOWN for every other row (no value can be
-  // proven distinct from NULL), so no row is TRUE. Unexpressible as a
-  // hyparquet operator, so the engine keeps it. (`col IN (…, NULL)` is fine:
-  // the NULL entry can never make the disjunction true, and the `$ne: null`
-  // guard below stops it from matching NULL rows.)
-  if (negate && values.some((value) => value === null)) return undefined
+  // proven distinct from NULL), so no row is TRUE. `$in: []` is hyparquet's
+  // never-match: `matchesIn` folds an empty target list to `[].some(…)`, which
+  // is false, and `canSkipStats`'s `$in` branch folds it to `[].every(…)`,
+  // which is true, so every row group is skipped on statistics alone. Pushing
+  // it is also what keeps the answer right: squirreling's own `WHERE` is
+  // two-valued for NULLs, so handing the predicate back returns the very rows
+  // it excludes. (`col IN (…, NULL)` is fine: the NULL entry can never make
+  // the disjunction true, and the `$ne: null` guard below stops it from
+  // matching NULL rows.)
+  if (negate && values.some((value) => value === null)) return { [node.expr.name]: { $in: [] } }
   return { [node.expr.name]: { $ne: null, [negate ? '$nin' : '$in']: values } }
 }
