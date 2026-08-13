@@ -15,15 +15,25 @@
 // The rule is enforced in `extractContentText`, so every branch (plain string,
 // `tool_result` string, `tool_result` array, thinking, error) is covered by one
 // pass rather than one branch being patched and the next one regressing. The
-// marker survives: the row still records that an image was there, and a search
-// for `input_image` or `image_url` still finds the row. Only the pixels go.
+// marker survives: the row still records that a payload was there, names the
+// mediatype it had, and a search for `input_image` or `image_url` still finds
+// the row. Only the bytes go.
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
-const MARKER = 'data:image;base64,<stripped>'
+/**
+ * The marker the strip leaves behind for a payload of mediatype `mime`. It is
+ * not a fixed sentinel: the mediatype that was on the wire is echoed back, so
+ * the row never claims a payload was something it was not (#722).
+ *
+ * @param {string} mime
+ */
+function markerFor(mime) {
+  return `data:${mime};base64,<stripped>`
+}
 
 // Long enough that a retained payload is unmistakable in an assertion diff,
 // and shaped like real PNG base64 (the `iVBORw0KGgo` header Codex emits).
@@ -57,7 +67,7 @@ test('string path: a stringified JSON array of input_image keeps the marker and 
   // never runs on it.
   const text = contentTextFor(`[{"type":"input_image","image_url":"data:image/png;base64,${PNG_BASE64}"}]`)
   assertNoPayload(text)
-  assert.equal(text, `[{"type":"input_image","image_url":"${MARKER}"}]`)
+  assert.equal(text, `[{"type":"input_image","image_url":"${markerFor('image/png')}"}]`)
   // The row still says an image was here, and still matches a search for it.
   assert.ok(String(text).includes('input_image'))
   assert.ok(String(text).includes('image_url'))
@@ -78,14 +88,14 @@ test('tool_result string branch: the payload is stripped there too', () => {
   }, { gatewayId: 'gw' })
   assert.equal(rows.length, 1)
   assertNoPayload(rows[0].content_text)
-  assert.equal(rows[0].content_text, `[{"type":"input_image","image_url":"${MARKER}"}]`)
+  assert.equal(rows[0].content_text, `[{"type":"input_image","image_url":"${markerFor('image/png')}"}]`)
   assert.equal(rows[0].part_type, 'tool_result')
 })
 
 test('a data URI embedded mid-prose loses only the payload, not the prose', () => {
   const text = contentTextFor(`Here is the screenshot: data:image/png;base64,${PNG_BASE64} - what do you see?`)
   assertNoPayload(text)
-  assert.equal(text, `Here is the screenshot: ${MARKER} - what do you see?`)
+  assert.equal(text, `Here is the screenshot: ${markerFor('image/png')} - what do you see?`)
 })
 
 test('multiple data URIs in one string are all stripped', () => {
@@ -93,16 +103,16 @@ test('multiple data URIs in one string are all stripped', () => {
     `first data:image/png;base64,${PNG_BASE64} then data:image/jpeg;base64,${PNG_BASE64} done`,
   )
   assertNoPayload(text)
-  assert.equal(text, `first ${MARKER} then ${MARKER} done`)
+  assert.equal(text, `first ${markerFor('image/png')} then ${markerFor('image/jpeg')} done`)
 })
 
 test('a non-image mime type is stripped as well', () => {
   // Deliberate: any `;base64,` payload goes, not just images. The retained
-  // marker is a fixed sentinel, so it reads `image` regardless of the original
-  // mime; it marks "a base64 payload was here", not the payload's type.
+  // marker names the mediatype the payload actually had, so the row records
+  // both that a base64 payload was here and what kind it was.
   const text = contentTextFor(`report: data:application/pdf;base64,${PNG_BASE64}`)
   assertNoPayload(text)
-  assert.equal(text, `report: ${MARKER}`)
+  assert.equal(text, `report: ${markerFor('application/pdf')}`)
 })
 
 test('mime case and mime parameters do not defeat the strip', () => {
@@ -115,11 +125,11 @@ test('a base64url payload (containing - and _) is fully stripped, no bare tail s
   const urlSafe = PNG_BASE64.replace(/\+/g, '-').replace(/\//g, '_')
   const text = contentTextFor(`shot: data:image/png;base64,${urlSafe}`)
   assertNoPayload(text)
-  assert.equal(text, `shot: ${MARKER}`)
+  assert.equal(text, `shot: ${markerFor('image/png')}`)
 })
 
 test('stripping an already-stripped value is a no-op', () => {
-  const already = `shot: ${MARKER}`
+  const already = `shot: ${markerFor('image/png')}`
   assert.equal(contentTextFor(already), already)
 })
 
@@ -208,8 +218,88 @@ test('thinking and error blocks are covered by the same pass', () => {
     }],
   }, { gatewayId: 'gw' })
   assert.equal(rows.length, 2)
-  assert.equal(rows[0].content_text, `reasoning over ${MARKER}`)
-  assert.equal(rows[1].content_text, `upload failed for ${MARKER}`)
+  assert.equal(rows[0].content_text, `reasoning over ${markerFor('image/png')}`)
+  assert.equal(rows[1].content_text, `upload failed for ${markerFor('image/png')}`)
+})
+
+// The marker has to name the mediatype that was actually stripped. A fixed
+// `image` sentinel makes the row assert something false about what was
+// captured: a search for `data:application/pdf` over `content_text` misses
+// every row where a PDF was present, because the row now claims an image.
+
+test('the marker names the stripped mediatype, not a fixed `image`', () => {
+  const text = contentTextFor(`report: data:application/pdf;base64,${PNG_BASE64}`)
+  assertNoPayload(text)
+  assert.equal(text, `report: ${markerFor('application/pdf')}`)
+  // The whole point: searching for what was really there finds the row.
+  assert.ok(String(text).includes('data:application/pdf'))
+  assert.ok(!String(text).includes('data:image'))
+})
+
+test('a `+`-bearing mediatype reaches the marker intact', () => {
+  const text = contentTextFor(`logo: data:image/svg+xml;base64,${PNG_BASE64}`)
+  assertNoPayload(text)
+  assert.equal(text, `logo: ${markerFor('image/svg+xml')}`)
+})
+
+test('an empty mediatype falls back to application/octet-stream', () => {
+  // `data:;base64,...` is legal and says nothing about the bytes, so the marker
+  // has to say that rather than guess.
+  const text = contentTextFor(`bare: data:;base64,${PNG_BASE64}`)
+  assertNoPayload(text)
+  assert.equal(text, `bare: ${markerFor('application/octet-stream')}`)
+})
+
+test('mediatype case is recorded as it arrived on the wire', () => {
+  const text = contentTextFor(`shot: data:image/PNG;base64,${PNG_BASE64}`)
+  assertNoPayload(text)
+  assert.equal(text, `shot: ${markerFor('image/PNG')}`)
+})
+
+test('mediatype parameters are carried into the marker', () => {
+  const text = contentTextFor(`doc: data:text/plain;charset=utf-8;base64,${PNG_BASE64}`)
+  assertNoPayload(text)
+  assert.equal(text, `doc: ${markerFor('text/plain;charset=utf-8')}`)
+})
+
+test('several mediatypes in one string each keep their own', () => {
+  const text = contentTextFor(
+    `a data:image/png;base64,${PNG_BASE64}`
+    + ` b data:application/pdf;base64,${PNG_BASE64}`
+    + ` c data:audio/mpeg;base64,${PNG_BASE64} d`,
+  )
+  assertNoPayload(text)
+  assert.equal(
+    text,
+    `a ${markerFor('image/png')} b ${markerFor('application/pdf')} c ${markerFor('audio/mpeg')} d`,
+  )
+})
+
+test('the marker stays idempotent for every mediatype it can now emit', () => {
+  // The sentinel's text now varies with the mediatype, so "stripping an
+  // already-stripped value is a no-op" has to hold for all of them, not just
+  // for one fixed string. The payload class `[A-Za-z0-9+/=_-]` excludes `<`,
+  // which is what stops `<stripped>` from reading as a fresh payload; the
+  // mediatype class excludes only whitespace and `,`, so `+`, `.`, `-`, `;`
+  // and even a nested `data:` inside the mediatype have to be checked.
+  const mimes = [
+    'image/png',
+    'application/pdf',
+    'image/svg+xml',
+    'application/vnd.ms-excel',
+    'application/octet-stream',
+    'text/plain;charset=utf-8',
+    'x-custom.type-1+json',
+    'IMAGE/PNG',
+    'xdata:nested',
+    '',
+  ]
+  for (const mime of mimes) {
+    const once = String(contentTextFor(`shot: data:${mime};base64,${PNG_BASE64}`, 'sess-idem'))
+    assertNoPayload(once)
+    assert.equal(contentTextFor(once, 'sess-idem'), once, `second strip changed the marker for "${mime}"`)
+    assert.equal(contentTextFor(once, 'sess-idem'), once, `third strip changed the marker for "${mime}"`)
+  }
 })
 
 test('stripping bounds the row: a multi-megabyte payload lands as a short value', () => {
