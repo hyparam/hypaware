@@ -11,6 +11,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
@@ -977,10 +978,12 @@ function reportEnableFailure({ name, result, ctx }) {
  * @returns {Promise<void>}
  */
 async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json }) {
+  const homeDir = ctx.env.HOME ?? os.homedir()
   await materializeClientAssets({
     clients: [name],
     descriptors: descriptorMap,
-    homeDir: ctx.env.HOME ?? os.homedir(),
+    homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
     dryRun,
@@ -1956,6 +1959,7 @@ export async function runSkillsInstall(argv, ctx) {
     clients: parsed.client === 'all' ? 'all' : [parsed.client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
     stdout: ctx.stdout,

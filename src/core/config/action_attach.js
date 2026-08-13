@@ -3,6 +3,7 @@
 import os from 'node:os'
 
 import { Attr } from '../observability/index.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import {
   clientAssetBaseDirs,
   clientAssetsKey,
@@ -482,6 +483,7 @@ function attachedAssetOptions(client, ctx) {
     clients: [client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     ...(ctx.skills ? { skills: ctx.skills } : {}),
     ...(ctx.agents ? { agents: ctx.agents } : {}),
   }

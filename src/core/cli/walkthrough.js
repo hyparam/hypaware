@@ -12,6 +12,7 @@ import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select } from './tui/index.js'
@@ -1651,6 +1652,7 @@ export async function runPickerFinale(args) {
           clients: clientsPicked,
           descriptors: descriptorMap,
           homeDir,
+          stateRoot: clientAssetStateRoot(env, homeDir),
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
           dryRun,

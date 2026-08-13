@@ -253,10 +253,39 @@ export interface MaterializeClientAssetsOptions {
    */
   skills?: { list(): { name: string; clients: string[]; sourceDir: string }[] }
   agents?: { list(): { name: string; clients: string[]; sourceFile: string }[] }
+  /**
+   * State root (`<HYP_HOME>/hypaware`) holding the install ledger: the record
+   * of which destinations HypAware itself wrote, which is what makes removing
+   * a no-longer-contributed asset safe. Omitted, the install still copies but
+   * records nothing and removes nothing, which is what every pre-LLP-0218
+   * caller did. Resolve it with `clientAssetStateRoot(env, homeDir)` so it is
+   * anchored on the same home the assets land in.
+   */
+  stateRoot?: string
   /** Report what would be copied without touching the filesystem. */
   dryRun?: boolean
   /** Progress lines, one per copy. Omitted on non-interactive callers. */
   stdout?: { write(chunk: string): unknown }
   /** Per-contribution warnings for the skips that are worth surfacing. */
   stderr?: { write(chunk: string): unknown }
+}
+
+/**
+ * One line of the client-asset install ledger: a destination HypAware wrote,
+ * and enough about it to answer, on a later upgrade, both "did we put this
+ * here?" and "is what is there still what we put?".
+ */
+export interface ClientAssetLedgerRecord {
+  kind: 'skill' | 'agent'
+  /** Contribution name, for the line a removal prints. */
+  name: string
+  /** Client whose asset directories this destination belongs to. */
+  client: string
+  /** Absolute destination path. */
+  dest: string
+  /**
+   * Content digest taken right after the copy. Absent on a record carried from
+   * a failed write, which is why a missing digest never reads as a match.
+   */
+  digest?: string
 }

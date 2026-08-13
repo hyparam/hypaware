@@ -214,17 +214,19 @@ test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currenc
     assert.equal(attachCalls.length, 2)
 
     // The org withdraws the plugin again. The set shrinks, so this re-attach
-    // copies only helper-a - but helper-b is still on disk, and the marker is
-    // the only thing naming it. A rewrite that reported just this pass's copies
-    // would strand it beyond the reach of every reversal.
+    // copies only helper-a, and takes helper-b off the machine: this attach's
+    // own record says it wrote that path, the plan no longer contains it, and
+    // its bytes are unchanged (LLP 0218 #prune-on-materialize). Before that it
+    // sat there until someone ran a detach.
     const r5 = await reconciler.reconcile(reconcileInput({ endpoint, clients, home, skills: [skillA] }))
     assert.deepEqual(r5.results.map((x) => x.outcome), ['done'])
     const dropped = path.join(home, 'skills', 'claude', 'helper-b')
-    assert.equal(fs.existsSync(dropped), true, 'the withdrawn skill is still on disk')
+    assert.equal(fs.existsSync(dropped), false, 'the withdrawn skill comes off the machine')
     assert.deepEqual(
       [...readMarkerFile(stateRoot).attach.claude.installed_assets].sort(),
       [path.join(home, 'skills', 'claude', 'helper-a'), dropped].sort(),
-      'the undo record still names it, so a later leave can remove it'
+      'the undo record still names it: the union is unchanged, and it is what a ' +
+        'prune that could not act (an edited copy, a locked path) would fall back on'
     )
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
