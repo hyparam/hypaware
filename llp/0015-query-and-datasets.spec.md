@@ -72,8 +72,20 @@ union (partitions with additive schema drift) can otherwise push a filter on a
 column a given partition physically lacks, and a parquet-backed source throws
 `parquet filter columns not found` rather than reading it as null; when a
 partition can't satisfy the predicate the union drops `where` for it and lets
-the engine filter. `columns` is always forwarded: projecting an absent column
-reads as null, never throws.
+the engine filter. `columns` is always forwarded, which adds no failure the
+merged stream did not already have, but an absent column does **not** read as
+null. A bare identifier projection (`SELECT extra FROM t`, with or without an
+alias, a `LIMIT`, or a predicate on a column every partition has) copies the
+value through and yields `undefined` for rows from a partition that lacks the
+column: the key is present, its value is not `null`, and `JSON.stringify` drops
+it. Anything that *evaluates* the absent column throws squirreling's
+`ColumnNotFoundError` at the first row from a partition without it: a `WHERE` on
+it, an expression or function over it, `ORDER BY`, `GROUP BY`, `DISTINCT`, or an
+aggregate on it. `SELECT *` is unaffected: each partition's rows keep their own
+shape, so the key is simply absent. The column is addressable at all only
+because the union advertises the superset of partition columns; when no
+partition has it, planning fails with the same error. Pinned by
+[`test/core/union-source.test.js`](../test/core/union-source.test.js).
 
 ## Collect: the ad-hoc on-ramp
 

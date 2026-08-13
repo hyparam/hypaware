@@ -26,7 +26,14 @@ import { normalizeScanColumn } from './scan-column.js'
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded: projecting an absent column reads as null, never throws.
+ * forwarded, which adds no failure the merged stream did not already have, but
+ * an absent column does NOT read as null: a bare identifier projection yields
+ * `undefined` for rows from a partition that lacks the column (key present,
+ * value not `null`, dropped by `JSON.stringify`), while anything that evaluates
+ * it (a `WHERE` on it, an expression over it, `ORDER BY`/`GROUP BY`/`DISTINCT`,
+ * an aggregate) throws `ColumnNotFoundError` at the first such row. `SELECT *`
+ * keeps each partition's own row shape, so the key is simply absent.
+ * `test/core/union-source.test.js` pins both halves.
  *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}

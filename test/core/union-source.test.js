@@ -3,12 +3,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { asyncRow, parseSql } from 'squirreling'
+import { parquetMetadataAsync } from 'hyparquet'
+import { parquetWriteBuffer } from 'hyparquet-writer'
+import { asyncRow, collect, executeSql, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
+import { parquetDataSource } from '../../src/core/query/parquet-source.js'
+import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncBuffer } from 'hyparquet'
+ * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanColumnResults, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -363,7 +369,7 @@ test('unionSources scanColumn reports appliedWhere false over a legacy bare-iter
 })
 
 test('normalizeScanColumn passes a flagged result through and shims a legacy iterable', async () => {
-  /** @type {import('squirreling/src/types.js').ScanColumnResults} */
+  /** @type {ScanColumnResults} */
   const flagged = { appliedWhere: true, appliedLimitOffset: false, async *chunks() {} }
   assert.equal(normalizeScanColumn(flagged, { column: 'v' }), flagged, 'flagged shape is returned untouched')
 
@@ -388,4 +394,105 @@ test('emptySource advertises the given columns and yields no rows', async () => 
   const out = []
   for await (const row of scan.rows()) out.push(row)
   assert.equal(out.length, 0)
+})
+
+// --- additive schema drift over real parquet partitions ----------------------
+
+/** @type {ColumnSpec[]} */
+const DRIFT_BASE_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'score', type: 'DOUBLE', nullable: false },
+]
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {AsyncBuffer}
+ */
+function asyncBufferFromBytes(bytes) {
+  return {
+    byteLength: bytes.byteLength,
+    slice(start, end) {
+      const sliced = bytes.subarray(start, end)
+      const out = new ArrayBuffer(sliced.byteLength)
+      new Uint8Array(out).set(sliced)
+      return out
+    },
+  }
+}
+
+/**
+ * @param {ColumnSpec[]} columns
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function parquetPartition(columns, rows) {
+  const columnData = rowsToColumnSources(columns, rows)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY' })
+  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  return parquetDataSource(file, await parquetMetadataAsync(file))
+}
+
+/**
+ * Two real parquet partitions with additive drift: `extra` exists only in the
+ * newer one, the shape a cache takes on the day a dataset gains a column.
+ *
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function driftedUnion() {
+  const older = await parquetPartition(DRIFT_BASE_COLUMNS, [
+    { id: 1, score: 1.5 },
+    { id: 2, score: 2.5 },
+  ])
+  const newer = await parquetPartition(
+    [...DRIFT_BASE_COLUMNS, { name: 'extra', type: 'STRING', nullable: true }],
+    [{ id: 3, score: 3.5, extra: 'x' }]
+  )
+  return unionSources([older, newer])
+}
+
+/**
+ * @param {string} query
+ * @returns {Promise<Record<string, SqlPrimitive>[]>}
+ */
+async function runDrifted(query) {
+  return collect(executeSql({ tables: { t: await driftedUnion() }, query }))
+}
+
+/**
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @returns {boolean[]}
+ */
+function hasExtraKey(rows) {
+  return rows.map((row) => Object.prototype.hasOwnProperty.call(row, 'extra'))
+}
+
+// @ref LLP 0015#multi-partition-union [tests]: forwarding `columns` does not null-pad; the drifted cell is `undefined`, which is why the doc no longer promises null
+test('a projected column one partition lacks reads as undefined, never null', async () => {
+  for (const query of ['SELECT extra FROM t', 'SELECT extra FROM t WHERE score > 1']) {
+    const rows = await runDrifted(query)
+    assert.equal(rows.length, 3, query)
+    assert.deepEqual(hasExtraKey(rows), [true, true, true], 'the projection puts the key on every row')
+    assert.deepEqual(rows.map((row) => row.extra), [undefined, undefined, 'x'], query)
+    assert.equal(rows[0].extra === null, false, 'undefined, not null: the union never pads the drifted partition')
+    assert.equal(JSON.stringify(rows), '[{},{},{"extra":"x"}]', 'JSON.stringify drops the undefined cells')
+  }
+})
+
+// @ref LLP 0015#multi-partition-union [tests]: evaluating (not merely projecting) an absent column throws rather than reading as null
+test('evaluating a column one partition lacks throws ColumnNotFoundError', async () => {
+  const evaluating = [
+    'SELECT extra FROM t WHERE extra IS NOT NULL',
+    "SELECT id FROM t WHERE extra = 'x'",
+    "SELECT coalesce(extra, 'none') AS e FROM t",
+    'SELECT id, extra FROM t ORDER BY extra',
+    'SELECT max(extra) AS m FROM t',
+  ]
+  for (const query of evaluating) {
+    await assert.rejects(() => runDrifted(query), /Column "extra" not found/, query)
+  }
+})
+
+test('SELECT * keeps each partition row shape, so a drifted key is absent rather than undefined', async () => {
+  const rows = await runDrifted('SELECT * FROM t')
+  assert.deepEqual(hasExtraKey(rows), [false, false, true], 'a star projection copies only the columns a row has')
 })
