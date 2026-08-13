@@ -668,8 +668,8 @@ export async function runDaemon(opts = {}) {
           daemon_mode: mode,
           status: 'ok',
         },
-        async () => {
-          await maintainCache({
+        async (span) => {
+          const report = await maintainCache({
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
             config: mCfg,
@@ -680,9 +680,31 @@ export async function runDaemon(opts = {}) {
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
           })
+          // @ref LLP 0220#tick-reports-degraded [implements]: the walk now
+          // survives a partition that throws, so the rejected promise has
+          // stopped being how the daemon hears about one. Read the failures
+          // off the report instead, or a tick that lost its neediest
+          // partition would log exactly as a clean one does. The line names
+          // the partitions, which the propagated exception never could.
+          for (const p of report.partitions) {
+            if (!p.failed) continue
+            fileLog.error('daemon.maintenance_failed', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              [Attr.ERROR_KIND]: p.errorKind,
+              message: p.errorMessage,
+            })
+          }
+          if (report.totalFailed > 0) {
+            span.setAttribute('status', 'degraded')
+            span.setAttribute('partitions_failed', report.totalFailed)
+          }
+          span.setAttribute('partitions_maintained', report.partitions.length - report.totalFailed)
         },
         { component: 'daemon' }
       ).catch((err) => {
+        // Still reachable: partition discovery, the retired-generation
+        // sweep, and anything else outside the per-partition catch.
         const message = err instanceof Error ? err.message : String(err)
         fileLog.error('daemon.maintenance_failed', { message })
       })

@@ -342,13 +342,26 @@ export async function runQueryMaintain(argv, ctx) {
     if (p.compactionAttemptFailed) {
       actions.push(`compaction skipped: the retry failed under this writer at ${p.compactionAttemptFailedAt}, --force to retry`)
     }
+    // @ref LLP 0220#tick-reports-degraded: this tick's own failure, as
+    // opposed to the line above, which reports one an earlier tick already
+    // recorded on the cursor. The walk continued past this partition, so
+    // without the line the run reads as a clean one that happened to do
+    // less work.
+    if (p.failed) {
+      actions.push(`FAILED: ${p.errorMessage} (${p.errorKind}); the walk continued`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
   const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
-  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote} (${report.elapsedMs}ms)\n`)
-  return 0
+  const failedNote = report.totalFailed > 0 ? `, ${report.totalFailed} partitions failed` : ''
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote}${failedNote} (${report.elapsedMs}ms)\n`)
+  // A partition that threw used to abort the walk and exit non-zero. The
+  // walk survives it now, but the tick did not do what it was asked, so the
+  // exit status still says so: a script that gated on this must not start
+  // reading a degraded run as a clean one.
+  return report.totalFailed > 0 ? 1 : 0
 }
 
 const QUERY_MAINTAIN_USAGE = 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]'

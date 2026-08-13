@@ -294,8 +294,12 @@ test('a retry whose rewrite throws still spends its writer generation', async ()
     const [torn] = await liveDataFiles(dir)
     await fs.truncate(torn, 4)
 
-    await assert.rejects(
-      maintainCache({ cacheRoot, compactOnly: true }),
+    // The walk survives the failure and reports it per partition
+    // (LLP 0220), so the fixture invariant is read off the report rather
+    // than off a rejected tick.
+    const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(
+      attempt.partitions[0].failed, true,
       'fixture invariant: the retry must attempt a rewrite, and that rewrite must fail'
     )
 
@@ -343,8 +347,9 @@ test('a partition frozen by a failed retry is reported as skipped on every later
     const intact = await fs.readFile(torn)
     await fs.truncate(torn, 4)
 
-    await assert.rejects(
-      maintainCache({ cacheRoot, compactOnly: true }),
+    const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(
+      attempt.partitions[0].failed, true,
       'fixture invariant: the retry must attempt a rewrite, and that rewrite must fail'
     )
     const record = compactionRecord(dir)
@@ -409,7 +414,8 @@ test('a committed ineffective verdict outranks the failed attempt that followed 
     const retiringDir = path.join(dir, retiring)
     await fs.chmod(retiringDir, 0o555)
     try {
-      await assert.rejects(maintainCache({ cacheRoot, compactOnly: true }))
+      const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(attempt.partitions[0].failed, true, 'fixture invariant: the tick must fail on this partition')
     } finally {
       await fs.chmod(retiringDir, 0o755)
     }
@@ -461,8 +467,9 @@ test('a rewrite that throws after committing its cursor keeps the generation it 
     const retiringDir = path.join(dir, retiring)
     await fs.chmod(retiringDir, 0o555)
     try {
-      await assert.rejects(
-        maintainCache({ cacheRoot, compactOnly: true }),
+      const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(
+        attempt.partitions[0].failed, true,
         'fixture invariant: the rewrite must commit its cursor and then fail'
       )
 

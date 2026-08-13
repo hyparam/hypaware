@@ -143,6 +143,7 @@ export async function maintainCache(opts) {
   let totalSnapshotsExpired = 0
   let totalCompacted = 0
   let totalRebaselined = 0
+  let totalFailed = 0
 
   for (const part of partitions) {
     // Always work one partition before the budget can cut the tick short:
@@ -151,49 +152,69 @@ export async function maintainCache(opts) {
     // maintenance would never run at all.
     if (reports.length > 0 && Date.now() - startMs > budgetMs) break
 
-    const report = await withSpan(
-      'maintenance.partition',
-      {
-        [Attr.COMPONENT]: 'cache',
-        [Attr.OPERATION]: 'maintenance.partition',
-        [Attr.DATASET]: part.dataset,
-        partition: JSON.stringify(part.partition),
-        status: 'ok',
-      },
-      async (span) => {
-        /** @type {MaintenancePartitionReport} */
-        const r = {
-          dataset: part.dataset,
-          partition: part.partition,
-          path: part.path,
-          snapshotsExpired: 0,
-          compacted: false,
-          rowCount: part.rowCount,
-          dataFilesBefore: 0,
-          dataFilesAfter: 0,
-        }
+    // Built out here rather than inside the span callback so the catch
+    // below still has it: a partition that threw part-way keeps whatever
+    // the run had already established about it (its live file count, any
+    // snapshots expired before compaction reached the error) instead of
+    // being reported as a bare failure with zeroed counts.
+    /** @type {MaintenancePartitionReport} */
+    const report = {
+      dataset: part.dataset,
+      partition: part.partition,
+      path: part.path,
+      snapshotsExpired: 0,
+      compacted: false,
+      rowCount: part.rowCount,
+      dataFilesBefore: 0,
+      dataFilesAfter: 0,
+    }
 
-        const cursor = readCursorSync(part.path)
-        const settle = resolveSettleContext(opts, part.dataset)
+    try {
+      await withSpan(
+        'maintenance.partition',
+        {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.OPERATION]: 'maintenance.partition',
+          [Attr.DATASET]: part.dataset,
+          partition: JSON.stringify(part.partition),
+          status: 'ok',
+        },
+        async (span) => {
+          const cursor = readCursorSync(part.path)
+          const settle = resolveSettleContext(opts, part.dataset)
 
-        const done = await maintainGeneration(
-          r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter
-        )
-        // A compaction that "converged" is only healthy if it also shrank
-        // the file count; publish both sides of that so a run that rewrites
-        // a partition into the same fragmentation is visible in the trace
-        // rather than only in a later disk audit.
-        span.setAttribute('compacted', done.compacted)
-        span.setAttribute('data_files_before', done.dataFilesBefore)
-        span.setAttribute('data_files_after', done.dataFilesAfter)
-        span.setAttribute('rows', done.rowCount)
-        if (done.compactedBytesWritten !== undefined) {
-          span.setAttribute('bytes_written', done.compactedBytesWritten)
-        }
-        return done
-      },
-      { component: 'cache' }
-    )
+          const done = await maintainGeneration(
+            report, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter
+          )
+          // A compaction that "converged" is only healthy if it also shrank
+          // the file count; publish both sides of that so a run that rewrites
+          // a partition into the same fragmentation is visible in the trace
+          // rather than only in a later disk audit.
+          span.setAttribute('compacted', done.compacted)
+          span.setAttribute('data_files_before', done.dataFilesBefore)
+          span.setAttribute('data_files_after', done.dataFilesAfter)
+          span.setAttribute('rows', done.rowCount)
+          if (done.compactedBytesWritten !== undefined) {
+            span.setAttribute('bytes_written', done.compactedBytesWritten)
+          }
+        },
+        { component: 'cache' }
+      )
+    } catch (err) {
+      // @ref LLP 0220#walk-survives-a-partition [implements]: one partition's
+      // error ends that partition's work, not the tick's. Outside `withSpan`
+      // on purpose: the helper rethrows after recording the exception and an
+      // ERROR status on `maintenance.partition`, so catching here keeps the
+      // span honest about the partition while the walk moves on. Catching
+      // inside the callback would hand every reader of the trace an `ok`
+      // span for a partition that failed. Everything the failure path itself
+      // has to do - LLP 0217's writer-generation stamp above all - already
+      // ran inside `maintainGeneration`, on the way out.
+      report.failed = true
+      report.errorKind = errorKindOf(err)
+      report.errorMessage = err instanceof Error ? err.message : String(err)
+      totalFailed++
+    }
     reports.push(report)
     totalSnapshotsExpired += report.snapshotsExpired
     if (report.compacted) totalCompacted++
@@ -209,9 +230,27 @@ export async function maintainCache(opts) {
     totalSnapshotsExpired,
     totalCompacted,
     totalRebaselined,
+    totalFailed,
     dryRun: opts.dryRun ?? false,
     elapsedMs: Date.now() - startMs,
   }
+}
+
+/**
+ * The error's own kind when it carries one (the convention sink
+ * materialization already uses for the same per-unit catch), else a kind
+ * naming where it was caught. Never the exception's class: what an
+ * operator needs off a maintenance report is which step of the tick gave
+ * up, and the message beside it carries the rest.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function errorKindOf(err) {
+  if (err && typeof err === 'object' && 'errorKind' in err) {
+    return String(/** @type {{ errorKind: unknown }} */ (err).errorKind)
+  }
+  return 'maintenance_partition_failed'
 }
 
 /**
