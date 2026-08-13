@@ -46,9 +46,19 @@ const NULLABLE_ROWS = [
 /**
  * Every predicate below, with the rows SQL's three-valued logic selects. The
  * cache (Iceberg) path and the parquet-file path must both return exactly
- * this, and the same rows as each other.
+ * this, and the same rows as each other -- except a case marked `bounded`,
+ * where the kernel converter (`whereToParquetFilter`) declines the predicate
+ * (a CAST/typed-literal operand it can't read a literal out of) but icebird's
+ * own converter still folds it and keeps forwarding `where` as a pruning
+ * hint (LLP 0221#pruning-hint). The wrapper then claims `appliedWhere: false`
+ * and hands the rows icebird's filter already let through back to the
+ * engine's own two-valued WHERE. That is sound (icebird's filter never drops
+ * a SQL-TRUE row, LLP 0221#pruning-hint) but not exact: the cache answer is
+ * only guaranteed to sit between SQL's answer and the parquet path's
+ * unpruned one, per LLP 0221#consequences, so a `bounded` case asserts
+ * `SQL ⊆ cache ⊆ parquet` rather than equality.
  *
- * @type {[string, number[]][]}
+ * @type {[string, number[], { bounded?: boolean }?][]}
  */
 const PARITY_CASES = [
   // --- comparison against a NULL literal ------------------------------------
@@ -112,7 +122,30 @@ const PARITY_CASES = [
   // predicates neither converter takes: the engine owns them on both paths
   ["label LIKE 'a%'", [1]],
   ["label LIKE 'a%' OR ts > 300", [1, 5]],
+
+  // --- a predicate the kernel converter declines (CAST/typed literal) ------
+  // `whereToParquetFilter` only reads a literal straight off a comparison
+  // operand (`extractColumnAndValue`), so a `CAST(... AS BIGINT)` operand
+  // makes it decline, unlike the bare `neg > -400` case above. icebird's own
+  // converter still folds the CAST and pushes the same unguarded `$gt`, so
+  // the pruning hint carries the same NULL-coercion behavior either way; the
+  // difference is that a declined predicate additionally gets re-judged by
+  // the engine's own two-valued WHERE, which is NULL-correct for this
+  // (non-negated) shape. `bounded` still applies: this is a `SQL ⊆ cache ⊆
+  // parquet` case that happens to land on equality, not a guarantee that it
+  // always will.
+  ['neg > CAST(-400 AS BIGINT)', [3, 5], { bounded: true }],
 ]
+
+/**
+ * @param {number[]} inner
+ * @param {number[]} outer
+ * @returns {boolean}
+ */
+function isSubset(inner, outer) {
+  const have = new Set(outer)
+  return inner.every((id) => have.has(id))
+}
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -181,9 +214,20 @@ test('cache and parquet backends answer NULL predicates identically (issue #744)
     const iceberg = await makeIcebergSource(path.join(dir, 'table'))
     /** @type {string[]} */
     const wrong = []
-    for (const [predicate, expected] of PARITY_CASES) {
+    for (const [predicate, expected, opts] of PARITY_CASES) {
       const cacheIds = await idsFor(iceberg, predicate)
       const parquetIds = await idsFor(await makeParquetSource(), predicate)
+      if (opts?.bounded) {
+        // A declined predicate is only guaranteed SQL ⊆ cache ⊆ parquet
+        // (LLP 0221#consequences), not cache === parquet.
+        if (!isSubset(expected, cacheIds)) {
+          wrong.push(`WHERE ${predicate} -> cache [${cacheIds.join(',')}] does not contain SQL's answer [${expected.join(',')}]`)
+        }
+        if (!isSubset(cacheIds, parquetIds)) {
+          wrong.push(`WHERE ${predicate} -> cache [${cacheIds.join(',')}] is not a subset of parquet [${parquetIds.join(',')}]`)
+        }
+        continue
+      }
       if (cacheIds.join(',') !== expected.join(',')) {
         wrong.push(`WHERE ${predicate} -> cache [${cacheIds.join(',')}], SQL says [${expected.join(',')}]`)
       }

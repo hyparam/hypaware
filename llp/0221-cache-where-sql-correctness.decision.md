@@ -123,19 +123,32 @@ makes.
 
 ## Consequences {#consequences}
 
-- A predicate over `ai_gateway_messages` and the same predicate over a parquet
-  file return the same rows. `test/core/iceberg-source-parity.test.js` runs one
-  corpus against both backends and against SQL's answer.
+- A predicate the kernel converter owns (`whereToParquetFilter` converts it,
+  so the wrapper claims `appliedWhere`) returns the same rows over
+  `ai_gateway_messages` as the same predicate does over a parquet file.
+  `test/core/iceberg-source-parity.test.js` runs one corpus against both
+  backends and against SQL's answer.
 - No pruning is lost, so LLP 0098's filtered-aggregate fast path and the
   file-level pruning LLP 0212 measured both survive. What is added is a
   per-row `matchFilter` over rows that already passed icebird's filter, which
   is strictly less work than the engine-side re-filter option 3 would have
   forced.
-- The remaining NULL gap is unchanged and still tracked by issue #734: a
-  predicate this repo's converter declines falls to squirreling's two-valued
-  `WHERE`, which answers a negated UNKNOWN subtree (`NOT (col LIKE 'a%')` over
-  a nullable column) with rows SQL excludes. That is now identical on both
-  backends rather than worse on one.
+- The remaining NULL gap is still tracked by issue #734: a predicate this
+  repo's converter declines falls to squirreling's two-valued `WHERE`, which
+  answers a negated UNKNOWN subtree (`NOT (col LIKE 'a%')` over a nullable
+  column) with rows SQL excludes. On the parquet-file path, which has no
+  pruning to fall back on, that two-valued answer is the whole story. On the
+  cache path a declined predicate is still forwarded to icebird as a pruning
+  hint (#pruning-hint), so it is filtered twice: once by icebird's own
+  (possibly cast-folding) converter, then by the engine's two-valued `WHERE`
+  over whatever survived. The pruning step can drop UNKNOWN rows the
+  two-valued engine would otherwise have returned, so for a declined
+  predicate the cache path may return FEWER rows than the parquet path, not
+  the same rows and not more. What holds is weaker than parity: `SQL ⊆ cache
+  ⊆ parquet`, bounded between SQL's own answer and the parquet path's,
+  not equal to either in general. `test/core/iceberg-source-parity.test.js`
+  pins a CAST/typed-literal case against that subset chain rather than
+  asserting `cache === parquet` for this class.
 - icebird's converter still runs, so a divergence in ITS constant folding
   (`foldCast`, which it documents as a mirror of squirreling's `CAST`
   evaluation) would now prune rows rather than decide them. That was already

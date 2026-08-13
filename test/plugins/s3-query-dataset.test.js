@@ -2,6 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { Readable } from 'node:stream'
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
@@ -9,6 +12,9 @@ import { collect, executeSql } from 'squirreling'
 
 import { buildS3QueryDataset } from '../../hypaware-core/plugins-workspace/s3/src/query-dataset.js'
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
+import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
+import { createBlobStoreIO, tableUrlForBlobPrefix } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
+import { commitBatch, probeTable } from '../../hypaware-core/plugins-workspace/format-iceberg/src/commit.js'
 
 /**
  * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../hypaware-plugin-kernel-types.js'
@@ -159,6 +165,70 @@ test('iceberg query source with no metadata reads as empty (no throw)', async ()
   })
   const rows = await runQuery(dataset, 'SELECT * FROM ai_gw')
   assert.deepEqual(rows, [])
+})
+
+// The s3 iceberg branch (`createIcebergDataSource`) wraps its
+// `icebergDataSource` in `withSqlCorrectWhere` the same way the local cache's
+// `dataSourceForTable` does (LLP 0221#wrapper, issue #744), but had no test
+// of its own. This writes a real table through a real BlobStore (local-fs
+// standing in for S3, the same adapter shape `@hypaware/s3` uses) and proves
+// the remote branch is NULL-correct, not just the local one.
+test('iceberg query source is NULL-correct through a real BlobStore round trip (issue #744)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-s3-iceberg-'))
+  try {
+    const blobStore = createLocalFsBlobStore({ baseDir: dir })
+    const { resolver, lister } = await createBlobStoreIO(blobStore)
+    const prefix = 'iceberg/datasets/ai_gw'
+    const tableUrl = tableUrlForBlobPrefix(prefix)
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'ts', type: 'INT64', nullable: true },
+    ]
+    // Same `ts` shape as the local-cache parity fixture
+    // (`test/core/iceberg-source-parity.test.js`): straddles a bound with
+    // NULLs on either side, so `!= 300` has to exclude both the NULL rows
+    // and the literal match rather than just the match.
+    const rows = [
+      { id: 1, ts: 100 },
+      { id: 2, ts: null },
+      { id: 3, ts: 300 },
+      { id: 4, ts: null },
+      { id: 5, ts: 500 },
+    ]
+    const priorState = await probeTable(tableUrl, resolver, lister)
+    await commitBatch({ tableUrl, columns, rows, resolver, lister }, priorState)
+
+    const dataset = buildS3QueryDataset({
+      source: { name: 'ai_gw', format: 'iceberg', prefix, schema: columns },
+      blobStore,
+      plugin: '@hypaware/s3',
+    })
+
+    /** @type {[string, number[]][]} */
+    const cases = [
+      ['ts = NULL', []],
+      ['NOT (ts = NULL)', []],
+      ['ts != NULL', []],
+      ['ts NOT IN (300, NULL)', []],
+      ['ts != 300', [1, 5]],
+    ]
+    /** @type {string[]} */
+    const wrong = []
+    for (const [predicate, expected] of cases) {
+      const got = await runQuery(dataset, `SELECT id FROM ai_gw WHERE ${predicate}`)
+      const ids = got.map((r) => Number(r.id)).sort((a, b) => a - b)
+      if (ids.join(',') !== expected.join(',')) {
+        wrong.push(`WHERE ${predicate} -> [${ids.join(',')}], SQL says [${expected.join(',')}]`)
+      }
+    }
+    assert.deepEqual(wrong, [])
+
+    const agg = await runQuery(dataset, 'SELECT COUNT(ts) AS n FROM ai_gw WHERE NOT (ts = NULL)')
+    assert.equal(Number(agg[0].n), 0, 'a filtered aggregate must reach the same NULL-correct rows')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('parquet discovery bounds the prefix to a directory, excluding sibling namespaces', async () => {
