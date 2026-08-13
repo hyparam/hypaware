@@ -319,6 +319,60 @@ test('a retry whose rewrite throws still spends its writer generation', async ()
   }
 })
 
+// @ref LLP 0217#retry-on-writer-change [tests]: the companion to the case
+// above, and the one the re-read exists for. A rewrite can also throw *after*
+// committing its cursor, and the stamp is written from the cursor on disk
+// rather than the one read at the top of the tick precisely so that the
+// committed generation stands. Stamping the in-memory copy instead would roll
+// the partition back onto the retired generation, orphaning the rewrite's
+// output for the grace sweep to reap and losing the verdict it just recorded,
+// so the partition is skipped silently forever instead of reported.
+test('a rewrite that throws after committing its cursor keeps the generation it committed', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-late-'))
+  try {
+    await seedUnshrinkablePartition(cacheRoot, 8)
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    const dir = partitionDir(cacheRoot)
+    // The stamp-less cursor from issue #723 again: one attempt is owed.
+    await plantCompactionRecord(dir, {
+      previousTableDir: 'table',
+      compactedAt: '2026-08-12T21:55:35.168Z',
+      resettleBaselineFiles: 8,
+    })
+
+    // The generation the retry will read from and, once it has committed the
+    // new one, retire. Making it read-only lets the whole rewrite run and
+    // commit, then fails the last step: the `.retired` marker written into
+    // this directory.
+    const retiring = readCursorSync(dir).tableDir ?? 'table'
+    const retiringDir = path.join(dir, retiring)
+    await fs.chmod(retiringDir, 0o555)
+    try {
+      await assert.rejects(
+        maintainCache({ cacheRoot, compactOnly: true }),
+        'fixture invariant: the rewrite must commit its cursor and then fail'
+      )
+
+      // The commit stands: the cursor still points at the generation the
+      // rewrite produced, not back at the one it was retiring.
+      assert.notEqual(
+        readCursorSync(dir).tableDir, retiring,
+        'a throw after the commit must not roll the cursor back onto the retired generation'
+      )
+      // And the verdict that commit recorded survives the stamp, so the next
+      // tick can still tell what the rewrite achieved.
+      const record = compactionRecord(dir)
+      assert.equal(record.dataFilesBefore, 8, 'the committed record must not be replaced by the pre-rewrite one')
+      assert.equal(typeof record.writerGeneration, 'number', 'a spent attempt must still stamp the cursor')
+    } finally {
+      await fs.chmod(retiringDir, 0o755)
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 // @ref LLP 0217#record-effectiveness [tests]: a partition holding one data
 // file is at its floor, not fragmented. A rewrite of it reduces nothing
 // because there is nothing to reduce, which is evidence about neither the

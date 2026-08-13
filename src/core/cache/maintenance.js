@@ -408,7 +408,15 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           // cursor that cannot be read back must not be replaced by the
           // epoch-0 default `readCursorSync` would synthesize.
           if (verdictStale) {
-            await writeCursor(r.path, stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor))
+            // Best-effort: a cursor write that fails must not displace the
+            // rewrite failure that is the actual diagnosis (a decode error
+            // masked by an ENOSPC on the stamp sends the operator after the
+            // wrong symptom). Unstamped means the next tick attempts the
+            // rewrite again, which is the pre-existing behaviour rather than
+            // a regression.
+            try {
+              await writeCursor(r.path, stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor))
+            } catch { /* see above */ }
           }
           throw err
         }

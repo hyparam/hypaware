@@ -332,7 +332,7 @@ export async function runQueryMaintain(argv, ctx) {
     if (p.compactionIneffective) {
       actions.push(p.compacted
         ? 'no file-count reduction'
-        : `compaction skipped: the last rewrite of these ${p.compactionIneffectiveFiles} files reduced nothing`)
+        : `compaction skipped: the last rewrite of ${p.compactionIneffectiveFiles} files reduced nothing`)
     }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
