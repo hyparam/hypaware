@@ -37,6 +37,7 @@ import { errCode } from '../util/json_util.js'
 
 /**
  * @import { Hash } from 'node:crypto'
+ * @import { Stats } from 'node:fs'
  * @import { ClientAssetLedgerRecord } from '../../../src/core/runtime/types.js'
  */
 
@@ -191,17 +192,38 @@ export async function digestClientAsset(dest) {
  * because the safe direction of a wrong guess here is "remove less, report
  * more".
  *
+ * The `missing` outcome is scoped to the top-level probe: `fs.stat(dest)` is
+ * its own `try`, and only *that* call's `ENOENT` sets `missing`. A dangling
+ * symlink *at* `dest` is this case: `fs.stat` follows it, finds nothing, and
+ * `ENOENT` is exactly right there. Anything thrown while walking a directory
+ * or reading a file (an `EACCES` three levels into a skill tree, a device
+ * error, a file `readdir` just listed that a concurrent actor removes before
+ * the following `readFile` reaches it) falls into a second, narrower `try`
+ * that always reports `missing: false`, so a failure below `dest` can never
+ * be mistaken for `dest` itself being gone. A dangling symlink *inside* the
+ * tree never reaches either `try`'s error path at all: `hashTree` reads
+ * `Dirent` shape from `readdir` without following the entry, so a symlink
+ * whose target is gone hashes as an opaque `o:` entry by name, the same as
+ * one whose target exists.
+ *
  * @param {string} dest
  * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
  *   only for a path that is not there; a digest is present only when the whole
  *   asset was read
- * @ref LLP 0219#unreadable-is-not-absent [implements]: an unreadable asset is
- *   reported and kept on the books, never read as one that is already gone.
+ * @ref LLP 0223#unreadable-is-not-absent [implements]: an unreadable asset is
+ *   reported and kept on the books, never read as one that is already gone,
+ *   including when the read failure happens below `dest` rather than at it.
  */
 export async function inspectClientAsset(dest) {
+  /** @type {Stats} */
+  let stat
+  try {
+    stat = await fs.stat(dest)
+  } catch (err) {
+    return { missing: errCode(err) === 'ENOENT' }
+  }
   const hash = createHash('sha256')
   try {
-    const stat = await fs.stat(dest)
     if (stat.isDirectory()) {
       hash.update('dir\n')
       await hashTree(dest, dest, hash)
@@ -209,8 +231,8 @@ export async function inspectClientAsset(dest) {
       hash.update('file\n')
       hash.update(await fs.readFile(dest))
     }
-  } catch (err) {
-    return { missing: errCode(err) === 'ENOENT' }
+  } catch {
+    return { missing: false }
   }
   return { digest: hash.digest('hex'), missing: false }
 }

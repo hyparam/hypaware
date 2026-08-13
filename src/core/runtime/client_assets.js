@@ -528,7 +528,7 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   // end. So the record is carried **verbatim**: no digest is taken of what we
   // could not read, which keeps a later run's removal gated on the digest
   // recorded when we wrote the bytes and on nothing this run inferred.
-  // @ref LLP 0219#unreadable-is-not-absent [implements]: unreadable is reported
+  // @ref LLP 0223#unreadable-is-not-absent [implements]: unreadable is reported
   //   and kept, never mistaken for absent.
   if (!digest) {
     stderr?.write(
@@ -680,17 +680,27 @@ const NO_BASE_DIRS_REASON =
  * `path.dirname('/')` is `'/'`, so a degenerate base would otherwise match
  * itself, and this predicate is only ever allowed to shrink.
  *
+ * `isWithinDir` is kept as a conjunct alongside the `dirname` check, not
+ * dropped in its favour: `isWithinDir` refuses on a **prefix** test
+ * (`rel.startsWith('..')`), so a basename beginning with `..`
+ * (`<base>/..stash`) is refused by it even though `path.dirname` alone would
+ * admit it as a direct child. Without the conjunct, a `..`-prefixed
+ * user-authored directory name that the old predicate refused becomes
+ * removable, which is a widening, not the narrowing this predicate exists to
+ * be.
+ *
  * @param {string} dest
  * @param {string[]} baseDirs
  * @returns {boolean}
- * @ref LLP 0219#only-direct-children [implements]: the delete side admits
- *   exactly the shape the copy side writes, and nothing beneath it.
+ * @ref LLP 0223#only-direct-children [implements]: the delete side admits
+ *   exactly the shape the copy side writes, and nothing beneath it, without
+ *   widening what the prefix-based containment check already refused.
  */
 function isRemovableAsset(dest, baseDirs) {
   const resolved = path.resolve(dest)
   return baseDirs.some((baseDir) => {
     const base = path.resolve(baseDir)
-    return resolved !== base && path.dirname(resolved) === base
+    return resolved !== base && path.dirname(resolved) === base && isWithinDir(resolved, base)
   })
 }
 

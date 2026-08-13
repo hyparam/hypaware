@@ -23,7 +23,7 @@ import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
 import { clientAssetStateRoot, digestClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
-import { materializeClientAssets } from '../../src/core/runtime/client_assets.js'
+import { materializeClientAssets, removeClientAssets } from '../../src/core/runtime/client_assets.js'
 
 /**
  * A fresh kernel + command registry, the way a new process would boot one. Each
@@ -394,6 +394,9 @@ test('a ledger record with no digest at all is withheld and reported', async () 
   assert.match(second.stderr, /no recorded content digest/)
 })
 
+/*
+ * @ref LLP 0223#unreadable-is-not-absent [tests]:
+ */
 test('a retired asset that cannot be read is named and kept on the books', async (t) => {
   const { home, env } = await makeHome()
   const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
@@ -425,6 +428,13 @@ test('a retired asset that cannot be read is named and kept on the books', async
   await fs.mkdir(locked, { recursive: true })
   await fs.writeFile(path.join(locked, 'notes.md'), 'notes\n', 'utf8')
   await fs.chmod(locked, 0o000)
+  // Registered the moment the mode drops, not after the assertions below: a
+  // failed assertion here must not leave a mode-000 directory that `rm -rf`
+  // cannot remove. Registered before the `home` cleanup below so it always
+  // runs first: `t.after` hooks run in registration order, and restoring the
+  // mode is what makes the recursive `home` removal possible at all.
+  t.after(() => fs.chmod(locked, 0o755).catch(() => {}))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
   const stillReadable = await fs.readdir(locked).then(() => true, () => false)
   if (stillReadable) {
     // Root reads through any mode, so the fixture cannot be built here at all.
@@ -464,6 +474,84 @@ test('a retired asset that cannot be read is named and kept on the books', async
     'the carried record is what lets the next complete pass remove the retired copy'
   )
   assert.match(third.stdout, /removed retired skill 'hypaware-ignore'/)
+})
+
+/*
+ * The split try/catch in `inspectClientAsset` only changes behaviour for an
+ * `ENOENT` raised *below* `dest`, after the top-level `fs.stat(dest)` already
+ * succeeded. A dangling symlink placed at `dest` itself does not reach that
+ * code at all: `fs.stat` follows the symlink and throws `ENOENT` at the
+ * top-level probe, which both the old and the new code read as "missing" -
+ * so it cannot discriminate this fix (verified empirically: `fs.stat` on a
+ * dangling symlink throws before either version of the function branches on
+ * shape). A file `readdir` lists that a concurrent actor removes before the
+ * following `readFile` reaches it is the actual case the split guards, and a
+ * real race is not reproducible on demand, so this mocks `fs.readFile` to
+ * throw `ENOENT` for one specific path the walk is mid-way through - the same
+ * error a vanish-between-list-and-read race would produce, without depending
+ * on winning one.
+ * @ref LLP 0223#unreadable-is-not-absent [tests]:
+ */
+test('an ENOENT raised reading inside a retired asset, not at dest itself, is reported as unreadable', async (t) => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'retired body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const retired = path.join(skillsDir, 'hypaware-ignore')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  /** @param {string} p @returns {Promise<any>} */
+  const recordFor = async (p) =>
+    JSON.parse(await fs.readFile(ledgerPath, 'utf8')).assets.find(
+      (/** @type {any} */ r) => r.dest === p
+    )
+  const installedRecord = await recordFor(retired)
+  assert.ok(installedRecord?.digest, 'the install must have recorded a digest to carry forward')
+
+  // The top-level stat of `retired` itself must succeed - this is not the
+  // "dest is gone" case - so the digest walk gets far enough to reach the
+  // file the mock below intercepts.
+  const nested = path.join(retired, 'reference', 'notes.md')
+  await fs.mkdir(path.dirname(nested), { recursive: true })
+  await fs.writeFile(nested, 'notes\n', 'utf8')
+
+  const original = fs.readFile
+  let intercepted = false
+  t.mock.method(fs, 'readFile', async (/** @type {any[]} */ ...args) => {
+    if (args[0] === nested) {
+      intercepted = true
+      const err = /** @type {NodeJS.ErrnoException} */ (new Error('simulated: vanished between readdir and readFile'))
+      err.code = 'ENOENT'
+      throw err
+    }
+    return original.apply(fs, args)
+  })
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.ok(intercepted, 'sanity: the mocked path must actually have been reached by the digest walk')
+  assert.equal(second.code, 0)
+  assert.ok(await exists(retired), 'the top-level stat succeeded; this is not "already gone"')
+  assert.match(second.stderr, /hypaware-ignore/)
+  assert.match(
+    second.stderr,
+    /could not be read/,
+    'an ENOENT below dest must not be read as dest itself being gone'
+  )
+  const carried = await recordFor(retired)
+  assert.equal(
+    carried?.digest,
+    installedRecord.digest,
+    'the record must survive verbatim, the same as any other unreadable-below-dest failure'
+  )
 })
 
 test('a destination another client in the same run planned is never pruned', async () => {
@@ -534,6 +622,9 @@ test('a recorded destination outside the client asset directories is refused out
   assert.match(second.stderr, /outside/)
 })
 
+/*
+ * @ref LLP 0223#only-direct-children [tests]:
+ */
 test('a recorded destination deeper than a direct child is refused, digest or no digest', async () => {
   const { home, env } = await makeHome()
   const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
@@ -582,6 +673,79 @@ test('a recorded destination deeper than a direct child is refused, digest or no
   // write, so the refusal is about the depth and nothing else.
   assert.equal(await exists(path.join(skillsDir, 'hypaware-ignore')), false)
   assert.match(second.stdout, /removed retired skill 'hypaware-ignore'/)
+})
+
+/*
+ * `path.dirname` alone reads a basename beginning with `..` as a direct
+ * child, because `path.dirname('<base>/..stash')` is `<base>`. The old
+ * containment (`isWithinDir`) refused it on a prefix test instead
+ * (`path.relative(base, '<base>/..stash')` is the string `'..stash'`, which
+ * starts with `'..'`), so `isRemovableAsset` must keep both conjuncts or it
+ * widens for exactly this shape of name.
+ * @ref LLP 0223#only-direct-children [tests]:
+ */
+test('a recorded destination whose basename begins with ".." is refused, not read as a direct child', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+
+  await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  // A directory the user owns. Nothing HypAware ever writes can produce this
+  // name - `isSafeContributionName` forces a single safe segment - so a
+  // record naming it can only be corrupt.
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const stash = path.join(skillsDir, '..stash')
+  await fs.mkdir(stash, { recursive: true })
+  await fs.writeFile(path.join(stash, 'notes.md'), 'mine\n', 'utf8')
+
+  // A corrupt record naming it, carrying a digest that really does match, so
+  // every condition but the shape of the name is satisfied.
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
+  ledger.assets.push({
+    kind: 'skill',
+    name: '..stash',
+    client: 'claude',
+    dest: stash,
+    digest: await digestClientAsset(stash),
+  })
+  await fs.writeFile(ledgerPath, JSON.stringify(ledger), 'utf8')
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(second.code, 0)
+  assert.equal(
+    await fs.readFile(path.join(stash, 'notes.md'), 'utf8'),
+    'mine\n',
+    'a basename beginning with ".." must not be read as a direct child of the base'
+  )
+  assert.match(second.stderr, /deeper into them than HypAware writes/)
+})
+
+/*
+ * The same widening, reproduced through the lower-level entry point
+ * directly: `hyp detach` calls `removeClientAssets` with no digest gate at
+ * all, so containment is the only thing standing between a corrupt or
+ * malicious marker and a user's files.
+ * @ref LLP 0223#only-direct-children [tests]:
+ */
+test('removeClientAssets refuses a basename beginning with ".." on posix and win32 alike', async () => {
+  const { home } = await makeHome()
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const stash = path.join(skillsDir, '..stash')
+  const notes = path.join(skillsDir, '...notes')
+  await fs.mkdir(stash, { recursive: true })
+  await fs.writeFile(path.join(stash, 'mine.md'), 'mine\n', 'utf8')
+  await fs.mkdir(notes, { recursive: true })
+  await fs.writeFile(path.join(notes, 'mine.md'), 'mine too\n', 'utf8')
+
+  const { removed, failed } = await removeClientAssets([stash, notes], [skillsDir])
+
+  assert.deepEqual(removed, [], 'a basename beginning with ".." must never be read as a direct child')
+  assert.equal(failed.length, 2)
+  assert.equal(await fs.readFile(path.join(stash, 'mine.md'), 'utf8'), 'mine\n')
+  assert.equal(await fs.readFile(path.join(notes, 'mine.md'), 'utf8'), 'mine too\n')
+  await fs.rm(home, { recursive: true, force: true })
 })
 
 test('nothing is removed when this run installs nothing', async () => {

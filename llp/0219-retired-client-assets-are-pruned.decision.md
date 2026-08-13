@@ -6,6 +6,7 @@
 **Author:** Claude
 **Date:** 2026-08-13
 **Related:** LLP 0138 (#one-materializer, #marker-undo: the module this extends and the half-record it left), LLP 0107 (#currency, #reversal: why attach re-runs and what reversal may touch), LLP 0142 (the retirement that is still installed), LLP 0212 (the retirement that motivated #726), LLP 0215 (#not-in-scope: named this gap and deferred it)
+**Extended-by:** LLP 0223 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable)
 
 > Extends [LLP 0138](./0138-client-assets-one-install.decision.md), which made
 > one routine own copying client assets and recorded, on the org-driven half
@@ -65,9 +66,12 @@ path, and only while the bytes there are still the bytes it wrote.**
   the copy loop, any recorded destination for a client this run installed for,
   which this run's plan does not contain, is removed. Four conditions gate it,
   and all four must hold: we recorded writing the path; **the whole run's plan**
-  does not contain it; it sits strictly inside that client's own asset
-  directories (re-checked by `removeClientAssets`, whose input is persisted JSON
-  either way); and a digest we recorded for it still matches what is on disk.
+  does not contain it; it is a direct child of that client's own asset
+  directories (re-checked by `removeClientAssets`, whose input is persisted
+  JSON either way; narrowed from "sits strictly inside" by
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #only-direct-children); and a digest we recorded for it still matches what
+  is on disk.
 
   The plan check is over the whole run, not over the one client's share of it,
   because a destination is a physical path and two clients can declare the same
@@ -93,19 +97,14 @@ path, and only while the bytes there are still the bytes it wrote.**
   working install. So a client with no successful copy this pass is not pruned
   at all.
 
-- **A candidate must be a direct child of an asset directory**
-  {#only-direct-children}: recorded post-acceptance from the ship review of
+- **A candidate must be a direct child of an asset directory**: condition
+  three above narrows to exactly this shape. That narrowing changes what
+  condition three decided rather than merely restating it, so it is recorded
+  as its own decision in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #only-direct-children, minted from the ship review of
   [#745](https://github.com/hyparam/hypaware/pull/745)
-  ([#746](https://github.com/hyparam/hypaware/issues/746) item 1), narrowing
-  condition three above rather than changing it. Every write the materializer
-  makes is `<base>/<name>` or `<base>/<name>.md`, over a name that registration
-  has already forced to a single safe path segment, so "strictly inside the
-  client's asset directories" is wider than the writer: it also admits
-  `<skills>/<a-skill-this-run-is-installing>/subdir`, where one corrupt record
-  carrying a valid digest would take a subtree out of a live asset. The delete
-  side now admits exactly the shape the copy side writes and nothing beneath it,
-  which costs nothing (no path we ever wrote is deeper) and removes a class of
-  recursive delete that pure record corruption could otherwise reach.
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 1).
 
 - **A boot that did not reach its whole plugin set prunes nothing**
   {#incomplete-activation-prunes-nothing}: the scope guard above catches *total*
@@ -183,6 +182,11 @@ path, and only while the bytes there are still the bytes it wrote.**
   model-invocable leave-behind this document exists to remove. Pinned by a test
   so it cannot drift silently.
 
+  "Absent" also covers an install tree that is transiently absent (an
+  unmounted volume, an interrupted upgrade), which this reading deletes and a
+  later attach restores; accepted because the alternative never prunes after
+  a real uninstall.
+
 - **An asset the user changed is no longer ours to delete**
   {#edited-assets-are-not-ours}: the removal proceeds only on a digest we
   recorded that still matches. A mismatch stops it and turns it into a report
@@ -198,6 +202,11 @@ path, and only while the bytes there are still the bytes it wrote.**
   is corrupt. A ledger entry whose `digest` is present but unreadable is dropped
   whole rather than kept digest-less, so corruption cannot even manufacture a
   candidate.
+
+  "No recorded digest" is a fact about the *record*; "could not be read" is a
+  fact about the *candidate itself*, and the two are split apart in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #unreadable-is-not-absent.
 
   **The digest separates shapes, not only bytes.** A skill is a directory and a
   subagent a single file, and hashing both into one unframed stream let the two
@@ -227,19 +236,15 @@ path, and only while the bytes there are still the bytes it wrote.**
   `~/.claude` for the length of a prune, which buys less than it costs. Recorded
   here so a later review reaches this line rather than re-deriving it.
 
-- **An unreadable asset is not an absent one** {#unreadable-is-not-absent}:
-  recorded post-acceptance
-  ([#746](https://github.com/hyparam/hypaware/issues/746) item 2). Reading a
-  candidate produces three outcomes, not two: a digest, a path that is not there
-  (`ENOENT`), and a path that is there but could not be read (an `EACCES` on a
-  file inside an installed skill, a device error). Only the second is "already
-  gone" and only the second drops the record in silence. The third keeps the
-  record, verbatim and with no digest re-taken, and reports the path withheld
-  with a `digest_unreadable` kind - because the copy is still on disk and still
-  model-invocable, and dropping the only record naming it makes it permanently
-  unprunable *and* unreportable, which is the leave-behind this document exists
-  to end. The distinction also keeps this document's claim that unreadable
-  things only ever remove *less* true of assets as well as of ledger records.
+- **An unreadable asset is not an absent one**: reading a candidate produces
+  three outcomes, not two - a digest, a path that is not there, and a path
+  that is there but could not be read - and only the first two used to be
+  told apart. That distinction changes what "no digest" was read to mean
+  rather than merely restating it, so it is recorded as its own decision in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #unreadable-is-not-absent, minted from the ship review of
+  [#745](https://github.com/hyparam/hypaware/pull/745)
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 2).
 
 - **Pruning is automatic, not confirmed** {#automatic-not-gated}: no prompt.
   What gets removed is a byte-identical copy of a file HypAware itself wrote,
