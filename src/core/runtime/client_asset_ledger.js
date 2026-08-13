@@ -27,7 +27,7 @@ import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
  * digest that no longer matches is positive evidence the user edited or
  * replaced the file, which is the one case pruning must not act on.
  *
- * @ref LLP 0218#ledger [implements]: the per-home record of what HypAware
+ * @ref LLP 0219#ledger [implements]: the per-home record of what HypAware
  *   installed, which is the only evidence that a no-longer-contributed path is
  *   ours to delete.
  */

@@ -257,7 +257,7 @@ export interface MaterializeClientAssetsOptions {
    * State root (`<HYP_HOME>/hypaware`) holding the install ledger: the record
    * of which destinations HypAware itself wrote, which is what makes removing
    * a no-longer-contributed asset safe. Omitted, the install still copies but
-   * records nothing and removes nothing, which is what every pre-LLP-0218
+   * records nothing and removes nothing, which is what every pre-LLP-0219
    * caller did. Resolve it with `clientAssetStateRoot(env, homeDir)` so it is
    * anchored on the same home the assets land in.
    */

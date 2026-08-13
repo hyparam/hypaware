@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-07-26
 **Related:** LLP 0011, LLP 0044, LLP 0045, LLP 0100, LLP 0107
-**Extended-by:** LLP 0218 (the same materializer also removes what this version no longer contributes; #marker-undo's "manual copies record no marker" is answered with an install ledger)
+**Extended-by:** LLP 0219 (the same materializer also removes what this version no longer contributes; #marker-undo's "manual copies record no marker" is answered with an install ledger)
 
 > Extends [LLP 0107](./0107-skills-ride-attach.decision.md), which decided
 > skills ride attach but named only skills and was never implemented.

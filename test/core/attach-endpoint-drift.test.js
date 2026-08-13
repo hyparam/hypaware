@@ -216,7 +216,7 @@ test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currenc
     // The org withdraws the plugin again. The set shrinks, so this re-attach
     // copies only helper-a, and takes helper-b off the machine: this attach's
     // own record says it wrote that path, the plan no longer contains it, and
-    // its bytes are unchanged (LLP 0218 #prune-on-materialize). Before that it
+    // its bytes are unchanged (LLP 0219 #prune-on-materialize). Before that it
     // sat there until someone ran a detach.
     const r5 = await reconciler.reconcile(reconcileInput({ endpoint, clients, home, skills: [skillA] }))
     assert.deepEqual(r5.results.map((x) => x.outcome), ['done'])

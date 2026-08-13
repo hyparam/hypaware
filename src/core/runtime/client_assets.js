@@ -295,7 +295,7 @@ export async function removeClientAssets(dests, baseDirs) {
  * 4. **The bytes are still the bytes we wrote**, when a digest was recorded. A
  *    mismatch is positive evidence the user took the file over, and that is the
  *    one case where the right move is to name it and stop
- *    (LLP 0218 #edited-assets-are-not-ours).
+ *    (LLP 0219 #edited-assets-are-not-ours).
  *
  * The client scope is taken from what *landed*, not from what was asked for. A
  * run that copied nothing for a client - an empty registry, a boot whose
@@ -309,7 +309,7 @@ export async function removeClientAssets(dests, baseDirs) {
  *   installed: ClientAssetInstall[],
  * }} args
  * @returns {Promise<void>}
- * @ref LLP 0218#prune-on-materialize [implements]: the one materializer removes
+ * @ref LLP 0219#prune-on-materialize [implements]: the one materializer removes
  *   what this version no longer contributes, gated on its own install record.
  */
 async function reconcileClientAssetLedger({ options, planned, installed }) {
@@ -416,7 +416,7 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   // retired asset has no source left, so a delete here is unrecoverable. Name
   // it and leave it: the file stays visible, and the record stays, so the same
   // report reappears until the user acts on it.
-  // @ref LLP 0218#edited-assets-are-not-ours [implements]: a digest mismatch
+  // @ref LLP 0219#edited-assets-are-not-ours [implements]: a digest mismatch
   //   stops the removal and turns it into a report.
   if (record?.digest && record.digest !== digest) {
     stderr?.write(
