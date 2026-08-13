@@ -356,6 +356,13 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // so costs nothing; re-checking `needsCompaction` here would stat
       // every data file of every converged partition, every tick.
       r.compactionIneffective = true
+      // The count the recorded rewrite ran over, not the live one. They
+      // diverge whenever the partition changed without becoming due again
+      // (retention deleting files, say), and the message describes the
+      // record, so a partition now holding 5 files must not be reported as
+      // one whose last rewrite of 5 files reduced nothing when that rewrite
+      // read 40.
+      r.compactionIneffectiveFiles = compactionFilesBefore(cursor)
       getActiveSpan()?.setAttribute('compaction_ineffective', true)
     }
     if (shouldCompact) {
@@ -382,7 +389,29 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       } else if (opts.dryRun) {
         r.compacted = true
       } else {
-        const result = await compactGeneration(r.path, layout, cfg, settle, tableInfo)
+        /** @type {Awaited<ReturnType<typeof compactGeneration>>} */
+        let result
+        try {
+          result = await compactGeneration(r.path, layout, cfg, settle, tableInfo)
+        } catch (err) {
+          // @ref LLP 0217#retry-on-writer-change [implements]: the attempt
+          // spends the generation's retry, success or not. The rewrite
+          // writes its cursor only once it commits, so a throw would
+          // otherwise leave the stale verdict standing and this partition
+          // would be attempted, and fail, on every tick forever - taking
+          // the rest of the walk with it, because the neediest partition
+          // (LLP 0199#neediest-first) is both the first one tried and the
+          // likeliest to fail. Re-read rather than stamp the cursor read
+          // at the top of the tick: a rewrite that threw after committing
+          // its cursor must not be rolled back onto the retired generation.
+          // `tryReadCursorSync`, because this write is destructive and a
+          // cursor that cannot be read back must not be replaced by the
+          // epoch-0 default `readCursorSync` would synthesize.
+          if (verdictStale) {
+            await writeCursor(r.path, stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor))
+          }
+          throw err
+        }
         if (result) {
           r.compacted = true
           if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
@@ -392,9 +421,12 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           // @ref LLP 0217#record-effectiveness [implements]: a rewrite that
           // reproduced its own file count reports that, so the run is
           // legible as work that achieved nothing instead of surfacing
-          // only as a later disk audit.
-          if (result.dataFilesBefore > 0 && result.dataFiles >= result.dataFilesBefore) {
+          // only as a later disk audit. A partition already at its floor
+          // reduced nothing either, but reports nothing: see
+          // {@link rewriteReducedFiles}.
+          if (rewriteReducedFiles(result.dataFilesBefore, result.dataFiles) === false) {
             r.compactionIneffective = true
+            r.compactionIneffectiveFiles = result.dataFilesBefore
           }
           compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
         }
@@ -1016,28 +1048,56 @@ function compactionOutcomeRecord(outcome) {
 }
 
 /**
- * Did the compaction this cursor records reduce the partition's data-file
- * count? Undefined when the cursor predates the effectiveness record, in
- * which case what the rewrite achieved is unknown rather than known bad.
+ * Did a rewrite from `before` data files to `after` reduce the count?
  *
  * Any reduction counts. A rewrite that shaves one file off is progress,
  * and the baseline gate still requires the live count to move before the
  * next attempt, so a marginal gain cannot become a rewrite loop.
  *
+ * Undefined when the partition was already at its floor: no data files, or
+ * a single one. A partition holding one file is maximally compact, so the
+ * 1 to 1 rewrite every low-volume partition gets on its first tick (the
+ * avg-file-size heuristic flags any file under `compact_avg_file_bytes`)
+ * reduced nothing because there was nothing to reduce. Treating that as a
+ * verdict would report every ordinary small partition as unshrinkable,
+ * every tick, and drown the one line that is true.
+ *
+ * @ref LLP 0217#record-effectiveness [implements]: a rewrite of a partition at its floor is evidence about neither the writer nor the partition.
+ * @param {number} before
+ * @param {number} after
+ * @returns {boolean | undefined}
+ */
+function rewriteReducedFiles(before, after) {
+  if (before <= 1) return undefined
+  return after < before
+}
+
+/**
+ * The data-file count the rewrite this cursor records started from.
+ * Undefined for a cursor written before the effectiveness record existed.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {number | undefined}
+ */
+function compactionFilesBefore(cursor) {
+  const c = cursor.compaction
+  if (isPlainObject(c) && typeof c.dataFilesBefore === 'number') return c.dataFilesBefore
+  return undefined
+}
+
+/**
+ * Did the compaction this cursor records reduce the partition's data-file
+ * count? Undefined when the cursor predates the effectiveness record, in
+ * which case what the rewrite achieved is unknown rather than known bad.
+ *
  * @param {PartitionCursor} cursor
  * @returns {boolean | undefined}
  */
 function compactionReducedFiles(cursor) {
-  const c = cursor.compaction
-  if (!isPlainObject(c)) return undefined
-  const before = c.dataFilesBefore
-  const after = c.resettleBaselineFiles
-  if (typeof before !== 'number' || typeof after !== 'number') return undefined
-  // A rewrite of a partition that held no data files had nothing to
-  // reduce, so its outcome is evidence about neither the writer nor the
-  // partition.
-  if (before <= 0) return undefined
-  return after < before
+  const before = compactionFilesBefore(cursor)
+  const after = resettleBaselineFiles(cursor)
+  if (before === undefined || after === undefined) return undefined
+  return rewriteReducedFiles(before, after)
 }
 
 /**
@@ -1080,6 +1140,27 @@ function compactionVerdictStale(cursor) {
   if (!isPlainObject(c) || typeof c.resettleBaselineFiles !== 'number') return false
   if (compactionReducedFiles(cursor) === true) return false
   return c.writerGeneration !== COMPACTION_WRITER_GENERATION
+}
+
+/**
+ * Cursor carrying this build's writer generation and nothing else new: the
+ * record of an attempt that was made, without a claim about what it
+ * achieved. Written when a retry granted by
+ * {@link compactionVerdictStale} fails, so the retry is spent by the
+ * attempt rather than by its success. The baseline and any recorded
+ * effectiveness are left exactly as they were: a rewrite that threw
+ * part-way proves nothing about whether the partition can be shrunk.
+ *
+ * @ref LLP 0217#retry-on-writer-change [implements]: one attempt per writer generation, counted whether or not it succeeded.
+ * @param {PartitionCursor} cursor
+ * @returns {PartitionCursor}
+ */
+function stampWriterGeneration(cursor) {
+  const compaction = isPlainObject(cursor.compaction) ? cursor.compaction : {}
+  return {
+    ...cursor,
+    compaction: { ...compaction, writerGeneration: COMPACTION_WRITER_GENERATION },
+  }
 }
 
 /**

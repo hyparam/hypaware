@@ -52,8 +52,12 @@ count the rewrite started from, written beside the existing
 it strictly reduced the count. Any reduction counts: shaving one file off is
 progress, and the LLP 0199 gate still requires the live count to move before
 the next attempt, so a marginal gain cannot become a rewrite loop. A rewrite of
-a partition holding no data files is neither: it had nothing to reduce and is
-evidence about nothing.
+a partition holding at most one data file is neither: it had nothing to reduce
+and is evidence about nothing. One file is a partition's floor, not
+fragmentation, and the avg-file-size heuristic flags any partition whose files
+sit under `compact_avg_file_bytes`, so without that carve-out every low-volume
+partition would take one 1 to 1 rewrite on its first tick and then be reported
+as unshrinkable for the rest of its life.
 
 The verdict is reported, not only stored. `MaintenancePartitionReport` gains
 `compactionIneffective`, set on a rewrite that reproduced its own count and on
@@ -75,6 +79,14 @@ nothing, or it predates this record and so is unknown) and the running writer
 generation differs from the recorded one, the partition is due again if the
 size heuristics still flag it. The retry re-stamps the cursor, so it is one
 attempt per writer generation, never one per tick.
+
+The *attempt* spends the retry, not its success. A rewrite that throws (a torn
+data file, a settle hook that fails) commits no cursor of its own, so the stamp
+is written on the way out of the failure too, carrying no claim about
+effectiveness. Otherwise the stale verdict would stand and the partition would
+be retried, and fail, on every tick forever; and because the walk goes
+neediest-first (LLP 0199#neediest-first) and there is no per-partition catch,
+that is the whole maintenance tick lost behind it, every hour.
 
 A rewrite recorded as effective is never retried on this path, whatever
 generation produced it. Convergence is what LLP 0199 exists to protect, and an

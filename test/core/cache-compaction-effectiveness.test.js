@@ -106,6 +106,22 @@ async function plantCompactionRecord(dir, compaction) {
   await writeCursor(dir, next)
 }
 
+/**
+ * The parquet data files of the partition's live generation: exactly what
+ * a rewrite has to read back.
+ *
+ * @param {string} dir
+ * @returns {Promise<string[]>}
+ */
+async function liveDataFiles(dir) {
+  const cursor = readCursorSync(dir)
+  const dataDir = path.join(dir, cursor.tableDir ?? 'table', 'data')
+  const entries = await fs.readdir(dataDir, { withFileTypes: true })
+  return entries
+    .filter((e) => e.isFile() && e.name.endsWith('.parquet'))
+    .map((e) => path.join(dataDir, e.name))
+}
+
 /** @param {string} dir @returns {Record<string, unknown>} */
 function compactionRecord(dir) {
   const { compaction } = readCursorSync(dir)
@@ -224,9 +240,11 @@ test('a compaction that did reduce the file count is never retried', async () =>
       resettleBaselineFiles: after,
       dataFilesBefore: after + 5,
     })
-    const converged = await maintainCache({ cacheRoot, compactOnly: true })
-    assert.equal(converged.totalCompacted, 0, 'an effective compaction must stay converged')
-    assert.equal(converged.partitions[0].compactionIneffective, undefined)
+    for (const tick of [1, 2, 3]) {
+      const converged = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(converged.totalCompacted, 0, `tick ${tick}: an effective compaction must stay converged`)
+      assert.equal(converged.partitions[0].compactionIneffective, undefined)
+    }
 
     // Control: the same partition, the same stamp-less record, differing
     // only in what the last rewrite achieved. The tick compacts, which is
@@ -240,6 +258,96 @@ test('a compaction that did reduce the file count is never retried', async () =>
     })
     const retried = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(retried.totalCompacted, 1)
+    // The control converges too, so the run above is one retry and not the
+    // rewrite loop the baseline gate exists to prevent.
+    for (const tick of [1, 2]) {
+      const settled = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(settled.totalCompacted, 0, `tick ${tick}: the retry must not become a rewrite-forever loop`)
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0217#retry-on-writer-change [tests]: the *attempt* spends the
+// retry, not its success. A rewrite that throws writes no cursor of its own,
+// so without a stamp the stale verdict stands and the partition is attempted,
+// and fails, on every later tick. The walk goes neediest-first
+// (LLP 0199#neediest-first), so that is also every healthier partition
+// starved behind it.
+test('a retry whose rewrite throws still spends its writer generation', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-'))
+  try {
+    await seedUnshrinkablePartition(cacheRoot, 8)
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    const dir = partitionDir(cacheRoot)
+    // The stamp-less cursor from issue #723 again: this partition is owed
+    // exactly one attempt under the writer running now.
+    await plantCompactionRecord(dir, {
+      previousTableDir: 'table',
+      compactedAt: '2026-08-12T21:55:35.168Z',
+      resettleBaselineFiles: 8,
+    })
+    // A torn write: one live data file truncated to a stub no parquet
+    // reader can decode, so the retry's scan throws part-way through.
+    const [torn] = await liveDataFiles(dir)
+    await fs.truncate(torn, 4)
+
+    await assert.rejects(
+      maintainCache({ cacheRoot, compactOnly: true }),
+      'fixture invariant: the retry must attempt a rewrite, and that rewrite must fail'
+    )
+
+    // The failed attempt is still the generation's attempt. It records no
+    // verdict about the partition (the baseline is untouched and no
+    // before-count is invented), only that this writer has had its turn.
+    const record = compactionRecord(dir)
+    assert.equal(typeof record.writerGeneration, 'number', 'a spent attempt must stamp the cursor')
+    assert.equal(record.resettleBaselineFiles, 8, 'a failed rewrite must not move the baseline')
+    assert.equal(record.dataFilesBefore, undefined, 'a failed rewrite proves nothing about effectiveness')
+
+    // So the next ticks walk past the partition instead of re-entering a
+    // rewrite that cannot succeed and taking the whole tick down with it.
+    for (const tick of [1, 2]) {
+      const after = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(after.totalCompacted, 0, `tick ${tick} must not re-enter the failing rewrite`)
+      assert.equal(after.partitions[0].compacted, false)
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0217#record-effectiveness [tests]: a partition holding one data
+// file is at its floor, not fragmented. A rewrite of it reduces nothing
+// because there is nothing to reduce, which is evidence about neither the
+// writer nor the partition and must not be reported as a failure.
+test('a partition already at one data file is not reported as an ineffective compaction', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-floor-'))
+  try {
+    // One ingest wave, so the partition holds exactly one data file: the
+    // shape of every low-volume partition, and one `needsCompaction` still
+    // flags because that single file sits far below compact_avg_file_bytes.
+    await seedShrinkablePartition(cacheRoot, 1)
+
+    const first = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    const part = first.partitions[0]
+    assert.equal(part.compacted, true)
+    assert.equal(part.dataFilesBefore, 1, 'fixture invariant: the partition starts at its one-file floor')
+    assert.equal(part.dataFilesAfter, 1)
+    assert.equal(part.compactionIneffective, undefined, 'a 1 -> 1 rewrite had nothing to reduce')
+
+    // And the verdict is not then carried for life: later ticks skip the
+    // partition without reporting a compaction that achieved nothing.
+    for (const tick of [1, 2]) {
+      const later = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(later.totalCompacted, 0, `tick ${tick} must stay quiesced`)
+      assert.equal(
+        later.partitions[0].compactionIneffective, undefined,
+        `tick ${tick} must not report the partition's floor as an ineffective compaction`
+      )
+    }
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

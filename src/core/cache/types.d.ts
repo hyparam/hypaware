@@ -302,6 +302,10 @@ export interface MaintenancePartitionReport {
   // for the first case and without it for the second, where it is the
   // reason the partition was skipped.
   compactionIneffective?: boolean
+  // The data-file count the rewrite behind that verdict started from,
+  // which is the recorded count and not necessarily the live one. Set
+  // whenever `compactionIneffective` is.
+  compactionIneffectiveFiles?: number
 }
 
 export interface MaintenanceReport {
