@@ -1151,6 +1151,17 @@ function normalizeContent(content) {
 // prefix class already caps it at 255 characters and excludes whitespace and
 // `,`, and what was actually sent is the honest thing to record.
 //
+// #722's allowlist reservation is closed, verbatim, permanently (#736). An
+// allowlist cannot make the marker trustworthy: `data:application/pdf;base64,
+// <stripped>` typed into an ordinary message passes this regex byte-for-byte
+// untouched, because `<` is outside the payload class `[A-Za-z0-9+/=_-]+`
+// (which also requires at least one character), so a consumer that trusted a
+// structured-looking marker could already be fed a byte-identical forgery by
+// the wire, allowlisted mediatype or not. Nor is there an injection channel
+// an allowlist would need to close: the mediatype class excludes all
+// whitespace and `,`, so it can never carry a newline, tab, or a
+// comma to splice a log line or a CSV cell.
+//
 // The capture group only changes what the replacement does. It must not change
 // what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
 // splice onto an unrelated `;base64,` across prose, a comma, or 255 characters.
@@ -1169,6 +1180,16 @@ function normalizeContent(content) {
 // length cap on `content_text` is a deliberate open question (#718) and is
 // not addressed here.
 const BASE64_DATA_URI = /data:([^\s,]{0,255}?);base64,[A-Za-z0-9+/=_-]+/g
+
+// The empty-mediatype case (`data:;base64,...`) falls back to this rather
+// than echoing an empty string or resolving it the way RFC 2397 does (an
+// omitted mediatype means `text/plain;charset=US-ASCII`). Kept as shipped,
+// deliberately, after re-examination (#736): the RFC default answers "what
+// would a browser render this as", not "what did the row actually see", and
+// a search for it is no more discriminating than this sentinel. The
+// accepted cost: this collides indistinguishably with a genuine
+// `application/octet-stream` payload, and a literal search for
+// `data:;base64` no longer finds the row. Low stakes either way.
 const UNKNOWN_MEDIATYPE = 'application/octet-stream'
 
 /** @param {string | undefined} text */
