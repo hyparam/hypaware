@@ -3,6 +3,7 @@
 import os from 'node:os'
 
 import { Attr } from '../observability/index.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import {
   clientAssetBaseDirs,
   clientAssetsKey,
@@ -482,8 +483,13 @@ function attachedAssetOptions(client, ctx) {
     clients: [client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     ...(ctx.skills ? { skills: ctx.skills } : {}),
     ...(ctx.agents ? { agents: ctx.agents } : {}),
+    // A daemon boot where one plugin threw in `activate()` still reconciles;
+    // its attach copies what did activate and prunes nothing, because the
+    // missing contributions are indistinguishable from retired ones.
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
   }
 }
 
@@ -529,7 +535,7 @@ async function materializeAttachedAssets(client, ctx) {
   }
 
   try {
-    const installed = await materializeClientAssets({ ...options, stderr: warnings })
+    const { installed } = await materializeClientAssets({ ...options, stderr: warnings })
     return installed.map((asset) => asset.dest)
   } catch (err) {
     ctx.log.warn('client_action.attach_assets_failed', {

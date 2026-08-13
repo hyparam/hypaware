@@ -245,6 +245,15 @@ export async function dispatch(argv, opts = {}) {
   let kernel
   /** @type {ActivePlugin[]} */
   let activePlugins = []
+  /**
+   * Plugins this boot did not get, by any of the four routes `bootKernel`
+   * tracks: a throwing `activate()`, a dep-graph elimination, a manifest that
+   * would not load, or a config-enabled plugin the boot profile withheld. A
+   * command body cannot otherwise tell a partial boot from a complete one, and
+   * the client-asset materializer (which deletes) has to.
+   * @type {string[]}
+   */
+  let failedPlugins = []
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -264,6 +273,11 @@ export async function dispatch(argv, opts = {}) {
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
+    // Read, never re-derived: `activations` only ever holds the plugins that
+    // reached `activatePlugins`, and three of the four ways a boot comes up
+    // short never put a plugin there at all
+    // (LLP 0219 #incomplete-activation-prunes-nothing).
+    failedPlugins = boot.unavailablePlugins
     if (boot.config) activeConfig = boot.config
 
     // Lifecycle/read-only commands boot with no plugins, so no sink can
@@ -400,6 +414,7 @@ export async function dispatch(argv, opts = {}) {
     cwd,
     config: activeConfig,
     plugins: activePlugins,
+    failedPlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
