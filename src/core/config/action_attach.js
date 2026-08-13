@@ -486,6 +486,10 @@ function attachedAssetOptions(client, ctx) {
     stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     ...(ctx.skills ? { skills: ctx.skills } : {}),
     ...(ctx.agents ? { agents: ctx.agents } : {}),
+    // A daemon boot where one plugin threw in `activate()` still reconciles;
+    // its attach copies what did activate and prunes nothing, because the
+    // missing contributions are indistinguishable from retired ones.
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
   }
 }
 

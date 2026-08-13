@@ -986,6 +986,7 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
     stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     dryRun,
     // Under --json the adapter's one-line machine payload stays the only thing
     // on stdout, so the per-copy progress lines are suppressed.
@@ -1962,6 +1963,7 @@ export async function runSkillsInstall(argv, ctx) {
     stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     stdout: ctx.stdout,
     stderr: ctx.stderr,
   })

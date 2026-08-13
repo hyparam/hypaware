@@ -262,6 +262,16 @@ export interface MaterializeClientAssetsOptions {
    * anchored on the same home the assets land in.
    */
   stateRoot?: string
+  /**
+   * Plugins this boot failed to activate. Non-empty stands the prune down
+   * entirely: `activatePlugins` catches per plugin and `bootKernel` returns
+   * normally, so the realistic failure is *partial* - the client is still in
+   * scope, and the failed plugin's assets are missing from the plan in exactly
+   * the way a retired one is. Nothing in the plan or the ledger can tell them
+   * apart, so an incomplete activation removes nothing at all
+   * (LLP 0219 #incomplete-activation-prunes-nothing). Copying is unaffected.
+   */
+  failedPlugins?: string[]
   /** Report what would be copied without touching the filesystem. */
   dryRun?: boolean
   /** Progress lines, one per copy. Omitted on non-interactive callers. */

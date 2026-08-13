@@ -784,6 +784,7 @@ export async function runPickerWalkthrough(opts) {
       sources: opts.sources,
       skills: opts.skills,
       agents: opts.agents,
+      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
       config,
       configPath,
       env,
@@ -1462,6 +1463,7 @@ export function resolveSingleSourceEnablement(descriptor) {
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
+ *   failedPlugins?: string[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1655,6 +1657,9 @@ export async function runPickerFinale(args) {
           stateRoot: clientAssetStateRoot(env, homeDir),
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
+          // A boot with a broken plugin contributes a partial asset set; the
+          // finale copies it, and removes nothing on the strength of it.
+          ...(args.failedPlugins?.length ? { failedPlugins: args.failedPlugins } : {}),
           dryRun,
           stderr,
         })

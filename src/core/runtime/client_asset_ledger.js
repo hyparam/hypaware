@@ -23,9 +23,11 @@ import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
  *
  * It stores a content digest per destination as well as the path, because the
  * two questions a destructive upgrade has to answer are different: *did we
- * write this* (the path) and *is what is there still ours* (the digest). A
- * digest that no longer matches is positive evidence the user edited or
- * replaced the file, which is the one case pruning must not act on.
+ * write this* (the path) and *is what is there still ours* (the digest). Only a
+ * recorded digest that still matches answers the second one. A mismatch is
+ * positive evidence the user took the file over; a record with no digest is no
+ * evidence at all. Both stop the removal, which is why a record whose digest
+ * cannot be read is dropped rather than kept digest-less.
  *
  * @ref LLP 0219#ledger [implements]: the per-home record of what HypAware
  *   installed, which is the only evidence that a no-longer-contributed path is
@@ -93,12 +95,18 @@ export async function readClientAssetLedger(stateRoot) {
     if (typeof name !== 'string' || name.length === 0) continue
     if (typeof client !== 'string' || client.length === 0) continue
     if (typeof dest !== 'string' || dest.length === 0) continue
+    // A `digest` that is present but not a non-empty string is a record we
+    // cannot read, and a record we cannot read is dropped whole rather than
+    // kept with its digest quietly discarded. Keeping it would hand the prune a
+    // digest-less candidate built out of corruption, which is the one direction
+    // an unreadable ledger is never allowed to move in.
+    if (digest !== undefined && (typeof digest !== 'string' || digest.length === 0)) continue
     records.push({
       kind,
       name,
       client,
       dest,
-      ...(typeof digest === 'string' && digest.length > 0 ? { digest } : {}),
+      ...(typeof digest === 'string' ? { digest } : {}),
     })
   }
   return records

@@ -839,6 +839,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
         ...(opts.sources ? { sources: opts.sources } : {}),
         ...(opts.skills ? { skills: opts.skills } : {}),
         ...(opts.agents ? { agents: opts.agents } : {}),
+        // A boot with a broken plugin contributes a partial asset set. The
+        // finale still copies it; it must not read the hole as a retirement.
+        ...(opts.ctx.failedPlugins?.length ? { failedPlugins: opts.ctx.failedPlugins } : {}),
         config: picked.config,
         configPath: picked.configPath,
         env: opts.env,
