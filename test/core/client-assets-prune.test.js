@@ -394,6 +394,78 @@ test('a ledger record with no digest at all is withheld and reported', async () 
   assert.match(second.stderr, /no recorded content digest/)
 })
 
+test('a retired asset that cannot be read is named and kept on the books', async (t) => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'retired body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const retired = path.join(skillsDir, 'hypaware-ignore')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  /** @param {string} p @returns {Promise<any>} */
+  const recordFor = async (p) =>
+    JSON.parse(await fs.readFile(ledgerPath, 'utf8')).assets.find(
+      (/** @type {any} */ r) => r.dest === p
+    )
+  const installedRecord = await recordFor(retired)
+  assert.ok(installedRecord?.digest, 'the install must have recorded a digest to carry forward')
+
+  // The copy is plainly still there - the top-level stat succeeds - but the
+  // digest walk cannot finish, because one directory inside it is unlistable.
+  // This is the case that must not read as "already gone".
+  const locked = path.join(retired, 'reference')
+  await fs.mkdir(locked, { recursive: true })
+  await fs.writeFile(path.join(locked, 'notes.md'), 'notes\n', 'utf8')
+  await fs.chmod(locked, 0o000)
+  const stillReadable = await fs.readdir(locked).then(() => true, () => false)
+  if (stillReadable) {
+    // Root reads through any mode, so the fixture cannot be built here at all.
+    await fs.chmod(locked, 0o755)
+    t.skip('needs an unreadable directory, which a root-owned run cannot produce')
+    return
+  }
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(second.code, 0)
+  assert.ok(await exists(retired), 'nothing was removed, which is right but not the point')
+  assert.match(second.stderr, /hypaware-ignore/)
+  assert.match(
+    second.stderr,
+    /could not be read/,
+    'a copy we cannot account for must be reported, not silently forgotten'
+  )
+  const carried = await recordFor(retired)
+  assert.equal(
+    carried?.digest,
+    installedRecord.digest,
+    'the record must survive verbatim: dropping it makes the copy unprunable and unreportable forever'
+  )
+
+  // And the record still means what it meant. With the tree readable again and
+  // the bytes untouched, the ordinary prune finishes the job a later run was
+  // always supposed to be able to do.
+  await fs.chmod(locked, 0o755)
+  await fs.rm(locked, { recursive: true, force: true })
+  const third = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(third.code, 0)
+  assert.equal(
+    await exists(retired),
+    false,
+    'the carried record is what lets the next complete pass remove the retired copy'
+  )
+  assert.match(third.stdout, /removed retired skill 'hypaware-ignore'/)
+})
+
 test('a destination another client in the same run planned is never pruned', async () => {
   const { home, env } = await makeHome()
   const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
@@ -460,6 +532,56 @@ test('a recorded destination outside the client asset directories is refused out
   assert.equal(await fs.readFile(path.join(precious, 'notes.md'), 'utf8'), 'mine\n')
   assert.match(second.stderr, /PRECIOUS/)
   assert.match(second.stderr, /outside/)
+})
+
+test('a recorded destination deeper than a direct child is refused, digest or no digest', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'retired body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  // A directory the user owns, with content of their own one level further in.
+  // Nothing HypAware wrote is involved anywhere in this subtree.
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const nested = path.join(skillsDir, 'my-own-skill', 'reference')
+  await fs.mkdir(nested, { recursive: true })
+  await fs.writeFile(path.join(nested, 'notes.md'), 'mine\n', 'utf8')
+
+  // A corrupt record naming that subtree - and carrying a digest that really
+  // does match it, so every other condition the prune checks is satisfied. What
+  // must stop the delete is that no copy this module makes is ever deeper than
+  // `<base>/<name>`, so a record this shape cannot be describing our own write.
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
+  ledger.assets.push({
+    kind: 'skill',
+    name: 'reference',
+    client: 'claude',
+    dest: nested,
+    digest: await digestClientAsset(nested),
+  })
+  await fs.writeFile(ledgerPath, JSON.stringify(ledger), 'utf8')
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(second.code, 0)
+  assert.equal(
+    await fs.readFile(path.join(nested, 'notes.md'), 'utf8'),
+    'mine\n',
+    'a recursive delete must not reach a path deeper than the copy side ever writes'
+  )
+  assert.match(second.stderr, /deeper into them than HypAware writes/)
+  // Not passing by inertia: the same run still prunes the direct child it did
+  // write, so the refusal is about the depth and nothing else.
+  assert.equal(await exists(path.join(skillsDir, 'hypaware-ignore')), false)
+  assert.match(second.stdout, /removed retired skill 'hypaware-ignore'/)
 })
 
 test('nothing is removed when this run installs nothing', async () => {
@@ -698,6 +820,62 @@ test('a skill the boot profile withheld is never read as retired', async () => {
   assert.ok(
     await exists(path.join(gascitySkill, 'SKILL.md')),
     'a skill this boot profile withheld must survive: the next attach would only put it back'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+/* ------------------------------------------------------------------------ *
+ * The door next to those four, which deliberately does not stand the prune
+ * down. Pinned so the reading cannot drift silently into either behaviour.
+ * @ref LLP 0219#uninstalled-is-retired [tests]:
+ * ------------------------------------------------------------------------ */
+
+test('a config-enabled plugin that is no longer installed is retired, and its skill prunes', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-prune-uninstalled-'))
+  const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const workspaceDir = await writeBundledWorkspace(home)
+  const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/claude', config: {} }, { name: '@hypaware/gascity', config: {} }],
+    })
+  )
+
+  const bootArgs = /** @type {const} */ ({
+    hypHome: path.join(home, '.hyp'),
+    configPath,
+    workspaceDir,
+    mode: 'smoke',
+    env,
+  })
+
+  const first = await bootKernel({ ...bootArgs, runId: 'prune-uninstalled-1' })
+  await materializeFromBoot({ boot: first, home, env })
+  const gascitySkill = path.join(home, '.claude', 'skills', 'hypaware-gascity')
+  assert.ok(await exists(path.join(gascitySkill, 'SKILL.md')), 'the opt-in skill must land first')
+
+  // The plugin is uninstalled: its whole directory is gone, so no manifest
+  // fails to load and nothing is withheld by a profile. It is in no list boot
+  // returns, and that is the intended reading - an uninstalled plugin is a
+  // retired plugin, and what prunes is a byte-identical copy of what HypAware
+  // wrote whose source no longer exists on this machine.
+  await fs.rm(path.join(workspaceDir, 'gascity'), { recursive: true, force: true })
+
+  const second = await bootKernel({ ...bootArgs, runId: 'prune-uninstalled-2' })
+  assert.deepEqual(
+    second.unavailablePlugins,
+    [],
+    'a wholly absent plugin directory walks through none of the four doors'
+  )
+  await materializeFromBoot({ boot: second, home, env })
+
+  assert.equal(
+    await exists(gascitySkill),
+    false,
+    'pinning the reading: change it in a new LLP, never by accident here'
   )
   await fs.rm(home, { recursive: true, force: true })
 })

@@ -93,6 +93,20 @@ path, and only while the bytes there are still the bytes it wrote.**
   working install. So a client with no successful copy this pass is not pruned
   at all.
 
+- **A candidate must be a direct child of an asset directory**
+  {#only-direct-children}: recorded post-acceptance from the ship review of
+  [#745](https://github.com/hyparam/hypaware/pull/745)
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 1), narrowing
+  condition three above rather than changing it. Every write the materializer
+  makes is `<base>/<name>` or `<base>/<name>.md`, over a name that registration
+  has already forced to a single safe path segment, so "strictly inside the
+  client's asset directories" is wider than the writer: it also admits
+  `<skills>/<a-skill-this-run-is-installing>/subdir`, where one corrupt record
+  carrying a valid digest would take a subtree out of a live asset. The delete
+  side now admits exactly the shape the copy side writes and nothing beneath it,
+  which costs nothing (no path we ever wrote is deeper) and removes a class of
+  recursive delete that pure record corruption could otherwise reach.
+
 - **A boot that did not reach its whole plugin set prunes nothing**
   {#incomplete-activation-prunes-nothing}: the scope guard above catches *total*
   failure, and total failure is not what a boot produces. Four routes take a
@@ -134,12 +148,40 @@ path, and only while the bytes there are still the bytes it wrote.**
   genuinely removed from the config still prunes) and `all-available` yields
   exactly the config-enabled names that profile dropped.
 
+  The config side of that intersection is **the config as it was at boot**, and
+  the wizard rewrites it mid-run: a user who hand-disables an opt-in plugin,
+  runs `hyp init`, and re-picks it gets that plugin's skill pruned by the finale
+  (the boot's `configEnabled` did not contain it) and re-installed by the next
+  config-profile attach. Transient, self-healing, and only ever HypAware-written
+  bytes, so it is accepted rather than fixed by re-deriving the set after the
+  wizard writes ([#746](https://github.com/hyparam/hypaware/issues/746) item 4).
+
   Coarse on purpose. The finer rule (record the owning plugin per ledger entry
   and skip only that plugin's candidates) buys a partial prune on a broken boot,
   which is worth nothing next to being wrong on a delete path. Together with the
   scope guard, this is what makes the mechanism fail safe: each of the four
   routes a plugin can leave a boot's plan by ends in "prune nothing", never in
   "prune everything it cannot see".
+
+- **A plugin that is not on the machine is retired, not withheld**
+  {#uninstalled-is-retired}: recorded post-acceptance
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 3) for a case the
+  four routes above do not cover and were never meant to. Each of them is a way
+  a plugin *present on the machine* leaves a boot's plan; a config-enabled
+  plugin whose directory is **wholly absent** (an uninstall, a deleted install
+  tree, lost plugin state) never enters the pool, so it is in neither
+  `unloadable` (nothing failed to load) nor the withheld-by-profile term
+  (nothing was there to withhold), and `unavailablePlugins` does not name it.
+  Its ledgered assets therefore prune.
+
+  **That is the intended reading**, not an oversight: an uninstalled plugin is a
+  retired plugin, its assets have no source left on the machine to re-copy from,
+  and what the prune takes is still only a byte-identical copy of what HypAware
+  itself wrote there (#edited-assets-are-not-ours is unchanged and still gates
+  it). Adding `configEnabled - pool` to `unavailablePlugins` would instead make
+  every uninstall stand the prune down permanently, leaving exactly the
+  model-invocable leave-behind this document exists to remove. Pinned by a test
+  so it cannot drift silently.
 
 - **An asset the user changed is no longer ours to delete**
   {#edited-assets-are-not-ours}: the removal proceeds only on a digest we
@@ -173,6 +215,31 @@ path, and only while the bytes there are still the bytes it wrote.**
   replace, and the source is right there to re-copy from). A retired asset has
   no source left, so deleting an edited one is unrecoverable. Different
   recoverability, different rule.
+
+  **The gate is check-then-act, and that residual is accepted**
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 5). Between
+  reading the digest and calling `fs.rm` there is a window in which an edit
+  would be deleted despite the rule. It is inherent to checking a filesystem
+  before writing to it, it is milliseconds wide, it is open only during an
+  attach or an install, and it is open only on the exact path that run has
+  already established is a retired asset whose bytes are still byte-identical to
+  what HypAware wrote. Closing it would mean holding a lock over a user's
+  `~/.claude` for the length of a prune, which buys less than it costs. Recorded
+  here so a later review reaches this line rather than re-deriving it.
+
+- **An unreadable asset is not an absent one** {#unreadable-is-not-absent}:
+  recorded post-acceptance
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 2). Reading a
+  candidate produces three outcomes, not two: a digest, a path that is not there
+  (`ENOENT`), and a path that is there but could not be read (an `EACCES` on a
+  file inside an installed skill, a device error). Only the second is "already
+  gone" and only the second drops the record in silence. The third keeps the
+  record, verbatim and with no digest re-taken, and reports the path withheld
+  with a `digest_unreadable` kind - because the copy is still on disk and still
+  model-invocable, and dropping the only record naming it makes it permanently
+  unprunable *and* unreportable, which is the leave-behind this document exists
+  to end. The distinction also keeps this document's claim that unreadable
+  things only ever remove *less* true of assets as well as of ledger records.
 
 - **Pruning is automatic, not confirmed** {#automatic-not-gated}: no prompt.
   What gets removed is a byte-identical copy of a file HypAware itself wrote,
