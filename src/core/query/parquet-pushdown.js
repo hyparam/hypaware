@@ -82,10 +82,58 @@ function convertBinary(node, negate) {
 
   const { column, value, flipped } = extractColumnAndValue(left, right)
   if (column === undefined || value === undefined) return undefined
+  // A comparison against a NULL literal (`col = NULL`, `col < NULL`) is
+  // UNKNOWN for every row under three-valued logic, so it matches nothing,
+  // NULL rows included. No hyparquet operator says "never match", so hand
+  // the predicate back to the engine rather than push a filter that would
+  // read as `IS NULL`. `IS NULL` itself goes through the unary path.
+  if (value === null) return undefined
 
   const mongoOp = mapOperator(op, flipped, negate)
   if (!mongoOp) return undefined
-  return { [column]: { [mongoOp]: value } }
+  return guardNulls(column, mongoOp, value)
+}
+
+/**
+ * Add the NULL guard a relational or inequality operator needs.
+ *
+ * hyparquet's `matchFilter` evaluates `$lt`/`$lte`/`$gt`/`$gte` with raw
+ * JavaScript relational operators, which coerce a NULL column value to `0`:
+ * `null <= 300n` and `null > -400n` are both true, so NULL rows sail past a
+ * bare bound (`>` and `>=` only look safe because a positive bound beats 0).
+ * `$ne` negates a failed equality, so NULL passes it too. SQL three-valued
+ * logic rejects every one of those rows. `convertInValues` applies the same
+ * guard to `$in`/`$nin` for the same reason.
+ *
+ * The guard is a `$ne: null` conjunct, and it rides inside the same condition
+ * object rather than an outer `$and` because `canSkipRowGroup` and
+ * `filterPageRanges` disable statistics pruning for any condition a NULL
+ * value could satisfy: a bare `{col: {$lte: v}}` reads as NULL-matching and
+ * forfeits row-group and page skipping on every chunk holding a NULL, and so
+ * does `{$and: [{col: {$ne: null}}, {col: {$lte: v}}]}`, whose bound is still
+ * bare inside its own branch. `{col: {$ne: null, $lte: v}}` prunes.
+ *
+ * `$ne` is the one operator whose guard key collides with its own, so it
+ * takes the `$and` form. That costs no pruning in practice: hyparquet only
+ * skips on `$ne` when a chunk is constant at the excluded value, and it
+ * already declines to skip such a chunk once the column has NULLs in it.
+ *
+ * `$eq` needs no guard: `equals(null, <non-null>)` is already false, and
+ * `$eq: null` is exactly how the `IS NULL` path spells itself.
+ *
+ * @ref LLP 0098#wrapper-duties [constrained-by]: pushdown may only claim
+ * `appliedWhere` for a filter that is faithful to SQL semantics; the engine
+ * never re-filters a claimed predicate, so a leak here is a wrong answer.
+ *
+ * @param {string} column
+ * @param {'$lt' | '$lte' | '$gt' | '$gte' | '$eq' | '$ne'} mongoOp
+ * @param {SqlPrimitive} value
+ * @returns {ParquetQueryFilter}
+ */
+function guardNulls(column, mongoOp, value) {
+  if (mongoOp === '$eq') return { [column]: { $eq: value } }
+  if (mongoOp === '$ne') return { $and: [{ [column]: { $ne: null } }, { [column]: { $ne: value } }] }
+  return { [column]: { $ne: null, [mongoOp]: value } }
 }
 
 /**
@@ -186,5 +234,11 @@ function convertInValues(node, negate) {
     if (val.type !== 'literal') return undefined
     values.push(coerceBigInt(val.value))
   }
-  return { [node.expr.name]: { [negate ? '$nin' : '$in']: values } }
+  // `col NOT IN (…, NULL)` is UNKNOWN for every row: no value can be proven
+  // distinct from NULL, so the predicate matches nothing. Unexpressible as a
+  // hyparquet operator, so the engine keeps it. (`col IN (…, NULL)` is fine:
+  // the NULL entry can never make the disjunction true, and the `$ne: null`
+  // guard below stops it from matching NULL rows.)
+  if (negate && values.some((value) => value === null)) return undefined
+  return { [node.expr.name]: { $ne: null, [negate ? '$nin' : '$in']: values } }
 }
