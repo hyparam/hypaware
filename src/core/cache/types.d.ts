@@ -295,6 +295,13 @@ export interface MaintenancePartitionReport {
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
+  // Compaction of this partition is known not to reduce its data-file
+  // count under the writer running now: either this run's rewrite
+  // reproduced the count it started from, or a previous one did and the
+  // cursor still records that verdict (LLP 0217). Set with `compacted`
+  // for the first case and without it for the second, where it is the
+  // reason the partition was skipped.
+  compactionIneffective?: boolean
 }
 
 export interface MaintenanceReport {

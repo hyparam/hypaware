@@ -323,6 +323,14 @@ export async function runQueryMaintain(argv, ctx) {
     // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
     // rewrite; without this line the run reads as "nothing due".
     if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
+    // @ref LLP 0217#record-effectiveness: without this the run reports
+    // "0 partitions compacted" for a partition it is deliberately leaving
+    // fragmented, and the reason is only recoverable by reading cursors.
+    if (p.compactionIneffective) {
+      actions.push(p.compacted
+        ? 'no file-count reduction'
+        : `compaction skipped: the last rewrite of these ${p.dataFilesBefore} files reduced nothing`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }

@@ -67,6 +67,29 @@ const GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
 const ORPHAN_GRACE_MS = 60 * 60 * 1000
 
 /**
+ * Which compaction writer produced the outcome a cursor records.
+ *
+ * Bump this when the rewrite gains the ability to shrink a partition it
+ * previously could not: a recorded "this rewrite achieved nothing"
+ * verdict is only binding for the writer that reached it, so a bump is
+ * what buys every frozen partition one honest retry.
+ *
+ * 1 - one output file per flushed batch (before LLP 0209). A 32 MB
+ *     in-memory batch landed as a ~200 KB file, so a rewrite reproduced
+ *     the file count it started with.
+ * 2 - row groups stream into a file that closes on bytes written
+ *     (LLP 0209#row-groups), so a rewrite converges toward
+ *     `target_file_bytes` per partition tuple.
+ *
+ * Cursors written before this field existed carry no generation and are
+ * therefore never equal to the running one, which is the correct reading:
+ * their verdict was reached by a writer this build cannot identify.
+ *
+ * @ref LLP 0217#retry-on-writer-change [implements]: the stamp that makes an ineffective verdict retryable exactly once.
+ */
+const COMPACTION_WRITER_GENERATION = 2
+
+/**
  * @param {Partial<MaintenanceConfig> | undefined} config
  * @returns {MaintenanceConfig}
  */
@@ -202,7 +225,7 @@ export async function maintainCache(opts) {
  * @property {() => string} nextDirName  fresh name for the replacement generation
  * @property {boolean} commitEmpty  commit a rewrite that found no columns (source-table) or abort it (legacy)
  * @property {number} [newEpoch]  epoch the legacy layout advances to, reported after compaction
- * @property {(nextDir: string, rowCount: number, resettleBaselineFiles: number) => PartitionCursor} cursorAfter  cursor to write once the generation swap commits
+ * @property {(nextDir: string, rowCount: number, outcome: { dataFilesBefore: number, dataFilesAfter: number }) => PartitionCursor} cursorAfter  cursor to write once the generation swap commits
  */
 
 /**
@@ -220,13 +243,13 @@ function generationLayout(cursor) {
       // point the cursor at it.
       nextDirName: () => `table-${Date.now()}`,
       commitEmpty: true,
-      cursorAfter: (nextDir, rowCount, resettleBaselineFiles) => ({
+      cursorAfter: (nextDir, rowCount, outcome) => ({
         epoch: cursor.epoch,
         rowCount,
         compaction: {
           previousTableDir: liveDir,
           compactedAt: new Date().toISOString(),
-          resettleBaselineFiles,
+          ...compactionOutcomeRecord(outcome),
         },
         layout: 'source-table',
         tableDir: nextDir,
@@ -241,13 +264,13 @@ function generationLayout(cursor) {
     nextDirName: () => `epoch=${newEpoch}`,
     commitEmpty: false,
     newEpoch,
-    cursorAfter: (_nextDir, rowCount, resettleBaselineFiles) => ({
+    cursorAfter: (_nextDir, rowCount, outcome) => ({
       epoch: newEpoch,
       rowCount,
       compaction: {
         previousEpoch: cursor.epoch,
         compactedAt: new Date().toISOString(),
-        resettleBaselineFiles,
+        ...compactionOutcomeRecord(outcome),
       },
     }),
   }
@@ -294,13 +317,21 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // compact_avg_file_bytes), and the tick budget is burned rewriting the
     // same partitions while the rest of the walk starves.
     const grewSinceCompaction = dataFilesBefore !== resettleBaselineFiles(cursor)
+    // @ref LLP 0217#retry-on-writer-change [implements]: the gate above
+    // reads "live count equals baseline" as convergence, which holds only
+    // while the writer that produced that baseline is the one running. A
+    // partition whose recorded rewrite achieved no reduction (or whose
+    // cursor predates the record) is owed one attempt under a new writer
+    // generation, or a partition frozen at 1,521 files by a writer that
+    // could not shrink it stays frozen after the writer is fixed (#723).
+    const verdictStale = !grewSinceCompaction && compactionVerdictStale(cursor)
     // Cheap dueness check first: file-count and byte-size heuristics only,
     // no metadata load and no row scan. A foreign sorted replace almost
     // always lands here (its baseline mismatch alone doesn't imply the
     // size heuristics fire), so gating the expensive re-settle scan behind
     // this check means the common "recognized, nothing to scan for" tick
     // never pays for one.
-    const compactionDue = opts.force || (grewSinceCompaction && needsCompaction(liveDir, cfg))
+    const compactionDue = opts.force || ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
@@ -318,6 +349,15 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       ? grewSinceCompaction && await hasResettleCandidate(liveDir)
       : false
     const shouldCompact = compactionDue || hasResettle
+    if (!shouldCompact && compactionKnownIneffective(cursor)) {
+      // Skipped for a stated reason rather than by the baseline
+      // coincidence: this writer has already rewritten this partition and
+      // produced the same fragmentation. Read from the cursor, so saying
+      // so costs nothing; re-checking `needsCompaction` here would stat
+      // every data file of every converged partition, every tick.
+      r.compactionIneffective = true
+      getActiveSpan()?.setAttribute('compaction_ineffective', true)
+    }
     if (shouldCompact) {
       const tableInfo = await loadCompactionTableInfo(liveDir)
       // @ref LLP 0207#foreign-replace [implements]: a baseline mismatch whose
@@ -349,6 +389,13 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           r.rowCount = result.rowCount
           r.dataFilesAfter = result.dataFiles
           r.compactedBytesWritten = result.bytesWritten
+          // @ref LLP 0217#record-effectiveness [implements]: a rewrite that
+          // reproduced its own file count reports that, so the run is
+          // legible as work that achieved nothing instead of surfacing
+          // only as a later disk audit.
+          if (result.dataFilesBefore > 0 && result.dataFiles >= result.dataFilesBefore) {
+            r.compactionIneffective = true
+          }
           compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
         }
       }
@@ -613,11 +660,16 @@ function estimateRowBytes(row) {
  * @param {MaintenanceConfig} cfg
  * @param {SettleContext | null} [settle]
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
- * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number, bytesWritten?: number } | null>}
+ * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFilesBefore: number, dataFiles: number, bytesWritten?: number } | null>}
  */
 async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   const oldDir = path.join(partitionDir, layout.liveDir)
   if (!tableExists(oldDir)) return null
+
+  // Counted here rather than taken from the caller: this is the count the
+  // rewrite about to run is measured against, and it goes into the cursor
+  // beside the count that rewrite produces.
+  const dataFilesBefore = countDataFiles(oldDir)
 
   const existingSpec = tableInfo?.partitionSpec
   const schemaColumns = tableInfo?.schemaColumns ?? null
@@ -723,11 +775,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
 
   if (!columns) {
     if (!layout.commitEmpty) return null
-    await writeCursor(partitionDir, layout.cursorAfter(newDirName, 0, 0))
+    await writeCursor(partitionDir, layout.cursorAfter(newDirName, 0, { dataFilesBefore, dataFilesAfter: 0 }))
     const retiredMarker = path.join(oldDir, '.retired')
     await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
     return {
       rowCount: 0,
+      dataFilesBefore,
       dataFiles: 0,
     }
   }
@@ -738,9 +791,14 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
 
   // Record the post-rewrite data-file count as the re-settle baseline: the
   // next tick only forces another re-settle sweep once new data flushes past
-  // this count, so an unmatchable fallback does not loop (LLP 0027).
+  // this count, so an unmatchable fallback does not loop (LLP 0027). The
+  // pre-rewrite count rides along, so a later tick can tell a rewrite that
+  // converged from one that reproduced its own fragmentation (LLP 0217).
   const newDataFiles = countDataFiles(newDir)
-  await writeCursor(partitionDir, layout.cursorAfter(newDirName, totalRows, newDataFiles))
+  await writeCursor(
+    partitionDir,
+    layout.cursorAfter(newDirName, totalRows, { dataFilesBefore, dataFilesAfter: newDataFiles })
+  )
 
   const retiredMarker = path.join(oldDir, '.retired')
   await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
@@ -748,6 +806,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   return {
     newEpoch: layout.newEpoch,
     rowCount: totalRows,
+    dataFilesBefore,
     dataFiles: newDataFiles,
     bytesWritten: streamed?.bytesWritten ?? 0,
   }
@@ -935,6 +994,95 @@ function resettleBaselineFiles(cursor) {
 }
 
 /**
+ * What a rewrite achieved, as the cursor records it: the file count it
+ * started from beside the count it produced (the baseline), stamped with
+ * the writer generation that reached that outcome.
+ *
+ * `resettleBaselineFiles` alone cannot answer "did the last compaction
+ * accomplish anything?", and the LLP 0199 gate reads a live count sitting
+ * on the baseline as convergence either way. Recording the before count
+ * makes a rewrite that reproduced its own fragmentation legible.
+ *
+ * @ref LLP 0217#record-effectiveness [implements]: store the pre-rewrite count beside the post-rewrite one.
+ * @param {{ dataFilesBefore: number, dataFilesAfter: number }} outcome
+ * @returns {Record<string, unknown>}
+ */
+function compactionOutcomeRecord(outcome) {
+  return {
+    resettleBaselineFiles: outcome.dataFilesAfter,
+    dataFilesBefore: outcome.dataFilesBefore,
+    writerGeneration: COMPACTION_WRITER_GENERATION,
+  }
+}
+
+/**
+ * Did the compaction this cursor records reduce the partition's data-file
+ * count? Undefined when the cursor predates the effectiveness record, in
+ * which case what the rewrite achieved is unknown rather than known bad.
+ *
+ * Any reduction counts. A rewrite that shaves one file off is progress,
+ * and the baseline gate still requires the live count to move before the
+ * next attempt, so a marginal gain cannot become a rewrite loop.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {boolean | undefined}
+ */
+function compactionReducedFiles(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c)) return undefined
+  const before = c.dataFilesBefore
+  const after = c.resettleBaselineFiles
+  if (typeof before !== 'number' || typeof after !== 'number') return undefined
+  // A rewrite of a partition that held no data files had nothing to
+  // reduce, so its outcome is evidence about neither the writer nor the
+  // partition.
+  if (before <= 0) return undefined
+  return after < before
+}
+
+/**
+ * Is the partition known to be unshrinkable by the writer running now?
+ * True when its last rewrite is recorded as having achieved no reduction
+ * and that verdict was reached by this same writer generation. Such a
+ * partition is skipped for a stated reason: rewriting it again would
+ * reproduce the same generation, exactly as the LLP 0199 gate assumes.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {boolean}
+ */
+function compactionKnownIneffective(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c)) return false
+  if (compactionReducedFiles(cursor) !== false) return false
+  return c.writerGeneration === COMPACTION_WRITER_GENERATION
+}
+
+/**
+ * Has the recorded verdict stopped binding? A partition sitting on its
+ * baseline is skipped because a rewrite would reproduce the same
+ * generation - which is only true while the writer is the one that
+ * produced it. When the last rewrite is not recorded as a reduction (it
+ * achieved nothing, or it predates the effectiveness record entirely) and
+ * a different writer generation is now running, the partition is owed one
+ * attempt under the new writer. The attempt re-stamps the cursor, so it
+ * happens once per generation and not once per tick.
+ *
+ * A partition that was successfully shrunk is never retried on this path,
+ * whatever its stamp: the convergence LLP 0199 protects is the whole
+ * point of the gate.
+ *
+ * @ref LLP 0217#retry-on-writer-change [implements]: the frozen partition thaws when, and only when, the writer under it changes.
+ * @param {PartitionCursor} cursor
+ * @returns {boolean}
+ */
+function compactionVerdictStale(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c) || typeof c.resettleBaselineFiles !== 'number') return false
+  if (compactionReducedFiles(cursor) === true) return false
+  return c.writerGeneration !== COMPACTION_WRITER_GENERATION
+}
+
+/**
  * Cursor for a partition converged by a foreign sorted rewrite: same
  * generation, same rows, only the re-settle baseline moves to the live
  * data-file count so the LLP 0199 gate reads the partition as converged.
@@ -942,15 +1090,30 @@ function resettleBaselineFiles(cursor) {
  * the kernel's own last rewrite, because this is a recognition, not a
  * compaction.
  *
+ * The recognition also carries this build's writer generation, and drops
+ * whatever effectiveness a previous kernel rewrite recorded: the layout
+ * on disk is the foreign compactor's, so no verdict about the kernel's
+ * own writer applies to it. Without the stamp a recognized partition
+ * would read as owing a retry on every tick and pay a metadata load and
+ * a cursor write for it, forever.
+ *
  * @ref LLP 0207#re-baseline [implements]: the cursor write without a
  * rewrite; the whole point is to keep the foreign layout.
+ * @ref LLP 0217#retry-on-writer-change [constrained-by]: recognition is a verdict of its own, so the retry stamp is settled here too.
  * @param {PartitionCursor} cursor
  * @param {number} liveDataFiles
  * @returns {PartitionCursor}
  */
 function rebaselineCursor(cursor, liveDataFiles) {
   const compaction = isPlainObject(cursor.compaction) ? cursor.compaction : {}
-  return { ...cursor, compaction: { ...compaction, resettleBaselineFiles: liveDataFiles } }
+  /** @type {Record<string, unknown>} */
+  const next = {
+    ...compaction,
+    resettleBaselineFiles: liveDataFiles,
+    writerGeneration: COMPACTION_WRITER_GENERATION,
+  }
+  delete next.dataFilesBefore
+  return { ...cursor, compaction: next }
 }
 
 /** @param {string} value */

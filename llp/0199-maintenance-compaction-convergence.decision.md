@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-07
 **Related:** LLP 0027
-**Extended-by:** [LLP 0207](./0207-foreign-sorted-replace-convergence.decision.md) (a baseline mismatch whose current snapshot is a sorted `replace` is a foreign rewrite, not growth: recognize it and re-baseline instead of compacting); [LLP 0209](./0209-compaction-file-size.decision.md) (the rewrite the baseline gate protects now sizes its output files by bytes written rather than by the in-memory batch estimate, so a compacted generation actually reaches `target_file_bytes`)
+**Extended-by:** [LLP 0207](./0207-foreign-sorted-replace-convergence.decision.md) (a baseline mismatch whose current snapshot is a sorted `replace` is a foreign rewrite, not growth: recognize it and re-baseline instead of compacting); [LLP 0209](./0209-compaction-file-size.decision.md) (the rewrite the baseline gate protects now sizes its output files by bytes written rather than by the in-memory batch estimate, so a compacted generation actually reaches `target_file_bytes`); [LLP 0217](./0217-compaction-effectiveness-verdict.decision.md) (the cursor records what a rewrite achieved, not only the count it produced, so a partition sitting on its baseline because the rewrite accomplished nothing is skipped explicitly and retried once when the writer changes)
 
 > Maintenance stops re-flagging already-compacted partitions: a partition is
 > only compaction-due when its live data-file count has moved off the count
