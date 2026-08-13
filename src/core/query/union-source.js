@@ -27,13 +27,20 @@ import { normalizeScanColumn } from './scan-column.js'
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
  * forwarded, which adds no failure the merged stream did not already have, but
- * an absent column does NOT read as null: a bare identifier projection yields
- * `undefined` for rows from a partition that lacks the column (key present,
- * value not `null`, dropped by `JSON.stringify`), while anything that evaluates
- * it (a `WHERE` on it, an expression over it, `ORDER BY`/`GROUP BY`/`DISTINCT`,
- * an aggregate) throws `ColumnNotFoundError` at the first such row. `SELECT *`
- * keeps each partition's own row shape, so the key is simply absent.
- * `test/core/union-source.test.js` pins both halves.
+ * an absent column does NOT read as null. A bare identifier projection leaves
+ * the drifted cell unresolved: squirreling's `executeProject` finds no matching
+ * cell, so it emits a lazy `evaluateExpr` thunk that would throw and writes no
+ * entry into the row's `resolved` map. `collect()` reads the pre-materialized
+ * `resolved` map for every advertised column and never invokes that thunk, so
+ * the key is present with the value `undefined` (not `null`, dropped by
+ * `JSON.stringify`). That holds only for consumers that go through `collect()`
+ * and only while every partition yields rows built by squirreling's `asyncRow`,
+ * which pre-materializes `resolved`; a partition whose rows carry no `resolved`
+ * disables the fast path for the whole result and a bare projection throws too.
+ * Anything that evaluates the column (a `WHERE` on it, an expression over it,
+ * `ORDER BY`/`GROUP BY`/`DISTINCT`, an aggregate) throws `ColumnNotFoundError`
+ * at the first such row. `SELECT *` keeps each partition's own row shape, so the
+ * key is simply absent. `test/core/union-source.test.js` pins both halves.
  *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}

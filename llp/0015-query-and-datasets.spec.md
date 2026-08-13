@@ -75,17 +75,31 @@ partition can't satisfy the predicate the union drops `where` for it and lets
 the engine filter. `columns` is always forwarded, which adds no failure the
 merged stream did not already have, but an absent column does **not** read as
 null. A bare identifier projection (`SELECT extra FROM t`, with or without an
-alias, a `LIMIT`, or a predicate on a column every partition has) copies the
-value through and yields `undefined` for rows from a partition that lacks the
-column: the key is present, its value is not `null`, and `JSON.stringify` drops
-it. Anything that *evaluates* the absent column throws squirreling's
-`ColumnNotFoundError` at the first row from a partition without it: a `WHERE` on
-it, an expression or function over it, `ORDER BY`, `GROUP BY`, `DISTINCT`, or an
-aggregate on it. `SELECT *` is unaffected: each partition's rows keep their own
-shape, so the key is simply absent. The column is addressable at all only
-because the union advertises the superset of partition columns; when no
-partition has it, planning fails with the same error. Pinned by
+alias, a `LIMIT`, or a predicate on a column every partition has) leaves the
+drifted cell **unresolved**: `executeProject` finds no matching cell, so it emits
+a lazy `evaluateExpr` thunk that would throw, and writes no entry into the row's
+`resolved` map. `collect()` reads the pre-materialized `resolved` map for every
+advertised column and never invokes that thunk, so the key is present with the
+value `undefined`, is not `null`, and `JSON.stringify` drops it. This holds only
+for consumers that go through `collect()` (as `executeQuerySql` does) **and**
+only while every partition yields rows built by squirreling's `asyncRow`, which
+pre-materializes `resolved`; a partition whose rows carry no `resolved` disables
+the fast path for the whole result and a bare projection throws too. Anything
+that *evaluates* the absent column throws squirreling's `ColumnNotFoundError` at
+the first row from a partition without it: a `WHERE` on it, an expression or
+function over it, `ORDER BY`, `GROUP BY`, `DISTINCT`, or an aggregate on it.
+`SELECT *` is unaffected: each partition's rows keep their own shape, so the key
+is simply absent. The column is addressable at all only because the union
+advertises the superset of partition columns; when no partition has it, planning
+fails with the same error **unless a wrapper advertises the declared schema on
+top of the union (LLP 0032's `withSchemaColumns`), in which case the same
+undefined-or-throws contract applies to a column no partition has**. Pinned by
 [`test/core/union-source.test.js`](../test/core/union-source.test.js).
+
+> **Corrected (#731, PR #740).** This section previously stated that projecting
+> an absent column "reads as null, never throws". That was never true of the
+> code; the paragraph above records the measured contract. No runtime behaviour
+> changed.
 
 ## Collect: the ad-hoc on-ramp
 

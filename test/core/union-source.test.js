@@ -3,17 +3,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { parquetMetadataAsync } from 'hyparquet'
-import { parquetWriteBuffer } from 'hyparquet-writer'
 import { asyncRow, collect, executeSql, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
-import { parquetDataSource } from '../../src/core/query/parquet-source.js'
-import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
+import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { AsyncBuffer } from 'hyparquet'
- * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanColumnResults, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncCells, AsyncDataSource, ExprNode, IdentifierNode, ScanColumnResults, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
@@ -405,45 +401,17 @@ const DRIFT_BASE_COLUMNS = [
 ]
 
 /**
- * @param {Uint8Array} bytes
- * @returns {AsyncBuffer}
- */
-function asyncBufferFromBytes(bytes) {
-  return {
-    byteLength: bytes.byteLength,
-    slice(start, end) {
-      const sliced = bytes.subarray(start, end)
-      const out = new ArrayBuffer(sliced.byteLength)
-      new Uint8Array(out).set(sliced)
-      return out
-    },
-  }
-}
-
-/**
- * @param {ColumnSpec[]} columns
- * @param {Record<string, SqlPrimitive>[]} rows
- * @returns {Promise<AsyncDataSource>}
- */
-async function parquetPartition(columns, rows) {
-  const columnData = rowsToColumnSources(columns, rows)
-  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY' })
-  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
-  return parquetDataSource(file, await parquetMetadataAsync(file))
-}
-
-/**
  * Two real parquet partitions with additive drift: `extra` exists only in the
  * newer one, the shape a cache takes on the day a dataset gains a column.
  *
  * @returns {Promise<AsyncDataSource>}
  */
 async function driftedUnion() {
-  const older = await parquetPartition(DRIFT_BASE_COLUMNS, [
+  const older = await parquetSourceFromRows(DRIFT_BASE_COLUMNS, [
     { id: 1, score: 1.5 },
     { id: 2, score: 2.5 },
   ])
-  const newer = await parquetPartition(
+  const newer = await parquetSourceFromRows(
     [...DRIFT_BASE_COLUMNS, { name: 'extra', type: 'STRING', nullable: true }],
     [{ id: 3, score: 3.5, extra: 'x' }]
   )
@@ -460,21 +428,100 @@ async function runDrifted(query) {
 
 /**
  * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {string} [key]
  * @returns {boolean[]}
  */
-function hasExtraKey(rows) {
-  return rows.map((row) => Object.prototype.hasOwnProperty.call(row, 'extra'))
+function hasExtraKey(rows, key = 'extra') {
+  return rows.map((row) => Object.prototype.hasOwnProperty.call(row, key))
 }
 
 // @ref LLP 0015#multi-partition-union [tests]: forwarding `columns` does not null-pad; the drifted cell is `undefined`, which is why the doc no longer promises null
 test('a projected column one partition lacks reads as undefined, never null', async () => {
-  for (const query of ['SELECT extra FROM t', 'SELECT extra FROM t WHERE score > 1']) {
+  // Every bare-projection shape the LLP names, so "Pinned by" covers the alias
+  // and `LIMIT` variants it claims and not just the plain projection.
+  const cases = [
+    { query: 'SELECT extra FROM t', key: 'extra', values: [undefined, undefined, 'x'], json: '[{},{},{"extra":"x"}]' },
+    { query: 'SELECT extra FROM t WHERE score > 1', key: 'extra', values: [undefined, undefined, 'x'], json: '[{},{},{"extra":"x"}]' },
+    { query: 'SELECT extra AS e FROM t', key: 'e', values: [undefined, undefined, 'x'], json: '[{},{},{"e":"x"}]' },
+    { query: 'SELECT extra FROM t LIMIT 1', key: 'extra', values: [undefined], json: '[{}]' },
+    { query: 'SELECT extra FROM t LIMIT 0', key: 'extra', values: [], json: '[]' },
+  ]
+  for (const { query, key, values, json } of cases) {
     const rows = await runDrifted(query)
-    assert.equal(rows.length, 3, query)
-    assert.deepEqual(hasExtraKey(rows), [true, true, true], 'the projection puts the key on every row')
-    assert.deepEqual(rows.map((row) => row.extra), [undefined, undefined, 'x'], query)
-    assert.equal(rows[0].extra === null, false, 'undefined, not null: the union never pads the drifted partition')
-    assert.equal(JSON.stringify(rows), '[{},{},{"extra":"x"}]', 'JSON.stringify drops the undefined cells')
+    assert.equal(rows.length, values.length, query)
+    assert.deepEqual(hasExtraKey(rows, key), values.map(() => true), 'the projection puts the key on every row')
+    assert.deepEqual(rows.map((row) => row[key]), values, query)
+    assert.equal(rows[0]?.[key] === null, false, 'undefined, not null: the union never pads the drifted partition')
+    assert.equal(JSON.stringify(rows), json, 'JSON.stringify drops the undefined cells')
+  }
+})
+
+// @ref LLP 0015#multi-partition-union [tests]: the undefined read is `collect()`'s pre-materialized fast path, not a copied value; the cell itself throws
+test('the drifted cell is unresolved and throws; only collect() turns it into undefined', async () => {
+  const results = executeSql({ tables: { t: await driftedUnion() }, query: 'SELECT extra FROM t' })
+  /** @type {{ resolvedHasKey: boolean, cell: string }[]} */
+  const seen = []
+  for await (const row of results.rows()) {
+    const resolved = row.resolved
+    let cell = 'ok'
+    try {
+      await row.cells.extra()
+    } catch (err) {
+      cell = err instanceof Error ? err.constructor.name : 'unknown'
+    }
+    seen.push({ resolvedHasKey: !!resolved && Object.prototype.hasOwnProperty.call(resolved, 'extra'), cell })
+  }
+  assert.deepEqual(seen, [
+    { resolvedHasKey: false, cell: 'ColumnNotFoundError' },
+    { resolvedHasKey: false, cell: 'ColumnNotFoundError' },
+    { resolvedHasKey: true, cell: 'ok' },
+  ], 'a drifted cell is a throwing thunk with no `resolved` entry; `collect()` reads `resolved` and never calls it')
+})
+
+// @ref LLP 0015#multi-partition-union [tests]: the undefined read is load-bearing on every partition pre-materializing `resolved`
+test('a partition whose rows carry no resolved map makes a bare projection throw', async () => {
+  /**
+   * A legal `AsyncDataSource` that hand-rolls its rows instead of going
+   * through squirreling's `asyncRow`, so nothing pre-materializes `resolved`.
+   *
+   * @param {string[]} columns
+   * @param {Record<string, SqlPrimitive>[]} rows
+   * @returns {AsyncDataSource}
+   */
+  function unresolvedSource(columns, rows) {
+    return {
+      columns,
+      numRows: rows.length,
+      /** @param {ScanOptions} [options] */
+      scan(options = {}) {
+        const wanted = options.columns ?? columns
+        return {
+          appliedWhere: false,
+          appliedLimitOffset: false,
+          async *rows() {
+            for (const row of rows) {
+              const present = wanted.filter((c) => c in row)
+              /** @type {AsyncCells} */
+              const cells = {}
+              for (const c of present) cells[c] = async () => row[c]
+              yield { columns: present, cells }
+            }
+          },
+        }
+      },
+    }
+  }
+
+  const union = unionSources([
+    unresolvedSource(['id', 'score'], [{ id: 1, score: 1.5 }]),
+    unresolvedSource(['id', 'score', 'extra'], [{ id: 3, score: 3.5, extra: 'x' }]),
+  ])
+  for (const query of ['SELECT extra FROM t', 'SELECT extra AS e FROM t', 'SELECT extra FROM t LIMIT 1']) {
+    await assert.rejects(
+      () => collect(executeSql({ tables: { t: union }, query })),
+      /Column "extra" not found/,
+      `${query} throws without collect()'s pre-materialized fast path`
+    )
   }
 })
 
