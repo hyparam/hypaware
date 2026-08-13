@@ -364,6 +364,20 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // read 40.
       r.compactionIneffectiveFiles = compactionFilesBefore(cursor)
       getActiveSpan()?.setAttribute('compaction_ineffective', true)
+    } else if (!shouldCompact) {
+      // @ref LLP 0218#report-the-spent-attempt [implements]: the other way a
+      // partition stops being compacted. The retry a writer change granted
+      // was spent by an attempt that threw, and that attempt recorded no
+      // effectiveness (it proved nothing), so the branch above cannot speak
+      // for it. Without this one the failing tick's `daemon.maintenance_failed`
+      // is the only evidence there ever is, while the partition stays
+      // fragmented and is skipped in silence from here on.
+      const failedAt = compactionAttemptFailedAt(cursor)
+      if (failedAt !== undefined) {
+        r.compactionAttemptFailed = true
+        r.compactionAttemptFailedAt = failedAt
+        getActiveSpan()?.setAttribute('compaction_attempt_failed', true)
+      }
     }
     if (shouldCompact) {
       const tableInfo = await loadCompactionTableInfo(liveDir)
@@ -415,7 +429,8 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // rewrite again, which is the pre-existing behaviour rather than
             // a regression.
             try {
-              await writeCursor(r.path, stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor))
+              const stamped = stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor, new Date().toISOString())
+              await writeCursor(r.path, stamped)
             } catch { /* see above */ }
           }
           throw err
@@ -1151,24 +1166,61 @@ function compactionVerdictStale(cursor) {
 }
 
 /**
- * Cursor carrying this build's writer generation and nothing else new: the
- * record of an attempt that was made, without a claim about what it
- * achieved. Written when a retry granted by
+ * Cursor carrying this build's writer generation and the moment the attempt
+ * that spent it failed: the record of an attempt that was made, without a
+ * claim about what it achieved. Written when a retry granted by
  * {@link compactionVerdictStale} fails, so the retry is spent by the
  * attempt rather than by its success. The baseline and any recorded
  * effectiveness are left exactly as they were: a rewrite that threw
  * part-way proves nothing about whether the partition can be shrunk.
  *
+ * The timestamp is what makes the spent attempt reportable. Without it the
+ * stamp is indistinguishable from the generation a successful rewrite
+ * records, so every later tick describes the frozen partition exactly as it
+ * describes a converged one.
+ *
  * @ref LLP 0217#retry-on-writer-change [implements]: one attempt per writer generation, counted whether or not it succeeded.
+ * @ref LLP 0218#report-the-spent-attempt [implements]: the stamp says when the attempt failed, so the skip that follows has a reason to state.
  * @param {PartitionCursor} cursor
+ * @param {string} failedAt
  * @returns {PartitionCursor}
  */
-function stampWriterGeneration(cursor) {
+function stampWriterGeneration(cursor, failedAt) {
   const compaction = isPlainObject(cursor.compaction) ? cursor.compaction : {}
   return {
     ...cursor,
-    compaction: { ...compaction, writerGeneration: COMPACTION_WRITER_GENERATION },
+    compaction: {
+      ...compaction,
+      writerGeneration: COMPACTION_WRITER_GENERATION,
+      attemptFailedAt: failedAt,
+    },
   }
+}
+
+/**
+ * When the compaction attempt this cursor records failed, if it did and if
+ * that failure is still the last thing known about the partition.
+ *
+ * Undefined once the record carries an effectiveness verdict, whether the
+ * rewrite that committed it ran before the failing one or threw after
+ * committing. A verdict says something about the partition; an error says
+ * only that the attempt ended, so the verdict is the better reason to state
+ * and {@link compactionKnownIneffective} reports it.
+ *
+ * Undefined too when the stamp names a writer generation this build does not
+ * run: that partition is owed a fresh attempt (see
+ * {@link compactionVerdictStale}) rather than being frozen by the old one.
+ *
+ * @ref LLP 0218#report-the-spent-attempt [implements]: a spent attempt is readable from the cursor alone, like every other skip reason.
+ * @param {PartitionCursor} cursor
+ * @returns {string | undefined}
+ */
+function compactionAttemptFailedAt(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c) || typeof c.attemptFailedAt !== 'string') return undefined
+  if (c.writerGeneration !== COMPACTION_WRITER_GENERATION) return undefined
+  if (compactionReducedFiles(cursor) !== undefined) return undefined
+  return c.attemptFailedAt
 }
 
 /**
@@ -1202,6 +1254,11 @@ function rebaselineCursor(cursor, liveDataFiles) {
     writerGeneration: COMPACTION_WRITER_GENERATION,
   }
   delete next.dataFilesBefore
+  // A recognition also settles whatever a failed attempt left hanging: the
+  // layout on disk is the foreign compactor's and the kernel is not going to
+  // rewrite it, so "the last retry failed" has stopped being the reason this
+  // partition is skipped (LLP 0218#report-the-spent-attempt).
+  delete next.attemptFailedAt
   return { ...cursor, compaction: next }
 }
 

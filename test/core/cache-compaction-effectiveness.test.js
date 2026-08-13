@@ -319,6 +319,114 @@ test('a retry whose rewrite throws still spends its writer generation', async ()
   }
 })
 
+// @ref LLP 0218#report-the-spent-attempt [tests]: the spent attempt is a
+// stated reason, not an absence. The stamp a failed retry writes carries no
+// effectiveness claim, so the recorded-ineffective skip report cannot fire for
+// it; without a report of its own, every later tick describes the partition
+// exactly as it describes a healthy converged one, while it is in fact still
+// fragmented and still holds the torn file that broke the rewrite.
+test('a partition frozen by a failed retry is reported as skipped on every later tick', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-report-'))
+  try {
+    await seedUnshrinkablePartition(cacheRoot, 8)
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    const dir = partitionDir(cacheRoot)
+    // The stamp-less cursor from issue #723: one attempt is owed under the
+    // writer running now.
+    await plantCompactionRecord(dir, {
+      previousTableDir: 'table',
+      compactedAt: '2026-08-12T21:55:35.168Z',
+      resettleBaselineFiles: 8,
+    })
+    const [torn] = await liveDataFiles(dir)
+    const intact = await fs.readFile(torn)
+    await fs.truncate(torn, 4)
+
+    await assert.rejects(
+      maintainCache({ cacheRoot, compactOnly: true }),
+      'fixture invariant: the retry must attempt a rewrite, and that rewrite must fail'
+    )
+    const record = compactionRecord(dir)
+    assert.equal(record.dataFilesBefore, undefined, 'fixture invariant: a failed rewrite records no effectiveness')
+
+    // The failing tick logged its error once. What the operator sees from
+    // here on is these ticks, and the partition is still frozen and still
+    // torn, so each of them has to say so.
+    for (const tick of [1, 2]) {
+      const after = await maintainCache({ cacheRoot, compactOnly: true })
+      const part = after.partitions[0]
+      assert.equal(part.compacted, false, `tick ${tick} must not re-enter the failing rewrite`)
+      assert.equal(
+        part.compactionAttemptFailed, true,
+        `tick ${tick} reports the partition exactly as it reports a healthy converged one`
+      )
+      assert.equal(
+        part.compactionAttemptFailedAt, record.attemptFailedAt,
+        `tick ${tick} must name when the attempt that froze the partition was spent`
+      )
+      // The failed attempt claims nothing about whether the partition can be
+      // shrunk, so it must not be reported as a verdict that it cannot.
+      assert.equal(part.compactionIneffective, undefined, `tick ${tick} must not invent an effectiveness verdict`)
+    }
+
+    // `--force` is the documented way out, and it must still clear the
+    // report once a rewrite succeeds. Untearing the file first: the point is
+    // that the record does not outlive the condition, not that --force can
+    // rewrite an undecodable partition.
+    await fs.writeFile(torn, intact)
+    const forced = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    assert.equal(forced.partitions[0].compacted, true)
+    assert.equal(forced.partitions[0].compactionAttemptFailed, undefined)
+    assert.equal(compactionRecord(dir).attemptFailedAt, undefined, 'a rewrite that committed replaces the spent-attempt note')
+    const settled = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(settled.partitions[0].compactionAttemptFailed, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0218#report-the-spent-attempt [tests]: the anti-regression. A
+// partition whose rewrite committed a verdict before the tick threw is
+// described by that verdict, which says something about the partition, and not
+// by the bare fact that the attempt ended in an error, which does not.
+test('a committed ineffective verdict outranks the failed attempt that followed it', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-verdict-wins-'))
+  try {
+    await seedUnshrinkablePartition(cacheRoot, 8)
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    const dir = partitionDir(cacheRoot)
+    await plantCompactionRecord(dir, {
+      previousTableDir: 'table',
+      compactedAt: '2026-08-12T21:55:35.168Z',
+      resettleBaselineFiles: 8,
+    })
+
+    // The late-throw shape: the rewrite runs and commits its cursor, then
+    // fails writing the retired generation's marker.
+    const retiring = readCursorSync(dir).tableDir ?? 'table'
+    const retiringDir = path.join(dir, retiring)
+    await fs.chmod(retiringDir, 0o555)
+    try {
+      await assert.rejects(maintainCache({ cacheRoot, compactOnly: true }))
+    } finally {
+      await fs.chmod(retiringDir, 0o755)
+    }
+    assert.equal(compactionRecord(dir).dataFilesBefore, 8, 'fixture invariant: the rewrite committed its verdict')
+
+    const after = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(after.partitions[0].compactionIneffective, true, 'the recorded verdict is what the skip is about')
+    assert.equal(after.partitions[0].compactionIneffectiveFiles, 8)
+    assert.equal(
+      after.partitions[0].compactionAttemptFailed, undefined,
+      'the rewrite proved something about this partition, so report that and not the error that followed'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 // @ref LLP 0217#retry-on-writer-change [tests]: the companion to the case
 // above, and the one the re-read exists for. A rewrite can also throw *after*
 // committing its cursor, and the stamp is written from the cursor on disk

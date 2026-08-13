@@ -306,6 +306,15 @@ export interface MaintenancePartitionReport {
   // which is the recorded count and not necessarily the live one. Set
   // whenever `compactionIneffective` is.
   compactionIneffectiveFiles?: number
+  // The partition is skipped because the one retry its writer generation
+  // owed it was spent by a rewrite that threw (LLP 0218). Never set with
+  // `compacted`, and never with `compactionIneffective`: a failed attempt
+  // records no verdict about the partition, so where a verdict exists that
+  // is the reason reported instead.
+  compactionAttemptFailed?: boolean
+  // When that attempt failed, as the cursor records it. Set whenever
+  // `compactionAttemptFailed` is.
+  compactionAttemptFailedAt?: string
 }
 
 export interface MaintenanceReport {
