@@ -75,9 +75,16 @@ squirreling's existing `ScanColumnOptions` contract:
   across a concatenation, [LLP 0015](./0015-query-and-datasets.spec.md) "Multi-partition
   union"); the engine re-applies them over the merged column stream.
 - **ai-gateway `withSchemaColumns`**: forward `scanColumn`; a partition whose
-  physical schema lacks the requested column yields nulls (the same additive
-  schema-drift rule `withSchemaColumns` already applies to row reads), never
-  throws.
+  physical schema lacks the requested column yields nulls, never throws.
+
+> **Corrected (#731, PR #740).** The `withSchemaColumns` bullet above used to
+> gloss its nulls as "the same additive schema-drift rule `withSchemaColumns`
+> already applies to row reads". The row path applies no such rule: it surfaces
+> the same physical hole as `undefined`, or throws, per
+> [LLP 0015](./0015-query-and-datasets.spec.md) "Multi-partition union".
+> Normalizing to null is this `scanColumn` path's own duty, not a rule it
+> inherits. What this document decided (forward `scanColumn`; yield nulls; never
+> throw) is unchanged.
 
 A source that cannot stream a given column may omit `scanColumn` for it; the
 engine then falls back to the buffering path, which is now bounded by the

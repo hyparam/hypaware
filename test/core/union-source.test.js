@@ -443,6 +443,10 @@ test('a projected column one partition lacks reads as undefined, never null', as
     { query: 'SELECT extra FROM t', key: 'extra', values: [undefined, undefined, 'x'], json: '[{},{},{"extra":"x"}]' },
     { query: 'SELECT extra FROM t WHERE score > 1', key: 'extra', values: [undefined, undefined, 'x'], json: '[{},{},{"extra":"x"}]' },
     { query: 'SELECT extra AS e FROM t', key: 'e', values: [undefined, undefined, 'x'], json: '[{},{},{"e":"x"}]' },
+    // A bare-identifier SIBLING keeps `executeProject`'s `resolveable` gate
+    // open, so the fast path survives. The throwing test below pins what a
+    // non-identifier sibling does to the very same query.
+    { query: 'SELECT score, extra FROM t', key: 'extra', values: [undefined, undefined, 'x'], json: '[{"score":1.5},{"score":2.5},{"score":3.5,"extra":"x"}]' },
     { query: 'SELECT extra FROM t LIMIT 1', key: 'extra', values: [undefined], json: '[{}]' },
     { query: 'SELECT extra FROM t LIMIT 0', key: 'extra', values: [], json: '[]' },
   ]
@@ -525,8 +529,8 @@ test('a partition whose rows carry no resolved map makes a bare projection throw
   }
 })
 
-// @ref LLP 0015#multi-partition-union [tests]: evaluating (not merely projecting) an absent column throws rather than reading as null
-test('evaluating a column one partition lacks throws ColumnNotFoundError', async () => {
+// @ref LLP 0015#multi-partition-union [tests]: evaluating an absent column throws rather than reading as null, and so does a non-identifier sibling column that never touches it
+test('evaluating a column one partition lacks throws, and so does a non-identifier sibling', async () => {
   const evaluating = [
     'SELECT extra FROM t WHERE extra IS NOT NULL',
     "SELECT id FROM t WHERE extra = 'x'",
@@ -535,6 +539,21 @@ test('evaluating a column one partition lacks throws ColumnNotFoundError', async
     'SELECT max(extra) AS m FROM t',
   ]
   for (const query of evaluating) {
+    await assert.rejects(() => runDrifted(query), /Column "extra" not found/, query)
+  }
+
+  // Nothing below evaluates `extra`. `executeProject` computes `resolveable`
+  // over the WHOLE column list and emits no `resolved` map when any output
+  // column is neither a star nor a bare identifier, so one literal or one
+  // expression sibling drops `collect()`'s fast path for the entire result,
+  // the drifted thunk is invoked, and it throws. This is the shape that
+  // surprises people: `SELECT score, extra FROM t` above reads `undefined`,
+  // and adding `, 1 AS n` to it throws.
+  const siblingCollapsesTheFastPath = [
+    'SELECT extra, 1 AS n FROM t',
+    'SELECT extra, score * 2 AS d FROM t',
+  ]
+  for (const query of siblingCollapsesTheFastPath) {
     await assert.rejects(() => runDrifted(query), /Column "extra" not found/, query)
   }
 })

@@ -33,10 +33,18 @@ import { normalizeScanColumn } from './scan-column.js'
  * entry into the row's `resolved` map. `collect()` reads the pre-materialized
  * `resolved` map for every advertised column and never invokes that thunk, so
  * the key is present with the value `undefined` (not `null`, dropped by
- * `JSON.stringify`). That holds only for consumers that go through `collect()`
- * and only while every partition yields rows built by squirreling's `asyncRow`,
- * which pre-materializes `resolved`; a partition whose rows carry no `resolved`
- * disables the fast path for the whole result and a bare projection throws too.
+ * `JSON.stringify`). That holds only under three conditions, all of them in
+ * `executeProject` and `collect()` rather than in the union: the consumer goes
+ * through `collect()`; every row reaching `collect()` carries a `resolved` map,
+ * which holds here because every in-repo partition's rows come from
+ * squirreling's `asyncRow`, the only thing that pre-materializes one; and every
+ * output column of that projection is a star or a bare identifier.
+ * `executeProject` gates on the last one up front (`resolveable`) and emits no
+ * `resolved` map at all when it fails, so a single non-identifier sibling column
+ * (an expression, a function, or even a literal) collapses the fast path for the
+ * whole result and the drifted column's thunk is invoked and throws:
+ * `SELECT extra, 1 AS n FROM t` throws even though nothing evaluates `extra`. A
+ * row that carries no `resolved` map at all does the same.
  * Anything that evaluates the column (a `WHERE` on it, an expression over it,
  * `ORDER BY`/`GROUP BY`/`DISTINCT`, an aggregate) throws `ColumnNotFoundError`
  * at the first such row. `SELECT *` keeps each partition's own row shape, so the

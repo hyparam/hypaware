@@ -165,11 +165,14 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * `columns`, so without this a contract or query that reads a freshly-added
  * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
  * itself is unchanged, and that means the row path does NOT read the missing key
- * as null: a bare projection of it yields `undefined` (key present, not `null`),
- * and anything that evaluates it throws `ColumnNotFoundError` at the first row
- * from a partition that lacks it (LLP 0015#multi-partition-union). Only the
- * `scanColumn` path below normalizes those holes to null, which is the whole
- * reason the `scanColumn` forwarding exists.
+ * as null: the partitions here are icebird-backed, and icebird answers a scan
+ * for a column it lacks with a cell that resolves to `undefined` and no
+ * `resolved` entry, so a projection of it yields `undefined` (key present, not
+ * `null`). The throwing half of LLP 0015#multi-partition-union belongs to
+ * parquet-backed partitions, which omit the cell entirely; icebird's do not.
+ * Only the `scanColumn` path below normalizes those holes to null; the
+ * forwarding itself exists for LLP 0055's streaming aggregates, and that
+ * normalization is what keeps the two paths from disagreeing.
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
  * @param {AsyncDataSource} source
