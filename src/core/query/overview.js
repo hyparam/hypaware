@@ -15,6 +15,7 @@
  * @import { OverviewNotice, OverviewRows, OverviewQueryRunner, OverviewWindow } from '../../../src/core/query/types.js'
  */
 
+import { escapeForDisplay } from '../util/json_util.js'
 import { executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
@@ -702,7 +703,7 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
     // An unlabelled row only reaches the table if it carried tokens, which
     // today it never does. If that changes, name it for what it is rather
     // than dropping measured tokens on the floor.
-    truncate(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)', MAX_MODEL_WIDTH),
+    truncate(escapeForDisplay(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)'), MAX_MODEL_WIDTH),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
@@ -806,7 +807,7 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
   // same thing here as in the models and daily tables.
   const max = Math.max(...shown.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
   const body = shown.map((r) => [
-    shortRepo(String(r.repo_root)),
+    escapeForDisplay(shortRepo(String(r.repo_root))),
     formatCount(r.sessions),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
@@ -1015,12 +1016,20 @@ function bar(value, max) {
  * (an unnamed model, an undated row), so render the absence explicitly
  * rather than emitting a blank column the reader has to interpret.
  *
+ * It is also where a captured group key (`provider`, `date`, `tool_name`)
+ * is escaped for the terminal. The escape belongs on the captured value and
+ * not on the assembled row, because this block emits `ESC` of its own: the
+ * bars and headings are painted, so a sweep over the finished table would
+ * erase the colour along with the attack.
+ *
+ * @ref LLP 0224#decision [implements]: the same rule on `hyp query overview`, per captured cell
+ *
  * @param {unknown} value
  * @returns {string}
  */
 function cell(value) {
   if (value === null || value === undefined) return '(none)'
-  const text = String(value).trim()
+  const text = escapeForDisplay(String(value).trim())
   return text.length === 0 ? '(none)' : text
 }
 

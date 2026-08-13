@@ -34,28 +34,62 @@ export function stringValue(value) {
  */
 export const MAX_LABEL_CHARS = 120
 
-// Everything a label may contain that either drives the terminal or
-// occupies no width on it. Three groups, one class:
+// Everything a captured value may contain that either drives the terminal
+// or occupies no width on it. Three groups, named separately because two
+// different policies are built out of them (strip, in `sanitizeLabel`;
+// escape, in `escapeForDisplay`), and a second hand-written character class
+// would be a second chance for the two to disagree about what "unsafe"
+// means.
 //
-//   - C0/DEL/C1 and the Unicode line/paragraph separators, so a label can
-//     never move the cursor, erase a line, open an escape sequence, or
-//     split into a second line.
-//   - Bidirectional formatting (embeddings, overrides, isolates, marks).
-//     These print nothing but reorder what follows, and an unterminated
-//     one keeps reordering past the end of the label into the rest of the
-//     status line. A label that renders as a different string than the one
-//     it stores defeats the point of naming a surface at all.
-//   - Zero-width and default-ignorable formatting (ZWSP/ZWNJ/ZWJ, word
-//     joiner, BOM, soft hyphen, variation selectors). These render as
-//     nothing, so keeping them lets two labels be distinct map keys while
-//     being indistinguishable on screen, which is what would otherwise
-//     dilute the tracker's eviction cap.
-//
-// Confusables are deliberately out of scope: this bounds what a label
+// @ref LLP 0224#one-vocabulary: one class, two policies over its named groups
+
+//   C0/DEL/C1 and the Unicode line/paragraph separators, so a value can
+//   never move the cursor, erase a line, open an escape sequence, or split
+//   into a second line.
+const TERMINAL_CONTROL_CHARS = '\\u0000-\\u001F\\u007F-\\u009F\\u2028-\\u2029'
+
+//   Bidirectional formatting (embeddings, overrides, isolates, marks).
+//   These print nothing but reorder what follows, and an unterminated one
+//   keeps reordering past the end of the value into the rest of the line. A
+//   value that renders as a different string than the one it stores defeats
+//   the point of showing it at all.
+const BIDI_FORMATTING_CHARS = '\\u061C\\u200E-\\u200F\\u202A-\\u202E\\u2066-\\u2069'
+
+//   Zero-width and default-ignorable formatting (ZWSP/ZWNJ/ZWJ, word
+//   joiner, BOM, soft hyphen, variation selectors). These render as
+//   nothing, so keeping them lets two labels be distinct map keys while
+//   being indistinguishable on screen, which is what would otherwise dilute
+//   the tracker's eviction cap.
+const INVISIBLE_FORMATTING_CHARS = '\\u00AD\\u180E\\u200B-\\u200D\\u2060-\\u2064\\uFE00-\\uFE0F\\uFEFF'
+
+// Confusables are deliberately out of scope: this bounds what a value
 // *does*, not what it looks like. Two labels built from different but
 // similar-looking real letters stay distinct, as they must.
-const UNSAFE_LABEL_CHARS =
-  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\uFEFF]/g
+const UNSAFE_LABEL_CHARS = new RegExp(
+  `[${TERMINAL_CONTROL_CHARS}${BIDI_FORMATTING_CHARS}${INVISIBLE_FORMATTING_CHARS}]`,
+  'g'
+)
+
+// What a rendered cell may not contain: a strict subset of
+// `UNSAFE_LABEL_CHARS` holding only the characters that drive or reorder a
+// terminal. The zero-width group is deliberately left alone here, unlike in
+// a label, for two reasons. A query cell is prose, not a map key, so nothing
+// downstream is diluted by two cells looking alike. And ZWJ and the
+// variation selectors are load-bearing inside ordinary emoji (a family emoji
+// is a ZWJ sequence), so escaping them would visibly corrupt legitimate
+// captured text on a large fraction of real rows, to defend against a
+// character that cannot repaint anything.
+//
+// @ref LLP 0224#escape-class [implements]: display escapes control and bidi, not zero-width
+const DISPLAY_UNSAFE_CHARS = new RegExp(`[${TERMINAL_CONTROL_CHARS}${BIDI_FORMATTING_CHARS}]`, 'g')
+
+// The three C0 characters an operator reads more easily by name than by code
+// point. Everything else in the class falls through to a `\uXXXX` escape.
+const DISPLAY_NAMED_ESCAPES = new Map([
+  ['\n', '\\n'],
+  ['\r', '\\r'],
+  ['\t', '\\t'],
+])
 
 // A high surrogate left stranded by the clamp below. Slicing counts UTF-16
 // code units, so a cut can land between the halves of an astral character
@@ -85,6 +119,10 @@ const TRUNCATION_MARKER = '...'
  * bytes: a label of astral characters is still roughly 4x `max` bytes
  * once encoded, which is why callers cap the count of labels too.
  *
+ * Sibling policy: `escapeForDisplay`, for the places where the value *is*
+ * the payload rather than a name for one, and losing bytes would be worse
+ * than showing them.
+ *
  * @param {unknown} value
  * @param {number} [max]
  * @returns {string | undefined} Cleaned non-empty string, else `undefined`.
@@ -98,6 +136,42 @@ export function sanitizeLabel(value, max = MAX_LABEL_CHARS) {
     .slice(0, Math.max(0, max - TRUNCATION_MARKER.length))
     .replace(TRAILING_HIGH_SURROGATE, '')
   return head.length === 0 ? undefined : `${head}${TRUNCATION_MARKER}`
+}
+
+/**
+ * Make a captured string safe to *print* without losing any of it: replace
+ * every character that drives or reorders a terminal with a visible escape,
+ * and change nothing else.
+ *
+ * This is the display-plane sibling of `sanitizeLabel`, over the same
+ * character vocabulary but under a different policy, because the two have
+ * different jobs. A label *names* a surface, so a stripped name is still a
+ * usable name and the shortest safe answer is to drop the bytes. A rendered
+ * cell *is* the captured payload the operator asked to see, so silently
+ * dropping bytes turns a query into a lie about what was captured: the row
+ * must stay honest about the ESC that was there. Hence escape, not strip,
+ * and hence no truncation and no `undefined` for empty (a cell that held an
+ * empty string is a cell, and the caller has already applied its own
+ * `--max-cell` clip).
+ *
+ * Escapes are the familiar JavaScript spellings: `\n`, `\r`, `\t`, and
+ * `\uXXXX` for everything else. The output is pure ASCII, one column per
+ * character, so a caller that pads to a computed column width stays aligned.
+ * A backslash already in the value is deliberately *not* doubled: captured
+ * data is full of Windows paths, regexes and JSON blobs, and mangling every
+ * one of them to disambiguate a literal two-character `\n` from an escaped
+ * newline would cost far more legibility than the ambiguity does. The
+ * ambiguity is cosmetic; neither spelling can move a cursor.
+ *
+ * @ref LLP 0224#escape-not-strip [implements]: the display plane escapes where the label plane strips
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function escapeForDisplay(value) {
+  return value.replace(DISPLAY_UNSAFE_CHARS, (ch) => {
+    return DISPLAY_NAMED_ESCAPES.get(ch) ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  })
 }
 
 /**

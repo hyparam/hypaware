@@ -1,5 +1,7 @@
 // @ts-check
 
+import { escapeForDisplay } from '../util/json_util.js'
+
 /**
  * @import { ContextControls, ContextControlsResult, QueryFormat, QueryResultSet } from '../../../src/core/query/types.js'
  */
@@ -139,6 +141,14 @@ function rowBytes(row) {
  * - `markdown` GitHub-flavoured table
  * - `table`    fixed-width text table (default)
  *
+ * The format, and only the format, decides whether cell values are escaped
+ * for a terminal: `table` and `markdown` are read by a person and go through
+ * `formatCell`, which escapes; `json` and `jsonl` are read by a program and
+ * stay byte-exact. Deliberately not a TTY test, so a query redirected to a
+ * file holds exactly the bytes its terminal showed.
+ *
+ * @ref LLP 0224#format-not-tty [implements]: escaping is chosen by format, never by isTTY
+ *
  * @param {QueryResultSet} result
  * @param {QueryFormat} format
  * @returns {string}
@@ -182,7 +192,11 @@ export function jsonReplacer(_key, value) {
 function renderTable(result) {
   const columns = result.columns.length > 0 ? result.columns : inferColumns(result.rows)
   if (columns.length === 0) return '(no rows)\n'
-  if (result.rows.length === 0) return columns.join('  ') + '\n(no rows)\n'
+  // Headers are schema names rather than captured data, so escaping them is
+  // defence in depth, not the fix; it costs one map and means no part of the
+  // rendered table is exempt.
+  const headers = columns.map(escapeForDisplay)
+  if (result.rows.length === 0) return headers.join('  ') + '\n(no rows)\n'
 
   const cells = result.rows.map((row) => {
     /** @type {Record<string, string>} */
@@ -190,14 +204,17 @@ function renderTable(result) {
     for (const column of columns) out[column] = formatCell(row[column])
     return out
   })
-  const widths = columns.map((column) => {
-    let width = column.length
+  // Widths are measured on the escaped text, which is what actually gets
+  // padded and printed. Every escape this file emits is ASCII, one column
+  // per character, so a measured length is still a display width.
+  const widths = columns.map((column, i) => {
+    let width = headers[i].length
     for (const row of cells) width = Math.max(width, row[column]?.length ?? 0)
     return Math.min(width, 80)
   })
 
   const lines = [
-    columns.map((column, i) => column.padEnd(widths[i])).join('  ').trimEnd(),
+    headers.map((header, i) => header.padEnd(widths[i])).join('  ').trimEnd(),
     columns.map((_, i) => '-'.repeat(widths[i])).join('  ').trimEnd(),
   ]
   for (const row of cells) {
@@ -213,7 +230,7 @@ function renderTable(result) {
 function renderMarkdown(result) {
   const columns = result.columns.length > 0 ? result.columns : inferColumns(result.rows)
   if (columns.length === 0) return '_(no rows)_\n'
-  const header = '| ' + columns.join(' | ') + ' |'
+  const header = '| ' + columns.map((c) => mdEscape(escapeForDisplay(c))).join(' | ') + ' |'
   const divider = '| ' + columns.map(() => '---').join(' | ') + ' |'
   if (result.rows.length === 0) return [header, divider, '_(no rows)_'].join('\n') + '\n'
   const body = result.rows.map((row) => {
@@ -232,10 +249,37 @@ function inferColumns(rows) {
 }
 
 /**
+ * One cell of a human-facing render, escaped so it cannot drive the
+ * terminal it is about to be written to.
+ *
+ * Every string column of every dataset is captured verbatim: `content_text`
+ * is prose a model or a user wrote, and a log body, an HTTP header value or
+ * a filename is whatever the observed process emitted. So an `ESC` reaches
+ * a cell with no parser or regex involved, and `hyp query sql` writes the
+ * rendered table straight to `process.stdout`, which (unlike stderr at
+ * `dispatch`) wraps nothing. A row could otherwise hide itself, overwrite
+ * the row above it, or reorder what the operator reads.
+ *
+ * The escape is applied to the finished text rather than only to the string
+ * branch, because the object branch is not safe either: `JSON.stringify`
+ * escapes C0 but passes C1 and every bidi override through untouched.
+ * Running it over already-stringified JSON is a no-op for the parts
+ * `JSON.stringify` already handled.
+ *
+ * @ref LLP 0224#decision [implements]: human-facing formats escape, machine formats do not
+ *
  * @param {unknown} value
  * @returns {string}
  */
 function formatCell(value) {
+  return escapeForDisplay(rawCell(value))
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function rawCell(value) {
   if (value === null || value === undefined) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'bigint') return value.toString()
@@ -245,12 +289,14 @@ function formatCell(value) {
 }
 
 /**
- * Pipe characters break Markdown tables; backslash-escape them.
+ * Pipe characters break Markdown tables; backslash-escape them. Newlines
+ * cannot reach here any more: every caller passes text that has already
+ * been through `escapeForDisplay`, which spells a newline `\n`.
  *
  * @param {string} value
  */
 function mdEscape(value) {
-  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+  return value.replace(/\|/g, '\\|')
 }
 
 /**
@@ -297,6 +343,13 @@ export function buildQuerySqlOutput(full, opts) {
  *
  * @param {string} outputPath
  * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * The receipt is a human-facing render in its own right, whatever
+ * `--format` the file got, so its preview is escaped too. It is escaped one
+ * rendered line at a time: the newlines between preview rows are structure
+ * this function produced, not captured bytes, and must survive.
+ *
+ * @ref LLP 0224#decision [constrained-by]: the receipt is a human render, so it escapes
+ *
  * @param {string} content  the already-rendered file content (sized for the receipt)
  * @returns {string}
  */
@@ -306,7 +359,7 @@ function renderSpillReceipt(outputPath, full, content) {
   const lines = [
     `wrote ${full.rows.length} rows · ${cols.length} cols · ${bytes}B → ${outputPath}`,
   ]
-  if (cols.length > 0) lines.push(`schema: ${cols.join(', ')}`)
+  if (cols.length > 0) lines.push(`schema: ${cols.map(escapeForDisplay).join(', ')}`)
   const previewRows = full.rows.slice(0, 3)
   if (previewRows.length > 0) {
     const { result: preview } = applyContextControls(
@@ -314,7 +367,9 @@ function renderSpillReceipt(outputPath, full, content) {
       { maxCell: 80, maxBytes: 0 }
     )
     lines.push(`preview (first ${previewRows.length}, cells clipped):`)
-    lines.push(renderResult(preview, 'jsonl').trimEnd())
+    for (const line of renderResult(preview, 'jsonl').trimEnd().split('\n')) {
+      lines.push(escapeForDisplay(line))
+    }
   }
   return lines.join('\n') + '\n'
 }
