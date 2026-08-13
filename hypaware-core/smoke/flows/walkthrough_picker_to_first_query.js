@@ -16,6 +16,7 @@ import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
+import { discoverBundledPlugins } from '../../../src/core/runtime/bundled.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
@@ -36,7 +37,9 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * Assertions (per bead hy-5oz4):
  *
  * - Non-interactive picker selections generate a config matching the
- *   expected v2 shape (both AI upstreams, OTEL, Parquet sink).
+ *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
+ *   riders those picks pull in (LLP 0213 #d1): the written config is wider
+ *   than the six plugins this smoke activates by injection.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
  * - Claude + Codex attach dry-runs produce expected file edits *without*
@@ -238,7 +241,7 @@ export async function run({ harness, expect }) {
     // ----- 2. Config written matches Phase 5 shape -----
     const configPath = defaultConfigPath(harness.hypHome)
     const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
-    const expected = goldenPickerConfig(harness.hypHome)
+    const expected = await goldenPickerConfig(harness.hypHome)
     expect.that(
       'config: Phase 5 picker config matches expected shape',
       written,
@@ -550,37 +553,91 @@ export async function run({ harness, expect }) {
 }
 
 /**
+ * Bundled plugins that ride the composed picks rather than being picked:
+ * a manifest whose `compose_with` names only plugins already composed is
+ * written into the config with no picker row and no prompt
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ *
+ * Derived from the manifests instead of restated by name, because a literal
+ * list here is a second copy of a declaration that lives in the plugins: the
+ * next derived-data plugin would re-red this smoke for correctly doing what
+ * its manifest asks. What the golden keeps literal is what the *picker*
+ * decides (which rows compose, the upstreams, the OTLP port, the sink shape,
+ * retention); a rider is decided by the plugin, so it is read from there.
+ *
+ * This deliberately does not call `composePickerConfig` or `ridersFor`: an
+ * expectation that runs the code under test asserts nothing. It reads the
+ * declarations and applies the rule to the literal picked set below, so a
+ * plugin appearing in the config that is neither picked nor declared as a
+ * rider still fails the assertion. The rider *mechanism* (fixpoint, the
+ * unmet-condition case, reconfigure) is unit-tested in
+ * `test/core/compose-picker-config.test.js`.
+ *
+ * Reading only `loaded` keeps the default-activation boundary without
+ * restating it: `discoverBundledPlugins` puts allowlisted plugins there and
+ * the explicit-opt-in ones in `excluded`, which is the same cut
+ * `ridersInDefaultSet` makes on the composer.
+ *
+ * @param {string[]} picked  plugin names the picker composed from its rows
+ * @returns {Promise<string[]>}
+ * @ref LLP 0213#d1 [tests]: the graph pair reaches a default install by riding the gateway pick, asserted by declaration rather than by name
+ */
+async function composedRiders(picked) {
+  const { loaded } = await discoverBundledPlugins()
+  const present = new Set(picked)
+  /** @type {string[]} */
+  const riders = []
+  for (const { manifest } of loaded) {
+    const waitsFor = manifest.compose_with
+    if (!Array.isArray(waitsFor) || waitsFor.length === 0) continue
+    if (present.has(manifest.name)) continue
+    if (!waitsFor.every((name) => present.has(name))) continue
+    riders.push(manifest.name)
+  }
+  return riders
+}
+
+/**
  * @param {string} hypHome
  */
-function goldenPickerConfig(hypHome) {
+async function goldenPickerConfig(hypHome) {
+  /** @type {{ name: string, config?: unknown }[]} */
+  const plugins = [
+    {
+      name: '@hypaware/ai-gateway',
+      config: {
+        upstreams: [
+          { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+          { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+          { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
+        ],
+      },
+    },
+    {
+      name: '@hypaware/otel',
+      config: { listen_host: '127.0.0.1', listen_port: 4318 },
+    },
+    { name: '@hypaware/local-fs' },
+    { name: '@hypaware/format-parquet' },
+    {
+      name: '@hypaware/claude',
+      config: { proxy: '@hypaware/ai-gateway' },
+    },
+    {
+      name: '@hypaware/codex',
+      config: { proxy: '@hypaware/ai-gateway' },
+    },
+  ]
+
+  // Riders land after every picked plugin, in the order the composer folds
+  // them: `composePickerConfig` appends them last, once the picks are settled.
+  for (const rider of await composedRiders(plugins.map((p) => p.name))) {
+    plugins.push({ name: rider })
+  }
+
   return {
     version: 2,
-    plugins: [
-      {
-        name: '@hypaware/ai-gateway',
-        config: {
-          upstreams: [
-            { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
-            { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
-            { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
-          ],
-        },
-      },
-      {
-        name: '@hypaware/otel',
-        config: { listen_host: '127.0.0.1', listen_port: 4318 },
-      },
-      { name: '@hypaware/local-fs' },
-      { name: '@hypaware/format-parquet' },
-      {
-        name: '@hypaware/claude',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
-      {
-        name: '@hypaware/codex',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
-    ],
+    plugins,
     sinks: {
       local: {
         writer: '@hypaware/format-parquet',
