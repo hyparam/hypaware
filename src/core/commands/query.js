@@ -334,6 +334,14 @@ export async function runQueryMaintain(argv, ctx) {
         ? 'no file-count reduction'
         : `compaction skipped: the last rewrite of ${p.compactionIneffectiveFiles} files reduced nothing`)
     }
+    // @ref LLP 0218#report-the-spent-attempt: the other stated reason a
+    // partition is left alone. The retry a writer change granted was spent by
+    // a rewrite that failed, which is why nothing has been attempted since;
+    // saying so names the manual way out instead of leaving the partition
+    // looking converged.
+    if (p.compactionAttemptFailed) {
+      actions.push(`compaction skipped: the retry failed under this writer at ${p.compactionAttemptFailedAt}, --force to retry`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
