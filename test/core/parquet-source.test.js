@@ -176,24 +176,60 @@ test('whereToParquetFilter returns undefined for non-convertible predicates', ()
 
 test('whereToParquetFilter handles predicates whose SQL result is always UNKNOWN', () => {
   // Comparison against a NULL literal never matches a row, not even a NULL
-  // one. The engine keeps the predicate rather than the scan claiming a
-  // filter that reads like IS NULL.
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL')), undefined)
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id != NULL')), undefined)
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id < NULL')), undefined)
-  // NOT IN over a list containing NULL matches no row either, and that one is
-  // expressible: `$in: []` is hyparquet's never-match, and pushing it beats
-  // declining, whose fallback (squirreling's two-valued WHERE) returns rows.
+  // one, and `NOT UNKNOWN` is still UNKNOWN, so the whole family pushes
+  // `$in: []`, hyparquet's never-match. Declining instead would hand the
+  // predicate to squirreling's two-valued WHERE, which returns every row for
+  // the negated shapes (issue #734).
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id != NULL')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id < NULL')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NULL >= id')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = NULL)')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT NOT (id = NULL)')), { id: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name LIKE NULL')), { name: { $in: [] } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (name LIKE NULL)')), { name: { $in: [] } })
+  // NOT IN over a list containing NULL matches no row either: `$in: []` is
+  // hyparquet's never-match, and pushing it beats declining, whose fallback
+  // (squirreling's two-valued WHERE) returns rows.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, NULL)')),
     { id: { $in: [] } }
   )
-  // IN over such a list is expressible too: the NULL entry cannot make the
-  // disjunction true, and the guard keeps NULL rows out.
+  // A NULL member of a non-negated list cannot make the disjunction true, so
+  // it is dropped: same rows, and the leaf keeps its statistics pruning.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, NULL)')),
-    { id: { $ne: null, $in: [1n, null] } }
+    { id: { $ne: null, $in: [1n] } }
   )
+  assert.deepEqual(
+    whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (NULL)')),
+    { id: { $ne: null, $in: [] } }
+  )
+})
+
+test('whereToParquetFilter pushes never-match only where the shape proves it', () => {
+  // A comparison against a non-NULL literal keeps its ordinary filter: the
+  // never-match is for UNKNOWN-for-every-row, not for "has a NULL somewhere".
+  assert.deepEqual(
+    whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 3)')),
+    { $and: [{ id: { $ne: null } }, { id: { $ne: 3n } }] }
+  )
+  // A never-match leaf composes: it zeroes an AND and leaves an OR to its
+  // sibling, which is what Kleene logic says (UNKNOWN AND x is never TRUE,
+  // UNKNOWN OR x is TRUE exactly where x is).
+  assert.deepEqual(
+    whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL OR id = 3')),
+    { $or: [{ id: { $in: [] } }, { id: { $eq: 3n } }] }
+  )
+  // The NULL literal has to sit opposite a plain column. Against an
+  // expression there is no leaf to name, and against another literal there is
+  // no column at all, so both keep declining.
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id + 1 = NULL)')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (NULL = 1)')), undefined)
+  // ...and a negated LIKE over a real pattern stays declined (and, on a
+  // nullable column, stays SQL-wrong until the engine speaks three-valued
+  // logic: issue #734, option 1).
+  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE NOT (name LIKE 'a%')")), undefined)
 })
 
 // --- NULL rows must not leak past a pushed-down filter ------------------------
@@ -260,6 +296,119 @@ test('comparison against a NULL literal matches no rows (issue #728)', async () 
     ['ts NOT IN (300, NULL)', []],
   ]
   assert.deepEqual(await mismatches(cases), [])
+})
+
+// A predicate the converter declines falls back to squirreling's WHERE, which
+// is two-valued: a comparison with a NULL operand is FALSE rather than
+// UNKNOWN, and unary NOT is JS `!`, so `NOT <UNKNOWN>` comes back TRUE. Every
+// negation of a NULL-literal comparison therefore returned rows SQL excludes.
+// These shapes are UNKNOWN for every row whatever the negation depth, so the
+// converter pushes hyparquet's never-match instead of declining.
+test('negated comparisons against a NULL literal match no rows (issue #734)', async () => {
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // rows: ts = 100, NULL, 300, NULL, 500
+    ['NOT (ts = NULL)', []],
+    ['NOT (ts != NULL)', []],
+    ['NOT (ts <> NULL)', []],
+    ['NOT (ts < NULL)', []],
+    ['NOT (ts <= NULL)', []],
+    ['NOT (ts > NULL)', []],
+    ['NOT (ts >= NULL)', []],
+    // literal on the left mirrors the operator but not the UNKNOWN
+    ['NOT (NULL = ts)', []],
+    ['NOT (NULL > ts)', []],
+    // NOT UNKNOWN is UNKNOWN, so negation depth never makes it TRUE
+    ['NOT NOT (ts = NULL)', []],
+    ['NOT NOT NOT (ts = NULL)', []],
+    // strings and LIKE are UNKNOWN against a NULL literal too
+    ['NOT (label = NULL)', []],
+    ['label LIKE NULL', []],
+    ['NOT (label LIKE NULL)', []],
+    // BETWEEN desugars to two comparisons, one of them against the NULL
+    ['ts BETWEEN NULL AND 500', []],
+    ['NOT (ts BETWEEN NULL AND 500)', []],
+    // composition: UNKNOWN AND TRUE is UNKNOWN, UNKNOWN OR TRUE is TRUE
+    ['NOT (ts = NULL) AND ts >= 300', []],
+    ['NOT (ts = NULL) OR ts >= 300', [3, 5]],
+    ['NOT (ts = NULL OR ts = 300)', []],
+    // ...and the never-match branch must not swallow its sibling: NOT (a AND b)
+    // is TRUE wherever b is FALSE, however UNKNOWN a is
+    ['NOT (ts = NULL AND ts = 300)', [1, 5]],
+    ['ts IN (NULL)', []],
+  ]
+  assert.deepEqual(await mismatches(cases), [])
+})
+
+// The conservative direction. A predicate that is not UNKNOWN for every row
+// must keep its ordinary filter (or keep declining), and the rows must still
+// be the ones SQL names.
+test('predicates that are not always-UNKNOWN keep their ordinary handling (issue #734)', async () => {
+  /** @type {[string, number[]][]} */
+  const cases = [
+    ['NOT (ts = 300)', [1, 5]],
+    ['NOT (ts = 300 OR ts = 500)', [1]],
+    ['NOT (ts IS NULL)', [1, 3, 5]],
+    ['ts IN (300, NULL)', [3]],
+    // declined subtrees the engine still gets right
+    ["label LIKE 'a%'", [1]],
+    ["label LIKE 'a%' OR ts > 300", [1, 5]],
+    ["NOT (label LIKE 'a%') AND ts IS NOT NULL", [3, 5]],
+  ]
+  assert.deepEqual(await mismatches(cases), [])
+})
+
+// The row set is the same either way, so only the read proves this one: a
+// NULL member left in a non-negated `$in` list is undecidable against
+// BYTE_ARRAY bounds, and one undecidable member forfeits statistics pruning
+// for the whole leaf. Measure the bytes the scan pulls off the file.
+test('a NULL member in an IN list does not cost row-group pruning (issue #734)', async () => {
+  const columnData = rowsToColumnSources(NULLABLE_COLUMNS, NULLABLE_ROWS)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
+  const bytes = new Uint8Array(arrayBuffer)
+
+  /**
+   * @param {string} predicate
+   * @returns {Promise<{ read: number, ids: number[] }>}
+   */
+  async function scanReading(predicate) {
+    const counting = asyncBufferFromBytes(bytes)
+    let read = 0
+    const file = {
+      byteLength: counting.byteLength,
+      /**
+       * @param {number} start
+       * @param {number} [end]
+       */
+      slice(start, end) {
+        read += (end ?? bytes.byteLength) - start
+        return counting.slice(start, end)
+      },
+    }
+    const source = parquetDataSource(file, await parquetMetadataAsync(file))
+    // Count only what the scan reads, not the metadata read above.
+    read = 0
+    /** @type {number[]} */
+    const ids = []
+    const scan = source.scan({ columns: ['id'], where: whereOf(`SELECT id FROM t WHERE ${predicate}`) })
+    assert.equal(scan.appliedWhere, true)
+    for await (const row of scan.rows()) ids.push(Number(await row.cells.id))
+    return { read, ids }
+  }
+
+  // No row group holds a label at or above 'zz', so every one is skippable.
+  const withNull = await scanReading("label IN ('zz', NULL)")
+  const withoutNull = await scanReading("label IN ('zz')")
+  const unfiltered = await scanReading('id >= 1')
+
+  assert.deepEqual(withNull.ids, [])
+  assert.deepEqual(withoutNull.ids, [])
+  // Pruned to nothing, and the NULL member costs nothing.
+  assert.equal(withNull.read, withoutNull.read)
+  assert.ok(
+    withNull.read < unfiltered.read,
+    `pruned scan read ${withNull.read} bytes, unfiltered read ${unfiltered.read}`
+  )
 })
 
 /**
