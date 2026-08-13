@@ -6,6 +6,7 @@
 
 export { executeQuerySql, QueryExecutionBudgetError } from './sql.js'
 export { parquetDataSource } from './parquet-source.js'
+export { withSqlCorrectWhere } from './iceberg-source.js'
 export { whereToParquetFilter } from './parquet-pushdown.js'
 export { unionSources, emptySource, canPushWhere, whereColumns } from './union-source.js'
 export { normalizeScanColumn } from './scan-column.js'
