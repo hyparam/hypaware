@@ -1157,10 +1157,17 @@ function normalizeContent(content) {
 // untouched, because `<` is outside the payload class `[A-Za-z0-9+/=_-]+`
 // (which also requires at least one character), so a consumer that trusted a
 // structured-looking marker could already be fed a byte-identical forgery by
-// the wire, allowlisted mediatype or not. Nor is there an injection channel
-// an allowlist would need to close: the mediatype class excludes all
-// whitespace and `,`, so it can never carry a newline, tab, or a
-// comma to splice a log line or a CSV cell.
+// the wire, allowlisted mediatype or not. The mediatype class does close
+// one channel: it excludes all whitespace and `,`, so a marker can never
+// carry a newline, carriage return, tab, or a comma to splice a log line
+// or a CSV cell. That class is negated, though, not an allowlist, so it
+// admits every other control character. ESC survives into `content_text`:
+// `data:evil<ESC>[31mX;base64,QUFB` strips to
+// `data:evil<ESC>[31mX;base64,<stripped>`, ESC intact, and the default
+// `table` query-output format does not escape it before writing it to the
+// terminal. Neutralizing terminal escapes is a `content_text` rendering
+// concern for every column, not something an allowlist on this one
+// mediatype would fix; it is an open concern, not a closed one.
 //
 // The capture group only changes what the replacement does. It must not change
 // what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
