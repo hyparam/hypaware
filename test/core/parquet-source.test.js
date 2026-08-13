@@ -333,13 +333,14 @@ test('negated comparisons against a NULL literal match no rows (issue #734)', as
     // BETWEEN desugars to two comparisons, one of them against the NULL
     ['ts BETWEEN NULL AND 500', []],
     ['NOT (ts BETWEEN NULL AND 500)', []],
-    // These three are non-empty on purpose: `ts` maxes at 500, so a bound of
-    // 500 makes every row's non-NULL conjunct FALSE and both cases above
-    // empty by accident of the data, not by the logic. A bound of 50 (or
-    // reversing which side is NULL) leaves rows whose non-NULL conjunct is
-    // FALSE rather than TRUE, so the negation matches and a bug that pushed
-    // never-match for the whole desugared AND, rather than only the
-    // `>= NULL` conjunct, would fail these.
+    // These three are non-empty on purpose. The negated case above is empty
+    // only because `ts` maxes at 500, so its `ts > 500` conjunct is FALSE for
+    // every row: an accident of the data, not of the logic. (The non-negated
+    // case above is empty at any bound, since a never-match zeroes an $and.)
+    // A bound of 50, or moving the NULL to the upper bound, leaves rows whose
+    // non-NULL conjunct is FALSE rather than TRUE, so the negation matches.
+    // A bug that pushed never-match for the whole desugared AND, rather than
+    // only for the conjunct holding the NULL, would return [] and fail these.
     ['NOT (ts BETWEEN NULL AND 50)', [1, 3, 5]],
     ['ts NOT BETWEEN NULL AND 50', [1, 3, 5]],
     ['NOT (ts BETWEEN 400 AND NULL)', [1, 3]],
