@@ -909,6 +909,17 @@ export interface CommandRunContext {
   cwd: string
   config: HypAwareV2Config
   plugins: ActivePlugin[]
+  /**
+   * Plugins this boot selected but whose `activate()` threw (kernel-owned,
+   * populated by the dispatcher). `plugins` alone cannot express a partial
+   * boot: `activatePlugins` catches per plugin and continues, so a command
+   * body that acts on "what the plugin set contributes now" sees a plan with
+   * a hole in it and no way to know. Empty on a clean boot, and on a caller
+   * that pre-built the kernel. Read by the client-asset materializer, which
+   * must not read a failed plugin's missing contribution as a retirement
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry

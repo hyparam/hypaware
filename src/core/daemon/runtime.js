@@ -386,6 +386,15 @@ export async function runDaemon(opts = {}) {
           //   skills without anyone re-running login
           skills: boot.runtime.skills,
           agents: boot.runtime.agents,
+          // What this boot did NOT get. The registries above describe a partial
+          // plugin set whenever a plugin threw, was eliminated by the dep graph,
+          // failed to load, or was withheld by the profile, and the materializer
+          // has no other way to tell that hole from a set of retirements. Taken
+          // whole from boot rather than re-derived from `activations`, which
+          // only ever sees the first of those four.
+          // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: an
+          //   incomplete activation copies but removes nothing
+          failedPlugins: boot.unavailablePlugins,
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,

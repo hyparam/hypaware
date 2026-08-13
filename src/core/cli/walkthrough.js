@@ -12,6 +12,7 @@ import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select } from './tui/index.js'
@@ -31,7 +32,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
- * @import { ClientAssetInstall } from '../../../src/core/runtime/types.js'
+ * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -783,6 +784,7 @@ export async function runPickerWalkthrough(opts) {
       sources: opts.sources,
       skills: opts.skills,
       agents: opts.agents,
+      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
       config,
       configPath,
       env,
@@ -1461,6 +1463,7 @@ export function resolveSingleSourceEnablement(descriptor) {
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
+ *   failedPlugins?: string[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1647,16 +1650,28 @@ export async function runPickerFinale(args) {
         // command's subject, but in the finale a dozen path lines bury the one
         // fact the step reports. The counts go out instead; the paths stay
         // available in the run summary and the span.
-        const installed = await materializeClientAssets({
+        //
+        // Withholding the stream is exactly why the removals have to come back
+        // as data. `pruneOneAsset` reports a deletion on stdout and nowhere
+        // else, so this call site - the one with a human watching - was the one
+        // that deleted a skill and said nothing, while the withheld candidates
+        // it did *not* delete were visible on stderr.
+        // @ref LLP 0219#automatic-not-gated [implements]: the finale counts its
+        //   removals out loud rather than reporting them down a stream it withholds
+        const { installed, pruned } = await materializeClientAssets({
           clients: clientsPicked,
           descriptors: descriptorMap,
           homeDir,
+          stateRoot: clientAssetStateRoot(env, homeDir),
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
+          // A boot with a broken plugin contributes a partial asset set; the
+          // finale copies it, and removes nothing on the strength of it.
+          ...(args.failedPlugins?.length ? { failedPlugins: args.failedPlugins } : {}),
           dryRun,
           stderr,
         })
-        for (const line of clientAssetCountLines(installed, dryRun)) framed.write(`${line}\n`)
+        for (const line of clientAssetCountLines(installed, pruned, dryRun)) framed.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -2164,8 +2179,9 @@ export async function buildWalkthroughClientDescriptorMap() {
 }
 
 /**
- * One line per client naming how many skills and agents landed there, in the
- * order the copies were made.
+ * One line per client naming how many skills and agents landed there, plus one
+ * naming how many retired ones were taken off the machine, in the order the
+ * copies were made.
  *
  * Counted per client rather than summed across them, because the sum is the
  * one number that is true of nobody: six skills copied to two clients is
@@ -2173,26 +2189,50 @@ export async function buildWalkthroughClientDescriptorMap() {
  * the user picked these clients a screen ago and did not choose the assets,
  * so the roster is not a decision they are being shown for review.
  *
+ * The removals get a count and not the paths, unlike everywhere else, for that
+ * same reason: this is a step summary in a wizard, and it is the *fact* of a
+ * deletion the user needs at this moment, not a roster. What was removed stays
+ * on the span and in `client_assets.pruned`.
+ *
  * @param {ClientAssetInstall[]} installed
+ * @param {ClientAssetRemoval[]} pruned
  * @param {boolean} dryRun
  * @returns {string[]}
  */
-function clientAssetCountLines(installed, dryRun) {
-  /** @type {Map<string, { skills: number, agents: number }>} */
+function clientAssetCountLines(installed, pruned, dryRun) {
+  /** @type {Map<string, { skills: number, agents: number, removedSkills: number, removedAgents: number }>} */
   const byClient = new Map()
-  for (const item of installed) {
-    let counts = byClient.get(item.client)
-    if (!counts) byClient.set(item.client, (counts = { skills: 0, agents: 0 }))
-    if (item.kind === 'skill') counts.skills += 1
-    else counts.agents += 1
+  /** @param {string} client */
+  const counts = (client) => {
+    let entry = byClient.get(client)
+    if (!entry) byClient.set(client, (entry = { skills: 0, agents: 0, removedSkills: 0, removedAgents: 0 }))
+    return entry
   }
-  const verb = dryRun ? '(dry-run) would install' : 'installed'
-  return [...byClient].map(([client, counts]) => {
-    const parts = []
-    if (counts.skills > 0) parts.push(plural(counts.skills, 'skill'))
-    if (counts.agents > 0) parts.push(plural(counts.agents, 'agent'))
-    return `${verb} ${parts.join(' and ')} for ${client}`
-  })
+  for (const item of installed) {
+    const entry = counts(item.client)
+    if (item.kind === 'skill') entry.skills += 1
+    else entry.agents += 1
+  }
+  for (const item of pruned) {
+    const entry = counts(item.client)
+    if (item.kind === 'skill') entry.removedSkills += 1
+    else entry.removedAgents += 1
+  }
+  const installVerb = dryRun ? '(dry-run) would install' : 'installed'
+  const removeVerb = dryRun ? '(dry-run) would remove' : 'removed'
+  /** @type {string[]} */
+  const lines = []
+  for (const [client, entry] of byClient) {
+    const landed = []
+    if (entry.skills > 0) landed.push(plural(entry.skills, 'skill'))
+    if (entry.agents > 0) landed.push(plural(entry.agents, 'agent'))
+    if (landed.length > 0) lines.push(`${installVerb} ${landed.join(' and ')} for ${client}`)
+    const gone = []
+    if (entry.removedSkills > 0) gone.push(plural(entry.removedSkills, 'retired skill'))
+    if (entry.removedAgents > 0) gone.push(plural(entry.removedAgents, 'retired agent'))
+    if (gone.length > 0) lines.push(`${removeVerb} ${gone.join(' and ')} for ${client}`)
+  }
+  return lines
 }
 
 /**

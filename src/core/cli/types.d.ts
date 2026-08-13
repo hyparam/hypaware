@@ -184,6 +184,12 @@ export interface RunPickerWalkthroughOptions {
   agents?: {
     list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
   }
+  /**
+   * Plugins this boot failed to activate, threaded to the finale's client-asset
+   * materialization so a partial boot copies but never prunes
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
