@@ -48,7 +48,8 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
@@ -426,6 +427,201 @@ export function recentEntrypointsFromSources(sources) {
   return out.slice(0, MAX_RECENT_ENTRYPOINTS)
 }
 
+/* ---------- maintenance skips (LLP 0224) ---------- */
+
+/**
+ * How many skipped partitions the standing surface names. The counts beside
+ * the list are exact, so this bounds the terminal block and the status file
+ * without hiding the size of the problem; `hyp query maintain` is where an
+ * operator enumerates every one. Eight is a screenful, and a cache with more
+ * than eight frozen partitions has a story the count already tells.
+ */
+export const MAX_SKIPPED_PARTITIONS_REPORTED = 8
+
+/** Every reason id, in the order the render lists them. */
+const MAINTENANCE_SKIP_REASONS = Object.freeze(
+  /** @type {MaintenanceSkipReason[]} */ (['compaction_ineffective', 'compaction_attempt_failed'])
+)
+
+/**
+ * The reason breakdown as one phrase, e.g. `2 compaction_ineffective, 1
+ * compaction_attempt_failed`. Reasons no partition was skipped for are left
+ * out rather than printed as zeros, and the ids are printed verbatim: they
+ * are the span attribute names, so this phrase is also the trace query
+ * (LLP 0224#reason-ids-are-span-attribute-names).
+ *
+ * @param {Record<MaintenanceSkipReason, number>} reasons
+ * @returns {string}
+ */
+export function describeMaintenanceSkipReasons(reasons) {
+  return MAINTENANCE_SKIP_REASONS
+    .filter((reason) => (reasons[reason] ?? 0) > 0)
+    .map((reason) => `${reasons[reason]} ${reason}`)
+    .join(', ')
+}
+
+/**
+ * The partition tuple as one label: exactly the shape `hyp query maintain`
+ * prints after the dataset name, so the same partition reads identically on
+ * both surfaces.
+ *
+ * @param {Record<string, string> | undefined} partition
+ * @returns {string}
+ */
+function partitionLabel(partition) {
+  if (!isPlainObject(partition)) return 'all'
+  const parts = Object.entries(partition)
+    .filter(([, v]) => typeof v === 'string')
+    .map(([k, v]) => `${k}=${v}`)
+  return parts.length > 0 ? parts.join('/') : 'all'
+}
+
+/**
+ * Why this tick left the partition fragmented, or undefined when it did not.
+ *
+ * A partition the tick *rewrote* is not on this surface even when the rewrite
+ * achieved nothing: that is a run that did work, and the verdict it recorded
+ * puts the partition on the next tick's snapshot as a skip. What this names is
+ * the standing state, the partition the kernel has stopped rewriting.
+ *
+ * @param {MaintenancePartitionReport} p
+ * @returns {MaintenanceSkipReason | undefined}
+ * @ref LLP 0218#verdict-outranks-error [constrained-by]: maintenance already makes the two mutually exclusive, so this order only has to agree about which one a reader is owed if that ever stops holding
+ */
+function skipReasonOf(p) {
+  if (p.compacted || p.rebaselined) return undefined
+  if (p.compactionIneffective) return 'compaction_ineffective'
+  if (p.compactionAttemptFailed) return 'compaction_attempt_failed'
+  return undefined
+}
+
+/**
+ * Summarize a maintenance tick's report into the snapshot the daemon persists
+ * (`DaemonStatus.maintenance`). Pure, and deliberately cheap: it reads the
+ * report the walk already produced and stats nothing, because proving a
+ * skipped partition is also still fragmented is the per-tick cost the LLP 0199
+ * baseline gate exists to avoid.
+ *
+ * A tick that skipped nothing still produces a snapshot (all-zero counts, an
+ * empty list). The snapshot is the *current* answer, so a partition that
+ * thawed has to be able to leave it.
+ *
+ * @param {MaintenanceReport} report
+ * @param {{ at?: string }} [opts]
+ * @returns {MaintenanceSkipSnapshot}
+ * @ref LLP 0224#last-tick-only [implements]: one bounded snapshot per tick, named partitions capped and taken in the walk's own neediest-first order
+ */
+export function summarizeMaintenanceSkips(report, opts = {}) {
+  const visited = Array.isArray(report?.partitions) ? report.partitions : []
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  /** @type {MaintenanceSkippedPartition[]} */
+  const partitions = []
+  let skippedTotal = 0
+  for (const p of visited) {
+    const reason = skipReasonOf(p)
+    if (reason === undefined) continue
+    reasons[reason] += 1
+    skippedTotal += 1
+    // No sort: the report is already in walk order, which is descending live
+    // data-file count (LLP 0199#neediest-first), so the first entries past the
+    // cap are the most fragmented ones by construction.
+    if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) continue
+    partitions.push({
+      dataset: p.dataset,
+      partition: partitionLabel(p.partition),
+      reason,
+      // The count the recorded rewrite ran over, not the live one: the same
+      // distinction `hyp query maintain` draws, for the same reason.
+      ...(reason === 'compaction_ineffective' && typeof p.compactionIneffectiveFiles === 'number'
+        ? { dataFiles: p.compactionIneffectiveFiles }
+        : {}),
+      ...(reason === 'compaction_attempt_failed' && typeof p.compactionAttemptFailedAt === 'string'
+        ? { failedAt: p.compactionAttemptFailedAt }
+        : {}),
+    })
+  }
+  return {
+    tickAt: opts.at ?? new Date().toISOString(),
+    partitionsVisited: visited.length,
+    skippedTotal,
+    reasons,
+    partitions,
+  }
+}
+
+/**
+ * Lift the maintenance snapshot out of a status file, or null when no daemon
+ * has reported a tick for this state root.
+ *
+ * Validated, sanitized and re-capped on read as well as on write, for the
+ * reason `recentEntrypointsFromSources` states: `status.json` is a file, this
+ * build did not necessarily write it, and everything here is about to be
+ * printed to a terminal. Dataset and partition labels are the only free-form
+ * strings on the path and both are kernel-side identifiers, but they are
+ * cleaned anyway rather than trusted.
+ *
+ * Not liveness-gated, for LLP 0164's reason: "these partitions were frozen as
+ * of the tick at T" stays true after the daemon exits, and the rendered age
+ * carries the staleness.
+ *
+ * @param {DaemonStatus | null} status
+ * @returns {MaintenanceSkipSnapshot | null}
+ * @ref LLP 0224#status-file-is-the-surface [implements]: hyp status answers from status.json rather than running a second maintenance walk
+ */
+export function maintenanceSkipsFromStatus(status) {
+  const raw = status?.maintenance
+  if (!isPlainObject(raw)) return null
+  const tickAt = raw.tickAt
+  // No timestamp, no snapshot: every render of this block is relative to when
+  // the tick ran, and "frozen, at some unknown time" is not worth printing.
+  if (typeof tickAt !== 'string' || Number.isNaN(Date.parse(tickAt))) return null
+
+  const rawReasons = isPlainObject(raw.reasons) ? raw.reasons : {}
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  for (const reason of MAINTENANCE_SKIP_REASONS) {
+    reasons[reason] = nonNegativeInt(rawReasons[reason]) ?? 0
+  }
+
+  /** @type {MaintenanceSkippedPartition[]} */
+  const partitions = []
+  const rawPartitions = Array.isArray(raw.partitions) ? raw.partitions : []
+  for (const item of rawPartitions) {
+    if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) break
+    if (!isPlainObject(item)) continue
+    const reason = item.reason
+    // An unknown reason id is dropped rather than printed: a name this build
+    // cannot explain is worse than a shorter list, and the counts above still
+    // account for it.
+    if (typeof reason !== 'string' || !MAINTENANCE_SKIP_REASONS.includes(/** @type {MaintenanceSkipReason} */ (reason))) continue
+    const dataset = sanitizeLabel(item.dataset)
+    const partition = sanitizeLabel(item.partition)
+    if (dataset === undefined || partition === undefined) continue
+    const dataFiles = nonNegativeInt(item.dataFiles)
+    const failedAt = sanitizeLabel(item.failedAt)
+    partitions.push({
+      dataset,
+      partition,
+      reason: /** @type {MaintenanceSkipReason} */ (reason),
+      ...(dataFiles !== undefined ? { dataFiles } : {}),
+      ...(failedAt !== undefined ? { failedAt } : {}),
+    })
+  }
+
+  const recordedTotal = nonNegativeInt(raw.skippedTotal)
+    ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
+  return {
+    tickAt,
+    partitionsVisited: nonNegativeInt(raw.partitionsVisited) ?? partitions.length,
+    // The list is capped, so the count leads; but a count smaller than the
+    // list would render "2 partitions" above three lines of them.
+    skippedTotal: Math.max(recordedTotal, partitions.length),
+    reasons,
+    partitions,
+  }
+}
+
 /**
  * Resolve the AI gateway's live bound base URL from the on-disk daemon status
  * snapshot, **guarded by a daemon-liveness check** so a stale snapshot from a
@@ -771,6 +967,29 @@ export async function collectHypAwareStatus(opts = {}) {
   // self-evident.
   // @ref LLP 0164#not-liveness-gated [implements]: a last-seen timestamp survives its daemon; the rendered age carries the staleness
   const recentEntrypoints = recentEntrypointsFromSources(daemonStatusFile?.sources)
+
+  // ----- partitions maintenance left fragmented (LLP 0224) -----
+  // Same route and the same reason as the block above: the daemon runs the
+  // hourly walk, and `hyp status` reads no cache, so answering this any other
+  // way would mean firing a second maintenance walk from a status command.
+  const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
+  if (maintenance && maintenance.skippedTotal > 0) {
+    const one = maintenance.skippedTotal === 1
+    const breakdown = describeMaintenanceSkipReasons(maintenance.reasons)
+    // Warning, never an error: the daemon is running, capture works, and
+    // queries answer. A frozen partition costs disk and query time, so it is
+    // a thing to know about rather than an outage, which is why it sits with
+    // `recent_errors` outside the set that degrades `overall` below.
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'maintenance_partitions_skipped',
+      message: `cache maintenance is leaving ${maintenance.skippedTotal} partition${one ? '' : 's'} fragmented (${breakdown}), as of its tick at ${maintenance.tickAt}`,
+      repair: [
+        'hyp query maintain --dry-run',
+        'hyp query maintain --force',
+      ],
+    })
+  }
 
   // Sinks are derived from the loaded config (so the count reflects
   // "how many sinks does the user have configured?", the same number
@@ -1152,6 +1371,7 @@ export async function collectHypAwareStatus(opts = {}) {
     usagePolicy,
     firstSyncHoldDeadline,
     recentEntrypoints,
+    maintenance,
   }
 }
 

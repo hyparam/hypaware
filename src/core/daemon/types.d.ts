@@ -66,6 +66,70 @@ export interface SinkSnapshot {
   nextScheduledAt?: string
 }
 
+/**
+ * Why a maintenance tick deliberately left a partition fragmented instead
+ * of rewriting it (LLP 0224#reason-ids-are-span-attribute-names). The ids
+ * are the `maintenance.partition` span's attribute names verbatim, which
+ * are themselves named after the `MaintenancePartitionReport` fields, so
+ * one spelling covers the trace, the status file, `hyp status`, and the
+ * daemon log.
+ *
+ * - `compaction_ineffective`: this writer already rewrote the partition and
+ *   reproduced the same file count (LLP 0217#record-effectiveness).
+ * - `compaction_attempt_failed`: the one retry the writer generation owed it
+ *   was spent by a rewrite that threw (LLP 0218#report-the-spent-attempt).
+ *
+ * Convergence (LLP 0199#baseline-gate) is not on this list: it is the
+ * healthy majority of a cache, not a partition left fragmented.
+ */
+export type MaintenanceSkipReason = 'compaction_ineffective' | 'compaction_attempt_failed'
+
+/** One partition the last maintenance tick left fragmented, and why. */
+export interface MaintenanceSkippedPartition {
+  dataset: string
+  /** Partition tuple as `k=v/k=v`, or `all` for an unpartitioned dataset. */
+  partition: string
+  reason: MaintenanceSkipReason
+  /**
+   * The data-file count the recorded rewrite ran over, not the live one
+   * (LLP 0217). Set for `compaction_ineffective` when the cursor records it.
+   */
+  dataFiles?: number
+  /**
+   * ISO time the spent attempt failed, as the cursor records it. Set for
+   * `compaction_attempt_failed`.
+   */
+  failedAt?: string
+}
+
+/**
+ * What the daemon's last completed maintenance tick left alone, summarized
+ * for a standing surface (LLP 0224). Overwritten whole by every tick,
+ * including one that skipped nothing: a skip reason is a state the tick
+ * re-derives from the partition cursor, so only the newest tick's answer is
+ * current, and a partition that thaws drops off by itself
+ * (LLP 0224#last-tick-only).
+ *
+ * Absent means no tick has reported (a daemon that has not reached one, or
+ * maintenance disabled), which is not the same as "nothing is frozen".
+ */
+export interface MaintenanceSkipSnapshot {
+  /** ISO time of the tick this snapshot describes. */
+  tickAt: string
+  /** Partitions the tick actually visited (a budget can cut the walk short). */
+  partitionsVisited: number
+  /** Partitions skipped for a stated reason, all reasons summed. */
+  skippedTotal: number
+  /** How many partitions each reason accounts for. Zero keys are kept. */
+  reasons: Record<MaintenanceSkipReason, number>
+  /**
+   * The worst of them by name, in walk order (LLP 0199#neediest-first, so
+   * descending live data-file count), capped at
+   * `MAX_SKIPPED_PARTITIONS_REPORTED`. `skippedTotal` is the true count.
+   */
+  partitions: MaintenanceSkippedPartition[]
+}
+
 export interface DaemonStatus {
   state: DaemonState
   pid: number
@@ -85,6 +149,11 @@ export interface DaemonStatus {
   configPath?: string
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
+  /**
+   * What the last completed cache-maintenance tick left fragmented, and why
+   * (LLP 0224#status-file-is-the-surface). Absent until a tick has run.
+   */
+  maintenance?: MaintenanceSkipSnapshot
   warnings?: string[]
 }
 
@@ -106,6 +175,7 @@ export type StatusDiagnosticKind =
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
+  | 'maintenance_partitions_skipped'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -326,6 +396,15 @@ export interface HypAwareStatusReport {
    * and reads no cache, so this is the only place the answer can come from.
    */
   recentEntrypoints: RecentEntrypoint[]
+  /**
+   * What the daemon's last cache-maintenance tick deliberately left
+   * fragmented (LLP 0224). Read from `status.json`, like
+   * `recentEntrypoints`: the daemon runs the hourly walk, and `hyp status`
+   * activates no plugins and reads no cache, so re-deriving this would mean
+   * running a second walk from a status command. Null when no daemon has
+   * reported a tick for this state root.
+   */
+  maintenance: MaintenanceSkipSnapshot | null
 }
 
 export interface CollectStatusOptions {
