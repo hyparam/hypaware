@@ -1167,7 +1167,7 @@ function normalizeContent(content) {
 // `table` query-output format does not escape it before writing it to the
 // terminal. Neutralizing terminal escapes is a `content_text` rendering
 // concern for every column, not something an allowlist on this one
-// mediatype would fix; it is an open concern, not a closed one.
+// mediatype would fix; it is open, tracked in #752.
 //
 // The capture group only changes what the replacement does. It must not change
 // what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
