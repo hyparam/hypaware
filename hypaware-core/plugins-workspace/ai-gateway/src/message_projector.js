@@ -1176,8 +1176,11 @@ function stripBase64DataUris(text) {
   // Cheap reject first: this runs on every captured part, and almost none of
   // them carry a payload.
   if (text === undefined || !text.includes(';base64,')) return text
-  // A replacer function, not a template string: a mediatype carrying `$` would
-  // otherwise be read as a replacement pattern.
+  // A replacer function, not a `$1` template: the empty mediatype
+  // (`data:;base64,`) has to fall back to `application/octet-stream`, and a
+  // template string cannot express that. A `$1` template would be safe against
+  // a `$` in the mediatype (a substituted capture is never re-scanned for
+  // replacement patterns), so that is not the reason.
   return text.replace(BASE64_DATA_URI, (_match, mediatype) => `data:${mediatype || UNKNOWN_MEDIATYPE};base64,<stripped>`)
 }
 
