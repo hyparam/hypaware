@@ -3,7 +3,7 @@
 import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord } from '../../../src/core/observability/types.js'
+ * @import { LogRecord, MetricRecord, OtlpScope } from '../../../src/core/observability/types.js'
  * @import { Span } from './runtime.js'
  */
 
@@ -81,7 +81,7 @@ export class OtlpMetricExporter extends OtlpHttpJsonExporter {
  * @param {(span: Span) => object} mapSpan
  */
 function groupByResourceAndScope(spans, mapSpan) {
-  /** @type {Map<string, { resource: object, scopeSpans: Array<{ scope: object, spans: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeSpans: Array<{ scope: OtlpScope, spans: object[] }> }>} */
   const byResource = new Map()
   for (const span of spans) {
     const resourceKey = JSON.stringify(span.resource.attributes)
@@ -102,7 +102,7 @@ function groupByResourceAndScope(spans, mapSpan) {
 
 /** @param {LogRecord[]} records */
 function groupLogsByResourceAndScope(records) {
-  /** @type {Map<string, { resource: object, scopeLogs: Array<{ scope: object, logRecords: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeLogs: Array<{ scope: OtlpScope, logRecords: object[] }> }>} */
   const byResource = new Map()
   for (const record of records) {
     const resourceKey = JSON.stringify(record.resource.attributes)
@@ -123,7 +123,7 @@ function groupLogsByResourceAndScope(records) {
 
 /** @param {MetricRecord[]} records */
 function groupMetricsByResourceAndScope(records) {
-  /** @type {Map<string, { resource: object, scopeMetrics: Array<{ scope: object, metrics: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeMetrics: Array<{ scope: OtlpScope, metrics: object[] }> }>} */
   const byResource = new Map()
   for (const record of records) {
     const resourceKey = JSON.stringify(record.resource.attributes)
@@ -256,7 +256,14 @@ function anyValueToOtlp(value) {
   return { stringValue: '' }
 }
 
-/** @param {Record<string, unknown>} obj */
+/**
+ * Drop undefined-valued keys. The shape is preserved in the type: every key
+ * this can remove was optional to begin with.
+ *
+ * @template {Record<string, unknown>} T
+ * @param {T} obj
+ * @returns {T}
+ */
 function cleanObject(obj) {
-  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined))
+  return /** @type {T} */ (Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)))
 }

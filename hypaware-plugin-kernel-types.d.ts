@@ -1565,6 +1565,18 @@ export interface VerbInputSchema {
 }
 
 /**
+ * The JSON Schema an MCP tool advertises: a verb's `VerbInputSchema` with the
+ * CLI-only argv-binding hints removed (`positional`, and per-property
+ * `greedy`). It is a projection, never authored by hand, so the flag set and
+ * the wire contract cannot drift apart.
+ */
+export interface McpToolInputSchema {
+  type: 'object'
+  properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
+  required?: string[]
+}
+
+/**
  * Local-execution context handed to a verb's `operation`. The CLI and
  * the local MCP host both build this from the kernel runtime; the
  * operation never touches argv or stdout.

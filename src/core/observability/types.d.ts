@@ -22,6 +22,41 @@ export interface ObservabilityEnv {
   resourceAttributes: string
 }
 
+// A metric instrument as its callers use it. `add` and `record` are the same
+// underlying write; which name reads correctly depends on the instrument kind
+// (counters add, histograms and gauges record), so both are always present.
+export interface MetricInstrument {
+  add(value: number, attributes?: Record<string, unknown>): void
+  record(value: number, attributes?: Record<string, unknown>): void
+}
+
+export interface InstrumentOptions {
+  description?: string
+  unit?: string
+}
+
+// The slice of a Meter that instrument builders need. Kept structural so it
+// resolves from the published `.d.ts` without a declaration for `runtime.js`.
+export interface Meter {
+  createCounter(name: string, opts?: InstrumentOptions): MetricInstrument
+  createUpDownCounter(name: string, opts?: InstrumentOptions): MetricInstrument
+  createGauge(name: string, opts?: InstrumentOptions): MetricInstrument
+  createHistogram(name: string, opts?: InstrumentOptions): MetricInstrument
+}
+
+// A periodic reader's flush/shutdown surface, as `installObservability`'s
+// shutdown path drives it.
+export interface MetricReader {
+  forceFlush(): Promise<void> | void
+  shutdown(): Promise<void> | void
+}
+
+// The scope (instrumentation library) identity carried on every OTLP group.
+export interface OtlpScope {
+  name: string
+  version?: string | undefined
+}
+
 export interface LogRecord {
   loggerName: string
   loggerVersion: string | undefined
