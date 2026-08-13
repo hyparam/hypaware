@@ -1217,7 +1217,7 @@ function stampWriterGeneration(cursor, failedAt) {
  */
 function compactionAttemptFailedAt(cursor) {
   const c = cursor.compaction
-  if (!isPlainObject(c) || typeof c.attemptFailedAt !== 'string') return undefined
+  if (!isPlainObject(c) || typeof c.attemptFailedAt !== 'string' || c.attemptFailedAt === '') return undefined
   if (c.writerGeneration !== COMPACTION_WRITER_GENERATION) return undefined
   if (compactionReducedFiles(cursor) !== undefined) return undefined
   return c.attemptFailedAt

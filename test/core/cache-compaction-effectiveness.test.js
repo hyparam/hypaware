@@ -414,6 +414,10 @@ test('a committed ineffective verdict outranks the failed attempt that followed 
       await fs.chmod(retiringDir, 0o755)
     }
     assert.equal(compactionRecord(dir).dataFilesBefore, 8, 'fixture invariant: the rewrite committed its verdict')
+    assert.ok(
+      compactionRecord(dir).attemptFailedAt,
+      'fixture invariant: the throw also stamped a failed attempt, so the two records really do compete'
+    )
 
     const after = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(after.partitions[0].compactionIneffective, true, 'the recorded verdict is what the skip is about')
