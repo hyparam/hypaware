@@ -246,9 +246,11 @@ export async function dispatch(argv, opts = {}) {
   /** @type {ActivePlugin[]} */
   let activePlugins = []
   /**
-   * Plugins this boot selected whose `activate()` threw. The loader continues
-   * past one, so a command body cannot otherwise tell a partial boot from a
-   * complete one, and the client-asset materializer has to.
+   * Plugins this boot did not get, by any of the four routes `bootKernel`
+   * tracks: a throwing `activate()`, a dep-graph elimination, a manifest that
+   * would not load, or a config-enabled plugin the boot profile withheld. A
+   * command body cannot otherwise tell a partial boot from a complete one, and
+   * the client-asset materializer (which deletes) has to.
    * @type {string[]}
    */
   let failedPlugins = []
@@ -271,7 +273,11 @@ export async function dispatch(argv, opts = {}) {
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
-    failedPlugins = boot.activations.filter((r) => r.ok === false).map((r) => r.plugin.name)
+    // Read, never re-derived: `activations` only ever holds the plugins that
+    // reached `activatePlugins`, and three of the four ways a boot comes up
+    // short never put a plugin there at all
+    // (LLP 0219 #incomplete-activation-prunes-nothing).
+    failedPlugins = boot.unavailablePlugins
     if (boot.config) activeConfig = boot.config
 
     // Lifecycle/read-only commands boot with no plugins, so no sink can

@@ -36,6 +36,8 @@ import { isWithinDir } from './contribution_names.js'
  * @import {
  *   ClientAssetInstall,
  *   ClientAssetLedgerRecord,
+ *   ClientAssetMaterialization,
+ *   ClientAssetRemoval,
  *   MaterializeClientAssetsOptions,
  *   PlannedClientAsset,
  *   ResolvedClientAsset,
@@ -51,9 +53,16 @@ import { isWithinDir } from './contribution_names.js'
  * warns and is skipped rather than throwing, so a single bad plugin cannot abort
  * an onboarding run or an org-driven attach midway.
  *
+ * The removals come back alongside the copies, not only as `stdout` lines,
+ * because a caller is allowed to withhold `stdout` and one does: the wizard
+ * finale suppresses the per-copy lines so a dozen paths do not bury its step
+ * summary. Reporting only through the stream it withholds is how a `hyp init`
+ * came to delete a skill and say nothing (LLP 0219 #automatic-not-gated).
+ *
  * @param {MaterializeClientAssetsOptions} options
- * @returns {Promise<ClientAssetInstall[]>} one entry per copy actually made
- *   (or, under `dryRun`, per copy that would be made)
+ * @returns {Promise<ClientAssetMaterialization>} the copies actually made (or,
+ *   under `dryRun`, that would be made), and the retired destinations this run
+ *   removed or left in place
  */
 export async function materializeClientAssets(options) {
   const { dryRun = false, stdout, stderr } = options
@@ -75,8 +84,8 @@ export async function materializeClientAssets(options) {
     }
     installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
   }
-  await reconcileClientAssetLedger({ options, planned, installed })
-  return installed
+  const { pruned, withheld } = await reconcileClientAssetLedger({ options, planned, installed })
+  return { installed, pruned, withheld }
 }
 
 /**
@@ -317,13 +326,17 @@ export async function removeClientAssets(dests, baseDirs) {
  *   planned: PlannedClientAsset[],
  *   installed: ClientAssetInstall[],
  * }} args
- * @returns {Promise<void>}
+ * @returns {Promise<{ pruned: ClientAssetRemoval[], withheld: ClientAssetRemoval[] }>}
  * @ref LLP 0219#prune-on-materialize [implements]: the one materializer removes
  *   what this version no longer contributes, gated on its own install record.
  */
 async function reconcileClientAssetLedger({ options, planned, installed }) {
   const { descriptors, homeDir, stateRoot, dryRun = false, stdout, stderr } = options
-  if (!stateRoot || homeDir.length === 0) return
+  /** @type {ClientAssetRemoval[]} */
+  const pruned = []
+  /** @type {ClientAssetRemoval[]} */
+  const withheld = []
+  if (!stateRoot || homeDir.length === 0) return { pruned, withheld }
   const ledger = await readClientAssetLedger(stateRoot)
   const scope = new Set(installed.map((item) => item.client))
   const landed = new Set(installed.map((item) => item.dest))
@@ -340,14 +353,6 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
   // contributing right now reads as another client's retired copy.
   const keepAll = new Set(planned.map(({ dest }) => dest))
 
-  /** @type {Map<string, Set<string>>} client -> the dests this run planned */
-  const plannedDests = new Map()
-  for (const { client, dest } of planned) {
-    const dests = plannedDests.get(client) ?? new Set()
-    dests.add(dest)
-    plannedDests.set(client, dests)
-  }
-
   // A client this run did not install for keeps every record it had: this pass
   // learned nothing about it.
   /** @type {ClientAssetLedgerRecord[]} */
@@ -358,7 +363,6 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
     if (!descriptor) continue
     const baseDirs = clientAssetBaseDirs(descriptor, homeDir)
     if (baseDirs.length === 0) continue
-    const keep = plannedDests.get(client) ?? new Set()
 
     if (activationIncomplete) {
       // Untouched, not dropped: the record is what a later complete boot will
@@ -381,16 +385,28 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
       }
 
       for (const [dest, record] of candidates) {
-        const carried = await pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, stderr })
-        if (carried) next.push(carried)
+        const outcome = await pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, stderr })
+        if (outcome.carried) next.push(outcome.carried)
+        if (outcome.removal) (outcome.removed ? pruned : withheld).push(outcome.removal)
       }
 
       // A planned copy that failed is not retired and not re-recorded: keep the
       // record of the copy that is still sitting there from last time, or the
       // next run would read the path as never ours and leave it forever.
+      //
+      // Asked of the **whole run's** plan, exactly as the candidate loop above
+      // is, and for the same reason: a dest is a physical path and two clients
+      // can share an asset directory. Asked of this client's share alone, a dest
+      // that moved to another client whose copy failed is neither a candidate
+      // (the plan contains it) nor carried (this client no longer plans it), so
+      // its record is dropped and the copy still sitting on disk becomes
+      // permanently unprunable and unreportable - the leave-behind LLP 0219
+      // exists to end. Two records for one dest under two clients is the price,
+      // and it is no price at all: candidates are keyed by dest per client and
+      // `fs.rm` is forced and idempotent.
       for (const record of ledger) {
         if (record.client !== client) continue
-        if (!keep.has(record.dest) || landed.has(record.dest)) continue
+        if (!keepAll.has(record.dest) || landed.has(record.dest)) continue
         next.push(record)
       }
     }
@@ -408,14 +424,18 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
     }
   }
 
-  if (dryRun) return
+  if (dryRun) return { pruned, withheld }
   await writeClientAssetLedger(stateRoot, next)
+  return { pruned, withheld }
 }
 
 /**
- * Decide one stale candidate, and return the record to carry forward (if any).
- * Returning a record means "still on disk, still ours to name later"; returning
- * `undefined` means the path is gone, by our hand or someone else's.
+ * Decide one stale candidate: what to carry forward in the ledger, and what to
+ * report. A `carried` record means "still on disk, still ours to name later";
+ * `undefined` means the path is gone, by our hand or someone else's. `removal`
+ * is the line for the caller's summary, with `removed` saying which of the two
+ * things happened to it; a candidate that was already absent produces neither,
+ * because there is nothing to tell anyone about.
  *
  * @param {{
  *   dest: string,
@@ -426,11 +446,17 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
  *   stdout?: { write(chunk: string): unknown },
  *   stderr?: { write(chunk: string): unknown },
  * }} args
- * @returns {Promise<ClientAssetLedgerRecord | undefined>}
+ * @returns {Promise<{
+ *   carried: ClientAssetLedgerRecord | undefined,
+ *   removed: boolean,
+ *   removal?: ClientAssetRemoval,
+ * }>}
  */
 async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, stderr }) {
   const kind = record?.kind ?? (path.extname(dest) === '.md' ? 'agent' : 'skill')
   const name = record?.name ?? path.basename(dest, kind === 'agent' ? '.md' : '')
+  /** @type {ClientAssetRemoval} */
+  const removal = { kind, name, client, dest, dryRun }
 
   // A recorded path outside this client's directories is not this run's to act
   // on. Kept verbatim rather than dropped: the record is the only thing naming
@@ -453,13 +479,39 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
       [Attr.ERROR_KIND]: 'outside_asset_dirs',
       detail: dest,
     })
-    return record
+    return { carried: record, removed: false, removal }
+  }
+
+  // Belt and braces over the digest domains. `kind` says what we wrote there (a
+  // skill is a directory, a subagent a single file), and an object of the other
+  // shape is by definition not the thing the record describes, whatever the
+  // hashes say. The digest already separates the two spaces; this refuses the
+  // question a second time, from the one field the record carries that the
+  // filesystem cannot forge.
+  // @ref LLP 0219#edited-assets-are-not-ours [implements]: an object whose shape
+  //   contradicts the record is not the asset we installed, so it is reported.
+  const shape = await statShape(dest)
+  if (record && shape && shape !== (record.kind === 'agent' ? 'file' : 'dir')) {
+    stderr?.write(
+      `warning: retired ${kind} '${name}' at ${dest} is a ${shape === 'dir' ? 'directory' : 'file'} where ` +
+        `HypAware installed a ${record.kind === 'agent' ? 'file' : 'directory'}; left in place - ` +
+        'remove it by hand if you no longer want it\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_withheld', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'asset_shape_changed',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
   }
 
   const digest = await digestClientAsset(dest)
   // Already gone (removed by hand, or by an earlier pass whose ledger write
   // lost the race). Nothing to report and nothing left to record.
-  if (!digest) return undefined
+  if (!digest) return { carried: undefined, removed: false }
 
   // The user's own edit outranks the retirement. Overwriting a *contributed*
   // asset's edits is a documented part of `hyp skills install` (the copy is
@@ -493,12 +545,12 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
       [Attr.ERROR_KIND]: record?.digest ? 'asset_modified' : 'digest_unrecorded',
       detail: dest,
     })
-    return record
+    return { carried: record, removed: false, removal }
   }
 
   if (dryRun) {
     stdout?.write(`(dry-run) Would remove retired ${kind} '${name}' → ${dest}\n`)
-    return record
+    return { carried: record, removed: true, removal }
   }
 
   const { removed, failed } = await removeClientAssets([dest], baseDirs)
@@ -511,7 +563,7 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
       [Attr.STATUS]: 'ok',
       detail: dest,
     })
-    return undefined
+    return { carried: undefined, removed: true, removal }
   }
   // Keep the record for a removal that can still succeed, exactly as the detach
   // path keeps its marker for one (LLP 0138 #refusal-is-not-failure). Here even
@@ -520,7 +572,26 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   for (const failure of failed) {
     stderr?.write(`warning: retired ${kind} '${name}' at ${failure.dest} could not be removed: ${failure.reason}\n`)
   }
-  return record
+  return { carried: record, removed: false, removal }
+}
+
+/**
+ * Whether `dest` is a directory, a file, or something else (a symlink to
+ * neither, a socket). `undefined` when it cannot be stat'd at all, which the
+ * caller must not read as either shape.
+ *
+ * @param {string} dest
+ * @returns {Promise<'dir' | 'file' | 'other' | undefined>}
+ */
+async function statShape(dest) {
+  try {
+    const stat = await fs.stat(dest)
+    if (stat.isDirectory()) return 'dir'
+    if (stat.isFile()) return 'file'
+    return 'other'
+  } catch {
+    return undefined
+  }
 }
 
 /**

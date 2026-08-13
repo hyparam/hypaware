@@ -535,7 +535,7 @@ async function materializeAttachedAssets(client, ctx) {
   }
 
   try {
-    const installed = await materializeClientAssets({ ...options, stderr: warnings })
+    const { installed } = await materializeClientAssets({ ...options, stderr: warnings })
     return installed.map((asset) => asset.dest)
   } catch (err) {
     ctx.log.warn('client_action.attach_assets_failed', {

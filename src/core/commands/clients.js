@@ -1956,7 +1956,7 @@ export async function runSkillsInstall(argv, ctx) {
   }
 
   const descriptors = await buildClientDescriptorMap(ctx)
-  const installed = await materializeClientAssets({
+  const { installed } = await materializeClientAssets({
     clients: parsed.client === 'all' ? 'all' : [parsed.client],
     descriptors,
     homeDir,

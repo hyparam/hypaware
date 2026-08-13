@@ -116,15 +116,25 @@ export async function readClientAssetLedger(stateRoot) {
  * Replace the ledger with `records`. Best-effort: a ledger we could not write
  * costs a later prune, never an install, so the caller is not failed over it.
  *
+ * Deduplicated on `(client, dest)`, which is the key the prune actually asks
+ * questions by: candidates are collected per client and keyed by destination.
+ * The pair, not the destination alone, because one physical path legitimately
+ * belongs to two clients at once (`claude` and `claude-desktop` both declare
+ * `.claude/skills`), and collapsing those would drop a record that is the only
+ * thing making the copy removable later.
+ *
  * @param {string} stateRoot
  * @param {ClientAssetLedgerRecord[]} records
  * @returns {Promise<boolean>} whether the write landed
  */
 export async function writeClientAssetLedger(stateRoot, records) {
+  /** @type {Map<string, ClientAssetLedgerRecord>} */
+  const unique = new Map()
+  for (const record of records) unique.set(`${record.client}\n${record.dest}`, record)
   try {
     await atomicWriteJson(
       path.join(stateRoot, LEDGER_BASENAME),
-      { version: LEDGER_VERSION, assets: [...records].sort(compareRecords) },
+      { version: LEDGER_VERSION, assets: [...unique.values()].sort(compareRecords) },
       { mkdir: true }
     )
     return true
@@ -142,16 +152,33 @@ export async function writeClientAssetLedger(stateRoot, records) {
  * directory (a symlink someone dropped in) contribute their name only, so they
  * likewise cannot be mistaken for the tree we copied.
  *
+ * **The shape is hashed before anything else.** Without it the two branches
+ * write into the same unframed byte stream and produce collisions across kinds:
+ * an empty directory and an empty file are both the hash of nothing, and a
+ * skill tree holding one `SKILL.md` of `body\n` hashes exactly like a file whose
+ * bytes are `SKILL.md\nbody\n`. Either one is enough to let a file the user
+ * authored inherit a digest we recorded for something else, and the digest is
+ * the last thing standing between the prune and their files. Seeding the domain
+ * (and marking each tree entry's own shape) makes the two spaces disjoint.
+ *
  * @param {string} dest
  * @returns {Promise<string | undefined>} `undefined` when the path is gone or
  *   unreadable, which no caller may treat as a match
+ * @ref LLP 0219#edited-assets-are-not-ours [implements]: a digest may only match
+ *   what we actually wrote, so file-shaped and directory-shaped content are
+ *   hashed in separate domains.
  */
 export async function digestClientAsset(dest) {
   const hash = createHash('sha256')
   try {
     const stat = await fs.stat(dest)
-    if (stat.isDirectory()) await hashTree(dest, dest, hash)
-    else hash.update(await fs.readFile(dest))
+    if (stat.isDirectory()) {
+      hash.update('dir\n')
+      await hashTree(dest, dest, hash)
+    } else {
+      hash.update('file\n')
+      hash.update(await fs.readFile(dest))
+    }
   } catch {
     return undefined
   }
@@ -171,7 +198,10 @@ async function hashTree(root, dir, hash) {
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
-    hash.update(`${path.relative(root, full)}\n`)
+    // The entry's shape leads its path, so a subdirectory named `x` and a file
+    // named `x` cannot hash alike, and a file's bytes can never be read back as
+    // the tree that would have followed a directory of the same name.
+    hash.update(`${entry.isDirectory() ? 'd' : entry.isFile() ? 'f' : 'o'}:${path.relative(root, full)}\n`)
     if (entry.isDirectory()) await hashTree(root, full, hash)
     else if (entry.isFile()) hash.update(await fs.readFile(full))
   }

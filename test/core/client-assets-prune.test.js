@@ -16,10 +16,14 @@ import path from 'node:path'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { runPickerFinale } from '../../src/core/cli/walkthrough.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
 import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { bootKernel } from '../../src/core/runtime/boot.js'
+import { clientAssetStateRoot, digestClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
+import { materializeClientAssets } from '../../src/core/runtime/client_assets.js'
 
 /**
  * A fresh kernel + command registry, the way a new process would boot one. Each
@@ -563,6 +567,342 @@ test('a boot where a plugin failed to activate prunes nothing', async () => {
   assert.equal(await exists(dropped), false, 'a complete boot still prunes what it retired')
 
   await fs.rm(home, { recursive: true, force: true })
+})
+
+/* ------------------------------------------------------------------------ *
+ * A boot can come up short of its plugin set without any `activate()` ever
+ * throwing, and the profile door is the one a shipped, bundled, opt-in plugin
+ * walks through on an ordinary `hyp init`.
+ * @ref LLP 0219#incomplete-activation-prunes-nothing [tests]:
+ * ------------------------------------------------------------------------ */
+
+/**
+ * A synthetic bundled workspace: a client-owning plugin and an opt-in plugin,
+ * each contributing one skill it registers from its own source tree. Real
+ * bundled names, because the profiles bucket on fixed name sets.
+ *
+ * @param {string} root
+ * @returns {Promise<string>} the workspace directory
+ */
+async function writeBundledWorkspace(root) {
+  const workspaceDir = path.join(root, 'workspace')
+  /**
+   * @param {string} dir
+   * @param {string} name
+   * @param {string} skill
+   * @param {Record<string, unknown>} [clientContribution]
+   */
+  const write = async (dir, name, skill, clientContribution) => {
+    const pluginDir = path.join(workspaceDir, dir)
+    await fs.mkdir(path.join(pluginDir, 'skills', skill), { recursive: true })
+    await fs.writeFile(path.join(pluginDir, 'skills', skill, 'SKILL.md'), `${skill} body\n`, 'utf8')
+    await fs.writeFile(
+      path.join(pluginDir, 'hypaware.plugin.json'),
+      JSON.stringify({
+        schema_version: 1,
+        name,
+        version: '2.0.0',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+        contributes: {
+          ...(clientContribution ? { client: clientContribution } : {}),
+          skills: [{ name: skill, clients: ['claude'] }],
+        },
+      })
+    )
+    await fs.writeFile(
+      path.join(pluginDir, 'index.js'),
+      "import path from 'node:path'\n" +
+        "import { fileURLToPath } from 'node:url'\n" +
+        'export async function activate(ctx) {\n' +
+        '  ctx.skills.register({\n' +
+        `    name: ${JSON.stringify(skill)},\n` +
+        `    plugin: ${JSON.stringify(name)},\n` +
+        "    clients: ['claude'],\n" +
+        `    sourceDir: path.join(path.dirname(fileURLToPath(import.meta.url)), 'skills', ${JSON.stringify(skill)}),\n` +
+        '  })\n' +
+        '}\n'
+    )
+  }
+  await write('claude', '@hypaware/claude', 'hypaware-query', {
+    name: 'claude',
+    skill_dir: '.claude/skills',
+    agent_dir: '.claude/agents',
+  })
+  await write('gascity', '@hypaware/gascity', 'hypaware-gascity')
+  return workspaceDir
+}
+
+/**
+ * What the wizard finale and the reconciler both do with a boot: materialize
+ * the client assets that boot's registries hold, telling the materializer what
+ * the boot did not get.
+ *
+ * @param {{ boot: any, home: string, env: NodeJS.ProcessEnv }} args
+ * @returns {Promise<any>}
+ */
+function materializeFromBoot({ boot, home, env }) {
+  return materializeClientAssets({
+    clients: ['claude'],
+    descriptors: boot.clientDescriptors,
+    homeDir: home,
+    stateRoot: clientAssetStateRoot(env, home),
+    skills: boot.runtime.skills,
+    ...(boot.unavailablePlugins?.length ? { failedPlugins: boot.unavailablePlugins } : {}),
+    stderr: makeBuf(),
+  })
+}
+
+test('a skill the boot profile withheld is never read as retired', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-prune-profile-'))
+  const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const workspaceDir = await writeBundledWorkspace(home)
+  const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/claude', config: {} }, { name: '@hypaware/gascity', config: {} }],
+    })
+  )
+
+  const bootArgs = /** @type {const} */ ({
+    hypHome: path.join(home, '.hyp'),
+    configPath,
+    workspaceDir,
+    mode: 'smoke',
+    env,
+  })
+
+  // `hyp attach claude` / `hyp skills install`: the `config` profile honours the
+  // opt-in, so gascity's skill lands and is ledgered with a matching digest.
+  const first = await bootKernel({ ...bootArgs, runId: 'prune-profile-1' })
+  await materializeFromBoot({ boot: first, home, env })
+  const gascitySkill = path.join(home, '.claude', 'skills', 'hypaware-gascity')
+  assert.ok(await exists(path.join(gascitySkill, 'SKILL.md')), 'the opt-in skill must land first')
+
+  // The user re-runs `hyp init`, which boots `all-available`. That profile drops
+  // the opt-in plugin even though the config enables it, so its skill is missing
+  // from the plan for a reason that is not a retirement - while claude's own
+  // skills still land, keeping the client in scope.
+  const second = await bootKernel({ ...bootArgs, runId: 'prune-profile-2', bootProfile: 'all-available' })
+  assert.deepEqual(
+    second.activations.filter((/** @type {any} */ r) => r.ok === false),
+    [],
+    'nothing threw, so an activation-only stand-down sees no reason to stand down'
+  )
+  await materializeFromBoot({ boot: second, home, env })
+
+  assert.ok(
+    await exists(path.join(gascitySkill, 'SKILL.md')),
+    'a skill this boot profile withheld must survive: the next attach would only put it back'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+/* ------------------------------------------------------------------------ *
+ * The digest is the only thing between the prune and a user's files, so the
+ * shapes it hashes have to be distinguishable from each other.
+ * @ref LLP 0219#edited-assets-are-not-ours [tests]:
+ * ------------------------------------------------------------------------ */
+
+test('a directory and a file never share a content digest', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-digest-'))
+
+  const emptyDir = path.join(root, 'empty-dir')
+  await fs.mkdir(emptyDir, { recursive: true })
+  const emptyFile = path.join(root, 'empty-file')
+  await fs.writeFile(emptyFile, '', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(emptyDir),
+    await digestClientAsset(emptyFile),
+    'an empty installed skill and an empty user file must not hash alike'
+  )
+
+  // The tree walk frames each entry's path but not its shape, so a one-file
+  // skill and a file holding that skill's path followed by its bytes collide.
+  const treeDir = path.join(root, 'tree')
+  await fs.mkdir(treeDir, { recursive: true })
+  await fs.writeFile(path.join(treeDir, 'SKILL.md'), 'body\n', 'utf8')
+  const flatFile = path.join(root, 'flat')
+  await fs.writeFile(flatFile, 'SKILL.md\nbody\n', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(treeDir),
+    await digestClientAsset(flatFile),
+    'a skill tree and a file spelling out that tree must not hash alike'
+  )
+
+  await fs.rm(root, { recursive: true, force: true })
+})
+
+test("a user's file that collides with a retired skill's digest is left in place", async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  // The installed skill is a directory holding one `SKILL.md` of `body\n`. The
+  // user takes the name over with a file of their own whose bytes happen to
+  // spell the tree out: same hash under a shape-blind digest, and this one is
+  // not empty, so the delete destroys real content.
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const taken = path.join(skillsDir, 'hypaware-ignore')
+  await fs.rm(taken, { recursive: true, force: true })
+  await fs.writeFile(taken, 'SKILL.md\nbody\n', 'utf8')
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(second.code, 0)
+  assert.equal(
+    await fs.readFile(taken, 'utf8'),
+    'SKILL.md\nbody\n',
+    'a file the user authored must not be deletable by colliding with a skill tree'
+  )
+  assert.match(second.stderr, /hypaware-ignore/)
+})
+
+test("a user's empty file at an empty retired skill's path is left in place", async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  // A contributed skill whose source tree happens to be empty: the recorded
+  // digest is the hash of nothing at all.
+  const retiredSource = path.join(home, 'sources', 'hypaware-ignore')
+  await fs.mkdir(retiredSource, { recursive: true })
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const taken = path.join(skillsDir, 'hypaware-ignore')
+  await fs.rm(taken, { recursive: true, force: true })
+  await fs.writeFile(taken, '', 'utf8')
+
+  const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
+
+  assert.equal(second.code, 0)
+  assert.ok(
+    await exists(taken),
+    'an empty user file must not inherit an empty installed directory digest'
+  )
+})
+
+/* ------------------------------------------------------------------------ *
+ * The finale is the one call site with a human at the terminal, and it is the
+ * one that said nothing when it deleted.
+ * @ref LLP 0219#automatic-not-gated [tests]:
+ * ------------------------------------------------------------------------ */
+
+test('the wizard finale says how many retired assets it removed', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'retired body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource },
+      { name: 'hypaware-ignore', sourceDir: retiredSource },
+    ],
+  })
+
+  const stdout = makeBuf()
+  await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true, skipDaemonInstall: true },
+    clientsPicked: ['claude'],
+    capabilities: /** @type {any} */ ({ has: () => false }),
+    skills: { list: () => [{ name: 'hypaware-query', clients: ['claude'], sourceDir: keptSource }] },
+    config: { version: 2, plugins: [] },
+    configPath: path.join(home, '.hyp', 'hypaware-config.json'),
+    env,
+    stdout,
+    stderr: makeBuf(),
+    retentionDays: 30,
+    interactive: false,
+  }))
+
+  assert.equal(
+    await exists(path.join(home, '.claude', 'skills', 'hypaware-ignore')),
+    false,
+    'the finale really does delete here; the question is whether it says so'
+  )
+  assert.match(
+    stdout.text(),
+    /removed 1 retired skill for claude/,
+    'a wizard that deletes a skill under the user\'s nose must count it out loud'
+  )
+})
+
+/* ------------------------------------------------------------------------ *
+ * A dest that changes hands between clients must keep its record, or the copy
+ * on disk becomes unprunable and unreportable forever - the leave-behind this
+ * whole mechanism exists to end.
+ * @ref LLP 0219#prune-on-materialize [tests]:
+ * ------------------------------------------------------------------------ */
+
+test('a record survives a dest moving to a client whose copy failed', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = path.join(home, 'sources', 'analyst.md')
+  const movedSource = path.join(home, 'sources', 'reporter.md')
+  await fs.mkdir(path.dirname(keptSource), { recursive: true })
+  await fs.writeFile(keptSource, 'analyst\n', 'utf8')
+  await fs.writeFile(movedSource, 'reporter\n', 'utf8')
+
+  // `claude` and `claude-desktop` both declare `.claude/agents`, so one physical
+  // path can be recorded under one client and planned under the other.
+  await installWith({
+    env,
+    agents: [
+      { name: 'hypaware-analyst', sourceFile: keptSource, clients: ['claude'] },
+      { name: 'hypaware-reporter', sourceFile: movedSource, clients: ['claude'] },
+    ],
+  })
+  const agentsDir = path.join(home, '.claude', 'agents')
+  const moved = path.join(agentsDir, 'hypaware-reporter.md')
+  assert.equal(await fs.readFile(moved, 'utf8'), 'reporter\n')
+
+  // The upgrade hands the reporter to `claude-desktop`, and that client's copy
+  // fails (its source is gone). The dest is in this run's plan, so it is no
+  // candidate; it is not in `claude`'s share of the plan, so the old carry loop
+  // dropped its record on the floor and nothing named the file again.
+  await fs.rm(movedSource, { force: true })
+  const second = await installWith({
+    env,
+    agents: [
+      { name: 'hypaware-analyst', sourceFile: keptSource, clients: ['claude'] },
+      { name: 'hypaware-reporter', sourceFile: movedSource, clients: ['claude-desktop'] },
+    ],
+  })
+  assert.equal(second.code, 0)
+  assert.equal(await fs.readFile(moved, 'utf8'), 'reporter\n', 'the failed copy left the old bytes alone')
+
+  // The next version retires the reporter outright. With its record intact this
+  // is an ordinary prune; without it the file is ours no more and stays forever.
+  const third = await installWith({
+    env,
+    agents: [{ name: 'hypaware-analyst', sourceFile: keptSource, clients: ['claude'] }],
+  })
+
+  assert.equal(third.code, 0)
+  assert.equal(
+    await exists(moved),
+    false,
+    'a dest that changed hands must stay accounted for, or it can never be removed'
+  )
+  assert.match(third.stdout, /removed retired agent 'hypaware-reporter'/)
 })
 
 function makeBuf() {

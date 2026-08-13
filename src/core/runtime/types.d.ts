@@ -101,6 +101,20 @@ export interface BootKernelResult {
    */
   withheldByProfile: PluginName[]
   /**
+   * Everything this boot did not get, in one list: plugins whose `activate()`
+   * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
+   * plugins the boot profile withheld although the config enabled them, and
+   * manifests that would not load (named by their directory, since a manifest
+   * that did not parse has no plugin name to be known by).
+   *
+   * Read by every caller that must not mistake a contribution this boot never
+   * saw for one this version withdrew - above all the client-asset prune, which
+   * deletes files out of the user's home and stands down entirely while this is
+   * non-empty (LLP 0219 #incomplete-activation-prunes-nothing). Strictly wider
+   * than the failed activations, which are only the first of the four doors.
+   */
+  unavailablePlugins: string[]
+  /**
    * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
    * derived from the very manifests this boot discovered. The daemon threads
    * it onto the client-action reconcile context so the attach handler can
@@ -233,6 +247,35 @@ export interface ClientAssetInstall {
   /** Absolute destination path; the reversal record for org-driven installs. */
   dest: string
   dryRun: boolean
+}
+
+/**
+ * One retired destination the materializer acted on: removed, or named and
+ * left alone. Same shape as an install because it is the same asset seen from
+ * the other end, and callers that summarize a run need the two to line up.
+ */
+export interface ClientAssetRemoval {
+  kind: ClientAssetKind
+  name: string
+  client: string
+  dest: string
+  dryRun: boolean
+}
+
+/**
+ * What one materialization did, in full. `installed` is the copies; the other
+ * two are the removals, which used to be reportable only by watching `stdout`.
+ * A caller that withholds `stdout` (the wizard finale suppresses the per-copy
+ * lines so a dozen paths do not bury its step summary) would otherwise have no
+ * way at all to say a file was deleted, which is the one thing LLP 0219
+ * #automatic-not-gated requires every removal to say.
+ */
+export interface ClientAssetMaterialization {
+  installed: ClientAssetInstall[]
+  /** Destinations this run removed, or under `dryRun` would remove. */
+  pruned: ClientAssetRemoval[]
+  /** Retired destinations left in place and reported (edited, digest-less, refused, or un-removable). */
+  withheld: ClientAssetRemoval[]
 }
 
 export interface MaterializeClientAssetsOptions {

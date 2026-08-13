@@ -75,6 +75,17 @@ path, and only while the bytes there are still the bytes it wrote.**
   Asked per client, a path one client is contributing *in this very run* reads
   as another client's retired copy, and the run deletes the copy it just made.
 
+  **Carrying a record forward asks the same question of the same plan.** A dest
+  in the run's plan but not in this client's share of it is no candidate (the
+  plan contains it) and, asked per client, nothing carries its record either, so
+  the record is dropped while the copy stays on disk: permanently unprunable and
+  unreportable, which is the leave-behind this whole mechanism exists to end. It
+  is reachable whenever a dest changes hands between two clients sharing a
+  directory and the new client's copy fails. So the carry is asked of the whole
+  run's plan too. Two records for one dest under two clients is the price, and
+  it is none: candidates are keyed by dest per client, `fs.rm` is forced and
+  idempotent, and the ledger dedupes on `(client, dest)`.
+
   **The client scope is what landed, not what was asked for.** A run that copied
   nothing for a client cannot tell "these were retired" from "this boot never
   saw them" (an empty registry, a config activating nothing, a `--client` filter
@@ -82,23 +93,53 @@ path, and only while the bytes there are still the bytes it wrote.**
   working install. So a client with no successful copy this pass is not pruned
   at all.
 
-- **An incomplete activation prunes nothing**
-  {#incomplete-activation-prunes-nothing}: the scope guard above catches
-  *total* failure, and total failure is not what the loader produces.
-  `activatePlugins` catches per plugin, logs `plugin.activate_failed`, and
-  continues; `bootKernel` counts the failures and returns normally. So the
-  realistic fault is partial: one plugin activates, another throws, the client
-  stays in scope, and the failed plugin's assets are missing from the plan in
-  exactly the way a retired asset is. Nothing in the plan, the registries, or
-  the ledger distinguishes them.
+- **A boot that did not reach its whole plugin set prunes nothing**
+  {#incomplete-activation-prunes-nothing}: the scope guard above catches *total*
+  failure, and total failure is not what a boot produces. Four routes take a
+  selected plugin out of this boot's plan, and only the first leaves any trace
+  in the activation results:
 
-  So the materializer is told, and stands down: `failedPlugins` non-empty means
-  copy as planned, remove nothing. Coarse on purpose. The finer rule (record
-  the owning plugin per ledger entry and skip only that plugin's candidates)
-  buys a partial prune on a broken boot, which is worth nothing next to being
-  wrong on a delete path. Together with the scope guard, this is what makes the
-  mechanism fail safe: every way a boot can come up short of its plugin set
-  ends in "prune nothing", never in "prune everything it cannot see".
+  1. **`activate()` threw.** `activatePlugins` catches per plugin, logs
+     `plugin.activate_failed`, and continues; `bootKernel` counts the failures
+     and returns normally.
+  2. **The dep graph eliminated it** for an unsatisfied `requires`
+     (`cap_missing`, `plugin_missing`, `cycle`). It is dropped from `finalOrder`
+     and `activatePlugins` is never handed it. A capability-version bump across
+     an upgrade takes exactly this shape: both skill-contributing bundled
+     plugins declare `requires.capabilities: { "hypaware.ai-gateway": "^2.0.0" }`.
+  3. **The boot profile withheld it** although the config enables it.
+     `all-available` (what `hyp init` boots) drops every opt-in bundled plugin
+     whatever the config says; `config` (what `hyp attach` and
+     `hyp skills install` boot) honours it. So an enabled `@hypaware/gascity`
+     contributes its skill on attach and contributes nothing on the next
+     `hyp init`, while the client stays in scope because the client plugin's own
+     skills still land.
+  4. **Its manifest did not load**, so it never entered the pool at all.
+
+  In every one of them the client stays in scope and the missing plugin's assets
+  are absent from the plan in exactly the way a retired asset is. Nothing in the
+  plan, the registries, or the ledger distinguishes them.
+
+  So `bootKernel` returns **one** list, `unavailablePlugins`, covering all four,
+  and the materializer is told and stands down: non-empty means copy as planned,
+  remove nothing. One list rather than a derivation per call site, because the
+  derivation the CLI and the daemon each reached for (filter the activation
+  results for `ok === false`) answers only the first route, and a hole the
+  stand-down cannot see is a file it deletes.
+
+  The profile term is **intersected with what the config enables**, and that
+  intersection is load-bearing. Unintersected, every ordinary `config`-profile
+  boot would list the whole non-config pool and the prune would stand down
+  forever. Intersected, `config` yields the empty set (so a plugin the user
+  genuinely removed from the config still prunes) and `all-available` yields
+  exactly the config-enabled names that profile dropped.
+
+  Coarse on purpose. The finer rule (record the owning plugin per ledger entry
+  and skip only that plugin's candidates) buys a partial prune on a broken boot,
+  which is worth nothing next to being wrong on a delete path. Together with the
+  scope guard, this is what makes the mechanism fail safe: each of the four
+  routes a plugin can leave a boot's plan by ends in "prune nothing", never in
+  "prune everything it cannot see".
 
 - **An asset the user changed is no longer ours to delete**
   {#edited-assets-are-not-ours}: the removal proceeds only on a digest we
@@ -116,6 +157,17 @@ path, and only while the bytes there are still the bytes it wrote.**
   whole rather than kept digest-less, so corruption cannot even manufacture a
   candidate.
 
+  **The digest separates shapes, not only bytes.** A skill is a directory and a
+  subagent a single file, and hashing both into one unframed stream let the two
+  spaces overlap: an empty directory and an empty file were both the hash of
+  nothing, and a tree holding one `SKILL.md` of `body\n` hashed exactly like a
+  file whose bytes are `SKILL.md\nbody\n`. Either collision hands a file the
+  user wrote a digest that was recorded for something else, which is the one
+  thing a match may never mean. So the shape is seeded into the hash before any
+  content, each entry in the tree walk carries its own shape ahead of its path,
+  and the prune additionally refuses any candidate whose shape on disk
+  contradicts the `kind` its record names.
+
   The asymmetry with the copy is deliberate. Overwriting a *contributed* asset's
   hand edits is documented behaviour (`hyp skills install` is an idempotent
   replace, and the source is right there to re-copy from). A retired asset has
@@ -128,21 +180,37 @@ path, and only while the bytes there are still the bytes it wrote.**
   it wrote it. That destroys nothing the user authored - not because authored
   files are recognised and skipped, but because a file the user authored or
   edited cannot reach the removal at all: it has no matching recorded digest,
-  and #edited-assets-are-not-ours turns every such candidate into a report. So
+  it cannot acquire one by colliding across shapes
+  (#edited-assets-are-not-ours), and #edited-assets-are-not-ours turns every
+  such candidate into a report. So
   there is no question left for a prompt to ask. It is also the only option that
   works: three of the four callers (the wizard finale, the reconciler's attach,
   an org-driven install) have nobody at a terminal, and a confirmation those
   paths must skip is a rule that holds on one call site out of four, which is
   the drift LLP 0138 collapsed four loops to prevent.
 
-  **Automatic is not silent.** Every removal prints the kind, name, and path on
-  stdout and emits `client_assets.pruned`; every withheld one prints and emits
-  `client_assets.prune_withheld`; a candidate refused for sitting outside the
-  client's asset directories prints and emits `client_assets.prune_refused`,
-  because a record naming `/` or `$HOME` is the loudest evidence available that
-  the install record is corrupt and swallowing it helps nobody. That is the
-  reporting half [#660](https://github.com/hyparam/hypaware/issues/660) asked
-  for ("deleting files a user can see, without saying so, is its own surprise").
+  **Automatic is not silent, and not silent at any call site.** Every removal
+  emits `client_assets.pruned` and prints the kind, name, and path on stdout;
+  every withheld one prints and emits `client_assets.prune_withheld`; a
+  candidate refused for sitting outside the client's asset directories prints
+  and emits `client_assets.prune_refused`, because a record naming `/` or
+  `$HOME` is the loudest evidence available that the install record is corrupt
+  and swallowing it helps nobody. That is the reporting half
+  [#660](https://github.com/hyparam/hypaware/issues/660) asked for ("deleting
+  files a user can see, without saying so, is its own surprise").
+
+  **Removals reach a caller as data, not only down `stdout`.** The wizard finale
+  withholds `stdout` on purpose - a dozen path lines would bury the one fact its
+  step reports - and prints counts instead. Reporting a deletion only by writing
+  to `stdout` therefore makes the *one* call site with a human at the terminal
+  the *only* silent one, while the candidates it declined to delete stay visible
+  on stderr, which is the inversion of what anyone wants. So
+  `materializeClientAssets` returns what it pruned and what it withheld
+  alongside what it installed, and the finale prints
+  `removed N retired skill(s) for <client>` next to its install counts.
+  **Counts on the finale, paths everywhere else**: a wizard step summary needs
+  the fact of a deletion, not a roster, and the roster stays on the span and in
+  `client_assets.pruned`.
 
 - **The attach marker is a second evidence source, and it reports rather than
   deletes** {#marker-is-evidence}: `installed_assets` on a client's attach
@@ -188,10 +256,14 @@ path, and only while the bytes there are still the bytes it wrote.**
   content digests, which is a real design question and a maintenance burden, and
   inventing it under a bugfix would be the heuristic this document exists to
   refuse.
-- **A boot that lost a plugin does less, never more.** A partial activation
-  copies what activated and prunes nothing at all
-  (#incomplete-activation-prunes-nothing), so a retirement that coincides with a
-  broken plugin is simply deferred to the next clean boot.
+- **A boot that lost a plugin does less, never more.** A boot missing part of
+  its plugin set - by a throw, a dep-graph elimination, a profile withhold, or
+  an unloadable manifest - copies what it has and prunes nothing at all
+  (#incomplete-activation-prunes-nothing), so a retirement that coincides with
+  one is simply deferred to the next complete boot. The cost is that a real
+  retirement is not taken off the machine while an opt-in plugin the config
+  enables is being dropped by `hyp init`'s profile; a later `hyp attach` or
+  `hyp skills install`, which boot `config`, does it.
 - The install now hashes what it copied, once per copy. Skill trees are a few
   kilobytes; this is not on any hot path.
 - A ledger that cannot be read or written costs a later prune, never an install.

@@ -214,6 +214,30 @@ export async function bootKernel(opts = {}) {
         .map((m) => /** @type {PluginName} */ (m.manifest.name))
         .filter((name) => !selected.has(name))
 
+      // The plugins the user asked for. The profile term of `unavailablePlugins`
+      // below is intersected with this set, and the intersection is what keeps
+      // the field usable: every `config`-profile boot withholds the whole
+      // non-config pool, so an unintersected profile term would report a hole on
+      // every ordinary boot and stand the client-asset prune down forever.
+      // Intersected, `config` yields nothing (a plugin the user genuinely
+      // removed from the config still prunes) and `all-available` yields exactly
+      // the config-enabled names that profile dropped.
+      const configEnabled = new Set(
+        (config?.plugins ?? [])
+          .filter((entry) => entry.enabled !== false)
+          .map((entry) => /** @type {PluginName} */ (entry.name))
+      )
+      const wantedButWithheld = withheldByProfile.filter((name) => configEnabled.has(name))
+
+      // A manifest that would not load contributes nothing and has no plugin
+      // name to be known by, so it is named by the directory it failed in. Both
+      // pools count: an installed plugin whose manifest is unreadable leaves the
+      // same hole a bundled one does.
+      const unloadable = [
+        ...discovered.failed.map((f) => f.rootDir),
+        ...installed.failed.map((f) => f.rootDir),
+      ]
+
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
       const skipped = []
@@ -262,6 +286,7 @@ export async function bootKernel(opts = {}) {
           runId,
           skipped,
           withheldByProfile,
+          unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
       }
@@ -314,6 +339,21 @@ export async function bootKernel(opts = {}) {
         runId,
         skipped,
         withheldByProfile,
+        // The one list of "this boot did not get its whole plugin set", for
+        // callers that must not read a missing contribution as a withdrawn one.
+        // Four doors, and only the first ever reaches an activation record: a
+        // plugin whose `activate()` threw, one the dep graph eliminated for an
+        // unsatisfied `requires`, one whose manifest would not load, and one the
+        // boot profile withheld although the config enabled it.
+        // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: every
+        //   way a boot comes up short of its plugin set lands in one list, so
+        //   the delete path stands down on all of them and not just on throws
+        unavailablePlugins: [...new Set([
+          ...failed.map((r) => /** @type {string} */ (r.plugin.name)),
+          ...resolution.unsatisfied.map((u) => /** @type {string} */ (u.plugin)),
+          ...unloadable,
+          ...wantedButWithheld,
+        ])],
         clientDescriptors: catalog.clientDescriptors,
       }
     },
