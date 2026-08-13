@@ -314,6 +314,60 @@ test('WHERE on a non-projected column still filters correctly', async () => {
   assert.deepEqual(rows.map((r) => r.name), ['carol', 'dave', 'eve'])
 })
 
+// A filtered scan must still honor the projection. The tests above only prove
+// the rows are right, which stays true when the scan reads every column and
+// the engine projects afterwards; on a table whose unselected columns hold
+// message bodies, that difference is the whole read. Assert the narrow read
+// directly, both in what the scan emits and in what it pulls off the file.
+test('a pushed-down filter does not widen the projection', async () => {
+  const columnData = rowsToColumnSources(COLUMNS, ROWS)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
+  const bytes = new Uint8Array(arrayBuffer)
+
+  /**
+   * Scan `columns` under a filter on `score`, reporting the bytes pulled from
+   * the file. `score` is deliberately absent from every projection so the read
+   * can only cover it because hyparquet folds filter columns into its own plan.
+   *
+   * @param {string[] | undefined} columns
+   * @returns {Promise<{ read: number, emitted: string[][] }>}
+   */
+  async function scanWithFilter(columns) {
+    let read = 0
+    const counting = asyncBufferFromBytes(bytes)
+    const file = {
+      byteLength: counting.byteLength,
+      /**
+       * @param {number} start
+       * @param {number} [end]
+       */
+      slice(start, end) {
+        read += (end ?? bytes.byteLength) - start
+        return counting.slice(start, end)
+      },
+    }
+    const source = parquetDataSource(file, await parquetMetadataAsync(file))
+    const scan = source.scan({ columns, where: whereOf('SELECT name FROM t WHERE score > 3') })
+    assert.equal(scan.appliedWhere, true)
+    /** @type {string[][]} */
+    const emitted = []
+    for await (const row of scan.rows()) emitted.push(row.columns)
+    return { read, emitted }
+  }
+
+  const projected = await scanWithFilter(['name'])
+  const everything = await scanWithFilter(undefined)
+
+  // The filter is honored on a column the scan never emits.
+  assert.equal(projected.emitted.length, 3)
+  for (const columns of projected.emitted) assert.deepEqual(columns, ['name'])
+  // ...and the unselected columns were never read off the file.
+  assert.ok(
+    projected.read < everything.read,
+    `projected scan read ${projected.read} bytes, unprojected read ${everything.read}`
+  )
+})
+
 test('range WHERE (AND) returns the inclusive window', async () => {
   const source = await makeSource()
   const rows = await run(source, 'SELECT id FROM t WHERE id >= 2 AND id <= 4')
