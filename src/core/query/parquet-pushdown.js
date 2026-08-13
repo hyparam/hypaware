@@ -21,5 +21,5 @@
 // `Array.prototype.includes`, so plain-number literals match bigint-decoded
 // INT64 columns and the old `coerceBigInt` shim is unnecessary.
 //
-// @ref LLP 0219 [implements]: one pushdown converter for the whole stack, owned by icebird
+// @ref LLP 0222 [implements]: one pushdown converter for the whole stack, owned by icebird
 export { whereToParquetFilter } from 'icebird/src/sql/whereFilter.js'

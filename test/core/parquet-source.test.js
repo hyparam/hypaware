@@ -152,7 +152,7 @@ async function run(source, query) {
 // bigint-decoded INT64 columns through `equals()`, and its bloom hashing
 // rejects a bigint for INT32/FLOAT/DOUBLE, so coercing would cost pruning.
 // Relational bounds push bare: 1.28.2's matchFilter rejects null cells in
-// $lt/$lte/$gt/$gte, so no guard is needed (LLP 0219).
+// $lt/$lte/$gt/$gte, so no guard is needed (LLP 0222).
 test('whereToParquetFilter converts simple comparisons', () => {
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 3')), { id: { $eq: 3 } })
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id > 3')), { id: { $gt: 3 } })
@@ -208,7 +208,7 @@ test('whereToParquetFilter handles IN / NOT IN / IS NULL', () => {
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NOT NULL')), { name: { $ne: null } })
 })
 
-// The regression that motivated LLP 0219: squirreling parses a typed literal
+// The regression that motivated LLP 0222: squirreling parses a typed literal
 // as a cast over a string, and requiring a bare literal operand made every
 // timestamp-bounded predicate convert to undefined and prune nothing.
 test('whereToParquetFilter folds typed literals (TIMESTAMP casts)', () => {

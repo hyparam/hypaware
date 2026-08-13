@@ -1,4 +1,4 @@
-# LLP 0219: One WHERE-to-parquet-filter converter, owned by icebird
+# LLP 0222: One WHERE-to-parquet-filter converter, owned by icebird
 
 **Type:** Decision
 **Status:** Accepted
