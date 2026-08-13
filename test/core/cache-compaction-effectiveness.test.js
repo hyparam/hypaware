@@ -518,3 +518,36 @@ test('a partition already at one data file is not reported as an ineffective com
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// @ref LLP 0218#report-the-spent-attempt [tests]: the recorded timestamp is
+// the whole content of the line, so a stamp carrying no usable one must be
+// read as no stamp rather than printed as a sentence with a hole in it.
+test('a spent-attempt stamp with no usable timestamp is not reported', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-empty-stamp-'))
+  try {
+    await seedUnshrinkablePartition(cacheRoot, 8)
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    // The shape the spent-attempt branch actually reads: this build's writer
+    // generation, kept from the real record, and no effectiveness verdict,
+    // because a rewrite that threw records none. A cursor carrying a verdict
+    // short-circuits at the verdict guard and never reaches the timestamp.
+    const dir = partitionDir(cacheRoot)
+    const { dataFilesBefore, ...noVerdict } = compactionRecord(dir)
+    assert.equal(dataFilesBefore, 8, 'fixture invariant: the real record carried a verdict, and this drops it')
+
+    await plantCompactionRecord(dir, { ...noVerdict, attemptFailedAt: '' })
+    const empty = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(empty.partitions[0].compactionAttemptFailed, undefined, 'an empty stamp names no moment, so it states no reason')
+    assert.equal(empty.partitions[0].compactionAttemptFailedAt, undefined)
+
+    // ...and the guard above rejects only that: the same cursor carrying a
+    // real timestamp is still reported.
+    await plantCompactionRecord(dir, { ...noVerdict, attemptFailedAt: '2026-08-12T22:04:11.900Z' })
+    const stamped = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(stamped.partitions[0].compactionAttemptFailed, true)
+    assert.equal(stamped.partitions[0].compactionAttemptFailedAt, '2026-08-12T22:04:11.900Z')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
