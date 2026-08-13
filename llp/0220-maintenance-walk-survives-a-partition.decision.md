@@ -78,7 +78,12 @@ knows what the tick did.
 Every caller therefore reads the failures rather than a rejected promise. The
 daemon logs one `daemon.maintenance_failed` per failed partition, naming the
 dataset and partition (which the propagated exception never could), and marks
-the `maintenance.tick` span `status: degraded` with `partitions_failed`. Its
+the `maintenance.tick` span with `status: degraded` and `partitions_failed`
+as attributes *and* an `ERROR` span status code - set directly once the
+report is in hand, since `withSpan`'s status-attribute convention only reads
+that attribute's snapshot from before the callback runs and cannot see a
+verdict this late (`src/core/daemon/runtime.js`'s tick manages its span
+directly for this reason, rather than through `withSpan`). Its
 outer `.catch` stays, for the errors still outside the per-partition catch:
 partition discovery and the retired-generation sweep. `hyp query maintain`
 prints a `FAILED:` line for the partition and exits non-zero, so a script that
@@ -97,10 +102,24 @@ readings back into the same absence the LLP 0218 report exists to remove.
 
 ## Consequences {#consequences}
 
-- A cache holding one permanently broken partition still gets full
-  maintenance everywhere else, on the tick the breakage happens and on every
-  tick after it. That is the whole point: the guard against unbounded metadata
-  growth stops being hostage to the neediest partition's health.
+- A cache holding one broken partition no longer has its whole walk starved
+  by it: the walk moves on to the next partition instead of aborting. The
+  per-tick budget guard (LLP 0199#neediest-first) still applies, and is keyed
+  off partitions actually *maintained*, not partitions merely visited - a
+  partition that failed did no work, so it cannot itself satisfy the guard's
+  "always work one partition before the budget can cut the tick short"
+  guarantee and stall everything behind it (`src/core/cache/maintenance.js`).
+  What this buys is "the walk keeps moving past a failure", not "every
+  healthy partition is guaranteed maintenance on the tick a partition
+  breaks": a tight budget can still cut a tick short once real work has
+  happened, exactly as it could before this document. The one case that
+  guard alone cannot bound - every partition in the cache failing - is capped
+  separately: the walk still breaks once `MAX_FAILURES_BEFORE_BUDGET_BREAK`
+  partitions have failed past the budget, so an all-failing cache cannot walk
+  unbounded either. The guard against unbounded metadata growth (snapshot
+  expiry, the orphan sweep) stops being hostage to the neediest partition's
+  health specifically; it is not a promise that one failure never costs any
+  other partition its turn in a budget-constrained tick.
 - `cleanRetiredEpochs` now runs on a tick that lost a partition, where the
   abort used to skip it, so the half-written generation a failed rewrite left
   behind is reclaimed by the orphan sweep on schedule instead of waiting for a

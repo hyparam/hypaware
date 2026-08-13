@@ -13,7 +13,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { MAX_FAILURES_BEFORE_BUDGET_BREAK, maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 
 /**
@@ -261,6 +261,73 @@ test('a tick that lost a partition reports the loss rather than swallowing it', 
     // LLP 0218 defined: an operator must be able to tell "this partition threw
     // just now" from "this partition has been skipped since an earlier throw".
     assert.equal(torn.compactionAttemptFailed, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- the budget guard must not let a failed partition stand in for real work (round-1 review finding 1) ---
+
+// @ref LLP 0220#walk-survives-a-partition [tests]: a partition that failed
+// did no work, so it must not be the one that satisfies the budget guard's
+// "always work one partition before the budget can cut the tick short"
+// guarantee (src/core/cache/maintenance.js). Before this fix, `reports.length
+// > 0` was true the moment the torn partition's failure was recorded, so a
+// zero budget broke the walk right there and the healthy partition behind it
+// was never visited - #737 by another route, reached without any per-partition
+// catch missing at all.
+test('a zero budget does not let a failed first partition starve the healthy partition behind it', async () => {
+  const cacheRoot = await seedTornAndHealthy()
+  try {
+    const report = await maintainCache({ cacheRoot, compactOnly: true, budgetMs: 0 })
+
+    const torn = partitionReport(report, 'ai_gateway_messages')
+    assert.equal(torn.failed, true, 'fixture invariant: the neediest partition still throws')
+
+    const healthy = partitionReport(report, 'logs')
+    assert.equal(
+      healthy.compacted, true,
+      'a zero budget must not let the failed first partition stand in for the "one partition maintained" guarantee'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0220#walk-survives-a-partition [tests]: the other half of the
+// budget-guard fix. Gating the break on "a partition was actually
+// maintained" alone would let a cache where every partition fails walk past
+// its budget without bound - trading one starvation bug for an unbounded
+// one. `MAX_FAILURES_BEFORE_BUDGET_BREAK` caps it; pinned here with more
+// failing partitions seeded than the cap allows through.
+test('an all-failing cache does not walk past its budget unbounded: it stops at the failure cap', async () => {
+  const total = MAX_FAILURES_BEFORE_BUDGET_BREAK + 2
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maintain-all-failing-'))
+  try {
+    for (let i = 0; i < total; i++) {
+      const dataset = `walk-budget-bad-${i}`
+      const rows = Array.from({ length: 4 }, (_, j) => ({
+        id: j,
+        session_id: `s-${j}`,
+        attributes: `{"gateway":{"session":"s-${j}"}}`,
+      }))
+      await appendRowsToSourceTable(
+        cacheRoot, dataset, ['source=claude'], SESSION_COLUMNS, rows,
+        { declaration: SESSION_DECLARATION }
+      )
+      const dir = partitionDir(cacheRoot, dataset)
+      await plantStamplessRecord(dir, 4)
+      await tearOneDataFile(dir)
+    }
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true, budgetMs: 0 })
+
+    assert.equal(
+      report.totalFailed, MAX_FAILURES_BEFORE_BUDGET_BREAK,
+      `the walk must stop once ${MAX_FAILURES_BEFORE_BUDGET_BREAK} partitions have failed, not after all ${total}`
+    )
+    assert.equal(report.partitions.length, MAX_FAILURES_BEFORE_BUDGET_BREAK)
+    assert.ok(report.partitions.every((p) => p.failed), 'every partition visited in this fixture fails')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

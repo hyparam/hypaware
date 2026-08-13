@@ -357,6 +357,13 @@ export async function runQueryMaintain(argv, ctx) {
   const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
   const failedNote = report.totalFailed > 0 ? `, ${report.totalFailed} partitions failed` : ''
   ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote}${failedNote} (${report.elapsedMs}ms)\n`)
+  // Before this PR the exception propagated to bin/hypaware.js, which wrote
+  // `hyp: <message>` to stderr - so a caller that only captures stderr (a
+  // cron or systemd wrapper, `>/dev/null`) still needs a line there on a
+  // degraded tick, not just the stdout summary above.
+  if (report.totalFailed > 0) {
+    ctx.stderr.write(`hyp query maintain: ${report.totalFailed} partition(s) failed; the walk continued\n`)
+  }
   // A partition that threw used to abort the walk and exit non-zero. The
   // walk survives it now, but the tick did not do what it was asked, so the
   // exit status still says so: a script that gated on this must not start
