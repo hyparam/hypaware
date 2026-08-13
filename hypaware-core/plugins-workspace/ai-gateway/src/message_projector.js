@@ -1155,9 +1155,13 @@ function normalizeContent(content) {
 // what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
 // splice onto an unrelated `;base64,` across prose, a comma, or 255 characters.
 //
-// Idempotency survives the varying marker because `<` is outside the payload
-// class, so `<stripped>` can never read as a fresh payload no matter which
-// mediatype precedes it.
+// Idempotency survives the varying marker on two locks, and the comma is the
+// load-bearing one: `[^\s,]` excludes `,` and every `;base64,` ends in one, so
+// a captured mediatype can never contain a `;base64,`. The emitted marker
+// therefore holds exactly one, always followed by `<`, which the payload class
+// also excludes, so it can neither re-match in place nor splice onto a later
+// `;base64,` by backtracking past `<stripped>`. Admitting `,` to the mediatype
+// class would break idempotency, not just splice safety.
 //
 // This bounds only the matched forms, so `content_text` is NOT guaranteed
 // bounded. A line-wrapped or `\n`-escaped payload still has its tail survive

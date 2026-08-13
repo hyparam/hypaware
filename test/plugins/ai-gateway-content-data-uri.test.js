@@ -278,10 +278,9 @@ test('several mediatypes in one string each keep their own', () => {
 test('the marker stays idempotent for every mediatype it can now emit', () => {
   // The sentinel's text now varies with the mediatype, so "stripping an
   // already-stripped value is a no-op" has to hold for all of them, not just
-  // for one fixed string. The payload class `[A-Za-z0-9+/=_-]` excludes `<`,
-  // which is what stops `<stripped>` from reading as a fresh payload; the
-  // mediatype class excludes only whitespace and `,`, so `+`, `.`, `-`, `;`
-  // and even a nested `data:` inside the mediatype have to be checked.
+  // for one fixed string. The mediatype class excludes only whitespace and
+  // `,`, so `+`, `.`, `-`, `;` and even a nested `data:` inside the mediatype
+  // have to be checked.
   const mimes = [
     'image/png',
     'application/pdf',
@@ -293,6 +292,7 @@ test('the marker stays idempotent for every mediatype it can now emit', () => {
     'IMAGE/PNG',
     'xdata:nested',
     '',
+    'm'.repeat(255),
   ]
   for (const mime of mimes) {
     const once = String(contentTextFor(`shot: data:${mime};base64,${PNG_BASE64}`, 'sess-idem'))
@@ -309,4 +309,13 @@ test('stripping bounds the row: a multi-megabyte payload lands as a short value'
   const text = contentTextFor(huge, 'sess-huge')
   assert.equal(typeof text, 'string')
   assert.ok(String(text).length < 128, `stripped value stays small, got ${String(text).length} chars`)
+})
+
+test('the echoed mediatype cannot grow the marker past the regex cap', () => {
+  // The marker length is now wire-influenced: `data:` + mediatype + `;base64,<stripped>`.
+  // Only the `{0,255}` in the prefix class bounds it, so pin the boundary here:
+  // raising that quantifier must break a test, not just widen a row.
+  const text = String(contentTextFor(`shot: data:${'m'.repeat(255)};base64,${PNG_BASE64}`))
+  assertNoPayload(text)
+  assert.equal(text.length, 'shot: '.length + 278, 'a max-length mediatype emits a 278-char marker')
 })
