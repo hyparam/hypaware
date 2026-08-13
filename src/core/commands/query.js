@@ -323,12 +323,30 @@ export async function runQueryMaintain(argv, ctx) {
     // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
     // rewrite; without this line the run reads as "nothing due".
     if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
+    // @ref LLP 0217#record-effectiveness: without this the run reports
+    // "0 partitions compacted" for a partition it is deliberately leaving
+    // fragmented, and the reason is only recoverable by reading cursors.
+    // The skip line quotes the count the recorded rewrite ran over, not the
+    // live count: the sentence is about that rewrite, and the two diverge
+    // whenever the partition shrank without becoming due again.
+    if (p.compactionIneffective) {
+      actions.push(p.compacted
+        ? 'no file-count reduction'
+        : `compaction skipped: the last rewrite of ${p.compactionIneffectiveFiles} files reduced nothing`)
+    }
+    // @ref LLP 0218#report-the-spent-attempt: the other stated reason a
+    // partition is left alone. The retry a writer change granted was spent by
+    // a rewrite that failed, which is why nothing has been attempted since;
+    // saying so names the manual way out instead of leaving the partition
+    // looking converged.
+    if (p.compactionAttemptFailed) {
+      actions.push(`compaction skipped: the retry failed under this writer at ${p.compactionAttemptFailedAt}, --force to retry`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
-  const rebaselined = report.partitions.filter((p) => p.rebaselined).length
-  const rebaselineNote = rebaselined > 0 ? `, ${rebaselined} rebaselined` : ''
+  const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
   ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote} (${report.elapsedMs}ms)\n`)
   return 0
 }

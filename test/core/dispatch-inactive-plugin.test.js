@@ -9,6 +9,19 @@ import path from 'node:path'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 
 /**
+ * The exemplar here is `@hypaware/gascity`, and it should stay a plugin that
+ * is genuinely opt-in (the `V1_EXCLUDED_FROM_DEFAULT` set).
+ *
+ * It used to be `@hypaware/context-graph`. These tests stage their own
+ * synthetic plugin, so they passed either way, but LLP 0213 composes the
+ * graph into every gateway install: an example built on it would teach the
+ * reader that the graph is the thing you probably do not have, which is now
+ * exactly backwards. Please do not move it back.
+ *
+ * @ref LLP 0213#consequences [constrained-by]: the graph stops being a usable example of an inactive plugin
+ */
+
+/**
  * Stage a bundled plugin under `workspaceDir` whose manifest declares the
  * given commands. The entrypoint is a trivial `activate` unless `activateBody`
  * is provided (used to register commands so the plugin is dispatchable when it
@@ -53,20 +66,20 @@ test('dispatch miss on an inactive bundled plugin command reports unavailable + 
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
-    name: '@hypaware/context-graph',
+    name: '@hypaware/gascity',
     commands: [
-      { name: 'graph project', summary: 'Project the activity graph' },
-      { name: 'graph neighbors', summary: 'Walk the activity graph' },
+      { name: 'gascity attach', summary: 'Attach the gascity subscriber' },
+      { name: 'gascity status', summary: 'Show gascity subscriber status' },
     ],
   })
-  // Effective config does NOT enable the plugin, so `graph` never registers.
+  // Effective config does NOT enable the plugin, so `gascity` never registers.
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
 
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['graph'], {
+  const code = await dispatch(['gascity'], {
     stdout,
     stderr,
     workspaceDir,
@@ -77,7 +90,7 @@ test('dispatch miss on an inactive bundled plugin command reports unavailable + 
   assert.equal(stdout.text(), '')
   assert.match(
     stderr.text(),
-    /^hyp: 'graph' is provided by @hypaware\/context-graph, which is not in the active config$/m
+    /^hyp: 'gascity' is provided by @hypaware\/gascity, which is not in the active config$/m
   )
   // Byte-exact: the repair line is the LLP 0153-pinned wording (issue #294),
   // so any drift in the exact phrasing must fail this test rather than slip
@@ -86,7 +99,7 @@ test('dispatch miss on an inactive bundled plugin command reports unavailable + 
     .text()
     .split('\n')
     .find((line) => line.startsWith('  repair:'))
-  assert.equal(repairLine, `  repair: add {"name": "@hypaware/context-graph"} to plugins[] in ${configPath}`)
+  assert.equal(repairLine, `  repair: add {"name": "@hypaware/gascity"} to plugins[] in ${configPath}`)
   // It must NOT fall back to the generic message.
   assert.equal(stderr.text().includes('unknown command'), false)
 })
@@ -96,8 +109,8 @@ test('dispatch miss on a genuine typo still gets the generic unknown-command mes
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
-    name: '@hypaware/context-graph',
-    commands: [{ name: 'graph project', summary: 'Project the activity graph' }],
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
   })
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
@@ -125,21 +138,21 @@ test('dispatch miss on a plugin present-but-disabled in the local config advises
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
-    name: '@hypaware/context-graph',
-    commands: [{ name: 'graph project', summary: 'Project the activity graph' }],
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
   })
   // The entry EXISTS in plugins[] but is disabled, so it lands in the boot pool
   // yet is not selected. The repair must say to flip it, not add a duplicate.
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(
     configPath,
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph', enabled: false }] })
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity', enabled: false }] })
   )
 
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['graph'], {
+  const code = await dispatch(['gascity'], {
     stdout,
     stderr,
     workspaceDir,
@@ -150,11 +163,11 @@ test('dispatch miss on a plugin present-but-disabled in the local config advises
   assert.equal(stdout.text(), '')
   assert.match(
     stderr.text(),
-    /^hyp: 'graph' is provided by @hypaware\/context-graph, which is not in the active config$/m
+    /^hyp: 'gascity' is provided by @hypaware\/gascity, which is not in the active config$/m
   )
   assert.match(
     stderr.text(),
-    /^ {2}repair: set "enabled": true on the \{"name": "@hypaware\/context-graph"\} entry in plugins\[\] in /m
+    /^ {2}repair: set "enabled": true on the \{"name": "@hypaware\/gascity"\} entry in plugins\[\] in /m
   )
   assert.match(stderr.text(), new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   // It must NOT tell the user to add an entry that already exists.
@@ -167,8 +180,8 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
-    name: '@hypaware/context-graph',
-    commands: [{ name: 'graph project', summary: 'Project the activity graph' }],
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
   })
   // The fleet (central) layer disables the plugin. The whole central document
   // wins and locks, so a local add-back is dropped (collides_with_central):
@@ -177,7 +190,7 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   await fs.mkdir(controlDir, { recursive: true })
   await fs.writeFile(
     path.join(controlDir, 'seed.json'),
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph', enabled: false }] })
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity', enabled: false }] })
   )
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
@@ -185,7 +198,7 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['graph'], {
+  const code = await dispatch(['gascity'], {
     stdout,
     stderr,
     workspaceDir,
@@ -195,11 +208,11 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   assert.equal(code, 2)
   assert.match(
     stderr.text(),
-    /^hyp: 'graph' is provided by @hypaware\/context-graph, which is not in the active config$/m
+    /^hyp: 'gascity' is provided by @hypaware\/gascity, which is not in the active config$/m
   )
   assert.match(
     stderr.text(),
-    /^ {2}repair: @hypaware\/context-graph is disabled by the fleet \(central\) config and cannot be enabled locally; ask your fleet admin to enable it$/m
+    /^ {2}repair: @hypaware\/gascity is disabled by the fleet \(central\) config and cannot be enabled locally; ask your fleet admin to enable it$/m
   )
   // Neither the add-entry nor the local-enable advice should appear.
   assert.equal(stderr.text().includes('add {"name"'), false)
@@ -212,30 +225,30 @@ test('a command whose plugin IS active is unaffected (renders group help, no ava
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
-    name: '@hypaware/context-graph',
-    commands: [{ name: 'graph project', summary: 'Project the activity graph' }],
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
     activateBody: [
       "  ctx.commands.register({",
-      "    name: 'graph project',",
-      "    plugin: '@hypaware/context-graph',",
-      "    summary: 'Project the activity graph',",
-      "    usage: 'hyp graph project',",
+      "    name: 'gascity attach',",
+      "    plugin: '@hypaware/gascity',",
+      "    summary: 'Attach the gascity subscriber',",
+      "    usage: 'hyp gascity attach',",
       "    run: async () => 0,",
       "  })",
     ].join('\n'),
   })
-  // Effective config enables the plugin, so `graph project` registers and the
-  // `graph` group resolves to synthesized group help.
+  // Effective config enables the plugin, so `gascity attach` registers and the
+  // `gascity` group resolves to synthesized group help.
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(
     configPath,
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph' }] })
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] })
   )
 
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['graph'], {
+  const code = await dispatch(['gascity'], {
     stdout,
     stderr,
     workspaceDir,
@@ -244,7 +257,7 @@ test('a command whose plugin IS active is unaffected (renders group help, no ava
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
-  assert.match(stdout.text(), /usage: hyp graph <subcommand>/)
-  assert.match(stdout.text(), /project\s+Project the activity graph/)
+  assert.match(stdout.text(), /usage: hyp gascity <subcommand>/)
+  assert.match(stdout.text(), /attach\s+Attach the gascity subscriber/)
   assert.equal(stdout.text().includes('not in the active config'), false)
 })

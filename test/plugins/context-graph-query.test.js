@@ -11,6 +11,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { queryNeighbors, resolveSeed, traverse } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
+import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 
 /**
  * @param {string} node_id
@@ -273,4 +274,76 @@ test('queryNeighbors folds pre-compaction duplicate rows so a natural-key seed s
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
+})
+
+// --- an empty graph reports itself (LLP 0213 #d3) ----------------------------
+
+// A graph that has never been projected fails every seed. "not found" sends
+// the reader hunting for a better seed when the answer is a command, so the
+// operation distinguishes the two. It rides the shared result rather than
+// the CLI renderer, so MCP callers get the distinction too.
+// @ref LLP 0213#empty-is-shared [tests]: emptiness is an operation fact, available to both surfaces
+test('queryNeighbors reports an unprojected graph as empty, not as a missing node', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-empty-'))
+  try {
+    const registry = createQueryRegistry()
+    registry.registerDataset(graphDatasetRegistration('node'))
+    registry.registerDataset(graphDatasetRegistration('edge'))
+    const storage = createQueryStorageService({ cacheRoot })
+
+    const result = await queryNeighbors({
+      query: registry, storage, seed: 'anything', depth: 1, direction: 'out', includeLocalOnly: true,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.graphEmpty, true, 'an unprojected graph is flagged empty')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// The flag must mean "nothing projected", not "this seed missed". A populated
+// graph with a bad seed is an ordinary not-found and must stay one, or the
+// message would send people to re-project a graph that is already fine.
+test('a populated graph with an unknown seed is not reported as empty', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-empty-'))
+  try {
+    const registry = createQueryRegistry()
+    registry.registerDataset(graphDatasetRegistration('node'))
+    registry.registerDataset(graphDatasetRegistration('edge'))
+    await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+      fullNode({ node_id: 'n-sess', node_type: 'Session', natural_key: 'conv-1', label: null }),
+    ])
+    const storage = createQueryStorageService({ cacheRoot })
+
+    const result = await queryNeighbors({
+      query: registry, storage, seed: 'no-such-node', depth: 1, direction: 'out', includeLocalOnly: true,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.graphEmpty, undefined, 'a real miss is not an empty graph')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// The CLI half of the same decision: the renderer turns the fact into the
+// command that fixes it, and does not print the generic seed error.
+test('the renderer names `hyp graph project` when the graph is empty', () => {
+  const rendered = graphNeighborsVerb.render(
+    { ok: false, error: 'no node matched', graphEmpty: true },
+    /** @type {any} */ ({}),
+  )
+  assert.equal(rendered.exitCode, 1)
+  assert.match(rendered.stderr ?? '', /graph is empty/)
+  assert.match(rendered.stderr ?? '', /hyp graph project/)
+  assert.doesNotMatch(rendered.stderr ?? '', /no node matched/)
+})
+
+test('an ordinary not-found still renders its own error and candidates', () => {
+  const rendered = graphNeighborsVerb.render(
+    { ok: false, error: 'ambiguous seed', candidates: [{ node_id: 'abc123', node_type: 'File', natural_key: 'x.js', label: 'x.js' }] },
+    /** @type {any} */ ({}),
+  )
+  assert.match(rendered.stderr ?? '', /ambiguous seed/)
+  assert.match(rendered.stderr ?? '', /x\.js/)
+  assert.doesNotMatch(rendered.stderr ?? '', /graph is empty/)
 })

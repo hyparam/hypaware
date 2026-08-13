@@ -358,6 +358,7 @@ export function createConfigControl(opts) {
     const activeEtag = runningEtag()
     if (!activeEtag || activeEtag !== state.bad_etag.etag) return null
 
+    /** @type {string|null} */
     let seedRaw = null
     try {
       seedRaw = fs.readFileSync(seedPath, 'utf8')
@@ -671,6 +672,7 @@ export function createConfigControl(opts) {
       // bytes in slot 'a' so rollback lands back on it. Seed-config mode
       // is a legitimate steady state, so this is a safe rollback target
       // by construction.
+      /** @type {string|null} */
       let seedRaw = null
       try {
         seedRaw = fs.readFileSync(seedPath, 'utf8')

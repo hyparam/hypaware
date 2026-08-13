@@ -872,6 +872,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
  * @returns {Promise<number | null>} the live deadline, or null when no hold applies
  */
 async function narratePrivacyIfTeamPath(opts) {
+  /** @type {number|null} */
   let deadline = null
   try {
     const obsEnv = readObservabilityEnv(opts.env)

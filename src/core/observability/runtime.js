@@ -189,7 +189,7 @@ class Tracer {
     const callback = typeof options === 'function' ? options : fn
     const spanOptions = typeof options === 'object' && options !== null ? options : {}
     const provider = globalTracerProvider
-    const parent = spanOptions.root ? null : (activeContext.getStore()?.span ?? null)
+    const parent = Reflect.get(spanOptions, 'root') ? null : (activeContext.getStore()?.span ?? null)
     const span = new Span({
       name,
       tracerName: this.name,

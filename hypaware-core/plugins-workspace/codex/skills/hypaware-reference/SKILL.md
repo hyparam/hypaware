@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-report.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
 user-invocable: false
 ---
 
@@ -78,14 +78,19 @@ curated HypAware registry.
 ## Hand-offs
 
 - Query or inspect recorded data - use the **hypaware-query** skill.
-- Team token usage, cost, and improvement analysis - use the
-  **hypaware-report** skill.
 - See what was captured here, and mark or purge it - use the
   **hypaware-privacy** skill (also the review before an enrolled machine's
   first sync).
 - Opt a folder out of recording - `hyp ignore <path>` writes a committable
   `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb.
+<!-- @ref LLP 0212#routing-moves-to-reference [implements]: the retired hypaware-ignore skill's job, minus the second implementation of the control call -->
+- Stop recording *this conversation* - `hyp session ignore` drops this session's
+  exchanges at the gateway; `hyp session unignore` resumes, and `hyp session
+  status` reports which it is right now. Each resolves the session id itself
+  (Claude and Codex) and fails closed rather than guessing. The opt-out is
+  in-memory: a gateway restart drops it, and a fork (`claude --fork-session`,
+  `codex fork`) mints a new id it no longer covers.
 - Decide what happens in new folders - by default they sync with no
   question; `hyp policy folders ask` asks once per new folder instead, and
   `hyp policy folders sync` returns to the default. It gates the question

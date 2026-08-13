@@ -322,7 +322,15 @@ export async function dispatch(argv, opts = {}) {
         stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
         stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
       } else {
-        renderGroupHelp({ stdout, group: group.prefix, children: group.children })
+        // A plugin namespace has no bare command, so its header and
+        // paragraph (when it registered one) come from the group registry.
+        // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
+        renderGroupHelp({
+          stdout,
+          group: group.prefix,
+          groupCommand: registry.getGroup?.(group.prefix),
+          children: group.children,
+        })
       }
       if (ownsKernel) {
         await stopBootStartedSources(kernel)

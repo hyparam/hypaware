@@ -26,7 +26,13 @@ import { normalizeScanColumn } from './scan-column.js'
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded: projecting an absent column reads as null, never throws.
+ * forwarded: projecting an absent column reads as null, never throws. Because
+ * a sub-source now emits exactly the columns it is asked for (see
+ * `parquet-source.js`), forwarding `columns` also determines what the engine
+ * gets to re-filter on: it relies on squirreling folding the WHERE columns
+ * into the projection it hands to `scan()`, so the predicate's columns are
+ * already present even though `appliedWhere: false` never asks for them
+ * explicitly.
  *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}

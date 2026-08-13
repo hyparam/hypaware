@@ -48,6 +48,11 @@ plugin that registers a dataset gets query and formatting for free.
   HypAware capability such as [the AI gateway](./0016-ai-gateway.decision.md).
 - **Composition plugins**: init presets, skill scaffolds; small surface, no
   daemon.
+- **Derived-data plugins**: materialize a new dataset from what another plugin
+  already captured (the context graph's `node` / `edge` tables, projected from
+  `ai_gateway_messages`). No external input and no daemon lifecycle, so they are
+  never a pick the user makes; they ride the pick whose data they derive from.
+  See [LLP 0213](./0213-graph-plugin-always-active.decision.md#derived-data-plugins).
 
 ## Subsystem map
 

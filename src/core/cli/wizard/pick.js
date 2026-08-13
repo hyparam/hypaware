@@ -20,9 +20,10 @@ import {
   defaultPickerDetect,
   defaultPromptFactory,
   derivePickedClients,
-  loadPickerDescriptors,
+  loadPickerCatalog,
   orderPickerDescriptors,
   resolveHypHome,
+  ridersInDefaultSet,
   visiblePickerDescriptors,
 } from '../walkthrough.js'
 
@@ -70,9 +71,23 @@ export async function resolvePickSeeding(opts) {
   const { env } = opts
   const interactive = !opts.picks
 
-  const descriptors = opts.catalog
-    ? orderPickerDescriptors(opts.catalog.pickerDescriptors)
-    : await loadPickerDescriptors()
+  // Riders (`compose_with`) ride the same catalog the descriptors come
+  // from, so an injected catalog and a discovered one agree about them.
+  //
+  // Both branches run `ridersInDefaultSet`. The injected branch is the live
+  // `hyp init` path (`runInitWizard` always supplies a catalog, built by
+  // `loadWizardCatalog` from the loaded *and* excluded manifests), so a
+  // filter applied only inside `loadPickerCatalog` would guard the legacy
+  // walkthrough and leave the shipped one open.
+  // @ref LLP 0213#d1 [implements]: the graph plugins are composed by riding the gateway pick
+  const loaded = opts.catalog
+    ? {
+        descriptors: orderPickerDescriptors(opts.catalog.pickerDescriptors),
+        composeWith: ridersInDefaultSet(opts.catalog.composeWith ?? new Map()),
+      }
+    : await loadPickerCatalog()
+  const descriptors = loaded.descriptors
+  const composeWith = loaded.composeWith
   const descriptorList = [...descriptors.values()]
 
   // Locked ids come from the join phase's central-layer classification. A
@@ -179,6 +194,7 @@ export async function resolvePickSeeding(opts) {
 
   return {
     descriptors,
+    composeWith,
     descriptorList,
     visibleList,
     lockedSources,
@@ -258,7 +274,7 @@ export async function runWizardPick(opts) {
   const log = getLogger('wizard')
   const seeding = await resolvePickSeeding(opts)
   const {
-    descriptors, descriptorList, visibleList, lockedSources, lockedSet,
+    descriptors, composeWith, descriptorList, visibleList, lockedSources, lockedSet,
     configPath, existing, configured, detected, seed, carried, interactive, defaultRows,
   } = seeding
 
@@ -345,6 +361,7 @@ export async function runWizardPick(opts) {
     exportChoice,
     retentionDays,
     hypHome,
+    composeWith,
     ...(existing ? { existing } : {}),
   })
 

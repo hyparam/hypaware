@@ -76,6 +76,14 @@ publishing, applying, or editing report sources) rather than onto the skill's
 discoverability. The rest of this document, including the reasoning for why
 `hypaware-ignore` / `hypaware-unignore` were never in this set, stands.
 
+**Superseded-by: [LLP 0212 #skills-retired](./0212-session-opt-out-is-a-cli-verb.decision.md#skills-retired)**
+(2026-08-12), for the following paragraph only. Both skills are retired: they
+predated `hyp session ignore` and had become a second, drifting implementation
+of it. The requirement below (the opt-out must be reachable in the user's own
+words) is unchanged and is now met by `hypaware-reference`'s description; see
+[LLP 0212 §costs](./0212-session-opt-out-is-a-cli-verb.decision.md#costs) for
+what that trade gives up.
+
 It does **not** cover `hypaware-ignore` / `hypaware-unignore`. For the
 session opt-out, being reachable in the user's own words *is* the feature:
 [LLP 0066](./0066-session-opt-out.spec.md) is written around the utterance
@@ -109,5 +117,15 @@ these skills still confirms before its consequential step.
   on the description, alongside the existing `@ref LLP 0100#skill`.
 - `hypaware-ignore` / `hypaware-unignore` `SKILL.md`: `@ref LLP 0142#user-invoked-only`
   recording why these two stay model-invocable.
+  **Superseded-by: [LLP 0212 #skills-retired](./0212-session-opt-out-is-a-cli-verb.decision.md#skills-retired)**
+  (2026-08-12): the opt-out pair retired to `hyp session ignore`, so these two
+  annotation sites no longer exist in the tree.
 - The three report skills' `SKILL.md`: `@ref LLP 0142#user-invoked-only` on
   the frontmatter that carries the key.
+  **Superseded-by: [LLP 0216](./0216-reports-generate-server-side.decision.md)**
+  (2026-08-12): report generation moved server-side and the skills went with
+  it, so these annotation sites no longer exist either.
+
+No `#user-invoked-only` annotation site survives in the tree. The decision
+they served is untouched: see [#user-invoked-only](#user-invoked-only) for the
+rule itself, which still governs any future bundled skill.

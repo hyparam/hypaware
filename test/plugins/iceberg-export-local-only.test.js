@@ -33,14 +33,15 @@ import {
 } from '../../src/core/usage-policy/index.js'
 
 /**
- * @import { BlobStore } from '../../hypaware-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const DATASET = 'iceberg_local_only_rows'
-const COLUMNS = /** @type {const} */ ([
+/** @type {readonly ColumnSpec[]} */
+const COLUMNS = [
   { name: 'id', type: 'INT64', nullable: false },
   { name: 'cwd', type: 'STRING', nullable: false },
-])
+]
 
 function makeLog() {
   const noop = () => {}

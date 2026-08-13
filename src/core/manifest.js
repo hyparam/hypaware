@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from './observability/index.js'
 import { isPlainObject } from './util/json_util.js'
 
 /**
- * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../hypaware-plugin-kernel-types.js'
+ * @import { PluginManifest, PluginName, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../hypaware-plugin-kernel-types.js'
  * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from '../../src/core/types.js'
  */
 
@@ -145,6 +145,21 @@ export function validateManifest(value) {
   if (m.permissions !== undefined && !isStringArray(m.permissions)) {
     return invalid('permissions must be a string array')
   }
+  // @ref LLP 0213#d1 [implements]: a derived-data plugin rides a pick it does not contribute
+  if (m.compose_with !== undefined) {
+    if (!isStringArray(m.compose_with) || m.compose_with.length === 0) {
+      return invalid('compose_with must be a non-empty array of plugin names when present')
+    }
+    // A plugin that waits for itself can never be composed: the fixpoint
+    // only adds a rider once every name it waits for is already present,
+    // and this one never will be. That terminates safely, which is exactly
+    // the problem - it composes nothing and reports nothing, so the plugin
+    // is simply missing from every config with no error to read. Rejecting
+    // it here is the only layer that can tell the author.
+    if (m.compose_with.includes(m.name)) {
+      return invalid('compose_with must not name its own plugin: a plugin cannot ride itself')
+    }
+  }
   if (m.contributes !== undefined && !isPlainObject(m.contributes)) {
     return invalid('contributes must be an object when present')
   }
@@ -168,6 +183,7 @@ export function validateManifest(value) {
   if (isPlainObject(m.requires)) manifest.requires = /** @type {PluginRequirements} */ (m.requires)
   if (isPlainObject(m.provides)) manifest.provides = /** @type {PluginProvides} */ (m.provides)
   if (isStringArray(m.permissions)) manifest.permissions = /** @type {PluginPermission[]} */ (m.permissions)
+  if (isStringArray(m.compose_with)) manifest.compose_with = /** @type {PluginName[]} */ (m.compose_with)
   if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
   return { ok: true, manifest }
 }

@@ -295,12 +295,33 @@ export interface MaintenancePartitionReport {
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
+  // Compaction of this partition is known not to reduce its data-file
+  // count under the writer running now: either this run's rewrite
+  // reproduced the count it started from, or a previous one did and the
+  // cursor still records that verdict (LLP 0217). Set with `compacted`
+  // for the first case and without it for the second, where it is the
+  // reason the partition was skipped.
+  compactionIneffective?: boolean
+  // The data-file count the rewrite behind that verdict started from,
+  // which is the recorded count and not necessarily the live one. Set
+  // whenever `compactionIneffective` is.
+  compactionIneffectiveFiles?: number
+  // The partition is skipped because the one retry its writer generation
+  // owed it was spent by a rewrite that threw (LLP 0218). Never set with
+  // `compacted`, and never with `compactionIneffective`: a failed attempt
+  // records no verdict about the partition, so where a verdict exists that
+  // is the reason reported instead.
+  compactionAttemptFailed?: boolean
+  // When that attempt failed, as the cursor records it. Set whenever
+  // `compactionAttemptFailed` is.
+  compactionAttemptFailedAt?: string
 }
 
 export interface MaintenanceReport {
   partitions: MaintenancePartitionReport[]
   totalSnapshotsExpired: number
   totalCompacted: number
+  totalRebaselined: number
   dryRun: boolean
   elapsedMs: number
 }

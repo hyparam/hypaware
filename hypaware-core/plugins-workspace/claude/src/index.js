@@ -264,10 +264,7 @@ export async function activate(ctx) {
   for (const skillName of [
     'hypaware-query',
     'hypaware-reference',
-    'hypaware-ignore',
-    'hypaware-unignore',
     'hypaware-privacy',
-    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,
@@ -382,6 +379,14 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
         name: '@hypaware/claude',
         config: { proxy: '@hypaware/ai-gateway' },
       },
+      // The graph pair rides the gateway in `hyp init`'s picker fold
+      // (`compose_with`). This preset writes its plugin list literally, so
+      // it has to name them itself: without this the preset ships a brand
+      // new config with no `node` / `edge`, while `hypaware-query` tells the
+      // model both datasets are there.
+      // @ref LLP 0213#d1 [implements]: a config the gateway reaches carries the graph, whichever path wrote it
+      { name: '@hypaware/context-graph' },
+      { name: '@hypaware/ai-gateway-graph' },
     ],
     sinks: {
       local: {

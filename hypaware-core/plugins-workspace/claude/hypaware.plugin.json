@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude",
   "version": "2.0.0",
-  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships the hypaware-query, hypaware-reference, hypaware-privacy, hypaware-report, and session opt-out skills.",
+  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships the hypaware-query, hypaware-reference, and hypaware-privacy skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -49,10 +49,7 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-reference", "clients": ["claude"] },
-      { "name": "hypaware-ignore", "clients": ["claude"] },
-      { "name": "hypaware-unignore", "clients": ["claude"] },
-      { "name": "hypaware-privacy", "clients": ["claude"] },
-      { "name": "hypaware-report", "clients": ["claude"] }
+      { "name": "hypaware-privacy", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }
