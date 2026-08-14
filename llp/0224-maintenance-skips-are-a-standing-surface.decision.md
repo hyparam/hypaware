@@ -122,6 +122,16 @@ the surface and none of the interesting ones. A rebaseline (LLP 0207) is work
 the tick performed, not a partition it left alone. The surface names only the
 partitions the kernel knows are still fragmented and has stopped rewriting.
 
+A partition whose rewrite throws on every tick is knowingly deferred, not
+named here. On the ordinary growth path a throwing rewrite writes no LLP
+0217 retry stamp, so the tick re-attempts and re-throws forever without
+`compactionAttemptFailed` ever being set, and this surface says nothing
+about it. That is the correct behavior for the two reasons this document
+settled (an operator sees nothing rather than a false "0 skipped"), not a
+defect in either; a third id for a tick's own error is the additive
+extension this decision's Consequences section already anticipates, left
+for whoever picks it up next.
+
 ## Consequences {#consequences}
 
 - `hyp status` on an install with no frozen partition is unchanged: the text

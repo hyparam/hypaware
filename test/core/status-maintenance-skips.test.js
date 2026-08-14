@@ -117,6 +117,61 @@ test('summarizeMaintenanceSkips names both skip reasons in the vocabulary the re
   })
 })
 
+// The cap on write bounds entry *count*; this pins that the write side also
+// sanitizes and clamps the bytes *inside* each entry, not only the count.
+// LLP 0224#last-tick-only says the cap and the sanitizing are "re-applied on
+// read as well as on write", which presumes the write side already produced
+// something clean. Partition labels are row-derived
+// (`resolveSourceSegments` -> `sanitizePathSegment`, which strips only
+// path-hostile bytes, not bidi/zero-width/DEL, and applies no length
+// clamp), so a hostile `client_name` reaches `summarizeMaintenanceSkips`
+// unsanitized. The daemon log's `worst` field reads `partitions[0]` straight
+// off this snapshot with no read-side cleanup of its own, so this is also
+// the only thing standing between a row-derived label and `tail -f`.
+// @ref LLP 0224#last-tick-only [tests]: the write side sanitizes and clamps too, not only the read side
+test('summarizeMaintenanceSkips sanitizes and clamps hostile dataset and partition labels on write, into status.json itself', async () => {
+  const BIDI = String.fromCharCode(0x202e) // right-to-left override
+  const ZW = String.fromCharCode(0x200b) // zero-width space
+  const SHY = String.fromCharCode(0x00ad) // soft hyphen
+  const DEL = String.fromCharCode(0x7f)
+  const hostile = `claude${BIDI}${ZW}${SHY}${DEL}` + 'x'.repeat(200)
+
+  const snapshot = summarizeMaintenanceSkips(maintenanceReport([
+    partitionReport({
+      dataset: hostile,
+      partition: { source: hostile },
+      compactionIneffective: true,
+      compactionIneffectiveFiles: 3,
+    }),
+  ]))
+
+  assert.equal(snapshot.partitions.length, 1)
+  const [p] = snapshot.partitions
+  for (const bad of [BIDI, ZW, SHY, DEL]) {
+    assert.equal(p.dataset.includes(bad), false, 'dataset must not carry hostile bytes')
+    assert.equal(p.partition.includes(bad), false, 'partition must not carry hostile bytes')
+  }
+  assert.ok(p.dataset.length <= 120, `dataset must be clamped, got ${p.dataset.length} chars`)
+  assert.ok(p.partition.length <= 120, `partition must be clamped, got ${p.partition.length} chars`)
+
+  // Not only the in-memory snapshot: the bytes that actually land in
+  // status.json, which is what the daemon writes and what a `tail -f` on
+  // the daemon log's `worst` field is downstream of.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-maintenance-sanitize-'))
+  try {
+    const stateRoot = path.join(hypHome, 'hypaware')
+    await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+    writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'healthy', sources: [], sinks: [], maintenance: snapshot }))
+    const raw = await fs.readFile(path.join(stateRoot, 'run', 'status.json'), 'utf8')
+    for (const bad of [BIDI, ZW, SHY, DEL]) {
+      assert.equal(raw.includes(bad), false, `status.json bytes must not carry ${JSON.stringify(bad)}`)
+    }
+    assert.ok(raw.length < 2000, `a single hostile label must not balloon status.json, got ${raw.length} bytes`)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 // Convergence (LLP 0199#baseline-gate) is the healthy case, a rebaseline (LLP
 // 0207) is work the tick did, and a rewrite that achieved nothing is a run
 // that ran. None of the three is a partition the kernel has stopped
@@ -221,7 +276,11 @@ test('a foreign status file is capped, cleaned, and stripped of reasons this bui
   // Unknown reason keys never reach the counts, and a non-numeric one reads
   // as zero rather than as text on a terminal.
   assert.deepEqual(snapshot.reasons, { compaction_ineffective: 900, compaction_attempt_failed: 0 })
-  assert.equal(snapshot.partitionsVisited, MAX_SKIPPED_PARTITIONS_REPORTED, 'a negative count is not a count')
+  // A negative count is not a count, and 900 partitions were recorded
+  // skipped, so visited is floored at the skipped total rather than at the
+  // capped list length: "8 of 900" is exactly the impossible-looking
+  // sentence a missing floor would render.
+  assert.equal(snapshot.partitionsVisited, 900, 'partitionsVisited must never read smaller than skippedTotal')
   assert.equal(snapshot.skippedTotal, 900)
 })
 
@@ -357,6 +416,67 @@ test('an install with nothing frozen keeps the V1 text surface, and a daemon tha
     assert.equal(silent.maintenance, null)
     const json = renderStatusJson({ report: silent, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
     assert.equal(json.maintenance, null)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// `describeMaintenanceSkipReasons` filters to reasons in the known
+// vocabulary with a nonzero count and joins; when a status.json's only
+// nonzero counts are for reasons this build does not recognize, the join is
+// '', and both `hyp status`'s text render and its
+// `maintenance_partitions_skipped` diagnostic interpolate that
+// unconditionally, so the rendered line ends "fragmented ()". This is
+// unreachable from a file this build wrote (every skip it records has one of
+// the two known reasons by construction), but the read path's whole
+// justification is that this build did not necessarily write the file, and
+// LLP 0224#consequences names exactly this extension ("a new id and a new
+// count key, not a new shape") as the forward-compatible path. The existing
+// foreign-file test above keeps `compaction_ineffective: 900` alongside its
+// unknown reason id, so that case never hits the all-unknown branch.
+//
+// Separately, `partitionsVisited` fell back to `partitions.length` with no
+// floor at `skippedTotal`, while `skippedTotal` is floored at
+// `partitions.length`. A status.json omitting `partitionsVisited` (as an
+// older or different build might) alongside a positive `skippedTotal` and an
+// empty `partitions` list rendered "5 of 0 partitions" - a sentence no tick
+// can produce, since visited can never be smaller than skipped.
+// @ref LLP 0224#last-tick-only [tests]: a foreign status file's reason breakdown and visited count stay sentences a tick could actually produce
+test('a status.json carrying only reasons this build does not recognize renders no empty parenthetical and no impossible visited count', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [],
+      sinks: [],
+      maintenance: {
+        tickAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        // No partitionsVisited at all: a later or different build might not
+        // have written one either.
+        skippedTotal: 5,
+        reasons: { compaction_from_the_future: 5 },
+        partitions: [],
+      },
+    }))
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.maintenance?.skippedTotal, 5)
+    // The floor: visited can never render smaller than skipped.
+    assert.ok(
+      (report.maintenance?.partitionsVisited ?? 0) >= 5,
+      `partitionsVisited must be floored at skippedTotal, got ${report.maintenance?.partitionsVisited}`
+    )
+
+    const diagnostic = report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(diagnostic, 'a positive skippedTotal still raises the diagnostic')
+    assert.doesNotMatch(diagnostic.message, /\(\)/, 'no bare parenthetical in the diagnostic message')
+    assert.match(diagnostic.message, /reasons this build does not recognize/)
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    const text = stdout.text()
+    assert.doesNotMatch(text, /\(\)/, 'no bare parenthetical in the rendered text')
+    assert.doesNotMatch(text, /5 of 0 partitions/, 'visited must never render smaller than skipped')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

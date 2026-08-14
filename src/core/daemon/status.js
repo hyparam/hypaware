@@ -450,14 +450,25 @@ const MAINTENANCE_SKIP_REASONS = Object.freeze(
  * are the span attribute names, so this phrase is also the trace query
  * (LLP 0224#reason-ids-are-span-attribute-names).
  *
+ * Both call sites interpolate this unconditionally into a sentence that
+ * already committed to a parenthetical, so an empty phrase would render as a
+ * bare `()`. That is unreachable from a snapshot this build wrote (every
+ * skip has one of the two known reasons by construction), but not from a
+ * `status.json` a later build wrote: LLP 0224#consequences names a third
+ * reason id as exactly the kind of extension this shape absorbs, and a
+ * snapshot whose only nonzero reasons are ones this build does not
+ * recognize is precisely `skippedTotal > 0` with every known count at zero.
+ * The fallback names that case instead of leaving the parenthetical empty.
+ *
  * @param {Record<MaintenanceSkipReason, number>} reasons
  * @returns {string}
  */
 export function describeMaintenanceSkipReasons(reasons) {
-  return MAINTENANCE_SKIP_REASONS
+  const phrase = MAINTENANCE_SKIP_REASONS
     .filter((reason) => (reasons[reason] ?? 0) > 0)
     .map((reason) => `${reasons[reason]} ${reason}`)
     .join(', ')
+  return phrase === '' ? 'reasons this build does not recognize' : phrase
 }
 
 /**
@@ -528,8 +539,20 @@ export function summarizeMaintenanceSkips(report, opts = {}) {
     // cap are the most fragmented ones by construction.
     if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) continue
     partitions.push({
-      dataset: p.dataset,
-      partition: partitionLabel(p.partition),
+      // Sanitized here too, not only on read: LLP 0224#last-tick-only says the
+      // cap and the sanitizing are both re-applied on read, which only holds
+      // if the write side already produced a clean label. `dataset` and
+      // `partition` are kernel-side identifiers in the ordinary case, but
+      // `partition`'s values come off a captured row's `client_name` by way
+      // of `resolveSourceSegments` -> `sanitizePathSegment`, which strips only
+      // path-hostile bytes and applies no length clamp or bidi/zero-width
+      // filtering. Unsanitized here, the daemon log line at
+      // `runtime.js`'s `worst` field (which reads `partitions[0]` straight)
+      // would be the one surface on this path with nothing downstream to
+      // clean it.
+      // @ref LLP 0224#last-tick-only [implements]: the write side sanitizes and clamps, not only the read side
+      dataset: sanitizeLabel(p.dataset) ?? 'unknown',
+      partition: sanitizeLabel(partitionLabel(p.partition)) ?? 'all',
       reason,
       // The count the recorded rewrite ran over, not the live one: the same
       // distinction `hyp query maintain` draws, for the same reason.
@@ -613,7 +636,12 @@ export function maintenanceSkipsFromStatus(status) {
     ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
   return {
     tickAt,
-    partitionsVisited: nonNegativeInt(raw.partitionsVisited) ?? partitions.length,
+    // Floored at the skipped total (and the named list, which the total
+    // itself is already floored at below): "visited" can never be smaller
+    // than "skipped", or the render says "5 of 0 partitions" for a snapshot
+    // no tick could have produced. A file this build did not write can claim
+    // whatever it wants here, so the floor is enforced rather than trusted.
+    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, recordedTotal, partitions.length),
     // The list is capped, so the count leads; but a count smaller than the
     // list would render "2 partitions" above three lines of them.
     skippedTotal: Math.max(recordedTotal, partitions.length),
