@@ -14,6 +14,10 @@ import {
   attachConnectFrontDoor,
   parseAuthority,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/connect.js'
+import {
+  compileConfig,
+  compileUpstreamProxy,
+} from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
 import { createLeafStore, ensureLocalCa } from '../../src/core/tls/ca.js'
 
 const HOST = 'api.anthropic.com'
@@ -68,6 +72,7 @@ async function bootFrontDoor({ shouldIntercept, onRequest }) {
     port,
     seen,
     warns,
+    server,
     frontDoor,
     async cleanup() {
       frontDoor.close()
@@ -249,4 +254,153 @@ test('a mid-tunnel upstream reset injects nothing into the tunnel', async (t) =>
   const injected = Buffer.concat(afterEstablished).toString('utf8')
   assert.equal(injected, '', `nothing may be written into an established tunnel, got ${JSON.stringify(injected)}`)
   socket.destroy()
+})
+
+// ---------------------------------------------------------------------------
+// Corporate proxy chaining
+//
+// Pointing `HTTPS_PROXY` at the gateway takes the customer's own egress proxy
+// out of the client's path, so `upstream_proxy` is what keeps that path
+// working. It had no coverage at all: neither the URL compiler nor the CONNECT
+// hop was exercised by any test.
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal CONNECT relay standing in for a corporate proxy.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.refuseWith] answer every CONNECT with this status line instead of relaying
+ */
+async function bootCorporateProxy(opts = {}) {
+  /** @type {{ authority: string, authorization: string | undefined }[]} */
+  const seen = []
+  const server = net.createServer((client) => {
+    /** @type {Buffer} */
+    let buffered = Buffer.alloc(0)
+    /** @param {Buffer} chunk */
+    const onData = (chunk) => {
+      buffered = Buffer.concat([buffered, Buffer.from(chunk)])
+      const end = buffered.indexOf('\r\n\r\n')
+      if (end === -1) return
+      client.removeListener('data', onData)
+      const lines = buffered.subarray(0, end).toString('ascii').split('\r\n')
+      const authority = lines[0].split(' ')[1] ?? ''
+      const auth = lines.slice(1)
+        .find((l) => l.toLowerCase().startsWith('proxy-authorization:'))
+      seen.push({ authority, authorization: auth?.slice(auth.indexOf(':') + 1).trim() })
+      if (opts.refuseWith) {
+        client.end(`HTTP/1.1 ${opts.refuseWith}\r\n\r\n`)
+        return
+      }
+      const [host, port] = authority.split(':')
+      const hop = net.connect(Number(port), host, () => {
+        client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+        const rest = buffered.subarray(end + 4)
+        if (rest.length > 0) hop.write(rest)
+        hop.pipe(client)
+        client.pipe(hop)
+      })
+      hop.on('error', () => client.destroy())
+    }
+    client.on('data', onData)
+    client.on('error', () => client.destroy())
+  })
+  const port = await listen(server)
+  return {
+    port,
+    seen,
+    close: () => new Promise((resolve) => server.close(() => resolve(undefined))),
+  }
+}
+
+// A mistyped credential must not be able to take the gateway down. `URL` leaves
+// an invalid percent-escape in place and `decodeURIComponent` throws on it, so
+// this used to propagate out of `compileConfig` and abort the source start,
+// which is the one thing the compiler's contract promises it will not do.
+test('a malformed upstream_proxy compiles to undefined rather than throwing', () => {
+  assert.equal(compileUpstreamProxy('http://user:p%zz@proxy.corp:8080'), undefined)
+  assert.equal(compileUpstreamProxy('http://us%er@proxy.corp:8080'), undefined)
+  assert.equal(compileConfig({ upstream_proxy: 'http://user:p%zz@proxy.corp:8080' }).upstreamProxy, undefined)
+  assert.equal(compileUpstreamProxy('not a url'), undefined)
+  assert.equal(compileUpstreamProxy('ftp://proxy.corp:8080'), undefined)
+  assert.equal(compileUpstreamProxy(''), undefined)
+  assert.equal(compileUpstreamProxy(undefined), undefined)
+})
+
+test('upstream_proxy compiles host, defaulted port and pre-encoded credentials', () => {
+  assert.deepEqual(compileUpstreamProxy('http://proxy.corp:8080'), { host: 'proxy.corp', port: 8080 })
+  assert.deepEqual(compileUpstreamProxy('http://proxy.corp'), { host: 'proxy.corp', port: 80 })
+  assert.deepEqual(compileUpstreamProxy('http://u%40b:p%3Aw@proxy.corp:3128'), {
+    host: 'proxy.corp',
+    port: 3128,
+    // The userinfo is percent-decoded before base64, so `u@b:p:w` round-trips.
+    authorization: `Basic ${Buffer.from('u@b:p:w').toString('base64')}`,
+  })
+})
+
+// The hop itself: a blind tunnel through a configured corporate proxy reaches
+// the destination and carries the credentials the URL named.
+test('a blind tunnel chains through the configured corporate proxy', async (t) => {
+  const corporate = await bootCorporateProxy()
+  const echo = net.createServer((socket) => socket.pipe(socket))
+  const echoPort = await listen(echo)
+  const rig = await bootFrontDoor({ shouldIntercept: () => false })
+  rig.frontDoor.close()
+
+  const via = compileUpstreamProxy(`http://alice:s3cret@127.0.0.1:${corporate.port}`)
+  assert.ok(via)
+  const chained = attachConnectFrontDoor({
+    server: /** @type {never} */ (rig.server),
+    shouldIntercept: () => false,
+    secureContextFor: () => { throw new Error('not intercepting') },
+    upstreamProxy: via,
+  })
+
+  const { socket, statusLine } = await connectTunnel(rig.port, `127.0.0.1:${echoPort}`)
+  // One ordered hook, not four: every `close()` here resolves only once its
+  // connections have ended, so the tunnel this test opened has to be torn down
+  // before any of the three servers is asked to close.
+  t.after(async () => {
+    socket.destroy()
+    chained.close()
+    await rig.cleanup()
+    await corporate.close()
+    await new Promise((resolve) => echo.close(() => resolve(undefined)))
+  })
+  assert.match(statusLine, /^HTTP\/1\.1 200 /)
+
+  socket.write('ping')
+  const echoed = await new Promise((resolve) => socket.once('data', (c) => resolve(c.toString())))
+  assert.equal(echoed, 'ping')
+
+  assert.equal(corporate.seen.length, 1)
+  assert.equal(corporate.seen[0].authority, `127.0.0.1:${echoPort}`)
+  assert.equal(
+    corporate.seen[0].authorization,
+    `Basic ${Buffer.from('alice:s3cret').toString('base64')}`
+  )
+})
+
+// A corporate proxy that refuses is a 502 to the client, not a hang and not a
+// silent close.
+test('a corporate proxy refusing CONNECT surfaces as 502', async (t) => {
+  const corporate = await bootCorporateProxy({ refuseWith: '407 Proxy Authentication Required' })
+  const rig = await bootFrontDoor({ shouldIntercept: () => false })
+  rig.frontDoor.close()
+
+  const chained = attachConnectFrontDoor({
+    server: /** @type {never} */ (rig.server),
+    shouldIntercept: () => false,
+    secureContextFor: () => { throw new Error('not intercepting') },
+    upstreamProxy: { host: '127.0.0.1', port: corporate.port },
+  })
+
+  const { socket, statusLine } = await connectTunnel(rig.port, 'example.invalid:443')
+  t.after(async () => {
+    socket.destroy()
+    chained.close()
+    await rig.cleanup()
+    await corporate.close()
+  })
+  assert.match(statusLine, /^HTTP\/1\.1 502 /)
 })

@@ -454,3 +454,82 @@ test('a damaged proxy marker leaves an externally changed proxy alone', async (t
   assert.equal((await r.read()).env.HTTPS_PROXY, 'http://someone-else:3128')
   assert.match(String(result.warning), /HTTPS_PROXY was overridden externally/)
 })
+
+// The trust pointer and the signing key have to come off together. This branch
+// already reverses `HTTPS_PROXY` by convention, so leaving the CA behind here
+// would strand trusted key material on exactly the path where the user has the
+// least evidence anything was missed.
+// @ref LLP 0235#detach-removes-the-ca [tests]
+test('a damaged proxy marker still deletes the CA', async (t) => {
+  const r = await rig({})
+  t.after(() => r.cleanup())
+
+  await proxyAttach(r)
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
+
+  const value = await r.read()
+  delete value._hypaware.managed
+  await fsp.writeFile(r.settingsPath, JSON.stringify(value, null, 2) + '\n')
+
+  await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: r.env,
+  })
+
+  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
+  await assert.rejects(fsp.stat(caPaths(r.stateRoot).certPath), /ENOENT/)
+})
+
+// Same branch, same homeDir rule as the record-driven one: a sandboxed undo
+// must not reach into the ambient home for the key it deletes.
+// @ref LLP 0235#detach-removes-the-ca [tests]
+test('a damaged proxy marker deletes the CA under homeDir, not the ambient one', async (t) => {
+  const r = await rig({})
+  t.after(() => r.cleanup())
+  await proxyAttach(r)
+
+  const decoyHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-decoy-damaged-'))
+  t.after(() => fsp.rm(decoyHome, { recursive: true, force: true }))
+  const decoyRoot = path.join(decoyHome, '.hyp', 'hypaware')
+  await ensureLocalCa({ stateRoot: decoyRoot, hosts: ['api.anthropic.com'] })
+
+  const value = await r.read()
+  delete value._hypaware.managed
+  await fsp.writeFile(r.settingsPath, JSON.stringify(value, null, 2) + '\n')
+
+  await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: {},
+  })
+
+  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
+  await fsp.stat(caPaths(decoyRoot).keyPath)
+})
+
+// A damaged *base-URL* marker must not delete a CA: nothing it wrote installed
+// one, and another client may still be attached in proxy mode.
+test('a damaged base-URL marker leaves the CA alone', async (t) => {
+  const r = await rig({})
+  t.after(() => r.cleanup())
+
+  await attach({
+    port: PORT,
+    version: '2.0.0',
+    stateFile: r.stateFile,
+    settingsPath: r.settingsPath,
+    mode: MODE_BASE_URL,
+  })
+  const value = await r.read()
+  delete value._hypaware.managed
+  await fsp.writeFile(r.settingsPath, JSON.stringify(value, null, 2) + '\n')
+
+  await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: r.env,
+  })
+
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
+})

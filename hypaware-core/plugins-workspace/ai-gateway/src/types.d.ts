@@ -78,7 +78,8 @@ export interface UpstreamConfig {
   path_prefix?: string
   provider?: string
   priority?: number
-  match?: (input: AiGatewayRouteInput) => boolean  /**
+  match?: (input: AiGatewayRouteInput) => boolean
+  /**
    * Paths the registering adapter claims, carried from its preset when
    * operator config overrode the entry by name. Proxy mode's record anchor
    * (LLP 0234); never a routing input.

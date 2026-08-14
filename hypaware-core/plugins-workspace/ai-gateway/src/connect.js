@@ -74,6 +74,7 @@ export function connectHostOf(socket) {
 /**
  * Install the CONNECT handler on an existing HTTP server.
  *
+ * @ref LLP 0233#one-listener-two-front-doors [implements]: no second port; a terminated tunnel re-enters the same server
  * @param {ConnectFrontDoorOptions} opts
  * @returns {ConnectFrontDoor}
  */
@@ -186,6 +187,7 @@ export function attachConnectFrontDoor(opts) {
   /**
    * Pipe bytes through without decrypting them.
    *
+   * @ref LLP 0234#blind-tunnel-by-default [implements]: the disposition for every host no upstream names
    * @param {{ host: string, port: number }} target
    * @param {Duplex} clientSocket
    * @param {Buffer} head

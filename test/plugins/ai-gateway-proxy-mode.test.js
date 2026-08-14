@@ -571,3 +571,72 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   })
   assert.match(statusLine, /^HTTP\/1\.1 200 /)
 })
+
+// The same stranding, reached by the other route. An empty routing table used
+// to return before the front door was ever considered, so a machine whose
+// upstreams went away (a config edit, an adapter that stopped registering its
+// preset) stopped binding at all - and a client attached in proxy mode has
+// `HTTPS_PROXY` pointing at that port for ALL of its egress, so it loses
+// authentication and updates, not just capture.
+// @ref LLP 0233#degrade-to-blind-tunnels [tests]
+test('an empty routing table with a CA installed still serves blind tunnels', async (t) => {
+  const hypHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-stranded-'))
+  t.after(() => fsp.rm(hypHome, { recursive: true, force: true }))
+  await ensureLocalCa({ stateRoot: path.join(hypHome, 'hypaware'), hosts: ['api.anthropic.com'] })
+
+  const echo = net.createServer((socket) => socket.pipe(socket))
+  await new Promise((resolve) => echo.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const echoAddress = echo.address()
+  const echoPort = echoAddress && typeof echoAddress === 'object' ? echoAddress.port : 0
+  t.after(() => new Promise((resolve) => echo.close(() => resolve(undefined))))
+
+  /** @type {{ level: string, event: string }[]} */
+  const logged = []
+  /** @param {string} level */
+  const record = (level) => (/** @type {string} */ event) => logged.push({ level, event })
+  const ctx = /** @type {any} */ ({
+    config: { listen: '127.0.0.1:0', proxy_mode: true, upstreams: [] },
+    env: { HYP_HOME: hypHome },
+    storage: { cacheTablePath: (/** @type {string} */ d) => d, async appendRows() {} },
+    log: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') },
+  })
+  const source = await createStartSource(createGatewayState())(ctx)
+  t.after(() => source.stop())
+
+  assert.ok(source.status, 'the source exposes status()')
+  const details = /** @type {any} */ ((await source.status()).details)
+  assert.equal(details.listening, undefined, 'the listener bound rather than idling')
+  assert.equal(logged.some((l) => l.event === 'aigw.idle_serves_tunnels'), true)
+
+  const statusLine = await new Promise((resolve, reject) => {
+    const socket = net.connect(details.port, details.host, () => {
+      socket.write(`CONNECT 127.0.0.1:${echoPort} HTTP/1.1\r\nHost: x\r\n\r\n`)
+    })
+    /** @type {Buffer} */
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, Buffer.from(chunk)])
+      if (buf.indexOf('\r\n\r\n') === -1) return
+      const line = buf.subarray(0, buf.indexOf('\r\n')).toString('ascii')
+      socket.destroy()
+      resolve(line)
+    })
+    socket.on('close', () => resolve('closed with no response'))
+    socket.on('error', reject)
+  })
+  assert.match(statusLine, /^HTTP\/1\.1 200 /)
+})
+
+// The other half of that guard: with nothing pointed at the port, an empty
+// routing table still idles exactly as LLP 0195 settled. Binding unconditionally
+// would make every hermes-only install hold a port it has no use for.
+// @ref LLP 0195#idle-not-throw [tests]
+test('an empty routing table with no CA still idles', async (t) => {
+  const rig = await bootSource({ listen: '127.0.0.1:0', proxy_mode: true, upstreams: [] })
+  t.after(() => rig.cleanup())
+
+  assert.ok(rig.source.status, 'the source exposes status()')
+  const status = await rig.source.status()
+  assert.equal(/** @type {any} */ (status.details).listening, false)
+  assert.match(String(status.message), /^idle: /)
+})

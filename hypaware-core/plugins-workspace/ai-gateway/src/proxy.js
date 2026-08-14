@@ -53,7 +53,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 export async function startProxy(opts) {
   const { host, port: requestedPort } = parseListen(opts.listen)
   const upstreams = compileUpstreams(opts.upstreams)
-  if (upstreams.length === 0) {
+  // An empty routing table is a caller mistake everywhere except one: a
+  // blind-tunnel-only listener has no routing to do. It exists because a client
+  // attached in proxy mode sends ALL of its egress here, so the port has to go
+  // on answering CONNECT even when there is nothing left to record.
+  // @ref LLP 0233#degrade-to-blind-tunnels [constrained-by]: tunnel-only is the one start with nothing to route
+  if (upstreams.length === 0 && !opts.tunnelOnly) {
     throw new Error('ai-gateway: at least one upstream must be configured before start')
   }
   /** @type {Set<Promise<void>>} */

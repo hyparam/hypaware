@@ -81,10 +81,19 @@ export function compileUpstreamProxy(raw) {
   /** @type {import('./types.js').UpstreamProxy} */
   const proxy = { host: url.hostname, port }
   if (url.username) {
-    const raw64 = Buffer.from(
-      `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
-    ).toString('base64')
-    proxy.authorization = `Basic ${raw64}`
+    /** @type {string} */
+    let userinfo
+    try {
+      // `URL` leaves an invalid escape (`p%zz`) in the credential untouched,
+      // and `decodeURIComponent` throws a `URIError` on it. Unguarded, one
+      // mistyped character in `upstream_proxy` propagated out of
+      // `compileConfig` and took the whole gateway source down at start,
+      // which is the outcome this function's contract exists to prevent.
+      userinfo = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+    } catch {
+      return undefined
+    }
+    proxy.authorization = `Basic ${Buffer.from(userinfo).toString('base64')}`
   }
   return proxy
 }

@@ -19,6 +19,8 @@ import crypto from 'node:crypto'
  * UTCTime only (valid to 2049, and nothing we mint lives longer than a year),
  * and only the extensions the interception path needs. This is not a general
  * certificate authority.
+ *
+ * @ref LLP 0235#minted-in-process: the options weighed, and why neither an `openssl` shell-out nor a certificate library survived them
  */
 
 // ---------------------------------------------------------------------------
@@ -452,6 +454,7 @@ function readChildren(buf, start, end) {
  * Returns empty lists when the extension is absent or unparseable, which the
  * caller reads as "cannot confirm this CA covers the hosts", i.e. regenerate.
  *
+ * @ref LLP 0235#constraints-are-read-back-structurally [implements]: the byte scan this replaces reported phantom permitted hosts and re-minted the machine's CA on every boot
  * @param {Buffer} der a DER-encoded certificate
  * @returns {{ permittedDns: string[], excludedIp: Buffer[] }}
  */

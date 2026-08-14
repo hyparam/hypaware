@@ -232,7 +232,22 @@ async function launchListener(ctx, state, liveState) {
         registered_presets: state.presets.size,
       })
     }
-    return undefined
+    // Idling is only safe while nothing depends on the port answering. A CA on
+    // disk says a client was attached in proxy mode and may still have
+    // `HTTPS_PROXY` pointing here for ALL of its egress, so not binding at all
+    // breaks its authentication and updates rather than only its capture. Bind
+    // anyway and serve blind tunnels: `prepareInterception` reaches
+    // `tunnelOnly` from an empty host list, and every request that is not a
+    // CONNECT still 404s exactly as an idle gateway's would.
+    // @ref LLP 0233#degrade-to-blind-tunnels [implements]: an empty routing table must not strand a proxy-attached client
+    const stranded = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
+    if (!stranded) return undefined
+    ctx.log.warn('aigw.idle_serves_tunnels', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      ca_cert_path: stranded.certPath,
+      reason: 'no upstream to route, but a local CA means a client may still proxy through ' +
+        'this port; binding for blind tunnels so its egress keeps working, unrecorded',
+    })
   }
   if (configured.dropped > 0) {
     // The routing table is non-empty but smaller than the config asked for.
@@ -327,6 +342,21 @@ async function launchListener(ctx, state, liveState) {
   // TLS failures once traffic arrives.
   // @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the CA is constrained to the upstream hosts and nothing else
   const interception = await prepareInterception(ctx, config, upstreams, liveState)
+
+  // A mistyped `upstream_proxy` compiles to `undefined` rather than throwing,
+  // which is the right call (a typo must not take capture down) but is silent
+  // on its own: the operator configured a required egress path and the gateway
+  // would quietly connect direct instead, failing every upstream call with no
+  // stated cause. Naming it here is the "the source reports it" half of that
+  // contract.
+  if (typeof ctx.config?.upstream_proxy === 'string' && !config.upstreamProxy) {
+    ctx.log.warn('aigw.upstream_proxy_invalid', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      // The value itself is not logged: it is exactly the field that carries
+      // proxy credentials.
+      reason: 'upstream_proxy is not a usable http(s) proxy URL; connecting direct instead',
+    })
+  }
 
   // Built once, outside `bind`: the EADDRINUSE fallback calls `bind` twice, and
   // a second agent would leak a keep-alive pool nothing ever closes.

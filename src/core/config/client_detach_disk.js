@@ -182,6 +182,8 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
       marker,
       mtimeMs: read.mtimeMs,
       fs,
+      env,
+      homeDir,
     })
   }
 
@@ -285,20 +287,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
   // un-attached and safe, and the leftover key is reported rather than
   // silently retained.
   // @ref LLP 0235#detach-removes-the-ca [implements]
-  if (marker.mode === 'proxy') {
-    try {
-      // `homeDir`, not the ambient home: this undo is routinely pointed at a
-      // sandbox (every test) or another user's tree, and resolving the CA from
-      // `os.homedir()` while resolving the settings file from `homeDir` deletes
-      // key material belonging to a different install.
-      await deleteLocalCa({ stateRoot: defaultStateRoot(env, homeDir) })
-    } catch (err) {
-      warnings.push(
-        `the local CA could not be removed (${err instanceof Error ? err.message : String(err)}); ` +
-        'delete it by hand'
-      )
-    }
-  }
+  await removeProxyModeCa({ marker, env, homeDir, warnings })
 
   const warning = joinWarnings(warnings)
 
@@ -544,10 +533,12 @@ const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_env', 'prev
  *   marker: Record<string, unknown>,
  *   mtimeMs: number | undefined,
  *   fs: typeof fsp,
+ *   env?: NodeJS.ProcessEnv,
+ *   homeDir?: string,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs }) {
+async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs, env, homeDir }) {
   const markerPort = typeof marker.port === 'number' ? marker.port : undefined
 
   // Read every backup the marker carries BEFORE it is deleted. A genuine
@@ -634,6 +625,11 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
 
   await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
 
+  // The record is damaged but `mode` survived it (that is one of the fields
+  // that routes a current-shape marker here at all), so the CA is still
+  // identifiable and must go with the trust pointer above.
+  await removeProxyModeCa({ marker, env, homeDir, warnings })
+
   const warning = joinWarnings(warnings)
 
   /** @type {DetachFromDiskResult} */
@@ -643,6 +639,45 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   if (restoredPaths.length > 0) result.restoredPaths = restoredPaths
   if (warning !== undefined) result.warning = warning
   return result
+}
+
+/**
+ * Delete the machine-local CA a proxy-mode attach installed.
+ *
+ * Shared by both JSON branches on purpose. A marker whose `managed` record is
+ * damaged still routes through {@link detachLegacyJsonMarker}, and that branch
+ * already reverses `HTTPS_PROXY` by convention; leaving the signing key behind
+ * there would keep the one piece of residue LLP 0235 calls the worst this
+ * feature can leave, on exactly the path where the user has least evidence
+ * that anything was missed.
+ *
+ * Always called after the settings write: if removal fails the client is
+ * already un-attached and safe, and the leftover key is reported rather than
+ * silently retained.
+ *
+ * `homeDir`, not the ambient home: this undo is routinely pointed at a sandbox
+ * (every test) or another user's tree, and resolving the CA from `os.homedir()`
+ * while resolving the settings file from `homeDir` deletes key material
+ * belonging to a different install.
+ *
+ * @ref LLP 0235#detach-removes-the-ca [implements]: every branch that reverses a proxy marker removes its CA
+ * @param {{
+ *   marker: Record<string, unknown>,
+ *   env: NodeJS.ProcessEnv | undefined,
+ *   homeDir: string | undefined,
+ *   warnings: string[],
+ * }} args
+ */
+async function removeProxyModeCa({ marker, env, homeDir, warnings }) {
+  if (marker.mode !== 'proxy') return
+  try {
+    await deleteLocalCa({ stateRoot: defaultStateRoot(env, homeDir) })
+  } catch (err) {
+    warnings.push(
+      `the local CA could not be removed (${err instanceof Error ? err.message : String(err)}); ` +
+      'delete it by hand'
+    )
+  }
 }
 
 /**

@@ -32,6 +32,7 @@ import { generateKeyPair, mintCertificate, readNameConstraints } from './x509.js
  *   settings file.
  *
  * @import { LocalCa, LocalCaInfo } from '../../../src/core/tls/types.js'
+ * @ref LLP 0235#client-scoped-trust: trust is scoped to the attached client's own settings file, which is why proxy mode needs no privileged install step
  */
 
 const CA_DIR_NAME = 'tls'
@@ -119,6 +120,7 @@ export function fingerprint(der) {
  * constraint set is part of the CA's identity, so widening it mints a new CA
  * rather than silently running with one that cannot vouch for the new host.
  *
+ * @ref LLP 0235#ca-name-constraints [implements]: the constraint set can never silently lag the intercept set, so a CA that does not already permit a host is regenerated rather than reused
  * @param {object} args
  * @param {string} args.stateRoot
  * @param {string[]} args.hosts hosts this CA may vouch for
@@ -360,6 +362,7 @@ export async function readLocalCaInfo({ stateRoot }) {
  *
  * Idempotent, and reports what it actually removed so callers can tell the user.
  *
+ * @ref LLP 0235#detach-removes-the-ca [implements]: removal lives in core so `hyp detach` and `hyp daemon uninstall` can run it with the plugin unloaded
  * @param {object} args
  * @param {string} args.stateRoot
  * @returns {Promise<{ removed: string[] }>}
