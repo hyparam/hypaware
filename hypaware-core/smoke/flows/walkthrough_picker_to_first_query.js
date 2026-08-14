@@ -554,7 +554,8 @@ export async function run({ harness, expect }) {
 
 /**
  * Bundled plugins that ride the composed picks rather than being picked:
- * a manifest whose `compose_with` names only plugins already composed is
+ * a manifest whose `compose_with` names plugins that are, transitively,
+ * already composed (picked, or riders composed in an earlier pass) is
  * written into the config with no picker row and no prompt
  * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
  *
@@ -565,6 +566,10 @@ export async function run({ harness, expect }) {
  * decides (which rows compose, the upstreams, the OTLP port, the sink shape,
  * retention); a rider is decided by the plugin, so it is read from there.
  *
+ * Run to a fixpoint, mirroring `ridersFor`: a rider whose `compose_with`
+ * names another rider (rather than a picked plugin) still lands, so the
+ * golden does not go stale the moment a rider rides a rider.
+ *
  * This deliberately does not call `composePickerConfig` or `ridersFor`: an
  * expectation that runs the code under test asserts nothing. It reads the
  * declarations and applies the rule to the literal picked set below, so a
@@ -574,9 +579,9 @@ export async function run({ harness, expect }) {
  * `test/core/compose-picker-config.test.js`.
  *
  * Reading only `loaded` keeps the default-activation boundary without
- * restating it: `discoverBundledPlugins` puts allowlisted plugins there and
- * the explicit-opt-in ones in `excluded`, which is the same cut
- * `ridersInDefaultSet` makes on the composer.
+ * restating it: it agrees with the cut `ridersInDefaultSet` makes, because
+ * the allowlist and the excluded set together cover every bundled plugin and
+ * `loadPickerCatalog` reads only those two buckets.
  *
  * @param {string[]} picked  plugin names the picker composed from its rows
  * @returns {Promise<string[]>}
@@ -587,12 +592,18 @@ async function composedRiders(picked) {
   const present = new Set(picked)
   /** @type {string[]} */
   const riders = []
-  for (const { manifest } of loaded) {
-    const waitsFor = manifest.compose_with
-    if (!Array.isArray(waitsFor) || waitsFor.length === 0) continue
-    if (present.has(manifest.name)) continue
-    if (!waitsFor.every((name) => present.has(name))) continue
-    riders.push(manifest.name)
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const { manifest } of loaded) {
+      const waitsFor = manifest.compose_with
+      if (!Array.isArray(waitsFor) || waitsFor.length === 0) continue
+      if (present.has(manifest.name)) continue
+      if (!waitsFor.every((name) => present.has(name))) continue
+      present.add(manifest.name)
+      riders.push(manifest.name)
+      grew = true
+    }
   }
   return riders
 }
