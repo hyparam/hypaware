@@ -62,10 +62,20 @@ export async function run({ harness, expect }) {
         helpResult.status,
         (v) => v === 0
       )
+      // The banner's marketing sentence is copy, not a contract this flow
+      // owns; it changes with onboarding copy decisions (e.g. LLP 0211) and
+      // no LLP pins it. Assert the usage line and a known command name
+      // instead: those are what "the packaged binary boots and --help
+      // works" actually means, and they survive a copy edit.
       expect.that(
-        'hypaware --help prints the usage header',
+        'hypaware --help prints the usage line',
         helpResult.stdout,
-        (v) => typeof v === 'string' && v.includes('hyp - HypAware kernel CLI')
+        (v) => typeof v === 'string' && v.includes('usage: hyp <command> [args...]')
+      )
+      expect.that(
+        'hypaware --help lists known commands',
+        helpResult.stdout,
+        (v) => typeof v === 'string' && v.includes('daemon') && v.includes('status')
       )
 
       const smokeResult = spawnSync(
