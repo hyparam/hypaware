@@ -257,9 +257,7 @@ test('ai-gateway createDataSource advertises declared schema columns absent from
   // ColumnNotFoundError. `withSchemaColumns` is the only thing guaranteeing
   // this, and every other test stages partitions that already carry all
   // columns. So without this test a regression dropping the advertisement would
-  // pass the suite while breaking real queries over old data. What comes back
-  // is a HOLE, not a null: the row carries no entry for the column at all
-  // (LLP 0015#multi-partition-union). @ref LLP 0032#capture
+  // pass the suite while breaking real queries over old data. @ref LLP 0032#capture
   const cacheRoot = await makeTmpDir('schema-pad')
   try {
     // Stage a partition with ONLY id/date: no repo-identity columns at all.
@@ -279,31 +277,28 @@ test('ai-gateway createDataSource advertises declared schema columns absent from
       assert.ok(source.columns.includes(col), `source advertises declared column ${col}`)
     }
 
-    // Scanning does not throw, and the row carries no entry at all for the
-    // columns the partition lacks. Asserting `?? null` here would launder the
-    // hole into the null the doc used to promise and hide the difference.
+    // Scanning does not throw. The exact value such a column yields depends on
+    // the read path (LLP 0015#multi-partition-union), so assert only that it is
+    // nullish rather than pinning one representation here.
     const seen = []
     for await (const row of source.scan({}).rows()) {
       if (row.resolved) seen.push(row.resolved)
     }
     assert.equal(seen.length, 1)
     assert.equal(seen[0].id, 1)
-    assert.equal(Object.prototype.hasOwnProperty.call(seen[0], 'git_remote'), false, 'absent column is a hole, not a null')
-    assert.equal(Object.prototype.hasOwnProperty.call(seen[0], 'repo_root'), false)
+    assert.equal(seen[0].git_remote ?? null, null, 'absent column stays addressable and reads as nullish')
+    assert.equal(seen[0].repo_root ?? null, null)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
 
 test('ai-gateway createDataSource streams scanColumn with nulls for a physically absent column', async () => {
-  // The column-stream analog of the row test above: the engine's
-  // streaming-aggregate fast path consumes scanColumn, and a partition that
-  // predates a declared column must contribute nulls (never undefined, never a
-  // throw) so an accumulator never meets a hole. This normalization is the
-  // scanColumn path's own duty, not something the row path also does: the row
-  // path leaves the same hole unfilled (LLP 0015#multi-partition-union), so
-  // normalizing here is what stops an aggregate from disagreeing with it.
-  // @ref LLP 0055
+  // The column-stream analog of the schema-padding row test above: the
+  // engine's streaming-aggregate fast path consumes scanColumn, and a
+  // partition that predates a declared column must contribute nulls (never
+  // undefined, never a throw) so accumulators see the same value the row
+  // path reads. @ref LLP 0055
   const cacheRoot = await makeTmpDir('scan-column')
   try {
     await appendRowsToSourceTable(

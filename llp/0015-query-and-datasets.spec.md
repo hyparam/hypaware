@@ -99,9 +99,10 @@ function over it, `ORDER BY`, `GROUP BY`, `DISTINCT`, or an aggregate on it.
 `SELECT *` is unaffected: each partition's rows keep their own shape, so the key
 is simply absent. The column is addressable at all only because the union
 advertises the superset of partition columns; when no partition has it, planning
-fails with the same error **unless a wrapper advertises the declared schema on
-top of the union (LLP 0032's `withSchemaColumns`), in which case the same
-undefined-or-throws contract applies to a column no partition has**. Pinned by
+fails with the same error unless a wrapper advertises the declared schema on top
+of the union (LLP 0032's `withSchemaColumns`), which keeps such a column
+addressable; the exact value a read of it then yields depends on the read path
+and is not settled here. Pinned by
 [`test/core/union-source.test.js`](../test/core/union-source.test.js).
 
 > **Corrected (#731, PR #740).** This section previously stated that projecting

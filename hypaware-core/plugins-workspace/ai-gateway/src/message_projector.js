@@ -23,12 +23,9 @@ const DATASET_NAME = 'ai_gateway_messages'
  * fields map onto these named columns directly). `schema_version` 7 added
  * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
  * the additions are nullable and no partition-label bump is needed. An old
- * partition does not read them as null, though: it physically lacks them,
- * `withSchemaColumns` in `dataset.js` is the only reason they stay
- * addressable at all, and the value a projection hands back is `undefined`
- * (LLP 0015#multi-partition-union), which `JSON.stringify` drops instead of
- * rendering as `null`. Only the `scanColumn` aggregate path normalizes the
- * hole to null. SQL predicates still treat it as NULL either way.
+ * partition physically lacks them; `withSchemaColumns` in `dataset.js` is the
+ * only reason they stay addressable at all, and the exact value a read of one
+ * yields depends on the read path (LLP 0015#multi-partition-union).
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
