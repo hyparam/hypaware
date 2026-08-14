@@ -15,6 +15,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
+import { withSpinner } from './spinner.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -1946,13 +1947,16 @@ async function runFinaleBackfill(args) {
         }
         try {
           // Importing local history reads and writes potentially
-          // thousands of rows with no other output. Without this line
-          // the resolved consent frame is the last thing on screen, so a
-          // multi-second import looks like the prompt is stuck. Announce
-          // the work before it starts so the wizard visibly moves on.
+          // thousands of rows with no other output. Without this the
+          // resolved consent frame is the last thing on screen, so a
+          // multi-second import looks like the prompt is stuck. On a TTY
+          // the announce line animates with elapsed time and clears when
+          // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
-          stdout.write(`${startTag}backfill ${provider}: importing local history…\n`)
-          const entry = await backfill.run({ provider, dryRun, retentionDays, until })
+          const entry = await withSpinner(
+            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            () => backfill.run({ provider, dryRun, retentionDays, until })
+          )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
           stdout.write(
