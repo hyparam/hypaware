@@ -303,8 +303,8 @@ function legacyNumberedPromptFactory(opts) {
  * list indented under it, and `Continue?` alone on the last line where a
  * reader's eye lands. Same facts, same order, scannable.
  *
- * A stdin that ends without a line (`hyp init < /dev/null`, a closed
- * terminal, a pipe that has already been drained) is read through
+ * A stdin that ends without a line (a terminal that dropped, a scripted
+ * run whose input runs out before the commit point) is read through
  * `queuedLineAsker` rather than `rl.question`, whose promise is left
  * permanently unsettled at EOF. The unanswerable question falls to the
  * default it prints, which is the same answer a bare Enter gives, so the

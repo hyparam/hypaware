@@ -2,8 +2,12 @@
 
 // The wizard's three legacy readline prompts on a stdin that can no longer
 // answer. `rl.question()` leaves its promise permanently unsettled at EOF,
-// so `hyp init < /dev/null` (or any run whose terminal drops) hung on the
-// prompt forever instead of taking the default it had just printed. Each
+// so a scripted run whose input runs out (or any run whose terminal drops)
+// hung on the prompt forever instead of taking the default it had just
+// printed. `hyp clients enable < /dev/null` reaches the backfill consent
+// directly; the wizard's own prompts are reached once its earlier screens
+// are answered, since `wizard/fork.js` still asks through `rl.question`
+// and so still hangs a fully unanswered `hyp init`. Each
 // case below is raced against a timer, because the pre-fix failure mode is
 // a hang rather than a wrong value and an unraced assertion would never
 // run at all.
