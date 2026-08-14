@@ -299,17 +299,26 @@ function legacyNumberedPromptFactory(opts) {
  * list indented under it, and `Continue?` alone on the last line where a
  * reader's eye lands. Same facts, same order, scannable.
  *
+ * A stdin that ends without a line (`hyp init < /dev/null`, a closed
+ * terminal, a pipe that has already been drained) is read through
+ * `queuedLineAsker` rather than `rl.question`, whose promise is left
+ * permanently unsettled at EOF. The unanswerable question falls to the
+ * default it prints, which is the same answer a bare Enter gives, so the
+ * on-screen `[y/N]` stays the whole contract.
+ *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
  * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
+ * @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default instead of waiting on an answer that can never come
  */
 export function defaultOverwriteConfirmFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function (targetPath) {
     const rl = readline.createInterface({ input, output, terminal: false })
+    const askLine = queuedLineAsker(rl, input, output)
     try {
-      const answer = await rl.question(
+      const answer = await askLine(
         '\n' +
         `This config will be rewritten from your picks:\n` +
         `  ${targetPath}\n` +
@@ -319,7 +328,10 @@ export function defaultOverwriteConfirmFactory(opts) {
         '\n' +
         'Continue? [y/N]: '
       )
-      return /^y(es)?$/i.test(answer.trim())
+      // `null` is EOF. Reading it as the empty line keeps one parse for both,
+      // so the default this branch takes cannot drift from the default the
+      // printed question advertises.
+      return /^y(es)?$/i.test((answer ?? '').trim())
     } finally {
       rl.close()
     }
@@ -417,6 +429,7 @@ function legacyConfirmSelectPromptFactory(opts) {
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function ask(question) {
     const rl = readline.createInterface({ input, output, terminal: false })
+    const askLine = queuedLineAsker(rl, input, output)
     try {
       // @ref LLP 0135#progress [implements]: the non-TUI fallback prints the position too
       if (question.progress) output.write(`\n${question.progress}`)
@@ -430,9 +443,13 @@ function legacyConfirmSelectPromptFactory(opts) {
       })
       const fallback = question.default ?? question.options[0].value
       const fallbackIdx = question.options.findIndex((o) => o.value === fallback)
-      const answer = await rl.question(
+      // `askLine` rather than `rl.question`, which never settles at EOF. The
+      // gate prints its default in the prompt (`select [2]`), so a stdin that
+      // can no longer answer takes that default instead of hanging the wizard.
+      // @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default
+      const answer = (await askLine(
         question.allowBack ? `select [${fallbackIdx + 1}, b back]: ` : `select [${fallbackIdx + 1}]: `
-      )
+      )) ?? ''
       // The readline form of the TUI's escape (LLP 0191).
       if (question.allowBack && answer.trim().toLowerCase() === 'b') throw new PromptBackRequestedError()
       const n = Number.parseInt(answer.trim(), 10)
@@ -497,10 +514,14 @@ function legacyBackfillConsentPromptFactory(opts) {
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function ({ providers, retentionDays }) {
     const rl = readline.createInterface({ input, output, terminal: false })
+    const askLine = queuedLineAsker(rl, input, output)
     try {
-      const answer = await rl.question(`${backfillConsentTitle(providers, retentionDays)} [Y/n]: `)
-      const trimmed = answer.trim().toLowerCase()
-      // Default yes: only an explicit no opts out.
+      // `askLine` rather than `rl.question`, which never settles at EOF.
+      // @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default
+      const answer = await askLine(`${backfillConsentTitle(providers, retentionDays)} [Y/n]: `)
+      const trimmed = (answer ?? '').trim().toLowerCase()
+      // Default yes: only an explicit no opts out, and EOF is read as the
+      // bare Enter the `[Y/n]` advertises rather than as a hang.
       return !(trimmed === 'n' || trimmed === 'no')
     } finally {
       rl.close()
