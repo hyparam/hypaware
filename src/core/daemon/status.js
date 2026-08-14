@@ -1035,10 +1035,18 @@ export async function collectHypAwareStatus(opts = {}) {
     remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
   if (remoteConfig?.lastRollback) {
+    // The three values in this message are display-only, and none of them is
+    // this build's own: the etag is whatever the joined server served, and
+    // all three come back through `config-control/state.json`, which is read
+    // with no validation beyond "is an object". A diagnostic message is a
+    // render for a person, so they are cleaned here rather than in
+    // `readConfigControlStatus`, whose result also feeds `--json`.
+    // @ref LLP 0225#decision [implements]: the message a person reads is cleaned; the machine copy of the same values is not
+    const rolledBack = remoteConfig.lastRollback
     diagnostics.push({
       severity: 'warning',
       kind: 'remote_config_rolled_back',
-      message: `remote config ${remoteConfig.lastRollback.etag} rolled back at ${remoteConfig.lastRollback.at} (${remoteConfig.lastRollback.reason})`,
+      message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
       repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
     })
   }

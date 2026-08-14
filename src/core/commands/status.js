@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
@@ -290,6 +291,41 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
+ * How much of an `error:` line a hostile file may spend. Wider than a label's
+ * 120, because unlike a name this carries a real error message - typically an
+ * fs or parser error naming a full path - and the clamp exists to stop the
+ * line being bloated, not to bound an identifier. Cutting a path short is the
+ * one way this cleaning could cost a reader an answer.
+ */
+const MAX_ERROR_CHARS = 400
+
+/**
+ * A string on its way into the text surface, made safe to print.
+ *
+ * `renderStatusText` is the last point before a terminal, and not everything
+ * it interpolates was written by this build. The remote-config block prints
+ * etags authored by whatever server the install joined, read back through a
+ * local state file that nothing validates; the client block prints an attach
+ * probe's error, which for a settings file that is not valid JSON is
+ * `JSON.parse`'s message and therefore quotes an excerpt of that file
+ * verbatim. Either can carry an escape sequence that repaints the operator's
+ * screen or a newline that forges a plausible extra status line.
+ *
+ * Cleaning happens here rather than in the collector because `--json` renders
+ * the same values for a program, which escapes for itself and must receive
+ * what was actually recorded (LLP 0225): escaping is a render's job, and only
+ * of the render a person reads.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ * @ref LLP 0225#decision [implements]: the text surface escapes what a person reads; --json stays byte-exact
+ */
+function printable(value, max) {
+  return sanitizeLabel(value, max) ?? ''
+}
+
+/**
  * Render the V1 status report as human-friendly text. Mirrors the
  * JSON shape but groups sections and surfaces diagnostics + repair
  * suggestions at the bottom.
@@ -361,7 +397,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       state.push(c.configured ? 'configured' : 'not in config')
       state.push(c.attached ? 'attached' : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
-      if (c.error) stdout.write(`        error: ${c.error}\n`)
+      // The probe's error is not this build's prose: a settings file that is
+      // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
+      // an excerpt of the file back. The client wrote that file, so it is
+      // cleaned on the way into the line.
+      if (c.error) stdout.write(`        error: ${printable(c.error, MAX_ERROR_CHARS)}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -460,16 +500,21 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // show. A never-joined install keeps the V1 status surface.
   const rc = report.remoteConfig
   if (rc && (rc.runningEtag || rc.probation || rc.lastRollback || rc.badEtag)) {
+    // Every value in this block is remote-authored or read back out of a
+    // local state file that nothing validates, and all of it is display-only
+    // here, so all of it is cleaned at the interpolation. An etag is whatever
+    // the joined server put in the header; a `reason` and a timestamp are
+    // this build's own vocabulary only if this build wrote the file.
     stdout.write('  remote config:\n')
-    if (rc.runningEtag) stdout.write(`    running etag:  ${rc.runningEtag}\n`)
+    if (rc.runningEtag) stdout.write(`    running etag:  ${printable(rc.runningEtag)}\n`)
     if (rc.probation) {
-      stdout.write(`    probation:     ${rc.probation.etag} until ${rc.probation.until}\n`)
+      stdout.write(`    probation:     ${printable(rc.probation.etag)} until ${printable(rc.probation.until)}\n`)
     }
     if (rc.lastRollback) {
-      stdout.write(`    last rollback: ${rc.lastRollback.etag} at ${rc.lastRollback.at} (${rc.lastRollback.reason})\n`)
+      stdout.write(`    last rollback: ${printable(rc.lastRollback.etag)} at ${printable(rc.lastRollback.at)} (${printable(rc.lastRollback.reason)})\n`)
     }
     if (rc.badEtag) {
-      stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+      stdout.write(`    bad etag:      ${printable(rc.badEtag.etag)} (${printable(rc.badEtag.reason)})\n`)
     }
   }
 
