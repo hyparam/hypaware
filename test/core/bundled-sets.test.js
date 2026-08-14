@@ -19,7 +19,7 @@ test('the default-activation allowlist and the excluded set are disjoint', () =>
     [],
     `plugin(s) ${overlap.join(', ')} appear in both V1_BUNDLED_PLUGIN_ALLOWLIST and `
     + 'V1_EXCLUDED_FROM_DEFAULT: discoverBundledPlugins checks the allowlist first, so '
-    + 'these would load by default while ridersInDefaultSet treats them as excluded. '
+    + 'these land in its `loaded` bucket while ridersInDefaultSet treats them as excluded. '
     + 'Remove the name from whichever set does not match its intended default-activation '
     + 'boundary.'
   )
