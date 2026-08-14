@@ -16,9 +16,9 @@ import { classifyClientProvenance } from './provenance.js'
 
 /**
  * The join phase's org-config convergence budget (LLP 0129: "seconds to a
- * minute"). Reuses the login lane's own reconcile-wait via
- * `waitForCentralConverge`; this is the ceiling the wizard is willing to
- * block for a locked picker before falling through to an unlocked one.
+ * minute"). `waitForCentralConverge` polls for the applied org-config slot
+ * on disk (LLP 0223); this is the ceiling the wizard is willing to block
+ * for a locked picker before falling through to an unlocked one.
  */
 export const ORG_CONFIG_WAIT_MS = 60000
 

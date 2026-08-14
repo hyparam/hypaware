@@ -399,7 +399,7 @@ export interface RunWizardJoinOptions {
   waitForConverge?: (
     opts: { env: NodeJS.ProcessEnv },
     waitOpts: { timeoutMs?: number, intervalMs?: number }
-  ) => Promise<{ ok: boolean, attached: string[] }>
+  ) => Promise<{ ok: boolean }>
   /**
    * Override layered-config resolution (tests inject a fixture). Defaults
    * to `resolveLayeredConfigFromDisk` over the on-disk local + central
