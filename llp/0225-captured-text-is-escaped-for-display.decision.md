@@ -92,8 +92,9 @@ Consequences accepted with this:
   legibility than the ambiguity does. The ambiguity is cosmetic, and neither
   spelling can move a cursor.
 - A newline inside a `table` cell now prints as `\n` instead of breaking the
-  row. That is a visible change to multi-line prose, and it is the point: a
-  newline in a cell is how a captured value forges a row.
+  row, and a newline in a `markdown` cell prints as `\n` rather than being
+  flattened to a space. That is a visible change to multi-line prose, and it
+  is the point: a newline in a cell is how a captured value forges a row.
 
 **One vocabulary, two policies.** {#one-vocabulary}
 
@@ -160,10 +161,14 @@ this one.
 
 ## Verification {#verification}
 
-Unit tests, each shown failing against the pre-fix source before being kept:
-`ESC` in a `table` cell, `ESC` and bidi in a `markdown` cell, `json`/`jsonl`
-byte-exactness, non-ASCII and emoji survival, and column alignment with an
-escaped cell.
+Unit tests. Six were shown failing against the pre-fix source before being
+kept: `ESC` in a `table` cell, `ESC` and bidi in a `markdown` cell, a newline
+that cannot forge a row, tab/CR spellings, column alignment with an escaped
+cell, and the `--output` receipt. Two more pass pre-fix by construction and
+guard preserved behaviour rather than the fix: `json`/`jsonl` byte-exactness
+(fails if the escape is ever applied to a machine format) and non-ASCII and
+emoji survival (fails if the display class is widened to the zero-width
+group). Both were confirmed by mutating the code they guard.
 
 **Not verified:** no test here renders into a real terminal emulator. The claim
 that `\u001b` is inert, and that a raw `ESC` sequence is not, rests on the

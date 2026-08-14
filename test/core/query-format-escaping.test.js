@@ -96,6 +96,17 @@ test('column widths and alignment survive an escaped cell', () => {
   assert.equal(second.indexOf('B'), width + 2)
 })
 
+test('table column width is measured on the escaped header, not the raw column name', () => {
+  // The column name itself carries the control character here, not a cell
+  // value: widths must come from `headers[i]`, the already-escaped text,
+  // or the header and its column drift out of alignment.
+  const out = renderResult(set([{ [`h${ESC}`]: 'x', tail: 'A' }]), 'table')
+  const [, divider, row] = out.trimEnd().split('\n')
+  const width = `h${ESC}`.replace(ESC, '\\u001b').length
+  assert.equal(divider.split('  ')[0].length, width)
+  assert.equal(row.indexOf('A'), width + 2)
+})
+
 test('the spill receipt escapes its preview but the file it wrote does not', () => {
   const rows = [{ c: `a${RLO}b` }, { c: `d${ESC}e` }]
   const out = buildQuerySqlOutput(set(rows), {

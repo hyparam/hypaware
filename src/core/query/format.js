@@ -341,8 +341,6 @@ export function buildQuerySqlOutput(full, opts) {
  * result went, its shape, and a small truncated preview so the caller can
  * sanity-check without ingesting the file.
  *
- * @param {string} outputPath
- * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
  * The receipt is a human-facing render in its own right, whatever
  * `--format` the file got, so its preview is escaped too. It is escaped one
  * rendered line at a time: the newlines between preview rows are structure
@@ -350,6 +348,8 @@ export function buildQuerySqlOutput(full, opts) {
  *
  * @ref LLP 0225#decision [constrained-by]: the receipt is a human render, so it escapes
  *
+ * @param {string} outputPath
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
  * @param {string} content  the already-rendered file content (sized for the receipt)
  * @returns {string}
  */

@@ -703,7 +703,7 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
     // An unlabelled row only reaches the table if it carried tokens, which
     // today it never does. If that changes, name it for what it is rather
     // than dropping measured tokens on the floor.
-    truncate(escapeForDisplay(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)'), MAX_MODEL_WIDTH),
+    escapeForDisplay(truncate(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)', MAX_MODEL_WIDTH)),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
@@ -841,7 +841,7 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
 export function renderToolMix(rows, color, showSql = false, sql = '') {
   const max = Math.max(...rows.map((r) => toNumber(r.calls)))
   const body = rows.map((r) => [
-    truncate(cell(r.tool_name), MAX_MODEL_WIDTH),
+    cell(r.tool_name, MAX_MODEL_WIDTH),
     formatCount(r.calls),
     formatCount(r.sessions),
     paint(bar(toNumber(r.calls), max), ANSI.cyan, color),
@@ -1022,14 +1022,21 @@ function bar(value, max) {
  * bars and headings are painted, so a sweep over the finished table would
  * erase the colour along with the attack.
  *
+ * `width`, when given, clips the raw trimmed value before escaping rather
+ * than after: escaping first can cut a `\uXXXX` escape in half at the
+ * boundary, so the clip always runs on the raw text.
+ *
  * @ref LLP 0225#decision [implements]: the same rule on `hyp query overview`, per captured cell
  *
  * @param {unknown} value
+ * @param {number} [width]
  * @returns {string}
  */
-function cell(value) {
+function cell(value, width) {
   if (value === null || value === undefined) return '(none)'
-  const text = escapeForDisplay(String(value).trim())
+  const trimmed = String(value).trim()
+  const clipped = width === undefined ? trimmed : truncate(trimmed, width)
+  const text = escapeForDisplay(clipped)
   return text.length === 0 ? '(none)' : text
 }
 
