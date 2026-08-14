@@ -663,7 +663,11 @@ export async function runInitWizard(opts) {
   // only - the hold itself was written by the join lane's login). Keyed
   // on the remembered join, like the abort narration above: enrollment
   // survives a back through the fork (LLP 0191 #join-not-undone).
-  const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts) : null
+  // `offerFollows` mirrors the sync offer's own gate below, so the
+  // narration drops its `hyp sync` sentence exactly when the offer is
+  // about to state the same thing as a choice.
+  const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
+  const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
 
   // ...and then the offer to end the wait. It sits between the narration
   // and the first ask because it is an action on what the narration just
@@ -839,6 +843,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
         ...(opts.sources ? { sources: opts.sources } : {}),
         ...(opts.skills ? { skills: opts.skills } : {}),
         ...(opts.agents ? { agents: opts.agents } : {}),
+        // A boot with a broken plugin contributes a partial asset set. The
+        // finale still copies it; it must not read the hole as a retirement.
+        ...(opts.ctx.failedPlugins?.length ? { failedPlugins: opts.ctx.failedPlugins } : {}),
         config: picked.config,
         configPath: picked.configPath,
         env: opts.env,
@@ -868,10 +875,18 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
  * runs off the same read rather than racing a second one against a marker
  * `hyp sync` may have cleared in between.
  *
+ * `offerFollows` trims the `hyp sync` sentence: when the closing sync
+ * offer is about to render (the ordinary attended close), its "Send now"
+ * row states the same command and the same asks-first promise, so the
+ * sentence read as the wizard saying one thing twice in a row. Every path
+ * that ends without the offer (aborts, non-interactive, dry runs) keeps
+ * the sentence, because there it is the only sighting of the way out.
+ *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
+ * @param {{ offerFollows?: boolean }} [flags]
  * @returns {Promise<number | null>} the live deadline, or null when no hold applies
  */
-async function narratePrivacyIfTeamPath(opts) {
+async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
   /** @type {number|null} */
   let deadline = null
   try {
@@ -887,8 +902,10 @@ async function narratePrivacyIfTeamPath(opts) {
     `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history.\n` +
     'To review or exclude anything before then, run the hypaware-privacy\n' +
     'skill in Claude or Codex. `hyp status` shows the countdown.\n' +
-    'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
-    'before sending anything.\n'
+    (offerFollows
+      ? ''
+      : 'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
+        'before sending anything.\n')
   )
   return deadline
 }

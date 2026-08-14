@@ -306,6 +306,26 @@ export interface MaintenancePartitionReport {
   // which is the recorded count and not necessarily the live one. Set
   // whenever `compactionIneffective` is.
   compactionIneffectiveFiles?: number
+  // The partition is skipped because the one retry its writer generation
+  // owed it was spent by a rewrite that threw (LLP 0218). Never set with
+  // `compacted`, and never with `compactionIneffective`: a failed attempt
+  // records no verdict about the partition, so where a verdict exists that
+  // is the reason reported instead.
+  compactionAttemptFailed?: boolean
+  // When that attempt failed, as the cursor records it. Set whenever
+  // `compactionAttemptFailed` is.
+  compactionAttemptFailedAt?: string
+  // THIS tick's work on the partition ended in an error and the walk moved
+  // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
+  // off the cursor and says an EARLIER tick's attempt failed and nothing
+  // has been attempted since: the two never appear together, because a
+  // tick that attempted a rewrite is not a tick that skipped one.
+  failed?: boolean
+  // The error's own `errorKind` when it carries one, else
+  // `maintenance_partition_failed`. Set whenever `failed` is.
+  errorKind?: string
+  // The error's message. Set whenever `failed` is.
+  errorMessage?: string
 }
 
 export interface MaintenanceReport {
@@ -313,6 +333,11 @@ export interface MaintenanceReport {
   totalSnapshotsExpired: number
   totalCompacted: number
   totalRebaselined: number
+  // Partitions whose work threw during this tick. Non-zero means the walk
+  // completed but the tick is degraded: it did not maintain everything it
+  // set out to, and its callers report that rather than a clean run
+  // (LLP 0220#tick-reports-degraded).
+  totalFailed: number
   dryRun: boolean
   elapsedMs: number
 }

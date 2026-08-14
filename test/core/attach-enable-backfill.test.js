@@ -265,7 +265,7 @@ test('client with no registered backfill provider: the question is not asked at 
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 0, stderr.text())
 
-    assert.doesNotMatch(stdout.text(), /Import local/)
+    assert.doesNotMatch(stdout.text(), /Import the .* history/)
     assert.doesNotMatch(stdout.text(), /backfill claude:/)
   })
 })
@@ -285,6 +285,6 @@ test('OpenClaw never reaches the backfill question, even with a registered provi
     assert.equal(code, 0, stderr.text())
 
     assert.equal(ran, false)
-    assert.doesNotMatch(stdout.text(), /Import local/)
+    assert.doesNotMatch(stdout.text(), /Import the .* history/)
   })
 })

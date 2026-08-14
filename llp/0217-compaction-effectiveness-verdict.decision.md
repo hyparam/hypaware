@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-13
 **Related:** LLP 0199 (the baseline gate this extends), LLP 0209 (the writer change that made a stale verdict reachable), LLP 0027 (the re-settle baseline the gate was built from)
+**Extended-by:** [LLP 0218](./0218-compaction-failed-attempt-reported.decision.md) (the stamp a failed retry writes carries no effectiveness claim, so the skip report below cannot speak for it: the stamp records when the attempt failed and the skip is reported on that instead)
 
 > The partition cursor records the data-file count a rewrite started from
 > beside the count it produced, so "the live count sits on its baseline" can be

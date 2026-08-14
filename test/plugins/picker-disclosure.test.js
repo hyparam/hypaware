@@ -105,10 +105,11 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
 
 // The real machine change (managed plist, helper write, residue clear) sits
 // behind `needs_setup: true` + `configure_command: "claude-desktop install"`,
-// and that command explains and asks, defaulting to no, before touching
-// anything (`claude-desktop/src/install.js` runInstall consent gate,
-// @ref LLP 0139#informed-consent). The reassurance is load-bearing on a row
-// whose other clause ("admin approval") reads as a sudo ambush without it.
+// and that command explains and asks - defaulting to yes, naming the
+// browser sign-in a yes may launch - before touching anything
+// (`claude-desktop/src/install.js`, @ref LLP 0139#informed-consent as
+// amended). The reassurance is load-bearing on a row whose other clause
+// ("admin approval") reads as a sudo ambush without it.
 test('claude-desktop picker summary keeps the asks-before-changing reassurance', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
   assert.match(summary, /asks before changing anything/i)

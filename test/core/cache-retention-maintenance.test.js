@@ -926,6 +926,58 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
   }
 })
 
+// @ref LLP 0220#walk-survives-a-partition [tests]: a rebaseline is a cursor
+// write with no rewrite behind it, and `writeCursor` can throw same as any
+// other write in this loop. `r.rebaselined` must not be set until that write
+// has actually landed, or a tick that lost this partition would still print
+// "rebaselined" and count it in `totalRebaselined` for a cursor that never
+// changed (round-1 review finding 2).
+test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace-write-fail')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same stale-baseline cursor as the passing recognition test: this is
+    // the fixture that would otherwise re-baseline cleanly.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // `writeCursor` writes `cursor.json` directly into the partition dir,
+    // so making the dir read-only fails exactly that write and nothing
+    // upstream of it (the read of the epoch dir's own metadata is
+    // unaffected).
+    await fs.chmod(partDir, 0o555)
+    try {
+      const report = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(report.partitions[0].failed, true, 'fixture invariant: the cursor write must fail')
+      assert.notEqual(
+        report.partitions[0].rebaselined, true,
+        'a rebaseline that never landed on disk must not be reported as one'
+      )
+      assert.equal(report.totalRebaselined, 0, 'an unpersisted rebaseline must not be counted')
+    } finally {
+      await fs.chmod(partDir, 0o755)
+    }
+
+    // The cursor on disk still carries the pre-rebaseline baseline: the
+    // write failure must not have partially landed.
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction)
+    assert.equal(compaction.resettleBaselineFiles, 99)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('foreign sorted replace recognition works on the source-table layout', async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-source')
   try {
@@ -1089,7 +1141,27 @@ test('a partition already due for compaction skips the resettle-candidate row sc
   // read, so it attributes each read to its caller instead of only counting
   // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
   // footer-stats probe, would not falsely implicate the scan).
+  //
+  // A stack-based observation can go blind: the deciding frame sits ~8 frames
+  // below the mock, and V8's default `Error.stackTraceLimit` of 10 leaves only
+  // two frames of headroom. Three more frames anywhere between the mock and
+  // the caller (an icebird refactor, extra node:test mock internals, a wrapper
+  // in `resolver.js`) would drop it, and a negative "no stack mentions
+  // `hasResettleCandidate`" assertion passes vacuously on truncated stacks.
+  // Two guards keep that from happening silently:
+  //   1. raise `Error.stackTraceLimit` while the mock is installed (restored
+  //      below even if the test throws), which removes the hazard outright;
+  //   2. assert positively that some stack names `compactGeneration`, the
+  //      legitimate reader. It calls `scanRowsFromTable` from exactly the same
+  //      depth as `hasResettleCandidate` does, so any truncation deep enough
+  //      to hide the frame the negative assertion hunts for also hides this
+  //      one, and the test fails loudly instead of going quiet. Asserting on
+  //      `scanRowsFromTable` itself would not do: it sits one frame shallower
+  //      and survives truncation that has already blinded the real check.
+  // Guard 2 also catches the `?? ''` fallback below storing an unattributable
+  // empty string.
   const cacheRoot = await makeTmpDir('maint-scan-skip')
+  const originalStackTraceLimit = Error.stackTraceLimit
   try {
     const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
     const epoch0 = path.join(partDir, 'epoch=0')
@@ -1104,6 +1176,7 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     /** @type {string[]} */
     const stacks = []
     const original = fsSync.readFileSync
+    Error.stackTraceLimit = 50
     t.mock.method(fsSync, 'readFileSync', function (p, ...rest) {
       if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
       return original.call(this, p, ...rest)
@@ -1122,12 +1195,17 @@ test('a partition already due for compaction skips the resettle-candidate row sc
     assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
 
     assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
+    assert.ok(
+      stacks.some((s) => s.includes('compactGeneration')),
+      'sanity: captured stacks must be deep enough to name the reader, or the assertion below passes vacuously'
+    )
     assert.deepEqual(
       stacks.filter((s) => s.includes('hasResettleCandidate')),
       [],
       'the resettle scan must not read the data file'
     )
   } finally {
+    Error.stackTraceLimit = originalStackTraceLimit
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })

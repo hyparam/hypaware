@@ -125,7 +125,7 @@ test('runWizardJoin: a non-zero login exit returns the classified failure and ne
   let waited = false
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 1, reason: 'no_membership', stderr: 'hyp remote login: not a member\n' }),
-    waitForConverge: async () => { waited = true; return { ok: true, attached: ['claude'] } },
+    waitForConverge: async () => { waited = true; return { ok: true } },
   })
   const out = await runWizardJoin(opts)
   assert.deepEqual(out, { status: 'failed', detail: 'hyp remote login: not a member\n', reason: 'no_membership' })
@@ -160,7 +160,7 @@ test('runWizardJoin: on convergence, locks exactly the central-layer picker rows
   )
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
-    waitForConverge: async () => ({ ok: true, attached: ['claude'] }),
+    waitForConverge: async () => ({ ok: true }),
     resolveLayered: async () => lc,
   })
   const out = await runWizardJoin(opts)
@@ -175,7 +175,7 @@ test('runWizardJoin: convergence with no central-owned rows locks nothing', asyn
   const lc = layered(['@hypaware/claude'], ['@hypaware/claude', '@hypaware/codex'])
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
-    waitForConverge: async () => ({ ok: true, attached: ['claude'] }),
+    waitForConverge: async () => ({ ok: true }),
     resolveLayered: async () => lc,
   })
   const out = await runWizardJoin(opts)
@@ -191,7 +191,7 @@ test('runWizardJoin: a convergence timeout narrates and returns an empty lock se
   let resolved = false
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
-    waitForConverge: async () => ({ ok: false, attached: [] }),
+    waitForConverge: async () => ({ ok: false }),
     // resolveLayered must never run on the timeout path (nothing to lock).
     resolveLayered: async () => { resolved = true; return layered([], []) },
   })
@@ -207,7 +207,7 @@ test('runWizardJoin: passes the org-config wait budget through to the converge h
   let sawWaitOpts = null
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
-    waitForConverge: async (_o, waitOpts) => { sawWaitOpts = waitOpts; return { ok: false, attached: [] } },
+    waitForConverge: async (_o, waitOpts) => { sawWaitOpts = waitOpts; return { ok: false } },
   })
   await runWizardJoin(opts)
   assert.ok(sawWaitOpts && typeof sawWaitOpts.timeoutMs === 'number' && sawWaitOpts.timeoutMs > 0)
