@@ -525,7 +525,10 @@ export function backfillConsentTitle(providers, retentionDays) {
   const list = names.length > 1
     ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
     : (names[0] ?? '')
-  return `Import local ${list} history now (last ${retentionDays} days)?`
+  // "up to", not "last N days": the retention window caps the import, but
+  // each client keeps far less on disk (Claude prunes after ~30 days), so
+  // promising the full window would overstate what the import can deliver.
+  return `Import the ${list} history already on this machine (up to ${retentionDays} days)?`
 }
 
 /**
