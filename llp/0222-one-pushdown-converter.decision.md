@@ -16,8 +16,8 @@
 
 ## Context {#context}
 
-Two converters existed. `src/core/query/parquet-pushdown.js` (the cache tier,
-via `parquet-source.js`) and `icebird/src/sql/whereFilter.js` (the archive
+Two converters existed. `src/core/query/parquet-pushdown.js` (the archive tier,
+via `parquet-source.js`) and `icebird/src/sql/whereFilter.js` (the cache
 tier, via `icebergDataSource`) both began as ports of the Hyperparam app's
 `lib/tools/parquetPushdownFilter.ts`. Same function names, same structure,
 same De Morgan comments. They then drifted in *opposite* directions:
@@ -28,7 +28,7 @@ same De Morgan comments. They then drifted in *opposite* directions:
   constant-folds that shape (`staticLiteral` / `foldCast`); the kernel's copy
   required a bare `literal` operand, and because AND is all-or-nothing the
   whole predicate declined, so every timestamp-bounded query scanned the
-  cache tier unpruned. Measured on the production central server, org
+  archive tier unpruned. Measured on the production central server, org
   `hyperparam`, 2026-08-12: 11.4s bounded on `message_created_at` versus
   7.3s bounded on `date`, same rows, same projection. icebird also gated the
   boolean-position cast unwrap that let `WHERE CAST(a = 1 AS TEXT)` push a
@@ -89,10 +89,10 @@ INT64 and disabled bloom pruning everywhere else.
 
 ## Consequences {#consequences}
 
-- Timestamp-bounded predicates prune the cache tier; the truthiness-cast
+- Timestamp-bounded predicates prune the archive tier; the truthiness-cast
   bug is gone; bloom pruning is restored for non-INT64 numerics.
 - The cache tier and archive tier answer the same predicate with the same
-  rows. Issue #744 (the archive tier's NULL wrongness) is closed by the
+  rows. Issue #744 (the cache tier's NULL wrongness) is closed by the
   same bump that lands this.
 - Issue #734 is closed outright: `NOT (col LIKE 'a%')` and every other
   negation of a declined subtree is now answered correctly by the engine.
