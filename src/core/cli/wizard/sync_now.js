@@ -69,6 +69,11 @@ export async function runWizardSyncNow(opts) {
         if (opts.interactive === false || !canPrompt) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
+          // The privacy narration above dropped its `hyp sync` sentence on
+          // the expectation this step would offer the release as a choice.
+          // A run that cannot prompt still owes the reader the way out, so
+          // the skip states it instead of asking (LLP 0188 #never-silent).
+          opts.stdout.write('To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n')
           return { asked: false, reason: /** @type {const} */ ('not-interactive') }
         }
 
