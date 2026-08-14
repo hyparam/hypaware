@@ -35,8 +35,9 @@ const COLUMNS = [
  * Conversation-contiguous rows (the order `readRows` yields). Each
  * conversation repeats one wide `tools` blob; the blob differs per
  * conversation, so the column has `nConvs` distinct values total: enough
- * distinct ~20 KB blobs to exceed hyparquet-writer's 1 MiB dictionary cap
- * when they all land in one row group.
+ * distinct ~20 KB blobs to exceed the 1 MiB dictionary cap of
+ * hyparquet-writer < 0.16.6 when they all land in one row group (the shape
+ * that used to bust the dictionary; kept as a regression canary).
  *
  * @param {number} nConvs
  * @param {number} rowsPerConv
@@ -76,7 +77,11 @@ function columnEncodings(bytes) {
 const N_CONVS = 70
 const ROWS_PER_CONV = 8
 
-test('without clustering, a wide per-conversation column falls back to PLAIN (the bug)', async () => {
+test('without clustering, a wide per-conversation column stays dictionary-encoded (hyparquet-writer#35)', async () => {
+  // Under hyparquet-writer < 0.16.6 this shape busted the ~1 MiB dictionary
+  // cap and exploded to PLAIN (the bug that motivated clustering). Since
+  // 0.16.6 the writer keeps any dictionary that at least halves the encoded
+  // bytes, so the dictionary must survive even in one whole-partition group.
   const encoder = await makeEncoder()
   const blob = await encoder.encodePartition(
     { dataset: 'ai_gateway_messages', partition: {} },
@@ -87,12 +92,12 @@ test('without clustering, a wide per-conversation column falls back to PLAIN (th
   assert.equal(rowGroups, 1, 'all rows land in a single default row group')
   const tools = encodingsByColumn.get('tools') ?? new Set()
   assert.ok(
-    !tools.has('RLE_DICTIONARY') && !tools.has('PLAIN_DICTIONARY'),
-    `expected tools to be PLAIN (dictionary busted), got ${[...tools].join(',')}`
+    tools.has('RLE_DICTIONARY'),
+    `expected tools to stay dictionary-encoded without clustering, got ${[...tools].join(',')}`
   )
 })
 
-test('with clustering, the wide column stays dictionary-encoded and the file shrinks', async () => {
+test('with clustering, the wide column stays dictionary-encoded at no size cost', async () => {
   const encoder = await makeEncoder()
 
   const plain = await encoder.encodePartition(
@@ -118,11 +123,14 @@ test('with clustering, the wide column stays dictionary-encoded and the file shr
     `expected tools to be dictionary-encoded under clustering, got ${[...tools].join(',')}`
   )
 
-  // Same rows, same codec: the only difference is row-group clustering, which
-  // keeps the repeated blob stored once per group instead of once per row.
+  // Since hyparquet-writer 0.16.6 the unclustered write dictionary-encodes
+  // too (the 3x shrink this test used to assert came from the old dictionary
+  // bust). Clustering now buys bounded memory and read locality; encoding-wise
+  // it must simply cost nothing: per-group dictionaries repeat some entries,
+  // so allow a modest overhead but nothing near the old PLAIN blowup.
   assert.ok(
-    clustered.bytesWritten * 3 < plain.bytesWritten,
-    `clustered export should be far smaller: clustered=${clustered.bytesWritten} plain=${plain.bytesWritten}`
+    clustered.bytesWritten < plain.bytesWritten * 1.5,
+    `clustered export should cost no material size overhead: clustered=${clustered.bytesWritten} plain=${plain.bytesWritten}`
   )
 })
 

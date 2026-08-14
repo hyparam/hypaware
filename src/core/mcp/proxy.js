@@ -69,8 +69,10 @@ export async function runMcpProxy({ target, ctx }) {
   let sessionId
   const log = getLogger('mcp')
   log.info('mcp.proxy_start', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy', target, url: mcpUrl })
-  // Lifecycle line to stderr: stdout is the protocol channel.
-  ctx.stderr.write(`hyp mcp: proxying stdio → ${mcpUrl} (target '${target}')\n`)
+  // Lifecycle line to stderr: stdout is the protocol channel. `note:`, not
+  // the `hyp mcp:` prefix the failures above use - this one is a successful
+  // startup banner, and on stderr the `hyp <cmd>:` shape means a diagnostic.
+  ctx.stderr.write(`note: mcp proxying stdio → ${mcpUrl} (target '${target}')\n`)
 
   /** Forward one message to the remote with the given bearer token. */
   const forward = (/** @type {any} */ message, /** @type {string} */ token) => {

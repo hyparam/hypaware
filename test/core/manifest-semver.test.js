@@ -140,6 +140,17 @@ test('validateManifest rejects a non-boolean needs_setup', () => {
   assert.equal(result.message, 'contributes.picker needs_setup must be a boolean when present')
 })
 
+test('validateManifest rejects a non-boolean hidden', () => {
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', hidden: 'yes' }] }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker hidden must be a boolean when present')
+})
+
+test('validateManifest accepts a hidden picker row', () => {
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', hidden: true }] }))
+  assert.equal(result.ok, true)
+})
+
 test('matchesSemverRange covers exact, wildcard, caret, tilde, and comparisons', () => {
   assert.equal(matchesSemverRange('1.2.3', '1.2.3'), true)
   assert.equal(matchesSemverRange('1.2.3', '*'), true)

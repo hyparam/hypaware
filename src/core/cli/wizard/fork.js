@@ -12,29 +12,37 @@ import readline from 'node:readline/promises'
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { select } from '../tui/index.js'
-import { isPromptCancelledError } from '../tui/runtime.js'
+import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { shouldUseTui } from '../tui-router.js'
+import { useColor } from '../stdio.js'
 
-const FORK_TITLE = 'Join a team, or set up HypAware locally?'
+const FORK_TITLE = 'How do you want to collect agent logs?'
+
+const FORK_INTRO =
+  'HypAware records the sessions, logs, and telemetry from your AI agents (Claude, Codex) into one queryable history.'
 
 /**
  * The wizard's top-level pathway fork.
  *
- * "Join a team" or "Local install and configuration", with quit as the
- * safe default on a bare enter or a cancelled prompt - the wizard never
- * reconfigures by accident. An enrolled machine never reaches this
- * prompt: `evaluateReturningGate` below short-circuits straight to the
- * scoped re-entry instead of presenting the fork again.
+ * Collect locally or collect shared, with quit as the safe default on a
+ * bare enter or a cancelled prompt - the wizard never reconfigures by
+ * accident. Every machine reaches this prompt, enrolled or not
+ * (LLP 0182): a managed machine's Reconfigure comes through here too,
+ * carrying its org rows in as a locked set.
  *
  * @ref LLP 0129#fork [implements]: the wizard's first question is the
- *   pathway fork ("Join a team" / "Local install and configuration");
- *   quit is the safe default on a bare enter.
+ *   pathway fork (local vs shared collection); quit is the safe default
+ *   on a bare enter.
  *
  * @param {RunWizardForkOptions} opts
  * @returns {Promise<WizardForkChoice>}
  */
 export async function runWizardFork(opts) {
   const log = getLogger('wizard')
+  // @ref LLP 0211#explain-first [implements]: the fork is the wizard's
+  //   first screen, and its question only makes sense once the user
+  //   knows what HypAware does, so one intro line precedes it.
+  opts.stdout.write(`${FORK_INTRO}\n\n`)
   const options = buildForkOptions()
   const choice = await withSpan(
     'wizard.fork',
@@ -55,25 +63,34 @@ export async function runWizardFork(opts) {
  * so both the TUI and legacy prompts, and tests, share one source of
  * truth for the choices and their default.
  *
+ * Shared leads: it is the pathway that pays off across machines and
+ * harnesses, not just for teams, and a menu that lists it second reads
+ * as the advanced option. (An explicit "recommended" tag is held back
+ * while shared collection is in beta; the ordering and summaries do
+ * the guiding.) Each real row carries a one-line summary because the
+ * labels alone cannot both guide the choice and disclose its cost:
+ * the shared row's summary states the value and the sign-in it will
+ * ask for, the local row's states the boundary and that the choice is
+ * revisitable. Quit stays bare.
+ *
+ * @ref LLP 0211#collect-labels [implements]: shared first, with row
+ *   summaries carrying the guidance and the sign-in disclosure.
+ *
  * @returns {ConfiguredMenuOption[]}
  */
 export function buildForkOptions() {
   return [
     {
       value: 'team',
-      label: 'Join a team',
-      summary: 'Enroll with your org and pick up its shared config.',
+      label: 'Collect shared agent logs',
+      summary: 'One history that follows you across machines and harnesses, and can be shared with your team. You will be asked to sign in.',
     },
     {
       value: 'local',
-      label: 'Local install and configuration',
-      summary: 'Set up HypAware on just this machine.',
+      label: 'Collect agent logs locally',
+      summary: 'Everything stays on this machine. You can switch to shared later by re-running hyp init.',
     },
-    {
-      value: 'quit',
-      label: 'Quit',
-      summary: 'Leave everything untouched.',
-    },
+    { value: 'quit', label: 'Quit' },
   ]
 }
 
@@ -90,12 +107,16 @@ async function promptForkChoice(opts, options) {
         options,
         default: 'quit',
         clearOnResolve: true,
+        ...(opts.allowBack ? { allowBack: true } : {}),
         stdin: opts.stdin ?? process.stdin,
         stdout: /** @type {any} */ (opts.stdout),
         env: opts.env,
       })
       return /** @type {WizardForkChoice} */ (String(choice))
     } catch (err) {
+      // Reachable only under `allowBack`: escape returns to the screen
+      // before the fork (the returning gate) instead of quitting.
+      if (isPromptBackError(err)) return 'back'
       if (isPromptCancelledError(err)) return 'quit'
       throw err
     }
@@ -114,33 +135,32 @@ async function promptForkChoice(opts, options) {
  * @returns {Promise<WizardForkChoice>}
  */
 export async function legacyForkPrompt(opts, options) {
-  const choice = await legacyMenuPrompt(opts, options, FORK_TITLE)
+  const choice = await legacyMenuPrompt(opts, options, FORK_TITLE, opts.allowBack === true)
   return /** @type {WizardForkChoice} */ (choice)
 }
 
 /**
  * The returning-install gate (LLP 0011), amended per LLP 0129
- * `#returning-gate`.
+ * `#returning-gate` and again per LLP 0182.
  *
  * A missing or invalid config is the first-run path, not the gate: the
  * caller falls straight through to `runWizardFork` (no pathway preset).
  * `managed` is still reported truthfully on that path, so a machine with
  * a central layer keeps its org rows locked (see the derivation below).
- * Once a valid config exists, a **managed** machine (the merged config
- * carries a central layer, LLP 0031) offers a scoped "adjust what this
- * machine collects" entry instead of dropping Reconfigure outright - no
- * fork, `runInitWizard` presets `pathway` to `'scoped'`. A **solo**
- * machine keeps `Reconfigure`, which re-enters the wizard at the fork
- * exactly as a first run does. Quit stays the default on a bare enter
- * either way (LLP 0011's never-reconfigure-by-accident rule, untouched).
+ * Once a valid config exists, every machine gets the same `Reconfigure`,
+ * which re-enters the wizard at the fork exactly as a first run does.
+ * `managed` (the merged config carries a central layer, LLP 0031) is
+ * still reported, because the caller locks the org's rows off it - but
+ * it no longer changes what the menu offers. Quit stays the default on a
+ * bare enter (LLP 0011's never-reconfigure-by-accident rule, untouched).
  *
  * This phase reads only the existing `hyp status` summary and its
  * central-layer check (`collectHypAwareStatus`); it has no dependency on
  * the picker-descriptor plumbing other wizard phases build on.
  *
- * @ref LLP 0129#returning-gate [implements]: a managed machine keeps a
- *   scoped re-entry instead of losing Reconfigure; a solo machine's
- *   Reconfigure re-enters the full fork.
+ * @ref LLP 0182#one-reconfigure [implements]: one Reconfigure for every
+ *   returning machine; `managed` survives as the locked-set input, not
+ *   as a menu branch.
  *
  * @param {EvaluateReturningGateOptions} opts
  * @returns {Promise<ReturningGateResult>}
@@ -165,58 +185,56 @@ export async function evaluateReturningGate(opts) {
     return { action: 'first-run', managed, report }
   }
 
-  renderConfigSummary({ report, locked: managed, stdout: opts.stdout })
-  const options = buildReturningGateOptions(managed)
-  const action = await promptReturningGateChoice(opts, options, managed)
+  renderConfigSummary({ report, locked: managed, stdout: opts.stdout, env: opts.env })
+  const options = buildReturningGateOptions()
+  const action = await promptReturningGateChoice(opts, options)
   log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action, managed })
   return { action, managed, report }
 }
 
 /**
- * The returning gate's menu, in display order. Managed machines never
- * see a bare `Reconfigure` (a local re-run would be a no-op against a
- * centrally-locked config); they get the scoped entry instead. Solo
- * machines keep `Reconfigure` as the full re-entry point.
+ * The returning gate's menu, in display order. One `Reconfigure` for
+ * every returning machine, managed or solo: an enrolled user who re-runs
+ * `hyp init` is usually there for the same reasons a solo user is, and a
+ * second entry that differed only in what it silently skipped taught
+ * nobody anything. What a managed machine cannot edit is shown where it
+ * is true - the picker dims the org's rows - rather than by removing the
+ * menu row that leads there.
  *
- * @param {boolean} managed
+ * Bare labels, no per-row summaries. This is a returning user on a
+ * working install: three self-describing verbs, each of which shows its
+ * own detail on the next screen (the picker dims the org-locked rows;
+ * status prints itself). A gloss under each row tripled the menu's
+ * height to restate the label, and the screen above it is the part
+ * worth reading.
+ *
+ * @ref LLP 0182#one-reconfigure [implements]: the gate's menu no longer
+ *   branches on `managed`
+ *
  * @returns {ConfiguredMenuOption[]}
  */
-export function buildReturningGateOptions(managed) {
-  /** @type {ConfiguredMenuOption[]} */
-  const options = managed
-    ? [
-      {
-        value: 'scoped-reconfigure',
-        label: 'Adjust what this machine collects',
-        summary: "Open the picker with your org's rows locked; local additions stay editable.",
-      },
-    ]
-    : [
-      {
-        value: 'reconfigure',
-        label: 'Reconfigure',
-        summary: 'Re-run the setup wizard from the top, including joining a team.',
-      },
-    ]
-  options.push({ value: 'status', label: 'See full status', summary: 'Print the detailed status report.' })
-  options.push({ value: 'quit', label: 'Quit', summary: 'Leave the current setup untouched.' })
-  return options
+export function buildReturningGateOptions() {
+  return [
+    { value: 'reconfigure', label: 'Reconfigure' },
+    { value: 'status', label: 'See full status' },
+    { value: 'quit', label: 'Quit' },
+  ]
 }
 
 /**
  * @param {EvaluateReturningGateOptions} opts
  * @param {ConfiguredMenuOption[]} options
- * @param {boolean} managed
  * @returns {Promise<ReturningGateAction>}
  */
-async function promptReturningGateChoice(opts, options, managed) {
-  const title = managed
-    ? 'This machine is managed by your fleet. What would you like to do?'
-    : 'What would you like to do?'
+async function promptReturningGateChoice(opts, options) {
   if (shouldUseTui({ stdin: opts.stdin, stdout: opts.stdout, env: opts.env })) {
     try {
+      // No title: `renderConfigSummary` already printed the gate's one
+      // headline just above, and the TUI's cursor + hint line make a
+      // second "what would you like to do?" restatement noise. The
+      // readline fallback below still asks the question, because a
+      // numbered list with no prompt reads as output, not a choice.
       const choice = await select({
-        title,
         options,
         default: 'quit',
         clearOnResolve: true,
@@ -230,7 +248,7 @@ async function promptReturningGateChoice(opts, options, managed) {
       throw err
     }
   }
-  return legacyReturningGatePrompt(opts, options, title)
+  return legacyReturningGatePrompt(opts, options)
 }
 
 /**
@@ -255,54 +273,55 @@ export async function legacyReturningGatePrompt(opts, options, title = 'What wou
  * `commands/init.js`'s retired configured-entry gate; defensive against
  * partial reports because gate tests drive it with minimal fixtures.
  *
- * @param {{ report: HypAwareStatusReport, locked: boolean, stdout: RunWizardForkOptions['stdout'] }} args
+ * The headline is the gate's only statement of where you stand, and it
+ * carries the prompt's bold weight because the menu below it renders
+ * without a title of its own: "set up" here plus "already configured" on
+ * the menu were two lines saying one thing.
+ *
+ * @param {{ report: HypAwareStatusReport, locked: boolean, stdout: RunWizardForkOptions['stdout'], env?: NodeJS.ProcessEnv }} args
  */
-export function renderConfigSummary({ report, locked, stdout }) {
-  stdout.write(locked ? 'HypAware is set up (managed by your fleet).\n\n' : 'HypAware is set up.\n\n')
+export function renderConfigSummary({ report, locked, stdout, env }) {
+  const title = 'HypAware is already configured.'
+  stdout.write(`${useColor(stdout, env) ? `\x1b[1m${title}\x1b[0m` : title}\n\n`)
   stdout.write(`  Collecting:  ${summariseCollecting(report)}\n`)
-  stdout.write(`  Saving to:   ${summariseSinks(report)}\n`)
   stdout.write(`  Daemon:      ${summariseDaemon(report.daemon)}\n`)
   stdout.write(
     `  Cache:       ${formatBytesShort(report.cache?.totalBytes ?? 0)} · ${report.retention?.days ?? '?'}-day retention\n`
   )
-  if (locked) stdout.write('\n  Settings are locked here and managed centrally.\n')
   stdout.write('\n')
 }
 
 /**
  * What's being collected, in human terms: configured AI clients first
- * (Claude, Codex), falling back to raw source names (OTEL, proxies).
+ * (Claude, Codex, OpenClaw), falling back to raw source names (OTEL,
+ * proxies). On a managed machine each client carries its reach - synced
+ * to the org, or collected but kept on this machine - since that split
+ * (not the sink list) is what a returning user actually needs to
+ * recognise; a solo host has no split and renders the plain list.
+ *
+ * @ref LLP 0188#never-silent [implements]: the gate summary marks each
+ *   client synced vs local only, so an opted-out client on an enrolled
+ *   machine is never silent
  *
  * @param {HypAwareStatusReport} report
  * @returns {string}
  */
 function summariseCollecting(report) {
-  const clients = (report.clients ?? [])
-    .filter((c) => c.configured)
-    .map((c) => FRIENDLY_CLIENT_LABELS[c.name] ?? c.name.charAt(0).toUpperCase() + c.name.slice(1))
-  if (clients.length > 0) return clients.join(', ')
+  const clients = (report.clients ?? []).filter((c) => c.configured)
+  if (clients.length > 0) {
+    const sync = report.clientSync
+    return clients
+      .map((c) => {
+        const label = FRIENDLY_CLIENT_LABELS[c.name] ?? c.name.charAt(0).toUpperCase() + c.name.slice(1)
+        if (sync?.localOnly.includes(c.name)) return `${label} (local only)`
+        if (sync?.syncing.includes(c.name)) return `${label} (synced)`
+        return label
+      })
+      .join(', ')
+  }
   const sources = (report.sources ?? []).map((s) => s.name)
   if (sources.length > 0) return sources.join(', ')
   return 'nothing yet'
-}
-
-/**
- * Where captured data lands. Dedupes friendly per-plugin labels; when no
- * sink is configured the local query cache is the only durable store.
- *
- * @param {HypAwareStatusReport} report
- * @returns {string}
- */
-function summariseSinks(report) {
-  const sinks = report.sinks ?? []
-  if (sinks.length === 0) return 'local query cache only'
-  /** @type {string[]} */
-  const labels = []
-  for (const s of sinks) {
-    const label = FRIENDLY_SINK_LABELS[s.plugin] ?? s.instance
-    if (!labels.includes(label)) labels.push(label)
-  }
-  return labels.join(' + ')
 }
 
 /**
@@ -335,36 +354,40 @@ function formatBytesShort(bytes) {
 const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
   claude: 'Claude',
   codex: 'Codex',
-})
-
-const FRIENDLY_SINK_LABELS = /** @type {Record<string, string>} */ ({
-  '@hypaware/format-parquet': 'local Parquet files',
-  '@hypaware/format-jsonl': 'local JSONL files',
-  '@hypaware/local-fs': 'local files',
-  '@hypaware/central': 'central fleet sink',
+  openclaw: 'OpenClaw',
 })
 
 /**
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and
- * `legacyReturningGatePrompt`: prints the title and each option, reads one
+ * `legacyReturningGatePrompt`: prints the title and each option (with its
+ * summary indented beneath, when the option carries one), reads one
  * line, and resolves to `quit` on an empty, unparseable, or out-of-range
- * answer so a non-TTY caller never reconfigures by accident.
+ * answer so a non-TTY caller never reconfigures by accident. With
+ * `allowBack`, a `b` answer resolves to `back` (the readline form of the
+ * TUI's escape, LLP 0191); any other stray answer still quits.
  *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: RunWizardForkOptions['stdout'] }} opts
  * @param {ConfiguredMenuOption[]} options
  * @param {string} title
+ * @param {boolean} [allowBack]
  * @returns {Promise<string>}
  */
-async function legacyMenuPrompt(opts, options, title) {
+async function legacyMenuPrompt(opts, options, title, allowBack = false) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (/** @type {any} */ (opts.stdout))
   const defaultIdx = Math.max(0, options.findIndex((o) => o.value === 'quit'))
   const rl = readline.createInterface({ input, output, terminal: false })
   try {
     output.write(`${title}\n`)
-    options.forEach((opt, i) => output.write(`  ${i + 1}) ${opt.label}\n`))
-    const answer = await rl.question(`Choose [1-${options.length}, default ${defaultIdx + 1}]: `)
+    options.forEach((opt, i) => {
+      output.write(`  ${i + 1}) ${opt.label}\n`)
+      if (opt.summary) output.write(`     ${opt.summary}\n`)
+    })
+    const answer = await rl.question(
+      `Choose [1-${options.length}, default ${defaultIdx + 1}${allowBack ? ', b back' : ''}]: `
+    )
     const trimmed = answer.trim()
+    if (allowBack && trimmed.toLowerCase() === 'b') return 'back'
     if (trimmed === '') return options[defaultIdx]?.value ?? 'quit'
     const n = Number.parseInt(trimmed, 10)
     if (Number.isInteger(n) && n >= 1 && n <= options.length) return options[n - 1].value

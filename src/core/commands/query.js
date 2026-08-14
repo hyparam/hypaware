@@ -320,12 +320,55 @@ export async function runQueryMaintain(argv, ctx) {
     const actions = []
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
+    // rewrite; without this line the run reads as "nothing due".
+    if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
+    // @ref LLP 0217#record-effectiveness: without this the run reports
+    // "0 partitions compacted" for a partition it is deliberately leaving
+    // fragmented, and the reason is only recoverable by reading cursors.
+    // The skip line quotes the count the recorded rewrite ran over, not the
+    // live count: the sentence is about that rewrite, and the two diverge
+    // whenever the partition shrank without becoming due again.
+    if (p.compactionIneffective) {
+      actions.push(p.compacted
+        ? 'no file-count reduction'
+        : `compaction skipped: the last rewrite of ${p.compactionIneffectiveFiles} files reduced nothing`)
+    }
+    // @ref LLP 0218#report-the-spent-attempt: the other stated reason a
+    // partition is left alone. The retry a writer change granted was spent by
+    // a rewrite that failed, which is why nothing has been attempted since;
+    // saying so names the manual way out instead of leaving the partition
+    // looking converged.
+    if (p.compactionAttemptFailed) {
+      actions.push(`compaction skipped: the retry failed under this writer at ${p.compactionAttemptFailedAt}, --force to retry`)
+    }
+    // @ref LLP 0220#tick-reports-degraded: this tick's own failure, as
+    // opposed to the line above, which reports one an earlier tick already
+    // recorded on the cursor. The walk continued past this partition, so
+    // without the line the run reads as a clean one that happened to do
+    // less work.
+    if (p.failed) {
+      actions.push(`FAILED: ${p.errorMessage} (${p.errorKind}); the walk continued`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
-  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
-  return 0
+  const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
+  const failedNote = report.totalFailed > 0 ? `, ${report.totalFailed} partitions failed` : ''
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote}${failedNote} (${report.elapsedMs}ms)\n`)
+  // Before this PR the exception propagated to bin/hypaware.js, which wrote
+  // `hyp: <message>` to stderr - so a caller that only captures stderr (a
+  // cron or systemd wrapper, `>/dev/null`) still needs a line there on a
+  // degraded tick, not just the stdout summary above.
+  if (report.totalFailed > 0) {
+    ctx.stderr.write(`hyp query maintain: ${report.totalFailed} partition(s) failed; the walk continued\n`)
+  }
+  // A partition that threw used to abort the walk and exit non-zero. The
+  // walk survives it now, but the tick did not do what it was asked, so the
+  // exit status still says so: a script that gated on this must not start
+  // reading a degraded run as a clean one.
+  return report.totalFailed > 0 ? 1 : 0
 }
 
 const QUERY_MAINTAIN_USAGE = 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]'

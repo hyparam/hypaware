@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/codex",
   "version": "2.0.0",
-  "description": "OpenAI Codex client adapter for HypAware, covering both the Codex CLI and Codex Desktop (they share ~/.codex/config.toml and ~/.codex/sessions). Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query and hypaware-graph helper skills plus the AI report skills and the report-to-html renderer.",
+  "description": "OpenAI Codex client adapter for HypAware, covering both the Codex CLI and Codex Desktop (they share ~/.codex/config.toml and ~/.codex/sessions). Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query, hypaware-reference, and hypaware-privacy skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -27,13 +27,14 @@
         "settings_file": ".codex/config.toml",
         "marker_header": "[model_providers.hypaware]"
       },
-      "required_upstreams": ["openai", "chatgpt"]
+      "required_upstreams": ["openai", "chatgpt"],
+      "launch": { "bin": "codex", "args": ["{prompt}"], "label": "Codex" }
     },
     "picker": [
       {
         "name": "codex",
-        "label": "capture Codex conversations (CLI and Desktop)",
-        "summary": "Configures Codex to use the local gateway and records Codex request/response traffic. One pick covers both: Codex CLI and Codex Desktop share ~/.codex/config.toml.",
+        "label": "Codex",
+        "summary": "Records your Codex conversations (CLI and Desktop). Setup points Codex at the local gateway and adds query skills.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },
@@ -48,12 +49,7 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] },
       { "name": "hypaware-reference", "clients": ["codex"] },
-      { "name": "hypaware-privacy", "clients": ["codex"] },
-      { "name": "hypaware-graph", "clients": ["codex"] },
-      { "name": "hypaware-ai-usage-report", "clients": ["codex"] },
-      { "name": "hypaware-report-to-html", "clients": ["codex"] },
-      { "name": "hypaware-publish-report", "clients": ["codex"] },
-      { "name": "hypaware-apply-report-changes", "clients": ["codex"] }
+      { "name": "hypaware-privacy", "clients": ["codex"] }
     ],
     "config_sections": [
       {

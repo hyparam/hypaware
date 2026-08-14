@@ -1,4 +1,6 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ParquetWriter } from 'hyparquet-writer'
+import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
@@ -147,6 +149,71 @@ export interface AppendOptions {
   sortOrder?: readonly { column: string, direction?: 'asc' | 'desc' }[]
 }
 
+/**
+ * A `hyparquet-writer` Writer that can also be discarded without being
+ * finished. `finish()` is the only thing that closes the local writer's
+ * file descriptor and renames its temp file into place, which is fine for
+ * a one-shot append but not for a writer held open across many row
+ * groups: an append that fails part-way has no `finish()` coming.
+ *
+ * `park()` is the other half of that: it hands the descriptor and the
+ * buffer back while keeping the half-written file, so a writer can stay
+ * logically open without costing a descriptor. A writer that does not
+ * implement it can only be retired by closing the file.
+ */
+export interface AbortableWriter extends Writer {
+  abort?(): void
+  park?(): void
+}
+
+/**
+ * One data file a streaming compaction currently has open: the parquet
+ * writer accumulating row groups into it, plus the per-file Iceberg
+ * metrics accumulated so far. Bounds are held as the raw minimum and
+ * maximum seen; serialization happens once, at file close.
+ */
+export interface OpenCompactionFile {
+  dataPath: string
+  writer: AbortableWriter
+  parquet: ParquetWriter
+  partition: Record<string, unknown>
+  rowGroups: number
+  rows: bigint
+  /**
+   * Upper bound on the row-group metadata `ParquetWriter` is pinning for
+   * this file (raw min/max values plus per-chunk overhead), charged
+   * against the append's global stats budget.
+   */
+  statsBytes: number
+  valueCounts: Record<number, bigint>
+  nullCounts: Record<number, bigint>
+  nanCounts: Record<number, bigint>
+  mins: Record<number, unknown>
+  maxes: Record<number, unknown>
+}
+
+export interface StreamingAppendResult {
+  rowCount: number
+  dataFiles: number
+  bytesWritten: number
+}
+
+/**
+ * A multi-batch append that decides its own file boundaries. Each `write`
+ * lands one bounded batch as a parquet row group; `close` commits every
+ * file the append produced in a single snapshot.
+ */
+export interface StreamingTableAppend {
+  write(rows: Record<string, unknown>[]): Promise<void>
+  close(): Promise<StreamingAppendResult>
+  /**
+   * Discard the append without committing. Releases the file descriptors
+   * and temp files of every still-open output file. Safe to call after a
+   * failed `close`, and a no-op once everything is closed.
+   */
+  abort(): Promise<void>
+}
+
 export interface MaintenanceConfig {
   enabled: boolean
   interval_minutes: number
@@ -218,16 +285,59 @@ export interface MaintenancePartitionReport {
   path: string
   snapshotsExpired: number
   compacted: boolean
+  // The partition was converged by a foreign sorted replace snapshot: the
+  // cursor baseline was moved to the live file count instead of rewriting
+  // (LLP 0207). Mutually exclusive with `compacted`.
+  rebaselined?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number
   dataFilesAfter: number
+  /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
+  compactedBytesWritten?: number
+  // Compaction of this partition is known not to reduce its data-file
+  // count under the writer running now: either this run's rewrite
+  // reproduced the count it started from, or a previous one did and the
+  // cursor still records that verdict (LLP 0217). Set with `compacted`
+  // for the first case and without it for the second, where it is the
+  // reason the partition was skipped.
+  compactionIneffective?: boolean
+  // The data-file count the rewrite behind that verdict started from,
+  // which is the recorded count and not necessarily the live one. Set
+  // whenever `compactionIneffective` is.
+  compactionIneffectiveFiles?: number
+  // The partition is skipped because the one retry its writer generation
+  // owed it was spent by a rewrite that threw (LLP 0218). Never set with
+  // `compacted`, and never with `compactionIneffective`: a failed attempt
+  // records no verdict about the partition, so where a verdict exists that
+  // is the reason reported instead.
+  compactionAttemptFailed?: boolean
+  // When that attempt failed, as the cursor records it. Set whenever
+  // `compactionAttemptFailed` is.
+  compactionAttemptFailedAt?: string
+  // THIS tick's work on the partition ended in an error and the walk moved
+  // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
+  // off the cursor and says an EARLIER tick's attempt failed and nothing
+  // has been attempted since: the two never appear together, because a
+  // tick that attempted a rewrite is not a tick that skipped one.
+  failed?: boolean
+  // The error's own `errorKind` when it carries one, else
+  // `maintenance_partition_failed`. Set whenever `failed` is.
+  errorKind?: string
+  // The error's message. Set whenever `failed` is.
+  errorMessage?: string
 }
 
 export interface MaintenanceReport {
   partitions: MaintenancePartitionReport[]
   totalSnapshotsExpired: number
   totalCompacted: number
+  totalRebaselined: number
+  // Partitions whose work threw during this tick. Non-zero means the walk
+  // completed but the tick is degraded: it did not maintain everything it
+  // set out to, and its callers report that rather than a clean run
+  // (LLP 0220#tick-reports-degraded).
+  totalFailed: number
   dryRun: boolean
   elapsedMs: number
 }
@@ -267,18 +377,21 @@ export interface RetentionResult {
 }
 
 /**
- * Export-seam source-scoped withholding (LLP 0132 #source-scoped-withholding):
- * a second, optional `readRowsSince` resolver alongside `UsagePolicyResolver`.
- * Where `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
+ * Export-seam source-scoped withholding (LLP 0188): a second, optional
+ * `readRowsSince` resolver alongside `UsagePolicyResolver`. Where
+ * `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
  * dataset-declared **attribution column** (`PluginDatasetManifest.attribution_column`,
- * e.g. `client_name` for `ai_gateway_messages`) and withholds rows attributed
- * to a picker source classified `'local'` on a machine with a central layer
- * (`classifyClientProvenance`, LLP 0132 #rule): a local addition on a managed
- * machine never leaves it, even though it stays fully queryable locally.
+ * e.g. `client_name` for `ai_gateway_messages`) and withholds rows
+ * attributed to an opted-out picker source (the machine-local client-sync
+ * store, LLP 0188 #opt-out) on a machine with a central layer: on an
+ * enrolled machine every source syncs by default, and a source the user
+ * keeps local never leaves it, even though it stays fully queryable
+ * locally.
  *
- * Built once at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
- * and threaded through `createQueryStorageService` the same way
- * `usagePolicyResolver` already is.
+ * Built at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
+ * over a live (TTL-re-read) withheld set, and threaded through
+ * `createQueryStorageService` the same way `usagePolicyResolver` already
+ * is.
  */
 export interface SourceWithholdResolver {
   /**
@@ -286,7 +399,8 @@ export interface SourceWithholdResolver {
    * `dataset`, or `undefined` when the dataset declared no
    * `attribution_column`, the conservative default, matching `local-only`'s
    * original design: a dataset with no declared attribution column is never
-   * subject to source-scoped withholding.
+   * subject to per-row source-scoped withholding (see
+   * `shouldWithholdDataset` for the dataset-scoped rule).
    */
   attributionColumnFor(dataset: string): string | undefined
   /**
@@ -296,6 +410,26 @@ export interface SourceWithholdResolver {
    * continuation semantics).
    */
   shouldWithhold(attributionValue: unknown): boolean
+  /**
+   * True when `dataset` has no attribution column, has at least one
+   * contributing picker source, and every such source is withheld: the
+   * whole dataset is then withheld (LLP 0188 #enforcement-scope), covering
+   * single-owner datasets (the otel signals) that per-row withholding can
+   * never reach. Optional so a hand-built test resolver without the
+   * dataset-ownership map behaves as before (nothing dataset-withheld).
+   */
+  shouldWithholdDataset?(dataset: string): boolean
+  /**
+   * Fail-closed rule for rows whose attribution value is unusable (not a
+   * non-empty string) in a dataset that DOES declare an attribution
+   * column: true when any picker source whose plugin declares this dataset
+   * (`contributes.datasets`) is withheld, since an unlabeled row cannot be
+   * proven to belong to a synced source (LLP 0192 #fail-closed). A plugin
+   * that only projects rows into the dataset, without declaring it, is not
+   * in that set. Optional for the same hand-built-resolver reason as
+   * `shouldWithholdDataset`.
+   */
+  shouldWithholdUnattributed?(dataset: string): boolean
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {

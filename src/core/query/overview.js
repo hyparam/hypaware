@@ -15,8 +15,11 @@
  * @import { OverviewNotice, OverviewRows, OverviewQueryRunner, OverviewWindow } from '../../../src/core/query/types.js'
  */
 
+import { escapeForDisplay } from '../util/json_util.js'
 import { executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
+// @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
+import { ANSI, paint } from '../cli/style.js'
 
 /** The dataset both overview queries read. Absent, there is nothing to show. */
 export const OVERVIEW_DATASET = 'ai_gateway_messages'
@@ -220,16 +223,37 @@ const SECTION_COST_VS_PROBE = 1.9
  * Without a probe timing there is nothing to infer from, so the caller
  * falls back to the row cap alone (`Infinity` here defers to it).
  *
- * @param {{ budgetMs?: number, probeMs?: number, totalRows: number }} args
+ * `sections` is what is about to run, not the list of sections that exist.
+ * `collectOverview` executes only the sections it was asked for, so
+ * charging a two-section caller for four halves the window it gets in
+ * exchange for work nobody will do - and the narrowing is invisible to it,
+ * since a window bound by time reports no reason. LLP 0135 #window puts the
+ * divisor as `perRowMs x 1.9 x sections`, which is the count planned.
+ *
+ * An empty section list divides by zero and yields `Infinity`, which is the
+ * honest answer: no sections means no section cost, and the row cap decides
+ * a window nothing will scan.
+ *
+ * @ref LLP 0135#window [implements]: the cost model's section term is the sections being planned for
+ * @param {{
+ *   budgetMs?: number,
+ *   probeMs?: number,
+ *   totalRows: number,
+ *   sections?: readonly ('models'|'daily'|'repos'|'tools')[],
+ * }} args
  * @returns {number}
  */
-function rowsAffordable({ budgetMs = OVERVIEW_TIME_BUDGET_MS, probeMs, totalRows }) {
+function rowsAffordable({
+  budgetMs = OVERVIEW_TIME_BUDGET_MS,
+  probeMs,
+  totalRows,
+  sections = OVERVIEW_SECTIONS,
+}) {
   if (probeMs === undefined || totalRows <= 0) return Infinity
   // A probe too fast to time is not evidence of infinite speed; floor it at
   // 1ms so the estimate stays finite and the row cap keeps its say.
   const perRowMs = Math.max(probeMs, 1) / totalRows
-  const sectionCount = OVERVIEW_SECTIONS.length
-  return Math.floor(budgetMs / (perRowMs * SECTION_COST_VS_PROBE * sectionCount))
+  return Math.floor(budgetMs / (perRowMs * SECTION_COST_VS_PROBE * sections.length))
 }
 
 /** Rows shown per section before the remainder is folded into a count line. */
@@ -250,24 +274,6 @@ const BAR_WIDTH = 18
 
 /** Model names longer than this are ellipsized so the columns stay aligned. */
 const MAX_MODEL_WIDTH = 30
-
-const ANSI = {
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  cyan: '\x1b[36m',
-  magenta: '\x1b[35m',
-  reset: '\x1b[0m',
-}
-
-
-/**
- * @param {string} text
- * @param {string} sgr
- * @param {boolean} on
- */
-function paint(text, sgr, on) {
-  return on ? `${sgr}${text}${ANSI.reset}` : text
-}
 
 /**
  * Build the query runner from a command context. Runs the same executor,
@@ -383,9 +389,11 @@ export function overviewRunnerFromCtx(ctx, onNotice, opts = {}) {
  *   days?: number,
  *   budgetMs?: number,
  *   probeMs?: number,
+ *   sections?: readonly ('models'|'daily'|'repos'|'tools')[],
  * }} [opts] `days` pins an explicit window (the user asked for it) and
  *   skips both caps; `probeMs` is how long the probe took over every row,
- *   which calibrates the time cap to this machine
+ *   which calibrates the time cap to this machine; `sections` is the work
+ *   the time cap is being asked to pay for, defaulting to all four
  * @returns {OverviewWindow | null} null when nothing has been recorded
  * @ref LLP 0135#window [implements]: the affordable-window plan, measured on the machine it runs on
  */
@@ -408,6 +416,7 @@ export function chooseOverviewWindow(probeRows, opts = {}) {
   const timeCap = rowsAffordable({
     budgetMs: sectionBudgetMs,
     ...(opts.probeMs !== undefined ? { probeMs: opts.probeMs } : {}),
+    ...(opts.sections !== undefined ? { sections: opts.sections } : {}),
     totalRows,
   })
   const cap = Math.min(rowCap, timeCap)
@@ -460,9 +469,20 @@ export function hasRenderableOverview(rows) {
 }
 
 /**
- * Which of the requested sections have landed. Lets a caller that stopped
- * early say what is missing rather than presenting a short block as whole.
+ * Which of the requested sections have not landed. Lets a caller that
+ * stopped early say what is missing rather than presenting a short block as
+ * whole.
  *
+ * Requested, not existing: the wizard prints this list as "the repos and
+ * tools sections did not finish", and a section nobody asked for did not
+ * fail to finish - it was never started. Naming it would be the same false
+ * claim as calling an unfinished section empty, in the other direction.
+ * `collectOverview` stamps the plan on the result, so a subset run carries
+ * what it meant to do; a result assembled by hand falls back to all four.
+ * The wizard's two-section first look reads its answer from that stamp
+ * (LLP 0198#wizard-sections).
+ *
+ * @ref LLP 0135#overrun [implements]: unfinished sections are named as unfinished, which only the requested ones can be
  * @param {OverviewRows} rows
  * @returns {('models'|'daily'|'repos'|'tools')[]}
  */
@@ -474,7 +494,7 @@ export function missingSections(rows) {
     repos: rows.repoRows,
     tools: rows.toolRows,
   }
-  return OVERVIEW_SECTIONS.filter((s) => byName[s].length === 0)
+  return (rows.sections ?? OVERVIEW_SECTIONS).filter((s) => byName[s].length === 0)
 }
 
 /**
@@ -508,6 +528,10 @@ export async function collectOverview(runner, opts = {}) {
   const sections = opts.sections ?? OVERVIEW_SECTIONS
   const clock = opts.clock ?? Date.now
   const out = opts.into ?? emptyOverview()
+  // Recorded on the result, before any await, because after an abandoned
+  // run the result object is all the caller still holds - and `missing`
+  // means "asked for and did not land", which needs the plan to read.
+  out.sections = sections
 
   // Timing the probe is what makes the plan an observation of this machine
   // rather than an assumption about it: the probe reads every row, so its
@@ -518,6 +542,7 @@ export async function collectOverview(runner, opts = {}) {
   const probeMs = Math.max(0, clock() - probeStart)
   const window = chooseOverviewWindow(probe.rows, {
     probeMs,
+    sections,
     ...(opts.targetRows !== undefined ? { targetRows: opts.targetRows } : {}),
     ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
     ...(opts.days !== undefined ? { days: opts.days } : {}),
@@ -678,7 +703,7 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
     // An unlabelled row only reaches the table if it carried tokens, which
     // today it never does. If that changes, name it for what it is rather
     // than dropping measured tokens on the floor.
-    truncate(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)', MAX_MODEL_WIDTH),
+    escapeForDisplay(truncate(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)', MAX_MODEL_WIDTH)),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
@@ -782,7 +807,7 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
   // same thing here as in the models and daily tables.
   const max = Math.max(...shown.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
   const body = shown.map((r) => [
-    shortRepo(String(r.repo_root)),
+    escapeForDisplay(shortRepo(String(r.repo_root))),
     formatCount(r.sessions),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
@@ -816,7 +841,7 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
 export function renderToolMix(rows, color, showSql = false, sql = '') {
   const max = Math.max(...rows.map((r) => toNumber(r.calls)))
   const body = rows.map((r) => [
-    truncate(cell(r.tool_name), MAX_MODEL_WIDTH),
+    cell(r.tool_name, MAX_MODEL_WIDTH),
     formatCount(r.calls),
     formatCount(r.sessions),
     paint(bar(toNumber(r.calls), max), ANSI.cyan, color),
@@ -991,12 +1016,27 @@ function bar(value, max) {
  * (an unnamed model, an undated row), so render the absence explicitly
  * rather than emitting a blank column the reader has to interpret.
  *
+ * It is also where a captured group key (`provider`, `date`, `tool_name`)
+ * is escaped for the terminal. The escape belongs on the captured value and
+ * not on the assembled row, because this block emits `ESC` of its own: the
+ * bars and headings are painted, so a sweep over the finished table would
+ * erase the colour along with the attack.
+ *
+ * `width`, when given, clips the raw trimmed value before escaping rather
+ * than after: escaping first can cut a `\uXXXX` escape in half at the
+ * boundary, so the clip always runs on the raw text.
+ *
+ * @ref LLP 0225#decision [implements]: the same rule on `hyp query overview`, per captured cell
+ *
  * @param {unknown} value
+ * @param {number} [width]
  * @returns {string}
  */
-function cell(value) {
+function cell(value, width) {
   if (value === null || value === undefined) return '(none)'
-  const text = String(value).trim()
+  const trimmed = String(value).trim()
+  const clipped = width === undefined ? trimmed : truncate(trimmed, width)
+  const text = escapeForDisplay(clipped)
   return text.length === 0 ? '(none)' : text
 }
 

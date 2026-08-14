@@ -8,6 +8,7 @@
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "permissions": ["read_state", "write_state"],
+  "compose_with": ["@hypaware/ai-gateway"],
   "provides": {
     "capabilities": { "hypaware.context-graph": "1.0.0" }
   },
@@ -17,7 +18,6 @@
       { "name": "graph project", "summary": "Project every registered source contract into the node/edge activity graph" },
       { "name": "graph compact", "summary": "Merge duplicate graph rows and rewrite affected partitions sorted" },
       { "name": "graph neighbors", "summary": "Walk the activity graph from a node out to N hops" }
-    ],
-    "skills": [{ "name": "hypaware-graph", "clients": ["claude", "codex"] }]
+    ]
   }
 }

@@ -2,6 +2,7 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { execFile } from 'node:child_process'
@@ -47,6 +48,67 @@ const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 
 /** The value-taking flags shared across the `report` subcommands. */
 const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output'])
+
+/**
+ * `hyp report render [<dir>]`: build the static HTML site for a local reports tree.
+ *
+ * @ref LLP 0196#mechanics-as-code [implements]: the deterministic half of rendering is a
+ * command, so the skill calls it instead of narrating a shell script it cannot version
+ *
+ * The one subcommand in this group that is NOT a call to the server's reports plane.
+ * It takes no `--remote`, reads and writes only local files, and needs no credential.
+ * It lives here anyway because a user's workflow is render-then-publish and splitting
+ * those across two command namespaces would serve the implementation, not the reader.
+ * LLP 0155's "there is no local reports plane" is still true of publish/list/get/delete;
+ * this is a local build step, not a plane operation, and the group help says so.
+ *
+ * Not destructive in the way `delete` is, so it does not prompt: it rebuilds `html/`
+ * (derived output, wiped and regenerated every run) and refreshes the command-owned
+ * assets. It never touches the report `.md` sources, and never `assets/theme.css`,
+ * which is the user's (LLP 0196 #theme-layer).
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runReportRender(argv, ctx) {
+  const { renderReports, discoverReports } = await import('../reports/render.js')
+
+  const dir = path.resolve(positionals(argv, VALUE_FLAGS)[0] ?? path.join(os.homedir(), 'hypaware-reports'))
+
+  /** @type {Stats} */
+  let stat
+  try {
+    stat = await fs.stat(dir)
+  } catch {
+    ctx.stderr.write(`hyp report render: no such directory: ${dir}\n`)
+    return 2
+  }
+  if (!stat.isDirectory()) {
+    ctx.stderr.write(`hyp report render: not a directory: ${dir}\n`)
+    return 2
+  }
+
+  // Refuse before wiping html/. An empty tree usually means the reports were just
+  // archived, and rebuilding would replace a good site with an empty one.
+  const found = discoverReports(dir)
+  if (found.length === 0) {
+    ctx.stderr.write(
+      `hyp report render: no reports in ${dir} (expected a top-level <slug>.md).\n` +
+        'Nothing was changed. If the reports were archived, generate new ones first.\n',
+    )
+    return 1
+  }
+
+  try {
+    const result = renderReports({ dir, refreshAssets: !argv.includes('--no-refresh-assets') })
+    ctx.stdout.write(`Built html/ : ${result.reports} report(s) into html/<slug>/ (index + sections + assets)\n`)
+    return 0
+  } catch (err) {
+    ctx.stderr.write(`hyp report render: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+}
 
 /**
  * `hyp report publish <file-or-dir>`: publish a report artifact to the org's

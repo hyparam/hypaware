@@ -13,23 +13,33 @@ import {
   validateToolArguments,
 } from '../../src/core/cli/verb_codec.js'
 
-/** A query_sql-shaped schema: one greedy string positional. */
+/**
+ * @import { VerbInputSchema } from '../../hypaware-plugin-kernel-types.js'
+ */
+
+/**
+ * A query_sql-shaped schema: one greedy string positional.
+ * @type {VerbInputSchema}
+ */
 const SQL_SCHEMA = {
-  type: /** @type {const} */ ('object'),
-  properties: { sql: { type: /** @type {const} */ ('string'), greedy: true } },
+  type: 'object',
+  properties: { sql: { type: 'string', greedy: true } },
   required: ['sql'],
   positional: ['sql'],
 }
 
-/** A graph_neighbors-shaped schema: positional + typed flags. */
+/**
+ * A graph_neighbors-shaped schema: positional + typed flags.
+ * @type {VerbInputSchema}
+ */
 const NEIGHBORS_SCHEMA = {
-  type: /** @type {const} */ ('object'),
+  type: 'object',
   properties: {
-    node: { type: /** @type {const} */ ('string') },
-    depth: { type: /** @type {const} */ ('integer'), default: 1, minimum: 1 },
-    edge_type: { type: /** @type {const} */ ('array'), items: { type: /** @type {const} */ ('string') } },
-    direction: { type: /** @type {const} */ ('string'), enum: ['out', 'in', 'both'], default: 'both' },
-    limit: { type: /** @type {const} */ ('integer'), default: 100, minimum: 1 },
+    node: { type: 'string' },
+    depth: { type: 'integer', default: 1, minimum: 1 },
+    edge_type: { type: 'array', items: { type: 'string' } },
+    direction: { type: 'string', enum: ['out', 'in', 'both'], default: 'both' },
+    limit: { type: 'integer', default: 100, minimum: 1 },
   },
   required: ['node'],
   positional: ['node'],

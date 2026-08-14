@@ -13,13 +13,14 @@ import {
   runWizardFork,
 } from '../../../../src/core/cli/wizard/fork.js'
 
-// The wizard fork phase (LLP 0129 #fork) and the amended returning gate
-// (LLP 0129 #returning-gate). Both prompts drive the legacy readline
-// fallback here (HYP_NO_TUI=1 / non-TTY stdout), matching the pattern
+// The wizard fork phase (LLP 0129 #fork) and the returning gate
+// (LLP 0129 #returning-gate, amended by LLP 0182 to one Reconfigure for
+// every machine). Both prompts drive the legacy readline fallback here
+// (HYP_NO_TUI=1 / non-TTY stdout), matching the pattern
 // `test/core/init-configured-entry.test.js` already uses for the
 // pre-amendment gate.
 // @ref LLP 0129#fork [tests]:
-// @ref LLP 0129#returning-gate [tests]:
+// @ref LLP 0182#one-reconfigure [tests]:
 
 function makeBuf() {
   let value = ''
@@ -69,9 +70,16 @@ test('runWizardFork: a bare enter takes the default (quit)', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
   const choice = await runWizardFork(opts)
   assert.equal(choice, 'quit')
-  assert.match(stdout.text(), /1\) Join a team/)
-  assert.match(stdout.text(), /2\) Local install and configuration/)
+  // The intro line precedes the menu (LLP 0211 #explain-first).
+  assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
+  assert.match(stdout.text(), /1\) Collect shared agent logs/)
+  assert.match(stdout.text(), /2\) Collect agent logs locally/)
   assert.match(stdout.text(), /3\) Quit/)
+  // Row summaries carry the guidance and the sign-in disclosure
+  // (LLP 0211 #collect-labels), in the legacy renderer too.
+  assert.match(stdout.text(), /follows you across machines and harnesses/)
+  assert.match(stdout.text(), /You will be asked to sign in\./)
+  assert.match(stdout.text(), /Everything stays on this machine\./)
 })
 
 test('runWizardFork: choosing 1 forks to the team pathway', async () => {
@@ -100,14 +108,12 @@ test('legacyForkPrompt: matches runWizardFork on the same input (direct call, no
 
 // --- buildReturningGateOptions ---
 
-test('buildReturningGateOptions: a managed machine gets scoped-reconfigure, never bare Reconfigure', () => {
-  const values = buildReturningGateOptions(true).map((o) => o.value)
-  assert.deepEqual(values, ['scoped-reconfigure', 'status', 'quit'])
-})
-
-test('buildReturningGateOptions: a solo machine keeps full Reconfigure', () => {
-  const values = buildReturningGateOptions(false).map((o) => o.value)
+// One menu for both machine kinds (LLP 0182): the builder takes no
+// `managed` argument at all, so there is no branch left to drift.
+test('buildReturningGateOptions: one Reconfigure, the same three rows for every machine', () => {
+  const values = buildReturningGateOptions().map((o) => o.value)
   assert.deepEqual(values, ['reconfigure', 'status', 'quit'])
+  assert.equal(buildReturningGateOptions.length, 0)
 })
 
 // --- evaluateReturningGate ---
@@ -154,14 +160,15 @@ test('evaluateReturningGate: a managed machine with no config at all is still ma
   assert.equal(gate.managed, true)
 })
 
-test('evaluateReturningGate: managed machine, choosing the scoped entry presets a scoped re-entry (no fork)', async () => {
+test('evaluateReturningGate: managed machine, Reconfigure is the same row it is on a solo machine', async () => {
   const { opts, stdout } = ctxWithStdin('1\n')
   opts.collectStatus = async () => fixtureReport({ hasCentral: true })
   const gate = await evaluateReturningGate(opts)
-  assert.equal(gate.action, 'scoped-reconfigure')
+  assert.equal(gate.action, 'reconfigure')
+  // Still reported: the orchestrator locks the org's picker rows off it.
   assert.equal(gate.managed, true)
-  assert.match(stdout.text(), /1\) Adjust what this machine collects/)
-  assert.doesNotMatch(stdout.text(), /1\) Reconfigure/)
+  assert.match(stdout.text(), /1\) Reconfigure/)
+  assert.doesNotMatch(stdout.text(), /Adjust/)
 })
 
 test('evaluateReturningGate: managed machine, a bare enter still quits (never reconfigures by accident)', async () => {
@@ -199,7 +206,7 @@ test('evaluateReturningGate: either machine kind can still choose status', async
 
 test('legacyReturningGatePrompt: default title is the plain "what would you like to do" prompt', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
-  const choice = await legacyReturningGatePrompt(opts, buildReturningGateOptions(false))
+  const choice = await legacyReturningGatePrompt(opts, buildReturningGateOptions())
   assert.equal(choice, 'quit')
   assert.match(stdout.text(), /What would you like to do\?/)
 })

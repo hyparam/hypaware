@@ -15,6 +15,45 @@ export type AsyncBackfillConsentPrompt = (args: {
   retentionDays: number
 }) => Promise<boolean>
 
+/** One choice offered by the wizard's defaults gate. */
+export interface ConfirmSelectOption {
+  value: string
+  label: string
+  summary?: string
+}
+
+/**
+ * The gate question a wizard lane asks before opening its full menu
+ * (LLP 0190): a single-select between accepting the stated defaults and
+ * opening the menu to change them. Renders as a TUI select on a real TTY
+ * and as a numbered readline fallback elsewhere; a bare enter takes
+ * `default` (the first option when unset), so accepting the defaults is
+ * one keypress on both paths.
+ */
+export interface ConfirmSelectQuestion {
+  title: string
+  /** Position line above the title (LLP 0135 #progress), wizard-only. */
+  progress?: string
+  /**
+   * Context lines listed under the title, one per entry: what the accept
+   * option covers. Rendered verbatim (callers own indentation) on both
+   * the TUI and readline paths.
+   */
+  items?: string[]
+  options: ConfirmSelectOption[]
+  /** Value returned on a bare enter; defaults to the first option. */
+  default?: string
+  /**
+   * Back-navigation opt-in (LLP 0191): the TUI select's escape and the
+   * readline fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling, returning the user to the previous screen.
+   * Only wizard lanes with a screen behind them set this.
+   */
+  allowBack?: boolean
+}
+
+export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Promise<string>
+
 /**
  * The bundled picker source ids. Rows are manifest-sourced (LLP 0130), so
  * this union tracks the bundled plugins' `contributes.picker` names; a
@@ -47,8 +86,10 @@ export interface WalkthroughOption {
   plugin?: string
   /**
    * Initial checkbox state in the TUI multiselect. Used by the picker to
-   * pre-select autodetected sources and the default export. Ignored by
-   * the legacy numbered prompt, which has no preselection concept.
+   * pre-select autodetected sources and the default export. The legacy
+   * numbered prompt ignores it unless the question sets
+   * `enterKeepsChecked`, which renders the state and makes a bare enter
+   * keep it.
    */
   checked?: boolean
   /**
@@ -72,6 +113,28 @@ export interface WalkthroughQuestion {
   progress?: string
   options: WalkthroughOption[]
   bounds?: { min?: number; max?: number }
+  /**
+   * Back-navigation opt-in (LLP 0191): the TUI multiselect's escape and
+   * the numbered fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling. Set only by wizard lanes that have a screen
+   * to return to; `runPickerWalkthrough` never sets it.
+   */
+  allowBack?: boolean
+  /**
+   * When set, the legacy numbered fallback renders each row's checked
+   * state (`[x]`/`[ ]`) and a bare enter returns the checked values
+   * instead of none, matching the TUI multiselect's enter. Set by the
+   * wizard's sync menu, where checked means "syncs" and an invisible
+   * empty-selection default would invert it (LLP 0190 #sync-gate). It
+   * also buys one re-ask on an answer that names no row, for the same
+   * reason, and makes the checked set what the question falls back to
+   * when the re-ask is spent or stdin closes. Unset questions keep the
+   * historical semantics: no state rendered, bare enter selects nothing,
+   * one ask only - and, having no stated default to fall back to, a
+   * closed stdin cancels them (`PromptCancelledError`) rather than
+   * answering them with an empty selection.
+   */
+  enterKeepsChecked?: boolean
 }
 
 export interface WalkthroughOptions {
@@ -121,6 +184,12 @@ export interface RunPickerWalkthroughOptions {
   agents?: {
     list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
   }
+  /**
+   * Plugins this boot failed to activate, threaded to the finale's client-asset
+   * materialization so a partial boot copies but never prunes
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream

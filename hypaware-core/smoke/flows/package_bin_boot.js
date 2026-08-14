@@ -62,10 +62,33 @@ export async function run({ harness, expect }) {
         helpResult.status,
         (v) => v === 0
       )
+      // The banner's marketing sentence is copy, not a contract this flow
+      // owns; it changes with onboarding copy decisions (e.g. LLP 0211) and
+      // no LLP pins it. Assert the usage line and a known command name
+      // instead: those are what "the packaged binary boots and --help
+      // works" actually means, and they survive a copy edit.
       expect.that(
-        'hypaware --help prints the usage header',
+        'hypaware --help prints the usage line',
         helpResult.stdout,
-        (v) => typeof v === 'string' && v.includes('hyp - HypAware kernel CLI')
+        (v) => typeof v === 'string' && v.includes('usage: hyp <command> [args...]')
+      )
+      // Match the rendered command rows, not the whole blob: `daemon` and
+      // `status` both also appear in incidental prose (the epilogue and the
+      // `query`/`join` row summaries), so a plain substring check would stay
+      // green even if the command table itself lost every daemon*/status
+      // row. `renderHelp` writes each row as a two-space indent, the name,
+      // then two-or-more spaces (src/core/cli/dispatch.js), so that shape
+      // uniquely identifies a row.
+      const helpRows = String(helpResult.stdout ?? '')
+        .split('\n')
+        .flatMap((line) => {
+          const m = /^ {2}(\S+) {2,}\S/.exec(line)
+          return m ? [m[1]] : []
+        })
+      expect.that(
+        `hypaware --help lists the core command rows (got rows=${helpRows.join(',') || '<none>'})`,
+        helpRows,
+        (v) => v.includes('daemon') && v.includes('status') && v.length >= 10
       )
 
       const smokeResult = spawnSync(

@@ -146,15 +146,13 @@ test('the reader carries the same qualifier, so writer and reader cannot drift',
 /* 2. The skills that call the route directly validate the reply       */
 /* ------------------------------------------------------------------ */
 
+// Only the privacy skills still post to the control route from shell. The
+// `hypaware-ignore` / `hypaware-unignore` skills were retired (LLP 0212): the
+// session opt-out is `hyp session ignore` now, whose receipt is held to R14 by
+// section 1 above, so there is no second shell implementation of it to bind.
 const SKILLS = [
   'claude/skills/hypaware-privacy/SKILL.md',
-  'claude/skills/hypaware-ignore/SKILL.md',
   'codex/skills/hypaware-privacy/SKILL.md',
-  // The removal verb calls the same route directly, so R14's last bullet binds
-  // it identically: it used to discard the body (`> /dev/null`) and print off
-  // the exit code alone, which is the echo check missing entirely rather than
-  // merely weak.
-  'claude/skills/hypaware-unignore/SKILL.md',
 ]
 
 /** @param {string} rel */
@@ -201,27 +199,6 @@ for (const rel of SKILLS) {
     assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
   })
 }
-
-test('the unignore skill reports the removal it verified, not a resumption', () => {
-  // The CLI receipt was held to R14 mirrored; the skill that DELETEs the same
-  // route was printing "Recording re-enabled" off `--fail-with-body` alone,
-  // with the response body sent to /dev/null. Same overclaim, and the one
-  // surface in the family with no response validation at all.
-  const text = skillText('claude/skills/hypaware-unignore/SKILL.md')
-
-  assert.doesNotMatch(text, /> \/dev\/null/, 'the reply must be read, not discarded')
-  assert.doesNotMatch(
-    text,
-    /Recording re-enabled for session/,
-    'the gateway cannot know recording resumed - `.hypignore` alone can keep it suppressed'
-  )
-  assert.match(
-    text,
-    /r\.get\("ignored"\) is not False/,
-    'the removal must be asserted as a real boolean false, as the CLI does'
-  )
-  assert.match(text, /out of the gateway drop set/, 'report the membership that IS established')
-})
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */

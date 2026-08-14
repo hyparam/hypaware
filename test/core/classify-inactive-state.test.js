@@ -20,6 +20,7 @@ function makeLayered({ effective, centralConfig }) {
     localConfig: null,
     centralConfigPath: null,
     localLoaded: null,
+    centralLoaded: null,
     drops: [],
     centralQueryIgnored: false,
   }

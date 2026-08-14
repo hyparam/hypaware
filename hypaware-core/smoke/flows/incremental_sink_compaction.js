@@ -156,6 +156,9 @@ export async function run({ harness, expect }) {
   const before = readCursorSync(sourceDir).tableDir ?? 'table'
   const maint = await maintainCache({ cacheRoot, force: true, compactOnly: true })
   expect.that('compaction: at least one partition compacted', maint.totalCompacted, (v) => typeof v === 'number' && v > 0)
+  // @ref LLP 0220#tick-reports-degraded: a partition that throws no longer
+  // rejects the tick, so the failure has to be read off the report.
+  expect.that('compaction: no partition failed', maint.totalFailed, (v) => v === 0)
   const after = readCursorSync(sourceDir).tableDir ?? 'table'
   expect.that('compaction: generation directory swapped', [before, after], ([b, a]) => b !== a)
 

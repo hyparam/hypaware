@@ -102,7 +102,7 @@ test('multiselect: summary lines appear under labels when set', () => {
   assert.match(out, /  \[ \] A\n      detail of A\n/)
 })
 
-test('multiselect: empty options renders title + hint without rows', () => {
+test('multiselect: empty options renders title + hint + submit row without option rows', () => {
   /** @type {any} */
   const state = {
     kind: 'multiselect',
@@ -113,7 +113,45 @@ test('multiselect: empty options renders title + hint without rows', () => {
   }
   const out = render(state, { color: false })
   assert.match(out, /^nothing\n/)
-  assert.equal(out.split('\n').filter((l) => l.startsWith('>') || l.startsWith(' ')).length, 0)
+  assert.doesNotMatch(out, /\[x\]|\[ \] /)
+  // With no options the cursor rests on the submit row.
+  assert.match(out, /> \[ Submit \]\n/)
+})
+
+test('multiselect: submit row renders below the options, pointer-free when not focused', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'multiselect',
+    title: 'pick',
+    options: [
+      { value: 'a', label: 'A', checked: true },
+      { value: 'b', label: 'B', checked: false },
+    ],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  const submitIdx = lines.findIndex((l) => l === '  [ Submit ]')
+  const lastOptionIdx = lines.findIndex((l) => l.includes('[ ] B'))
+  assert.ok(submitIdx > lastOptionIdx, 'submit row must render after the options')
+  assert.equal(lines[submitIdx - 1], '', 'submit row is separated by a blank line')
+})
+
+test('multiselect: submit row carries the pointer when the cursor is on it', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'multiselect',
+    title: 'pick',
+    options: [
+      { value: 'a', label: 'A', checked: true },
+      { value: 'b', label: 'B', checked: false },
+    ],
+    cursor: 2,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  assert.ok(lines.some((l) => l === '> [ Submit ]'))
+  assert.ok(lines.every((l) => !l.startsWith('> [x]') && !l.startsWith('> [ ] ')))
 })
 
 test('multiselect: error line is included when set', () => {
@@ -232,4 +270,107 @@ test('render: hint override replaces default hint line', () => {
   const out = render(state, { color: false })
   assert.match(out, /CUSTOM HINT/)
   assert.doesNotMatch(out, /space toggle/)
+})
+
+// Context lines (LLP 0190): the wizard's defaults gates list what they are
+// about to accept between the title and the hint, verbatim and unstyled.
+test('render: items render verbatim between the title and the hint', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'HypAware will record:',
+    items: ['  Claude Code', '  OpenClaw · managed by your fleet'],
+    options: [{ value: 'accept', label: 'Record all' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  assert.equal(lines[0], 'HypAware will record:')
+  assert.equal(lines[1], '  Claude Code')
+  assert.equal(lines[2], '  OpenClaw · managed by your fleet')
+  assert.match(lines[3], /enter pick/)
+})
+
+// The frame (LLP 0198 #frame): the closing ask draws as its own screen.
+test('box: frame is wrapped in a border, every row padded to one width', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Ask your first question',
+    box: true,
+    options: [
+      { value: 'a', label: 'What AI tasks cost the most tokens this week?' },
+      { value: 'b', label: 'Not now' },
+    ],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  lines.pop() // trailing newline
+  assert.match(lines[0], /^╭─+╮$/)
+  assert.match(lines[lines.length - 1], /^╰─+╯$/)
+  const width = lines[0].length
+  for (const line of lines.slice(1, -1)) {
+    assert.equal(line.length, width, `row is padded to the frame width: ${JSON.stringify(line)}`)
+    assert.ok(line.startsWith('│ ') && line.endsWith(' │'), `row is bordered: ${JSON.stringify(line)}`)
+  }
+  assert.ok(lines.some((l) => l.includes('> What AI tasks cost the most tokens this week?')))
+})
+
+test('box: a frame wider than the terminal is dropped, not soft-wrapped', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Ask your first question',
+    box: true,
+    options: [{ value: 'a', label: 'What AI tasks cost the most tokens this week?' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const out = render(state, { color: false, columns: 20 })
+  assert.doesNotMatch(out, /[╭╮╰╯│]/)
+  assert.match(out, /^Ask your first question\n/)
+})
+
+test('box: border width measures visible columns, not style escapes', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Pick',
+    box: true,
+    options: [{ value: 'a', label: 'Alpha' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const plain = render(state, { color: false }).split('\n')[0]
+  const colored = render(state, { color: true }).split('\n')[0]
+  assert.equal(colored.replace(/\x1b\[[0-9;]*m/g, '').length, plain.length)
+})
+
+test('box: an unboxed state renders exactly as it did before the field existed', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Pick one',
+    options: [{ value: 'a', label: 'A' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const out = render(state, { color: false, columns: 80 })
+  assert.equal(out, render(state, { color: false }))
+  assert.doesNotMatch(out, /[╭╮╰╯│]/)
+})
+
+test('render: a state without items renders exactly as it does today', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'select',
+    title: 'Pick one',
+    options: [{ value: 'a', label: 'A' }],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  assert.equal(lines[0], 'Pick one')
+  assert.match(lines[1], /enter pick/)
 })
