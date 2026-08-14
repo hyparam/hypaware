@@ -166,12 +166,19 @@ export async function runInstall(argv, cmdCtx, opts) {
     })
     cmdCtx.stdout.write(`\n${explanation}\n\n`)
     if (!assumeYes) {
-      // Whether a yes launches the sign-in right away is knowable now, so
-      // the question says it: subscription mode with no live session means
-      // step 1 opens a browser.
-      const signInFirst = opts.credential.mode !== 'org_key'
-        && (await cmdCtx.commands.run('claude-account status', [])) !== 0
-      if (!(await confirmProceed(cmdCtx, { signInFirst }))) {
+      // A yes can launch the Claude sign-in in a browser, so the question
+      // says so. It cannot say whether it *will*: the only sign-in probe
+      // reachable from here is `claude-account status` through
+      // `commands.run`, and the dispatcher hands every sub-command this
+      // same stdout, so probing would print `mode: ...` and `signed in:
+      // no (run 'hyp claude-account login')` between the disclosure and
+      // the question. A diagnostic wedged into the consent screen, telling
+      // the user to run a command this flow is about to run for them, is
+      // worse than the missing precision. So the sentence is conditional
+      // on the reader's own state and true either way; only `org_key` mode
+      // rules the sign-in out outright, and that is knowable from config.
+      const mayNeedSignIn = opts.credential.mode !== 'org_key'
+      if (!(await confirmProceed(cmdCtx, { mayNeedSignIn }))) {
         cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp claude-desktop install' when you want to.\n")
         return 1
       }

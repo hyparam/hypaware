@@ -103,15 +103,24 @@ every file that changes.
 > in front of it reads as the machine acting on its own (8/13 feedback,
 > from the build that briefly shipped without the prompt). So one
 > question stands between the disclosure and the steps, defaults to yes,
-> and says "the first step opens the Claude sign-in in your browser"
-> when that is what a yes does next. `--yes` accepts in advance;
+> and says "if you are not signed in yet, the first step opens the Claude
+> sign-in in your browser" wherever a yes can do that. It says *can*, not
+> *will*: the only live sign-in probe reachable from the install command
+> is `claude-account status` through `commands.run`, whose own output
+> would land on the consent screen, so the sentence is conditioned on the
+> reader's state instead. `org_key` mode drops the clause outright, being
+> the one case config alone settles. `--yes` accepts in advance;
 > `--print-commands` skips disclosure and question both; an
 > already-configured machine sees neither. And the question is asked for
 > a *new pick* only: the wizard's configure phase skips a `needs_setup`
 > row the existing config already composed (a reconfigure's carried
 > answer), so reconfiguring an unrelated setting never re-opens Desktop
-> setup - `hyp claude-desktop install` stays the finish and repair path,
-> and `hyp status` names it while setup is incomplete.
+> setup - `hyp claude-desktop install` stays the finish and repair path.
+> Known gap, left open: a row whose setup was declined or failed is
+> carried the same way (composed-in-config is the only signal the
+> configure phase has), so a reconfigure never re-offers it and no core
+> surface points at the repair. Closing that needs a completeness signal
+> from the adapter.
 
 This is a better gate than the exclusion list was, for three reasons.
 First, the acquisition of a credential was already attended: step 1 of
@@ -131,7 +140,9 @@ path, so it composes `subscription`. `org_key` is fleet policy and arrives
 through the central layer on `hyp join`, never through the picker
 ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
 
-<a id="default-no"></a>> **Amended 2026-08-13: the prompt now defaults to
+<a id="default-no"></a>
+
+> **Amended 2026-08-13: the prompt now defaults to
 > yes.** The opt-in this default protected has moved upstream - the row
 > is never pre-checked, so a user at this prompt chose to be here - and
 > the root escalation still cannot happen without the sudo password. What

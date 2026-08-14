@@ -53,7 +53,15 @@ export async function runConfigurePhase(picked, opts) {
   // a reconfigure that keeps it re-runs nothing and re-asks nothing (8/13
   // feedback - reconfiguring dropped the user into the Desktop sign-in
   // again). The standalone `hyp <configure_command>` stays the finish and
-  // repair path, and `hyp status` names it when setup is incomplete.
+  // repair path.
+  //
+  // Known gap: a row whose setup was declined or failed is carried all the
+  // same, because "composed in the config" is the only signal this phase
+  // has and it does not distinguish finished from abandoned. Such a row is
+  // then never re-offered by a reconfigure, and no core surface points at
+  // the repair - `hyp status` has no line for an incomplete `needs_setup`
+  // row. Closing it needs a completeness signal from the adapter, not a
+  // wider re-run here.
   const carried = new Set(picked?.previouslyConfigured ?? [])
   const descriptors = (picked?.descriptors ?? []).filter(
     (d) => !!d && d.needsSetup === true && typeof d.configureCommand === 'string' && d.configureCommand.length > 0

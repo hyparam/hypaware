@@ -70,7 +70,8 @@ export function buildConsentExplanation(args) {
   lines.push('')
   lines.push(
     'The credential never leaves this machine and is never written into the profile '
-    + 'or into recorded rows. To undo it later, delete the helper file and run '
+    + `or into recorded rows. To undo it later, remove ${args.plistPath} (needs `
+    + "sudo) - that is the file that points Claude Desktop here - and run "
     + "'hyp claude-account logout'.",
   )
   return lines.join('\n')
@@ -84,7 +85,11 @@ export function buildConsentExplanation(args) {
  * being dropped into an auth flow with no prompt reads as the machine
  * acting on its own (8/13 feedback, the run that removed the prompt
  * entirely). So the question always stands between the disclosure and
- * the steps, and when a sign-in is what comes next it says so.
+ * the steps, and wherever a sign-in can come next it says so. It says
+ * "if you are not signed in yet" rather than asserting the launch,
+ * because the caller cannot check the live session without printing
+ * `claude-account status`'s own output onto this screen; `org_key` mode
+ * is the one case rulable out from config, and there the clause is gone.
  *
  * Defaults to yes, unlike the original gate: the user opted in by
  * ticking a never-pre-checked row or typing the command, the plist
@@ -99,10 +104,10 @@ export function buildConsentExplanation(args) {
  *
  * @ref LLP 0139#informed-consent [implements]: the question stands between the disclosure and the sign-in launch, and names the launch
  * @param {CommandRunContext} cmdCtx
- * @param {{ signInFirst: boolean }} args
+ * @param {{ mayNeedSignIn: boolean }} args
  * @returns {Promise<boolean>}
  */
-export async function confirmProceed(cmdCtx, { signInFirst }) {
+export async function confirmProceed(cmdCtx, { mayNeedSignIn }) {
   const stdin = /** @type {NodeJS.ReadableStream | undefined} */ (cmdCtx.stdin)
   if (!stdin || typeof stdin.on !== 'function') {
     writeNonInteractiveHint(cmdCtx)
@@ -117,8 +122,8 @@ export async function confirmProceed(cmdCtx, { signInFirst }) {
           {
             value: 'yes',
             label: 'Continue',
-            summary: signInFirst
-              ? 'Opens the Claude sign-in in your browser, then runs the steps above.'
+            summary: mayNeedSignIn
+              ? 'Opens the Claude sign-in in your browser if you are not signed in yet, then runs the steps above.'
               : 'Runs the steps listed above.',
           },
           { value: 'no', label: 'Skip for now', summary: 'Changes nothing. Re-run hyp claude-desktop install any time.' },
@@ -138,8 +143,9 @@ export async function confirmProceed(cmdCtx, { signInFirst }) {
     })
     try {
       cmdCtx.stdout.write(
-        signInFirst
-          ? 'Set up Claude Desktop now? The first step opens the Claude sign-in in your browser. [Y/n]: '
+        mayNeedSignIn
+          ? 'Set up Claude Desktop now? If you are not signed in yet, the first step\n'
+            + 'opens the Claude sign-in in your browser. [Y/n]: '
           : 'Set up Claude Desktop now? [Y/n]: '
       )
       // The `line`/`close` events rather than `rl.question`: that promise

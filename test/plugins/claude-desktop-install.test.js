@@ -374,7 +374,7 @@ test('install: a bare enter proceeds - disclosure, question, then the steps', as
   // Claude sign-in in a browser.
   // @ref LLP 0139#informed-consent [tests]: disclosure, then the question naming the sign-in launch, then the steps
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
-  const { cmdCtx, bufs, credential, sectionConfig } = fixture({
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
     stateDir, mode: 'subscription', stdin: Readable.from(['\n']),
     commandRuns: { 'claude-account status': 1 },
   })
@@ -389,9 +389,18 @@ test('install: a bare enter proceeds - disclosure, question, then the steps', as
   assert.equal(code, 0, bufs.stdout.text())
   const text = bufs.stdout.text()
   assert.match(text, /Claude Desktop needs extra setup/)
-  assert.match(text, /Set up Claude Desktop now\? The first step opens the Claude sign-in in your browser\./)
+  assert.match(text, /If you are not signed in yet, the first step\nopens the Claude sign-in in your browser\./)
   assert.ok(text.indexOf('needs extra setup') < text.indexOf('Set up Claude Desktop now?'), 'the disclosure precedes the question')
   assert.ok(spawnCalls.some((c) => c.startsWith('sudo cp')))
+  // Nothing may run between the disclosure and the question. A sub-command
+  // shares this stdout (the dispatcher hands every one of them the same
+  // stream), so probing the live sign-in state to sharpen the wording would
+  // print `mode:` / `signed in:` lines into the middle of the consent screen.
+  assert.equal(
+    commandCalls.filter((c) => c.name === 'claude-account status').length,
+    1,
+    'the status probe belongs to the login step, not to the question',
+  )
 })
 
 test('install: an explicit no declines - nothing changed, nonzero exit', async () => {
@@ -411,9 +420,9 @@ test('install: an explicit no declines - nothing changed, nonzero exit', async (
   })
 
   assert.equal(code, 1)
-  // Only the read-only status probe ran (it feeds the question's wording);
-  // no sign-in, no helper write.
-  assert.deepEqual(commandCalls.map((c) => c.name), ['claude-account status'])
+  // Nothing ran at all: the question is answered from config alone, so a
+  // decline leaves no trace - no probe, no sign-in, no helper write.
+  assert.deepEqual(commandCalls, [])
   assert.equal(spawnCalls.length, 0, 'no sudo, no killall')
   assert.match(bufs.stdout.text(), /nothing changed/)
 })

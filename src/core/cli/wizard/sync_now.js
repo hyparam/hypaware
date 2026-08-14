@@ -127,7 +127,10 @@ export async function runWizardSyncNow(opts) {
 /**
  * The question. Two rows, waiting first and selected by default, so a stray
  * enter can only ever choose the slower, reversible answer - the same
- * polarity the overwrite confirm and the `hyp sync` prompt itself use.
+ * polarity the `hyp sync` prompt itself uses. The overwrite confirm defaults
+ * the other way now, and for the same reason read from its own side: there a
+ * bare enter commits answers the user just gave to a file that is backed up
+ * either way, where here it would send data off the machine.
  *
  * The rows say what each answer does rather than yes/no: "send now" is the
  * kind of choice a reader should not have to reconstruct from the question.

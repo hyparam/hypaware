@@ -105,6 +105,11 @@ test('a non-interactive run is never asked, and never sends', async () => {
   const result = await runWizardSyncNow(o.args)
   assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
   assert.equal(o.asked.length, 0)
+  // The narration upstream drops its `hyp sync` sentence whenever this step
+  // is expected to render, so the skip has to state the way out itself or
+  // the run ends without ever naming it.
+  // @ref LLP 0188#never-silent [tests]: the un-askable path still names the release verb
+  assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
 })
 
 // @ref LLP 0203#offer [tests]: waiting leads and is the default, so a stray enter cannot release
