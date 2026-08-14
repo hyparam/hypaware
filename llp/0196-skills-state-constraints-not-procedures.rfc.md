@@ -7,6 +7,7 @@
 **Date:** 2026-08-06
 **Related:** LLP 0074, LLP 0075, LLP 0102, LLP 0107, LLP 0142, LLP 0155
 **Planned-by:** LLP 0197
+**Superseded-in-part-by:** LLP 0208 (open question 1's keep-pandoc resolution)
 
 > The bundled skill surface has grown to 18 `SKILL.md` files across two
 > hand-synced trees, ~290 KB of prose, with the two largest skills at 25 KB
@@ -178,11 +179,11 @@ and a skill covers a whole want end to end. Proposed surface, 10 to 6:
 | Skill | Absorbs | Why one |
 | --- | --- | --- |
 | `hypaware-query` | `hypaware-graph` | Both answer "get me facts out of the recordings". The routing between them (graph for entities and connections, messages for per-message measures) is a paragraph inside one skill, not a boundary between two. `hypaware-ai-usage-report` already has to teach that routing itself, which is the tell. |
-| `hypaware-report` | `hypaware-ai-usage-report`, `hypaware-report-to-html`, `hypaware-publish-report`, `hypaware-apply-report-changes` | One workflow with four verbs. The model enters at the stage the user's request implies and can carry on to the next without a handoff. |
+| `hypaware-report` | `hypaware-ai-usage-report`, `hypaware-report-to-html`, `hypaware-publish-report`, `hypaware-apply-report-changes` | One workflow with four verbs. The model enters at the stage the user's request implies and can carry on to the next without a handoff. **Superseded-by: LLP 0216** (report generation moved server-side 2026-08-12; the merged skill is removed and no client skill replaces it). |
 | `hypaware-privacy` | (unchanged) | Already the single privacy surface per LLP 0142 #one-privacy-surface. |
 | `hypaware-reference` | (unchanged) | Product orientation. |
-| `hypaware-ignore` | (unchanged) | Protected by LLP 0142 #user-invoked-only. |
-| `hypaware-unignore` | (unchanged) | Same. |
+| `hypaware-ignore` | (unchanged) | Protected by LLP 0142 #user-invoked-only. **Superseded-by: LLP 0212** (retired 2026-08-12; `hyp session ignore` is the only implementation, and the natural-language routing moves into `hypaware-reference`). |
+| `hypaware-unignore` | (unchanged) | Same. **Superseded-by: LLP 0212** (retired 2026-08-12 with its pair). |
 
 The report skill's stage-specific detail (the render contract, the publish
 confirmation, the apply contract) lives in sibling reference files loaded when
@@ -395,7 +396,10 @@ that installed it before LLP 0142 stops advertising it.
 
 ## Open questions
 
-1. **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
+1. **Superseded-by: LLP 0208** (2026-08-10: the renderer converts in process via
+   `marked`; server-side generation made the binary dependency and its blocking
+   subprocess a problem, exactly the escape hatch named below).
+   **Resolved 2026-08-06: keep pandoc, and install it in CI.** The question was
    whether `hyp report render` should keep pandoc as a hard dependency or
    render Markdown in-process. `.github/workflows/ci.yml` runs on
    `ubuntu-latest` (Node 22 and 24), so adding pandoc is a one-line

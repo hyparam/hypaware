@@ -53,11 +53,18 @@ export function parquetDataSource(file, metadata) {
       // With a WHERE present the engine owns LIMIT/OFFSET so it applies
       // them to the *filtered* result rather than to raw row positions.
       const appliedLimitOffset = !hints.where
-      // When a filter is pushed down it may reference columns outside the
-      // engine's projection; read all columns so hyparquet can evaluate
-      // it, and let the engine project. Without a filter, honor the
-      // requested projection.
-      const readColumns = filter ? undefined : hints.columns
+      // Honor the requested projection whether or not a filter is pushed
+      // down. A filter may reference columns outside the projection, but
+      // hyparquet unions its own `columnsNeededForFilter` into the read
+      // plan and deletes the extras from the returned rows, so passing the
+      // narrow projection is safe. Reading all columns instead would decode
+      // every payload column on any filtered scan. Because the emitted row
+      // set is now exactly `columns`, a caller that wraps this scan and
+      // reports its own `appliedWhere: false` (letting the engine re-apply
+      // the predicate over rows this scan already returned, as `unionSources`
+      // does) must include the predicate's columns in `columns`, or the
+      // engine has nothing to re-filter on.
+      const readColumns = hints.columns
 
       return {
         appliedWhere,

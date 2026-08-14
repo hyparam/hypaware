@@ -329,6 +329,10 @@ async function wizardOpts(over = {}) {
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async () => pickResult(),
     syncScope: async () => ({ optedOut: [] }),
+    folderAsk: async () => ({ mode: 'sync' }),
+    // The express gate (LLP 0201) fronts the lanes; these tests walk the
+    // back edges between them, so it declines by default.
+    express: async () => 'choose',
     configure: async () => ({ results: [] }),
     finaleRunner: async () => ({
       daemonInstall: { skipped: true, dryRun: false },
@@ -341,7 +345,7 @@ async function wizardOpts(over = {}) {
     }),
     ...over,
   })
-  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'configure']) {
+  for (const name of ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'express', 'configure']) {
     const inner = opts[name]
     opts[name] = async (/** @type {any[]} */ ...a) => { calls.push(name); return inner(...a) }
   }
@@ -360,6 +364,178 @@ test('runInitWizard: a back from pick re-presents the fork', async () => {
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
+})
+
+/**
+ * A catalog with one picker row, so `expressRowsSafe` finds something to
+ * accept and the express gate is actually shown. With the default empty
+ * catalog there is nothing to accept and no gate at all (LLP 0201
+ * #no-default-no-accept), which is a different back chain.
+ */
+function gatedOverrides() {
+  return {
+    fork: async () => 'team',
+    detect: async () => new Set(['claude']),
+    catalog: /** @type {any} */ ({
+      plugins: new Map(),
+      pluginMetadata: new Map(),
+      knownDatasets: new Set(),
+      clientDescriptors: new Map(),
+      pickerDescriptors: new Map([['claude', { id: 'claude', label: 'Claude Code', plugin: '@hypaware/claude' }]]),
+    }),
+  }
+}
+
+// The express gate is a screen, so it is on the back chain like any other:
+// the lane behind it steps back *to it*, not past it to the fork. Without
+// this, inserting a question into the forward chain silently made its
+// neighbour overshoot by one screen.
+// @ref LLP 0191#back-edges [tests]: escape steps exactly one screen back, express gate included
+test('runInitWizard: a back from pick re-presents the express gate, not the fork', async () => {
+  let pickCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    pick: async () => {
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'fork' || c === 'express' || c === 'pick'),
+    ['fork', 'express', 'pick', 'express', 'pick'],
+    'the gate is re-presented once; the fork is not'
+  )
+})
+
+// @ref LLP 0191#back-edges [tests]: the sync lane backs to the picker, not past it to the express gate
+test('runInitWizard: a back from sync re-presents pick without re-asking the express gate', async () => {
+  let syncCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    syncScope: async () => {
+      syncCalls += 1
+      if (syncCalls === 1) return { back: true, optedOut: [] }
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'express' || c === 'pick' || c === 'syncScope'),
+    ['express', 'pick', 'syncScope', 'pick', 'syncScope'],
+    'the gate is asked once per pass through the lanes, and a sync back is not a new pass'
+  )
+})
+
+// @ref LLP 0201#no-default-no-accept [tests]: with no gate shown, pick's back edge still reaches the fork
+test('runInitWizard: with nothing to accept there is no gate, and pick backs straight to the fork', async () => {
+  let pickCalls = 0
+  const { opts, calls } = await wizardOpts({
+    fork: async () => 'team',
+    pick: async () => {
+      pickCalls += 1
+      if (pickCalls === 1) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(calls.filter((c) => c === 'express').length, 0, 'nothing detected, nothing locked, no gate')
+  assert.deepEqual(calls.filter((c) => c === 'fork' || c === 'pick'), ['fork', 'pick', 'fork', 'pick'])
+})
+
+// A lane that narrates instead of asking is not a screen, so escape has to
+// step past it. The sync lane asks nothing when everything picked is
+// fleet-locked (and nothing when the client store is corrupt): backing
+// "into" it re-ran it and re-asked the new-folder question, so escape at
+// the folders lane became a redraw with no exit but ctrl+c.
+// @ref LLP 0191#back-edges [tests]: escape past a lane that rendered a statement rather than a question reaches the picker
+test('runInitWizard: a back from folders skips a sync lane that asked nothing and reaches pick', async () => {
+  let folderCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    // The fully fleet-managed shape: every picked row is locked, so the
+    // real lane's `candidates` list is empty and it only states its outcome.
+    syncScope: async (/** @type {any} */ o) => {
+      assert.deepEqual(o.candidates, [], 'nothing is left for this lane to ask about')
+      return { optedOut: [], noQuestion: true }
+    },
+    folderAsk: async () => {
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'pick' || c === 'syncScope' || c === 'folderAsk'),
+    ['pick', 'syncScope', 'folderAsk', 'pick', 'syncScope', 'folderAsk'],
+    'escape reaches the picker, the last screen the user could answer'
+  )
+})
+
+// The same edge for the lane that does ask: a sync lane with a question
+// behind it is still where a folders back lands.
+// @ref LLP 0191#back-edges [tests]: a sync lane that asked is the screen behind the folders lane
+test('runInitWizard: a back from folders re-presents a sync lane that did ask', async () => {
+  let folderCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    folderAsk: async () => {
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(
+    calls.filter((c) => c === 'pick' || c === 'syncScope' || c === 'folderAsk'),
+    ['pick', 'syncScope', 'folderAsk', 'syncScope', 'folderAsk'],
+    'the picker is two screens back, not one'
+  )
+})
+
+// The gate's rows are the picker's own confirmed defaults, so a confirmed
+// empty selection leaves nothing to accept and the gate cannot render on
+// the pass a pick-back opens. Falling forward into the picker again would
+// make that escape a redraw; the screen behind an unshowable gate is the
+// fork.
+// @ref LLP 0201#edges [tests]: a back into a gate this pass cannot show reaches the fork instead of re-opening the picker
+test('runInitWizard: a back from pick reaches the fork when the confirmed picks leave the gate empty', async () => {
+  let pickCalls = 0
+  let syncCalls = 0
+  let forkCalls = 0
+  const { opts, calls } = await wizardOpts({
+    ...gatedOverrides(),
+    fork: async () => { forkCalls += 1; return 'team' },
+    pick: async () => {
+      pickCalls += 1
+      // 1: confirm an empty selection, so the seed the next gate pass would
+      // list is empty. 2: escape out of the re-entered lane.
+      if (pickCalls === 1) return pickResult({ sourcesPicked: [] })
+      if (pickCalls === 2) return /** @type {any} */ ({ ...pickResult(), back: true })
+      return pickResult()
+    },
+    syncScope: async () => {
+      syncCalls += 1
+      // One back, to re-enter the picker with the empty selection standing.
+      if (syncCalls === 1) return { back: true, optedOut: [] }
+      return { optedOut: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(forkCalls, 2, 'one escape, one step: the fork is what is behind a gate with no rows')
+  assert.deepEqual(
+    calls.filter((c) => c === 'fork' || c === 'express' || c === 'pick'),
+    ['fork', 'express', 'pick', 'pick', 'fork', 'pick'],
+    'the escape out of the re-entered picker steps to the fork, never back into the picker itself'
+  )
 })
 
 // @ref LLP 0191#join-not-undone [tests]:
@@ -586,7 +762,7 @@ function scriptedIo(answers) {
   const input = new PassThrough()
   const pending = [...answers]
   let value = ''
-  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [y/N]: ']
+  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [Y/n]: ']
   return {
     stdin: input,
     pending,
@@ -610,12 +786,16 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-wizard-e2e-'))
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
-    '1',    // fork: Join a team
-    'b',    // pick menu: step back to the fork
-    '2',    // fork: Local install and configuration
+    '1',    // fork: Collect shared agent logs
+    '2',    // express gate: No, take me through the steps
+    'b',    // pick menu: step back one screen - the express gate
+    'b',    // express gate: step back one screen - the fork
+    '2',    // fork: Collect agent logs locally
     '1',    // disconnect?: No, stay connected
+    '2',    // express gate (asked again on this pass): step by step
     'all',  // pick menu: record everything offered
     '1',    // sync gate: Sync all
+    '1',    // new folders: Sync them all
   ])
   const stderr = makeBuf()
   let joinCalls = 0
@@ -632,6 +812,14 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     // org-config converge timed out, so nothing landed to lock.
     join: async () => { joinCalls += 1; return /** @type {any} */ ({ status: 'ok', lockedSources: [] }) },
     gate: async () => /** @type {any} */ ({ action: 'first-run', managed: false, report: {} }),
+    // Detection is scripted, not probed: the express gate (LLP 0201) is
+    // shown only when there is something to accept, so a run that read the
+    // real machine would ask one fewer question on a host with no AI
+    // clients installed than on the developer laptop that wrote this
+    // script - and every scripted answer below would land on the wrong
+    // prompt. The rows themselves do not matter here ('all' picks whatever
+    // the menu offers); that there *are* rows does.
+    detect: async () => new Set(['claude']),
     configure: async () => ({ results: [] }),
     // A fresh install has no cache, so the real first look would find no
     // dataset and print nothing; the stub says exactly that.
@@ -646,15 +834,17 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const out = io.stdout.text()
   // The back edge: the fork was presented twice, the second time after
   // `b` at the pick menu.
-  assert.equal(out.split('Join a team, or set up HypAware locally?').length - 1, 2)
+  assert.equal(out.split('How do you want to collect agent logs?').length - 1, 2)
   // Enrolled-state decisions survive the walk to the local pathway.
   assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
   assert.match(out, /These will sync to your server:/)
-  // The itinerary is the enrolled one (pick, sync, finish), not the solo
-  // two-step local one: the denominator is the same `enrolled()` read the
-  // sync lane is gated on, so a regression there shows up here too.
-  assert.match(out, /Step 1 of 3 · Choose what to collect/)
-  assert.match(out, /Step 2 of 3 · Choose what syncs/)
+  // The itinerary is the enrolled one (pick, sync, folders, finish), not
+  // the solo two-step local one: the denominator is the same `enrolled()`
+  // read both enrolled lanes are gated on, so a regression there shows up
+  // here too.
+  assert.match(out, /Step 1 of 4 · Choose what to collect/)
+  assert.match(out, /Step 2 of 4 · Choose what syncs/)
+  assert.match(out, /Step 3 of 4 · Choose how new folders are handled/)
 
   // The run ended in a real config on disk, written after the last question.
   assert.match(String(result.configPath), /hypaware-config\.json$/)

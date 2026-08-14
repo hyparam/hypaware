@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { McpToolInputSchema, VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -272,17 +272,16 @@ export function validateToolArguments(inputSchema, args) {
  * contract).
  *
  * @param {VerbInputSchema} inputSchema
- * @returns {{ type: 'object', properties: Record<string, object>, required?: string[] }}
+ * @returns {McpToolInputSchema}
+ * @ref LLP 0034#verbs [implements]: the advertised tool schema is projected from the verb's own inputSchema, never authored
  */
 export function toJsonSchema(inputSchema) {
-  /** @type {Record<string, object>} */
-  const properties = {}
+  /** @type {McpToolInputSchema} */
+  const schema = { type: 'object', properties: {} }
   for (const [name, prop] of Object.entries(inputSchema.properties ?? {})) {
     const { greedy: _greedy, ...rest } = prop
-    properties[name] = rest
+    schema.properties[name] = rest
   }
-  /** @type {{ type: 'object', properties: Record<string, object>, required?: string[] }} */
-  const schema = { type: 'object', properties }
   if (inputSchema.required && inputSchema.required.length > 0) schema.required = [...inputSchema.required]
   return schema
 }

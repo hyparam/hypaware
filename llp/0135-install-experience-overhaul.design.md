@@ -330,6 +330,20 @@ transient network error) to `'failed' | 'abandoned'` for
 `runInitWizard`'s retry-or-local-or-quit prompt
 (`@ref LLP 0129#failed-join-returns-to-fork`).
 
+Extended-by: [LLP 0179](./0179-login-lane-returns-its-outcome.decision.md).
+The taxonomy and the classification it feeds are unchanged; how the wizard
+*learns* them is not. The implementation read the login lane's captured
+stderr and substring-matched the messages it printed; the lane now returns
+`{ exitCode, reason }` and `classifyLoginFailure` switches on the code.
+
+Extended-by: [LLP 0223](./0223-converge-on-applied-config.decision.md).
+The reuse-the-reconcile-wait sketch above is withdrawn:
+`waitForCentralConverge` now runs its own bounded poll over the applied
+org-config slot under `config-control/`, because an attach marker is
+sufficient but not necessary evidence that the org config landed. It stays
+a small exported helper of `remote_commands.js`, with the same budget and
+the same unlocked-picker timeout fallback, and returns `{ ok }` only.
+
 ## Pick phase {#pick}
 
 > **Extended-by [LLP 0190](./0190-wizard-defaults-gate.decision.md):**

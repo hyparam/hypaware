@@ -4,6 +4,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory, defaultPromptFactory } from '../walkthrough.js'
+import { narrateAcceptedGate } from './express.js'
 import { LOCKED_LABEL_SUFFIX } from './pick.js'
 import {
   ClientSyncListUnreadableError,
@@ -18,7 +19,7 @@ import {
  * @import { ClientSyncEntry } from '../../../../src/core/usage-policy/types.js'
  */
 
-const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs - unchecked sources stay on this machine.'
+const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this machine.'
 
 /**
  * The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190
@@ -67,17 +68,23 @@ export async function runWizardSyncScope(opts) {
       `warning: the client policy store at '${clientSyncListPath(stateDir)}' is unreadable; ` +
       'skipping the sync-scope step (exports fail until it is repaired or removed)\n'
     )
-    return await finishSpan({ skipped: true, optedOut: [] }, opts)
+    return await finishSpan({ skipped: true, noQuestion: true, optedOut: [] }, opts)
   }
 
   const candidateIds = new Set(opts.candidates.map((d) => d.id))
   const optedOutBefore = new Set(existing.filter((e) => candidateIds.has(e.source)).map((e) => e.source))
 
   if (opts.candidates.length === 0) {
+    // Led by a blank line like every other block this lane prints, so the
+    // no-question path is not the one that runs into its neighbour.
+    opts.stdout.write('\n')
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
-    return await finishSpan({ optedOut: [] }, opts)
+    // A statement, not a screen: `noQuestion` is what tells the lane after
+    // this one that there is nothing here to step back *to* (LLP 0191
+    // #back-edges).
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)
@@ -152,6 +159,14 @@ async function promptSyncScopeSelection({ opts, ask, confirm, optedOutBefore }) 
     ...(local.length > 0 && syncing.length > 0 ? ['Staying local-only:'] : []),
     ...local.map((label) => `  ${label}`),
   ]
+  // The express gate already accepted this lane (LLP 0201): state the same
+  // split it would have shown, then take it. Never silent - LLP 0188
+  // #never-silent binds the statement, not the keypress.
+  // @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
+  if (opts.autoAccept) {
+    narrateAcceptedGate({ stdout: opts.stdout, title: gateTitle, items: gateItems })
+    return { optedOut: [...optedOutBefore].sort() }
+  }
   let screen = 'gate'
   while (true) {
     if (screen === 'gate') {

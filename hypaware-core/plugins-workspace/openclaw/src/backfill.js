@@ -14,6 +14,7 @@ import {
   defaultOpenclawAgentsDir,
   readOpenclawSessionHeader,
   readOpenclawSessionMessages,
+  SESSION_FILE_NAME,
 } from './session_file.js'
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
@@ -768,8 +769,9 @@ function setNumber(target, key, source, aliases) {
 }
 
 /**
- * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, sorted so a run
- * is deterministic. A missing or unreadable directory at any level is an empty
+ * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, rotated names
+ * included ({@link SESSION_FILE_NAME}), sorted so a run is deterministic. A
+ * missing or unreadable directory at any level is an empty
  * result, never a throw: a machine with no OpenClaw install must scan to zero
  * sessions, not fail the whole `hyp backfill` run.
  *
@@ -797,7 +799,7 @@ async function listSessionFiles(agentsDir, quiesceBeforeMs) {
   for (const agentId of await readDirNames(agentsDir, 'dir')) {
     const sessionsDir = path.join(agentsDir, agentId, 'sessions')
     for (const name of await readDirNames(sessionsDir, 'file')) {
-      if (!name.endsWith('.jsonl')) continue
+      if (!SESSION_FILE_NAME.test(name)) continue
       const filePath = path.join(sessionsDir, name)
       if (quiesceBeforeMs !== undefined && !(await isOutsideQuiesceWindow(filePath, quiesceBeforeMs))) continue
       out.push({ agentId, filePath })
@@ -887,12 +889,26 @@ async function readDirNames(dir, kind) {
  * path rather than the line, so it never conflicts with the LLP 0158 reader's
  * "unconfirmable is unresolvable" rule for the header's own fields.
  *
+ * The id is the name with its `.jsonl` extension and any rotation marker
+ * removed, which is what makes a rotated file resolve to the session it
+ * holds: `basename(f, '.jsonl')` strips nothing off `<id>.jsonl.reset.<ts>`
+ * and would partition the run's rows under an id carrying the rotation
+ * marker and its timestamp.
+ *
+ * The `hashShort` fallback is belt-and-braces: every caller in this module
+ * reaches `filePath` through {@link listSessionFiles}, which already applies
+ * `SESSION_FILE_NAME`, so `exec` failing here would mean the two disagree.
+ * Kept anyway so a future caller that bypasses the scan still resolves to
+ * something stable instead of throwing.
+ *
+ * @ref LLP 0205#decision [implements]: the fallback id strips the `.jsonl`
+ * extension and rotation marker, so a rotation marker never reaches
+ * `session_id`
  * @param {string} filePath
  * @returns {string}
  */
 function sessionIdFromPath(filePath) {
-  const base = path.basename(filePath, '.jsonl')
-  return base.length > 0 ? base : hashShort(filePath)
+  return SESSION_FILE_NAME.exec(path.basename(filePath))?.[1] ?? hashShort(filePath)
 }
 
 /**

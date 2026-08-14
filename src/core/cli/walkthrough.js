@@ -10,10 +10,12 @@ import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
+import { withSpinner } from './spinner.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -31,6 +33,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -281,15 +284,24 @@ function legacyNumberedPromptFactory(opts) {
 
 /**
  * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **no** (a bare Enter keeps the existing config), so a stray
- * keystroke never destroys a working install. On yes the caller backs
- * the file up before replacing it.
+ * to **yes**: this lands at the end of an attended run, after every
+ * question was answered, so a bare Enter has to complete the run the
+ * user just walked - an enter that silently threw those answers away
+ * read as the wizard failing. It is safe as a yes because nothing is
+ * destroyed either way: the caller backs the file up before replacing
+ * it, and the carried-over list below names what the rewrite keeps.
  *
  * The question says the file is *rewritten from the picks*, not merely
  * "overwritten": the write is a whole-file regeneration, and a user whose
  * mental model is "I am adjusting checkboxes" needs to know that before
  * the y/N. It also names what survives the regeneration, so the answer is
  * a decision about the picks rather than a bet on how much is lost.
+ *
+ * That is three facts, and as one paragraph they arrived as a wall of text
+ * with the actual question buried at the end of it. So it is laid out
+ * instead: the path on its own line, the consequence and the carried-over
+ * list indented under it, and `Continue?` alone on the last line where a
+ * reader's eye lands. Same facts, same order, scannable.
  *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
@@ -302,12 +314,18 @@ export function defaultOverwriteConfirmFactory(opts) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
       const answer = await rl.question(
-        `The config at ${targetPath} will be rewritten from your picks. ` +
-        'Your retention window, export destinations, hand-edited settings, and any ' +
-        'plugins the picker does not manage are carried over; a backup is kept. ' +
-        'Continue? [y/N]: '
+        '\n' +
+        `This config will be rewritten from your picks:\n` +
+        `  ${targetPath}\n` +
+        '\n' +
+        '  Carried over: retention window, export destinations, hand-edited\n' +
+        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
+        '\n' +
+        'Continue? [Y/n]: '
       )
-      return /^y(es)?$/i.test(answer.trim())
+      // Only an explicit no declines; a bare enter (and any stray answer)
+      // proceeds, matching the stated default.
+      return !/^n(o)?$/i.test(answer.trim())
     } finally {
       rl.close()
     }
@@ -496,13 +514,27 @@ function legacyBackfillConsentPromptFactory(opts) {
   }
 }
 
+/** Friendly names for the backfill question; ids pass through unmapped. */
+const BACKFILL_PROVIDER_LABELS = /** @type {Record<string, string>} */ ({
+  claude: 'Claude',
+  codex: 'Codex',
+  openclaw: 'OpenClaw',
+})
+
 /**
  * @param {string[]} providers
  * @param {number} retentionDays
  * @returns {string}
  */
 export function backfillConsentTitle(providers, retentionDays) {
-  return `Import local ${providers.join(', ')} history now (last ${retentionDays} days)?`
+  const names = providers.map((p) => BACKFILL_PROVIDER_LABELS[p] ?? p)
+  const list = names.length > 1
+    ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+    : (names[0] ?? '')
+  // "up to", not "last N days": the retention window caps the import, but
+  // each client keeps far less on disk (Claude prunes after ~30 days), so
+  // promising the full window would overstate what the import can deliver.
+  return `Import the ${list} history already on this machine (up to ${retentionDays} days)?`
 }
 
 /**
@@ -515,6 +547,11 @@ export function backfillConsentTitle(providers, retentionDays) {
  * receivers. A descriptor whose id is absent here sorts after all known
  * ids (preserving catalog order among them), so a newly-contributed picker
  * row still appears rather than being dropped.
+ *
+ * `raw-anthropic` / `raw-openai` are listed here but no longer render:
+ * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
+ * array and their descriptors in the catalog - see
+ * {@link visiblePickerDescriptors} for what still depends on them.
  *
  * @type {string[]}
  */
@@ -599,7 +636,7 @@ export async function runPickerWalkthrough(opts) {
   // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
   // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
   // options and `composePickerConfig`'s fold read from these descriptors.
-  const pickerDescriptors = await loadPickerDescriptors()
+  const { descriptors: pickerDescriptors, composeWith } = await loadPickerCatalog()
   const descriptorList = [...pickerDescriptors.values()]
 
   await withSpan(
@@ -630,13 +667,17 @@ export async function runPickerWalkthrough(opts) {
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
 
-    stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
+    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
 
     try {
       const sourceRaw = await ask({
         pickType: 'sources',
-        title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: descriptorList.map((d) => ({
+        title: 'What do you want to collect?',
+        // Hidden rows are absent from the menu but still pickable via
+        // `--source` (which takes the `opts.picks` path above and never
+        // reaches this prompt). They are never detected, so nothing is
+        // silently unchecked by leaving them out here.
+        options: visiblePickerDescriptors(descriptorList).map((d) => ({
           value: d.id,
           label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
           ...(d.summary ? { summary: d.summary } : {}),
@@ -688,6 +729,7 @@ export async function runPickerWalkthrough(opts) {
     exportChoice: picks.exportChoice,
     retentionDays: picks.retentionDays,
     hypHome,
+    composeWith,
   })
 
   const obsEnv = readObservabilityEnv(env)
@@ -751,6 +793,7 @@ export async function runPickerWalkthrough(opts) {
       sources: opts.sources,
       skills: opts.skills,
       agents: opts.agents,
+      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
       config,
       configPath,
       env,
@@ -887,6 +930,12 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  * {@link carryForwardExistingConfig} for the split between what the
  * composer manages and what it merely passes through.
  *
+ * Finally, **riders** are folded in: a plugin whose manifest `compose_with`
+ * names only plugins the fold has already composed joins them, even though
+ * no picker row contributes it. That is how the context graph reaches a
+ * default install without being a question the user is asked
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ *
  * @param {{
  *   sources: PickerSource[],
  *   descriptors: Map<string, PickerDescriptor>,
@@ -894,6 +943,7 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  *   retentionDays: number,
  *   hypHome: string,
  *   existing?: HypAwareV2Config | undefined,
+ *   composeWith?: Map<string, string[]> | undefined,
  * }} args
  * @returns {HypAwareV2Config}
  * @ref LLP 0011#no-architectural-names [implements]: user picks what/where; HypAware derives the explicit plugin set, no role labels
@@ -968,6 +1018,8 @@ export function composePickerConfig(args) {
 
   plugins.push(...postExportPlugins)
 
+  for (const rider of ridersFor(plugins, args.composeWith)) plugins.push({ name: rider })
+
   /** @type {HypAwareV2Config} */
   const config = {
     version: 2,
@@ -980,7 +1032,7 @@ export function composePickerConfig(args) {
   }
   if (Object.keys(sinks).length > 0) config.sinks = sinks
   if (!args.existing) return config
-  return carryForwardExistingConfig(config, args.existing, args.descriptors)
+  return carryForwardExistingConfig(config, args.existing, args.descriptors, args.composeWith)
 }
 
 /** The gateway plugin every `requires_gateway` row composes behind. */
@@ -1017,21 +1069,61 @@ function contributedPlugins(compose) {
 }
 
 /**
+ * Riders to add to an already-composed plugin list: every plugin whose
+ * `compose_with` names are all present. Run to a fixpoint, so a rider that
+ * waits on another rider still lands and the manifests need no ordering
+ * convention between themselves. A plugin already in the list is never
+ * added twice, and one whose condition is unmet is simply absent.
+ *
+ * @param {PluginConfigInstance[]} composed
+ * @param {Map<string, string[]> | undefined} composeWith
+ * @returns {string[]}
+ * @ref LLP 0213#d1 [implements]: derived-data plugins ride a pick rather than contributing one
+ */
+function ridersFor(composed, composeWith) {
+  if (!composeWith || composeWith.size === 0) return []
+  const present = new Set(composed.map((p) => p.name))
+  /** @type {string[]} */
+  const added = []
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [rider, waitsFor] of composeWith) {
+      if (present.has(rider)) continue
+      if (waitsFor.length === 0) continue
+      if (!waitsFor.every((name) => present.has(name))) continue
+      present.add(rider)
+      added.push(rider)
+      grew = true
+    }
+  }
+  return added
+}
+
+/**
  * Every plugin name composition is entitled to add or remove: the gateway,
- * the export half's two plugins, and every plugin any picker row in the
- * catalog contributes. A plugin outside this set is in the config because
- * someone put it there by hand (`@hypaware/gascity`, `@hypaware/central`),
- * so a reconfigure carries it forward untouched.
+ * the export half's two plugins, every plugin any picker row in the
+ * catalog contributes, and every rider that can join them. A plugin outside
+ * this set is in the config because someone put it there by hand
+ * (`@hypaware/gascity`, `@hypaware/central`), so a reconfigure carries it
+ * forward untouched.
+ *
+ * Riders belong here for the same reason picked plugins do: composition put
+ * them in, so composition takes them out when the pick they rode in on goes
+ * away. Leaving them out would strand the graph plugins in a config whose
+ * gateway had just been unchecked.
  *
  * @param {Map<string, PickerDescriptor>} descriptors
+ * @param {Map<string, string[]>} [composeWith]
  * @returns {Set<string>}
  */
-function composerManagedPlugins(descriptors) {
+function composerManagedPlugins(descriptors, composeWith) {
   const managed = new Set([GATEWAY_PLUGIN, LOCAL_FS_PLUGIN, PARQUET_PLUGIN])
   for (const descriptor of descriptors.values()) {
     if (!descriptor.compose) continue
     for (const plugin of contributedPlugins(descriptor.compose)) managed.add(plugin.name)
   }
+  for (const rider of composeWith?.keys() ?? []) managed.add(rider)
   return managed
 }
 
@@ -1067,10 +1159,11 @@ function composerManagedPlugins(descriptors) {
  * @param {HypAwareV2Config} composed
  * @param {HypAwareV2Config} existing
  * @param {Map<string, PickerDescriptor>} descriptors
+ * @param {Map<string, string[]>} [composeWith]
  * @returns {HypAwareV2Config}
  * @ref LLP 0183#carry-forward [implements]: a reconfigure keeps what the composer does not own; only the picked set is recomposed
  */
-function carryForwardExistingConfig(composed, existing, descriptors) {
+function carryForwardExistingConfig(composed, existing, descriptors, composeWith) {
   const existingPlugins = existing.plugins ?? []
   const existingSinks = existing.sinks ?? {}
   const composedSinks = composed.sinks ?? {}
@@ -1110,10 +1203,11 @@ function carryForwardExistingConfig(composed, existing, descriptors) {
     for (const name of sinkPluginNames(sink)) pinnedPlugins.add(name)
   }
 
-  const managed = composerManagedPlugins(descriptors)
+  const managed = composerManagedPlugins(descriptors, composeWith)
+  const riders = new Set(composeWith?.keys() ?? [])
   const composedNames = new Set((composed.plugins ?? []).map((p) => p.name))
   const plugins = (composed.plugins ?? []).map((entry) =>
-    mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name))
+    mergePlugin(entry, existingPlugins.find((p) => p.name === entry.name), riders.has(entry.name))
   )
   for (const prior of existingPlugins) {
     if (composedNames.has(prior.name)) continue
@@ -1144,11 +1238,15 @@ function carryForwardExistingConfig(composed, existing, descriptors) {
  * already in the config: the user's keys win, except the gateway's
  * pick-derived `upstreams`.
  *
+ * `isRider` marks a plugin composed by `compose_with` rather than by a
+ * pick, which changes what a prior `enabled: false` means (see below).
+ *
  * @param {PluginConfigInstance} composed
  * @param {PluginConfigInstance | undefined} prior
+ * @param {boolean} [isRider]
  * @returns {PluginConfigInstance}
  */
-function mergePlugin(composed, prior) {
+function mergePlugin(composed, prior, isRider = false) {
   if (!prior) return composed
   const config = { ...(composed.config ?? {}), ...(prior.config ?? {}) }
   const upstreams = composed.config?.upstreams
@@ -1158,6 +1256,15 @@ function mergePlugin(composed, prior) {
   // Composing a plugin is what picking its row means, so a prior
   // `enabled: false` does not carry over: the pick would otherwise write a
   // config whose row reads picked and whose plugin never activates.
+  //
+  // A rider is the exception, and it inverts the argument rather than
+  // bending it. Nothing picked it: it has no picker row to read as picked
+  // (LLP 0213 #derived-data-plugins), so `enabled: false` is not a
+  // contradiction the user left behind, it is the *only* way the user can
+  // decline a plugin composition adds unasked. Deleting it would make every
+  // later `hyp init` silently re-enable a plugin its owner switched off.
+  // @ref LLP 0213#derived-data-plugins [constrained-by]: a rider has no picker row, so `enabled: false` is the user's only opt-out and outranks the fold
+  if (isRider) return merged
   if (merged.enabled === false && composed.enabled === undefined) delete merged.enabled
   return merged
 }
@@ -1365,6 +1472,7 @@ export function resolveSingleSourceEnablement(descriptor) {
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
+ *   failedPlugins?: string[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1546,16 +1654,33 @@ export async function runPickerFinale(args) {
       },
       async (span) => {
         const framed = framedStream(stdout)
-        const installed = await materializeClientAssets({
+        // No `stdout` here on purpose: the materializer's per-copy line is the
+        // right output for `hyp skills install`, where the copies are the
+        // command's subject, but in the finale a dozen path lines bury the one
+        // fact the step reports. The counts go out instead; the paths stay
+        // available in the run summary and the span.
+        //
+        // Withholding the stream is exactly why the removals have to come back
+        // as data. `pruneOneAsset` reports a deletion on stdout and nowhere
+        // else, so this call site - the one with a human watching - was the one
+        // that deleted a skill and said nothing, while the withheld candidates
+        // it did *not* delete were visible on stderr.
+        // @ref LLP 0219#automatic-not-gated [implements]: the finale counts its
+        //   removals out loud rather than reporting them down a stream it withholds
+        const { installed, pruned } = await materializeClientAssets({
           clients: clientsPicked,
           descriptors: descriptorMap,
           homeDir,
+          stateRoot: clientAssetStateRoot(env, homeDir),
           ...(skills ? { skills } : {}),
           ...(agents ? { agents } : {}),
+          // A boot with a broken plugin contributes a partial asset set; the
+          // finale copies it, and removes nothing on the strength of it.
+          ...(args.failedPlugins?.length ? { failedPlugins: args.failedPlugins } : {}),
           dryRun,
-          stdout: framed,
           stderr,
         })
+        for (const line of clientAssetCountLines(installed, pruned, dryRun)) framed.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1827,13 +1952,16 @@ async function runFinaleBackfill(args) {
         }
         try {
           // Importing local history reads and writes potentially
-          // thousands of rows with no other output. Without this line
-          // the resolved consent frame is the last thing on screen, so a
-          // multi-second import looks like the prompt is stuck. Announce
-          // the work before it starts so the wizard visibly moves on.
+          // thousands of rows with no other output. Without this the
+          // resolved consent frame is the last thing on screen, so a
+          // multi-second import looks like the prompt is stuck. On a TTY
+          // the announce line animates with elapsed time and clears when
+          // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
-          stdout.write(`${startTag}backfill ${provider}: importing local history…\n`)
-          const entry = await backfill.run({ provider, dryRun, retentionDays, until })
+          const entry = await withSpinner(
+            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            () => backfill.run({ provider, dryRun, retentionDays, until })
+          )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
           stdout.write(
@@ -1905,13 +2033,96 @@ export async function defaultPickerDetect(opts) {
  * @returns {Promise<Map<string, PickerDescriptor>>}
  */
 export async function loadPickerDescriptors() {
+  return (await loadPickerCatalog()).descriptors
+}
+
+/**
+ * The picker descriptors plus the `compose_with` riders, read in one
+ * discovery pass. `composePickerConfig` needs both: the descriptors to fold
+ * the picked rows, the riders to add the plugins that ride those picks
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ * Discovery failure yields empty maps rather than blocking init, which
+ * degrades to "no riders" instead of a config that cannot be written.
+ *
+ * The catalog is built from the excluded manifests too (config validation
+ * and descriptor resolution both need them), but the riders are filtered
+ * back down to the default-activated set: see {@link ridersInDefaultSet}.
+ *
+ * @returns {Promise<{ descriptors: Map<string, PickerDescriptor>, composeWith: Map<string, string[]> }>}
+ */
+export async function loadPickerCatalog() {
   try {
     const bundled = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
-    return orderPickerDescriptors(catalog.pickerDescriptors)
+    return {
+      descriptors: orderPickerDescriptors(catalog.pickerDescriptors),
+      composeWith: ridersInDefaultSet(catalog.composeWith ?? new Map()),
+    }
   } catch {
-    return new Map()
+    return { descriptors: new Map(), composeWith: new Map() }
   }
+}
+
+/**
+ * Drop the riders that are excluded from default activation.
+ *
+ * `compose_with` composes a plugin with no pick and no prompt, so left
+ * unfiltered it is a way around `V1_EXCLUDED_FROM_DEFAULT` - the boundary
+ * that says a plugin activates only if someone asked for it by name. The
+ * excluded set is not a display preference: `@hypaware/embedder-openai` is
+ * out because enabling an API-backed embedder is the opt-in that lets
+ * captured text leave the machine, and `@hypaware/claude-account` because it
+ * holds a real credential. A one-line manifest edit on any of them would
+ * otherwise compose it into every gateway config.
+ *
+ * The filter reads `V1_EXCLUDED_FROM_DEFAULT` itself rather than a list of
+ * loaded manifests handed in by the caller. That is deliberate: the riders
+ * reach composition from three catalog sources (the wizard's own
+ * `loadWizardCatalog`, an injected `opts.catalog`, and `loadPickerCatalog`'s
+ * discovery), and only one of them has a `loaded` array to inject. A filter
+ * that depends on what the caller passes is a filter one caller can skip,
+ * which is how the first version of this guard came to protect the legacy
+ * walkthrough while the shipped `hyp init` path routed around it.
+ *
+ * Filtering here rather than in `buildPluginCatalog` keeps the catalog a
+ * faithful read of the manifests; it is composition, not cataloguing, that
+ * the allowlist constrains.
+ *
+ * @param {Map<string, string[]>} composeWith
+ * @returns {Map<string, string[]>}
+ * @ref LLP 0213#d1 [constrained-by]: riding a pick is not a route around the explicit-opt-in boundary
+ */
+export function ridersInDefaultSet(composeWith) {
+  /** @type {Map<string, string[]>} */
+  const kept = new Map()
+  for (const [rider, waitsFor] of composeWith) {
+    if (V1_EXCLUDED_FROM_DEFAULT.has(rider)) continue
+    kept.set(rider, waitsFor)
+  }
+  return kept
+}
+
+/**
+ * The descriptors the interactive picker menu renders: everything except
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ *
+ * Display is the ONLY thing this filters. A hidden row keeps every other
+ * property of a picker source, and each one is load-bearing somewhere:
+ * `hyp init --source raw-anthropic` still composes it, `configuredPickerSources`
+ * still reads it back off a config that collects it, and - the one that
+ * bites hardest if the row is deleted outright rather than hidden - its id
+ * still reaches `datasetOwnedSourceIdsFromCatalog`, which folds picker
+ * descriptors into the dataset-owner map that arms the export seam's
+ * unattributed-row withholding (LLP 0192 #fail-closed). Drop the
+ * descriptors and `ai_gateway_messages` gets an empty owner list, which
+ * both withhold rules read as "never withhold": a privacy guard turned off
+ * by what looks like a UI cleanup.
+ *
+ * @param {Iterable<PickerDescriptor>} descriptors
+ * @returns {PickerDescriptor[]}
+ */
+export function visiblePickerDescriptors(descriptors) {
+  return [...descriptors].filter((d) => d.hidden !== true)
 }
 
 /**
@@ -1977,6 +2188,72 @@ export async function buildWalkthroughClientDescriptorMap() {
     }
   } catch { /* discovery failure → empty map */ }
   return map
+}
+
+/**
+ * One line per client naming how many skills and agents landed there, plus one
+ * naming how many retired ones were taken off the machine, in the order the
+ * copies were made.
+ *
+ * Counted per client rather than summed across them, because the sum is the
+ * one number that is true of nobody: six skills copied to two clients is
+ * twelve copies, and neither client got twelve. Names are left out entirely -
+ * the user picked these clients a screen ago and did not choose the assets,
+ * so the roster is not a decision they are being shown for review.
+ *
+ * The removals get a count and not the paths, unlike everywhere else, for that
+ * same reason: this is a step summary in a wizard, and it is the *fact* of a
+ * deletion the user needs at this moment, not a roster. What was removed stays
+ * on the span and in `client_assets.pruned`.
+ *
+ * @param {ClientAssetInstall[]} installed
+ * @param {ClientAssetRemoval[]} pruned
+ * @param {boolean} dryRun
+ * @returns {string[]}
+ */
+function clientAssetCountLines(installed, pruned, dryRun) {
+  /** @type {Map<string, { skills: number, agents: number, removedSkills: number, removedAgents: number }>} */
+  const byClient = new Map()
+  /** @param {string} client */
+  const counts = (client) => {
+    let entry = byClient.get(client)
+    if (!entry) byClient.set(client, (entry = { skills: 0, agents: 0, removedSkills: 0, removedAgents: 0 }))
+    return entry
+  }
+  for (const item of installed) {
+    const entry = counts(item.client)
+    if (item.kind === 'skill') entry.skills += 1
+    else entry.agents += 1
+  }
+  for (const item of pruned) {
+    const entry = counts(item.client)
+    if (item.kind === 'skill') entry.removedSkills += 1
+    else entry.removedAgents += 1
+  }
+  const installVerb = dryRun ? '(dry-run) would install' : 'installed'
+  const removeVerb = dryRun ? '(dry-run) would remove' : 'removed'
+  /** @type {string[]} */
+  const lines = []
+  for (const [client, entry] of byClient) {
+    const landed = []
+    if (entry.skills > 0) landed.push(plural(entry.skills, 'skill'))
+    if (entry.agents > 0) landed.push(plural(entry.agents, 'agent'))
+    if (landed.length > 0) lines.push(`${installVerb} ${landed.join(' and ')} for ${client}`)
+    const gone = []
+    if (entry.removedSkills > 0) gone.push(plural(entry.removedSkills, 'retired skill'))
+    if (entry.removedAgents > 0) gone.push(plural(entry.removedAgents, 'retired agent'))
+    if (gone.length > 0) lines.push(`${removeVerb} ${gone.join(' and ')} for ${client}`)
+  }
+  return lines
+}
+
+/**
+ * @param {number} count
+ * @param {string} noun
+ * @returns {string}
+ */
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
 /**

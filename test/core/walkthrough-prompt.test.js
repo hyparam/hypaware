@@ -34,11 +34,15 @@ test('picker prompt prints context under source options and defaults export to l
   })
 
   assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+  // Row 3 is otel: the raw API rows sort between codex and otel in
+  // PICKER_DISPLAY_ORDER but are `hidden`, so they never render (LLP 0202).
+  assert.deepEqual(result.sourcesPicked, ['otel'])
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /3\) Anthropic API\n     For apps you manually point at HypAware/)
+  assert.match(text, /3\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
+  assert.doesNotMatch(text, /Anthropic API/)
+  assert.doesNotMatch(text, /OpenAI API/)
   // The export question is no longer rendered.
   assert.doesNotMatch(text, /keep local query cache only/)
   assert.doesNotMatch(text, /Where should HypAware export/)
@@ -59,7 +63,7 @@ test('picker prompt prints context under source options and defaults export to l
 function syncMenuQuestion(/** @type {Record<string, unknown>} */ extra = {}) {
   return /** @type {any} */ ({
     pickType: 'clients',
-    title: 'Choose what syncs - unchecked sources stay on this machine.',
+    title: 'Choose what syncs. Unchecked sources stay on this machine.',
     options: [
       { value: 'claude', label: 'capture claude · managed by your fleet', checked: true, disabled: true },
       { value: 'openclaw', label: 'capture openclaw', checked: true },

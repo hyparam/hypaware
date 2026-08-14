@@ -27,6 +27,46 @@ export const graphNeighborsVerb = {
   tool: 'graph_neighbors',
   plugin: PLUGIN_NAME,
   summary: 'Walk the activity graph from a node out to N hops',
+  // The traversal mechanics live here rather than in a skill: they are
+  // deterministic properties of this command, and prose describing a command
+  // from outside it drifts from the command.
+  // @ref LLP 0214#d1 [implements]: a verb explains its own flags instead of a skill narrating them
+  help: [
+    'Walks outward from a seed node and prints what it reaches.',
+    '',
+    'The seed resolves in order: node_id, then natural_key, then label. So a',
+    'session id, a file path or basename, a model id, or a tool / skill /',
+    'program / app name all work. An ambiguous seed lists the candidates',
+    'instead of guessing; narrow it with --type.',
+    '',
+    '  --type <T>        restrict the seed to one node type: Session, App,',
+    '                    Model, Tool, File, Skill, Program, Repo, Commit, and,',
+    '                    where GitHub enrichment is configured, Actor, Issue,',
+    '                    PullRequest, Review',
+    '  --depth <N>       hops to walk (default 1)',
+    '  --direction       out | in | both (default both)',
+    '  --edge-type <T>   only walk these relations; repeatable or comma-separated',
+    '  --limit <N>       cap the output in breadth-first order (default 100)',
+    '  --json            structured result instead of the text table',
+    '',
+    'Direction is load-bearing, because edges point away from the session:',
+    '  out from a Session            what it used, touched, ran, invoked',
+    '  in  from a File/Tool/Skill/…  the sessions that touched or ran it',
+    '  both at --depth 2 from a File co-occurrence: what else those sessions',
+    '                                reached',
+    '',
+    'Truncation is part of the result, so it is printed on stdout with the',
+    'rows (`... - truncated; raise --limit`) and set as `truncated` in --json.',
+    'Not-found and ambiguity notes go to stderr instead. Exit 1 is a seed that',
+    'could not be resolved; exit 2 is a usage error.',
+    '',
+    'The bracketed id in the text output is shortened for display and will not',
+    'match anything if pasted into SQL. Take full ids from --json.',
+    '',
+    'Note --json, not --format json: this command renders its own structure.',
+    '',
+    'An empty graph is reported as such. If you see it, run `hyp graph project`.',
+  ].join('\n'),
   authClass: 'read',
   inputSchema: {
     type: 'object',
@@ -75,6 +115,16 @@ export const graphNeighborsVerb = {
     // so on stderr, counts only, whether it succeeded or failed to seed.
     const notice = localOnlyNotice(r.localOnly)
     if (!r.ok) {
+      // An unprojected graph fails every seed. Saying "not found" there sends
+      // the reader hunting for a better seed when the answer is a command.
+      // @ref LLP 0213#d3 [implements]: an empty graph names its own fix instead of reading as a bad seed
+      if (r.graphEmpty) {
+        return {
+          stdout: '',
+          stderr: 'hyp graph neighbors: the graph is empty - run `hyp graph project` to build it\n' + notice,
+          exitCode: 1,
+        }
+      }
       const lines = [`hyp graph neighbors: ${r.error}`]
       for (const c of (r.candidates ?? []).slice(0, 10)) {
         lines.push(`  ${c.node_type}\t${c.natural_key}\t(${shortId(c.node_id)})`)

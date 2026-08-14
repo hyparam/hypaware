@@ -68,7 +68,7 @@ If the `curl` fails (gateway not running, wrong port) or the verification line d
 
 **What `opt-out confirmed` proves, exactly.** The gateway holds the id as an opaque token: `ignored: true` means the id is in its drop set, and nothing more. It never inspects traffic, so it cannot tell you the id is one your exchanges carry - that match happens later, in the client adapter, against the `session_id` it stamps on the row. For Claude the session *is* the conversation and `CLAUDE_CODE_SESSION_ID` is that same id, so sending it is what makes the opt-out real; the reply is a receipt for the write, not a verified drop. Do not report it to the user as more than that, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
 
-The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`claude --fork-session`; a plain `--resume` / `--continue` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point. Reverse later with `/hypaware-unignore`.
+The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`claude --fork-session`; a plain `--resume` / `--continue` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point. Reverse later with `hyp session unignore`.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 
@@ -129,6 +129,10 @@ Present findings as **short, redacted excerpts** and a proposed class per direct
 
 Then **apply nothing without per-item user confirmation.** Propose, wait for a yes on each item, then mark. Do not batch-apply.
 
+Keep the response tight: a clear list of candidate directories with the proposed
+class for each, minimal prose, no restating of the steps. Flag individual
+sessions separately only when a directory is otherwise fine but one session is not.
+
 ## Step 6 - Apply only via `hyp` verbs, and offer purge for every ignore (R6, R7)
 
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
@@ -163,3 +167,4 @@ hyp policy set <dir> ignore && hyp purge <dir>
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
+- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp policy folders ask` turns that on and `hyp policy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.

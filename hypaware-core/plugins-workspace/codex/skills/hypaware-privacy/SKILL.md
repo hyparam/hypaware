@@ -221,6 +221,10 @@ Present findings as **short, redacted excerpts** and a proposed class per direct
 
 Then **apply nothing without per-item user confirmation.** Propose, wait for a yes on each item, then mark. Do not batch-apply.
 
+Keep the response tight: a clear list of candidate directories with the proposed
+class for each, minimal prose, no restating of the steps. Flag individual
+sessions separately only when a directory is otherwise fine but one session is not.
+
 ## Step 6 - Apply only via `hyp` verbs, and offer purge for every ignore (R6, R7)
 
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
@@ -255,3 +259,4 @@ hyp policy set <dir> ignore && hyp purge <dir>
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
+- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp policy folders ask` turns that on and `hyp policy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.

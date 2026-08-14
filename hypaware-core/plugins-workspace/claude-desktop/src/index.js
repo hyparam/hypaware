@@ -119,8 +119,9 @@ export async function activate(ctx) {
     plugin: PLUGIN_NAME,
     summary: 'Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt',
     usage: 'hyp claude-desktop install [--yes] [--print-commands]',
-    help: 'Explains what it will change and asks first, defaulting to no (LLP 0139#informed-consent): '
-      + 'unlike Claude Code and Codex, Desktop cannot present its own credential through a third-party '
+    help: 'Explains what it will change and asks once, defaulting to yes and naming the browser '
+      + 'sign-in a yes may launch (LLP 0139#informed-consent as amended): unlike Claude Code and '
+      + 'Codex, Desktop cannot present its own credential through a third-party '
       + 'endpoint, so attaching it makes this machine hold an Anthropic credential. Then runs the '
       + 'credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
       + 'up and clears stale Claude-3p dialog residue, writes the managed-preferences plist via an '

@@ -70,9 +70,16 @@ test('runWizardFork: a bare enter takes the default (quit)', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
   const choice = await runWizardFork(opts)
   assert.equal(choice, 'quit')
-  assert.match(stdout.text(), /1\) Join a team/)
-  assert.match(stdout.text(), /2\) Local install and configuration/)
+  // The intro line precedes the menu (LLP 0211 #explain-first).
+  assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
+  assert.match(stdout.text(), /1\) Collect shared agent logs/)
+  assert.match(stdout.text(), /2\) Collect agent logs locally/)
   assert.match(stdout.text(), /3\) Quit/)
+  // Row summaries carry the guidance and the sign-in disclosure
+  // (LLP 0211 #collect-labels), in the legacy renderer too.
+  assert.match(stdout.text(), /follows you across machines and harnesses/)
+  assert.match(stdout.text(), /You will be asked to sign in\./)
+  assert.match(stdout.text(), /Everything stays on this machine\./)
 })
 
 test('runWizardFork: choosing 1 forks to the team pathway', async () => {

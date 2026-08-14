@@ -72,7 +72,7 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
  * @returns {Promise<number>}
  */
 export async function runReportRender(argv, ctx) {
-  const { renderReports, discoverReports, hasPandoc } = await import('../reports/render.js')
+  const { renderReports, discoverReports } = await import('../reports/render.js')
 
   const dir = path.resolve(positionals(argv, VALUE_FLAGS)[0] ?? path.join(os.homedir(), 'hypaware-reports'))
 
@@ -87,15 +87,6 @@ export async function runReportRender(argv, ctx) {
   if (!stat.isDirectory()) {
     ctx.stderr.write(`hyp report render: not a directory: ${dir}\n`)
     return 2
-  }
-
-  if (!hasPandoc()) {
-    ctx.stderr.write(
-      'hyp report render: pandoc not found. Install it first:\n' +
-        '  macOS: brew install pandoc\n' +
-        '  Debian/Ubuntu: sudo apt-get install pandoc\n',
-    )
-    return 1
   }
 
   // Refuse before wiping html/. An empty tree usually means the reports were just

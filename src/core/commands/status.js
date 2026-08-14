@@ -219,7 +219,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // only when the exclusion list itself could not be read (see the
     // `local_only_list_unreadable` diagnostic).
     usage_policy: report.usagePolicy
-      ? { local_only_dir_count: report.usagePolicy.localOnlyDirCount }
+      ? {
+        local_only_dir_count: report.usagePolicy.localOnlyDirCount,
+        folder_ask: report.usagePolicy.folderAsk,
+      }
       : null,
     // Pending first-sync export hold (LLP 0101 / LLP 0100 R9): null once the
     // hold has expired or was never written, exactly matching the sink
@@ -448,6 +451,20 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
     stdout.write(
       `  local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
+    )
+  }
+
+  // What happens the next time the user works somewhere new (LLP 0200).
+  // Enrolled hosts only: on a machine with no server the question has no
+  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
+  // host's text output is unchanged. Both modes are stated - the default
+  // is the one with data consequences, so it is exactly the one that must
+  // not be silent.
+  if (report.layered?.hasCentral && report.usagePolicy) {
+    stdout.write(
+      report.usagePolicy.folderAsk === 'sync'
+        ? '  new folders:     sync without asking (`hyp policy folders ask` to be asked instead)\n'
+        : '  new folders:     asked about once each (`hyp policy folders sync` to stop asking)\n'
     )
   }
 

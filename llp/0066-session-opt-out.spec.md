@@ -16,6 +16,13 @@
 > from deferred to specced. Distinct from the folder-scoped `.hypignore`
 > ([LLP 0049](./0049-hypignore-usage-policy.spec.md)).
 
+**Extended-by: [LLP 0212 #cli-is-the-verb](./0212-session-opt-out-is-a-cli-verb.decision.md#cli-is-the-verb)**
+(2026-08-12), on the *surface* only. The requirements below are unchanged and
+still bind. What changed is which surface carries them: the two skills named
+throughout this document were retired once `hyp session ignore` (LLP 0067)
+existed, having become a second implementation of the same control-route call.
+Read every "the skill" below as "the `hyp session` verb".
+
 ## Motivation
 
 The `hypaware-ignore` / `hypaware-unignore` skills advertise a clear, correct

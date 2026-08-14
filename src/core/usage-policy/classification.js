@@ -7,6 +7,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { readCentralSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
 import { localOnlyListPath } from './local_only.js'
+import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
 
 /**
  * Session-start classification (LLP 0106): on an enrolled machine, an
@@ -26,7 +27,13 @@ import { localOnlyListPath } from './local_only.js'
  * verb mapping here means there is exactly one consent surface to pin with
  * tests (LLP 0106 consequences: "the prompt copy is load-bearing").
  *
- * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
+ * The ask is opt-in (LLP 0200): new folders sync by default and the hook is
+ * silent unless the user chose the per-folder question, in the wizard's
+ * new-folder step or with `hyp policy folders ask`. That preference is read
+ * here, so both hooks honor it for the same reason they share everything
+ * else.
+ *
+ * @import { FolderAskMode, UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -96,6 +103,7 @@ export function verbArgvForClass(cls, targetPath) {
  *
  * @ref LLP 0111#teaching [implements]: prints `hyp policy set <cwd> <token>`; the exit criterion is that no non-ignore class is ever taught with an ignore-spelled command
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
+ * @ref LLP 0200#escape-hatch [implements]: the prompt names its own off switch, so "stop asking me" is answerable in the session that asked
  * @param {{ cwd: string }} args
  * @returns {string}
  */
@@ -121,6 +129,13 @@ export function buildClassificationPrompt({ cwd }) {
   lines.push('If the user is unsure, the safe choice is local-only (recorded here, never')
   lines.push('forwarded). This affects only what HypAware records and forwards; it does')
   lines.push('not change your task.')
+  lines.push('')
+  // The way out, on the surface that annoys: a user who does not want this
+  // question at all learns the standing answer here rather than having to
+  // find a setting (LLP 0200 #escape-hatch).
+  lines.push('If the user does not want to be asked about folders at all, run')
+  lines.push('`hyp policy folders sync` instead: new folders then sync without asking,')
+  lines.push('and `hyp policy folders ask` brings the question back.')
   return lines.join('\n')
 }
 
@@ -138,13 +153,22 @@ export function buildClassificationPrompt({ cwd }) {
  * - non-interactive / headless: proceeds under today's implicit default and
  *   leaves the folder unclassified for the next interactive session to catch;
  *   the hook must never hang or fail such a run (LLP 0106 #interactive).
+ * - `askMode: 'sync'` (the default, LLP 0200 #default): new folders sync and
+ *   nobody is interrupted. Unclassified folders keep the implicit `full`
+ *   default and the hook stays quiet. It is checked right after enrollment
+ *   because it is the broadest answer there is: it settles every folder at
+ *   once, so it outranks every per-folder reason below it. Only `ask`, which
+ *   the user chooses in the wizard's new-folder step or with `hyp policy
+ *   folders ask`, turns the per-folder question on.
  *
- * @ref LLP 0106 [implements]: unclassified + interactive + enrolled => ask once
- * @param {{ enrolled: boolean, interactive: boolean, governed: boolean }} state
- * @returns {{ prompt: boolean, reason: 'unenrolled' | 'classified' | 'non-interactive' | 'unclassified' }}
+ * @ref LLP 0106 [implements]: unclassified + interactive + enrolled => ask once, when the ask is on
+ * @ref LLP 0200#suppression [implements]: the mode gates the ask alone, never the resolved class
+ * @param {{ enrolled: boolean, interactive: boolean, governed: boolean, askMode?: FolderAskMode }} state
+ * @returns {{ prompt: boolean, reason: 'unenrolled' | 'ask-disabled' | 'classified' | 'non-interactive' | 'unclassified' }}
  */
-export function decideClassification({ enrolled, interactive, governed }) {
+export function decideClassification({ enrolled, interactive, governed, askMode = DEFAULT_FOLDER_ASK_MODE }) {
   if (!enrolled) return { prompt: false, reason: 'unenrolled' }
+  if (askMode === 'sync') return { prompt: false, reason: 'ask-disabled' }
   if (governed) return { prompt: false, reason: 'classified' }
   if (!interactive) return { prompt: false, reason: 'non-interactive' }
   return { prompt: true, reason: 'unclassified' }
@@ -175,9 +199,10 @@ export function decideClassification({ enrolled, interactive, governed }) {
  *     readObservabilityEnv?: typeof readObservabilityEnv,
  *     readCentralSinkOrigins?: typeof readCentralSinkOrigins,
  *     createResolver?: (listPath: string) => UsagePolicyResolver,
+ *     readFolderAskMode?: typeof readFolderAskModeSafe,
  *   },
  * }} args
- * @returns {Promise<{ prompt: boolean, reason: string, cwd: string, enrolled: boolean, governed: boolean, promptText?: string }>}
+ * @returns {Promise<{ prompt: boolean, reason: string, cwd: string, enrolled: boolean, governed: boolean, askMode: FolderAskMode, promptText?: string }>}
  */
 export async function evaluateCwdClassification({ cwd, interactive, env, deps = {} }) {
   const obsEnv = (deps.readObservabilityEnv ?? readObservabilityEnv)(env)
@@ -194,6 +219,11 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     // fail the session on it.
     enrolled = false
   }
+
+  // The standing answer, if the user gave one (LLP 0200). The safe reader
+  // never throws and falls back to `ask`, so a corrupt preference costs a
+  // question rather than silently turning the ask off.
+  const askMode = await (deps.readFolderAskMode ?? readFolderAskModeSafe)({ stateDir })
 
   let governed = false
   let resolveFailed = false
@@ -215,14 +245,18 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     governed = true
   }
 
-  const decision = decideClassification({ enrolled, interactive, governed })
-  /** @type {{ prompt: boolean, reason: string, cwd: string, enrolled: boolean, governed: boolean, promptText?: string }} */
+  const decision = decideClassification({ enrolled, interactive, governed, askMode })
+  /** @type {{ prompt: boolean, reason: string, cwd: string, enrolled: boolean, governed: boolean, askMode: FolderAskMode, promptText?: string }} */
   const out = {
     prompt: decision.prompt,
-    reason: resolveFailed ? 'resolve-error' : decision.reason,
+    // A resolve error is only the reason when it is what stopped the prompt;
+    // an `ask-disabled` machine never consulted the resolver's verdict, so
+    // reporting the broken read as the reason would misname the decision.
+    reason: resolveFailed && decision.reason !== 'ask-disabled' ? 'resolve-error' : decision.reason,
     cwd,
     enrolled,
     governed,
+    askMode,
   }
   if (decision.prompt) out.promptText = buildClassificationPrompt({ cwd })
   return out

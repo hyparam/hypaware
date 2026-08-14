@@ -89,6 +89,13 @@ test('openclaw picker summary names the manual gateway restart attach requires',
 // config.js` DEFAULT_LISTEN, bound by `proxy.js` startProxy). That is the
 // same class of side effect the otel row already names, and these two rows
 // carry no adapter to disclose it anywhere else.
+//
+// Since LLP 0202 both rows are `hidden`, and the picker menu was the only
+// consumer of `summary`, so this copy currently reaches nobody: these two
+// are composed by `hyp init --source <id>`, which never prompts. The
+// assertions stay because hiding is a display filter, not a deletion - the
+// rows are still picker sources, and un-hiding one must not be the moment
+// its listener disclosure is discovered missing.
 for (const row of ['raw-anthropic', 'raw-openai']) {
   test(`${row} picker summary discloses that a local gateway listener is started`, async () => {
     const summary = await pickerSummary('ai-gateway', row)
@@ -98,10 +105,11 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
 
 // The real machine change (managed plist, helper write, residue clear) sits
 // behind `needs_setup: true` + `configure_command: "claude-desktop install"`,
-// and that command explains and asks, defaulting to no, before touching
-// anything (`claude-desktop/src/install.js` runInstall consent gate,
-// @ref LLP 0139#informed-consent). The reassurance is load-bearing on a row
-// whose other clause ("admin approval") reads as a sudo ambush without it.
+// and that command explains and asks - defaulting to yes, naming the
+// browser sign-in a yes may launch - before touching anything
+// (`claude-desktop/src/install.js`, @ref LLP 0139#informed-consent as
+// amended). The reassurance is load-bearing on a row whose other clause
+// ("admin approval") reads as a sudo ambush without it.
 test('claude-desktop picker summary keeps the asks-before-changing reassurance', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
   assert.match(summary, /asks before changing anything/i)

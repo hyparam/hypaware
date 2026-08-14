@@ -6,7 +6,15 @@ import assert from 'node:assert/strict'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createVerbRegistry, verbAuthClass, verbExposure } from '../../src/core/registry/verbs.js'
 
-/** @param {object} [over] */
+/**
+ * @import { VerbRegistration } from '../../hypaware-plugin-kernel-types.js'
+ */
+
+/**
+ * @param {object} [over] overrides, deliberately loose: the malformed-verb
+ *   cases below pass values a `Partial<VerbRegistration>` would reject
+ * @returns {VerbRegistration}
+ */
 function makeVerb(over = {}) {
   return {
     name: 'demo verb',

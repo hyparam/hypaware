@@ -6,7 +6,7 @@ import { MeterProvider, metrics } from './runtime.js'
 import { OtlpMetricExporter } from './otlp_exporters.js'
 
 /**
- * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
+ * @import { Meter, MetricReader, ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
@@ -20,11 +20,10 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * @param {object} args
  * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
- * @returns {{ provider: MeterProvider|null, exporters: object[], readers: object[] }}
+ * @returns {{ provider: MeterProvider|null, exporters: object[], readers: MetricReader[] }}
  * @ref LLP 0021#exporter-selection [implements]: mirrors tracer's JSONL/OTLP choice; 250ms dev push for fast smokes
  */
 export function installMeterProvider({ env, resource }) {
-  /** @type {object[]} */
   const exporters = []
 
   if (env.devTelemetry) {
@@ -55,7 +54,7 @@ export function installMeterProvider({ env, resource }) {
  * contract. Plugins declare their own meters; this set is reserved
  * for things the kernel itself emits.
  *
- * @param {{ createCounter(name: string, opts?: object): object, createUpDownCounter(name: string, opts?: object): object, createGauge(name: string, opts?: object): object, createHistogram(name: string, opts?: object): object }} meter
+ * @param {Meter} meter
  * @ref LLP 0021#summary: kernel pre-declares its own instruments; plugins declare theirs
  */
 function buildKernelInstruments(meter) {

@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -11,12 +12,33 @@ import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../sr
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { loadLatestFileCatalogMetadata } from 'icebird'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
+import { fileCatalog, icebergRewrite, loadLatestFileCatalogMetadata } from 'icebird'
+import { parquetMetadata } from 'hyparquet'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
+ * @import { Span } from '../../src/core/observability/runtime.js'
  */
+
+/**
+ * Row-group count of every data file in a table directory, in name order.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<number[]>}
+ */
+async function rowGroupCounts(tableDir) {
+  const dataDir = path.join(tableDir, 'data')
+  const names = (await fs.readdir(dataDir)).filter((n) => n.endsWith('.parquet')).sort()
+  const counts = []
+  for (const name of names) {
+    const bytes = await fs.readFile(path.join(dataDir, name))
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    counts.push(parquetMetadata(buffer).row_groups.length)
+  }
+  return counts
+}
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -592,6 +614,8 @@ test('normalizeMaintenanceConfig honours an explicit compact_batch_bytes', () =>
   assert.equal(cfg.compact_batch_bytes, 1234)
 })
 
+// @ref LLP 0209#row-groups [tests]: the byte budget still bounds a batch, but
+// what it produces is a row group, not a data file.
 test('compaction flushes by byte budget so a fat column cannot blow up one batch', async () => {
   const cacheRoot = await makeTmpDir('maint-bytecap')
   try {
@@ -604,7 +628,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
     }
 
     // A 150KB byte budget forces a flush roughly every two rows, so the
-    // compacted output spans many data files instead of one giant batch.
+    // rewrite never holds more than a couple of rows at once.
     const report = await maintainCache({
       cacheRoot,
       force: true,
@@ -614,13 +638,20 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
 
     assert.ok(report.totalCompacted > 0)
     const p = report.partitions[0]
-    assert.ok(p.dataFilesAfter > 1, `expected multiple flushed files, got ${p.dataFilesAfter}`)
+    // The blob compresses far below `target_file_bytes`, so the many flushes
+    // land as many row groups in ONE file.
+    assert.equal(p.dataFilesAfter, 1)
 
-    // All rows survive the split, and the data round-trips intact.
     const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
     const cursor = readCursorSync(sourceDir)
     assert.equal(cursor.rowCount, 20)
     const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.ok(
+      (await rowGroupCounts(liveDir))[0] > 1,
+      'expected the byte budget to flush more than one row group'
+    )
+
+    // All rows survive the split, and the data round-trips intact.
     const rows = await readRowsFromTable(liveDir)
     assert.equal(rows.length, 20)
     assert.equal(rows.every((r) => r.value === blob), true)
@@ -629,7 +660,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
   }
 })
 
-test('a generous byte budget compacts the same input into a single file', async () => {
+test('a generous byte budget compacts the same input into a single row group', async () => {
   const cacheRoot = await makeTmpDir('maint-bigcap')
   try {
     const blob = 'x'.repeat(40_000)
@@ -648,6 +679,10 @@ test('a generous byte budget compacts the same input into a single file', async 
 
     const p = report.partitions[0]
     assert.equal(p.dataFilesAfter, 1)
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const cursor = readCursorSync(sourceDir)
+    const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.deepEqual(await rowGroupCounts(liveDir), [1])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -811,6 +846,366 @@ test('an already-compacted partition is not recompacted until new data flushes',
     assert.equal(third.totalCompacted, 1)
     assert.equal(readCursorSync(partDir).epoch, 2)
   } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- foreign sorted replace recognition (LLP 0207) ---
+
+/**
+ * Commit the central server's export-time rewrite shape onto a live
+ * generation dir: an in-place `replace` snapshot through icebird, no
+ * cursor touch (the server knows nothing about kernel cursors).
+ *
+ * @param {string} tableDir
+ */
+async function commitForeignReplace(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  await icebergRewrite({ catalog, tableUrl: tableUrlForDir(tableDir), targetFileRows: 100_000 })
+}
+
+test('a foreign sorted replace re-baselines the cursor instead of being rewritten', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // A kernel cursor whose baseline no longer matches the live count: the
+    // replace read as growth before LLP 0207.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // A dry run predicts the recognition without writing anything.
+    const preview = await maintainCache({ cacheRoot, compactOnly: true, dryRun: true })
+    assert.equal(preview.totalCompacted, 0)
+    assert.equal(preview.totalRebaselined, 1, 'the report-level rebaseline count mirrors totalCompacted')
+    assert.equal(preview.partitions[0].rebaselined, true)
+    assert.equal(
+      /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction).resettleBaselineFiles,
+      99,
+      'dry run must not touch the cursor'
+    )
+
+    const first = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(first.totalCompacted, 0)
+    assert.equal(first.totalRebaselined, 1, 're-baselining one partition must be reflected in the report total')
+    assert.equal(first.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.epoch, 0, 'no rewrite: the generation must not advance')
+    const compaction = /** @type {{ compactedAt: string, resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, first.partitions[0].dataFilesBefore, 're-baselined to the live data-file count')
+    assert.equal(compaction.compactedAt, '2026-08-08T00:00:00.000Z', 'recognition is not a compaction')
+    assert.equal((await readRowsFromTable(epoch0)).length, 3, 'the foreign generation keeps its rows')
+
+    // Converged: the baseline gate now blocks before any metadata load.
+    const second = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(second.totalCompacted, 0)
+    assert.equal(second.totalRebaselined, 0, 'converged: no rebaseline happened this tick')
+    assert.notEqual(second.partitions[0].rebaselined, true)
+
+    // A late append flips the current snapshot off `replace` and moves the
+    // count off the baseline: genuinely due again, unchanged behavior.
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 99, value: 'fresh', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    const third = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(third.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0220#walk-survives-a-partition [tests]: a rebaseline is a cursor
+// write with no rewrite behind it, and `writeCursor` can throw same as any
+// other write in this loop. `r.rebaselined` must not be set until that write
+// has actually landed, or a tick that lost this partition would still print
+// "rebaselined" and count it in `totalRebaselined` for a cursor that never
+// changed (round-1 review finding 2).
+test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace-write-fail')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same stale-baseline cursor as the passing recognition test: this is
+    // the fixture that would otherwise re-baseline cleanly.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // `writeCursor` writes `cursor.json` directly into the partition dir,
+    // so making the dir read-only fails exactly that write and nothing
+    // upstream of it (the read of the epoch dir's own metadata is
+    // unaffected).
+    await fs.chmod(partDir, 0o555)
+    try {
+      const report = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(report.partitions[0].failed, true, 'fixture invariant: the cursor write must fail')
+      assert.notEqual(
+        report.partitions[0].rebaselined, true,
+        'a rebaseline that never landed on disk must not be reported as one'
+      )
+      assert.equal(report.totalRebaselined, 0, 'an unpersisted rebaseline must not be counted')
+    } finally {
+      await fs.chmod(partDir, 0o755)
+    }
+
+    // The cursor on disk still carries the pre-rebaseline baseline: the
+    // write failure must not have partially landed.
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction)
+    assert.equal(compaction.resettleBaselineFiles, 99)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('foreign sorted replace recognition works on the source-table layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-source')
+  try {
+    // Same recognition claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: the server's day
+    // compactor resolves and rewrites both layouts in prod.
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const tableDir = path.join(partDir, 'table')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(tableDir, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(tableDir)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+      layout: 'source-table',
+      tableDir: 'table',
+      retention: { lastCutoffDate: '2026-05-01' },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.tableDir, 'table', 'no generation swap: the cursor keeps pointing at the foreign rewrite')
+    assert.equal(cursor.retention?.lastCutoffDate, '2026-05-01', 'the rebaseline preserves the retention state')
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, report.partitions[0].dataFilesBefore)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('recognition outranks the re-settle force: a fallback row does not undo the sorted layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-resettle')
+  try {
+    // A committed provisional fallback row (LLP 0027 marker) normally
+    // forces a rewrite so the sweep can re-settle it. Under a foreign
+    // sorted replace that force must lose, or one leftover unmatchable
+    // fallback re-shreds the sorted layout every night (LLP 0207).
+    /** @type {ColumnSpec[]} */
+    const columns = [...COLUMNS, { name: 'attributes', type: 'STRING', nullable: true }]
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, columns, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString(), attributes: JSON.stringify({ gateway: { identity_source: 'gateway_fallback' } }) },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => () => {
+        throw new Error('the sweep must not run: recognition should skip the rewrite entirely')
+      },
+    })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 0, 'the fallback row must not force a shredding rewrite')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign replace without a declared sort order is not blessed', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-unsorted')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an arbitrary replace earns no convergence credit')
+    assert.notEqual(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('force still rewrites a foreign sorted replace', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-force')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an explicit force is an operator override')
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign sorted replace tags the maintenance.partition span with rebaselined', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-span')
+  /** @type {Span[]} */
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(/** @type {Span[]} */ spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.partitions[0].rebaselined, true, 'sanity: this tick recognized the foreign replace')
+
+    const partitionSpan = captured.find((span) => span.name === 'maintenance.partition')
+    assert.ok(partitionSpan, 'maintenance.partition span must be exported')
+    assert.equal(
+      partitionSpan?.attributes.rebaselined,
+      true,
+      'the span, not just the hyp_rebaselines counter, must name which partition re-baselined'
+    )
+  } finally {
+    await provider.shutdown()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a partition already due for compaction skips the resettle-candidate row scan', async (t) => {
+  // @ref LLP 0207#outranks-resettle [tests]: once the cheap file-count/size
+  // check alone makes compaction due, the resettle scan's answer cannot
+  // change `shouldCompact`, so it must not run at all. `hasResettleCandidate`
+  // is module-private and its `scanRowsFromTable` is an unpatchable ESM named
+  // import, so there is no direct call-count hook to assert against; instead
+  // this mocks `readFileSync` and captures a stack trace per `.parquet` read,
+  // then asserts none of those stacks pass through `hasResettleCandidate`.
+  // That frame name survives the async boundary between the scan and the
+  // read, so it attributes each read to its caller instead of only counting
+  // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
+  // footer-stats probe, would not falsely implicate the scan).
+  //
+  // A stack-based observation can go blind: the deciding frame sits ~8 frames
+  // below the mock, and V8's default `Error.stackTraceLimit` of 10 leaves only
+  // two frames of headroom. Three more frames anywhere between the mock and
+  // the caller (an icebird refactor, extra node:test mock internals, a wrapper
+  // in `resolver.js`) would drop it, and a negative "no stack mentions
+  // `hasResettleCandidate`" assertion passes vacuously on truncated stacks.
+  // Two guards keep that from happening silently:
+  //   1. raise `Error.stackTraceLimit` while the mock is installed (restored
+  //      below even if the test throws), which removes the hazard outright;
+  //   2. assert positively that some stack names `compactGeneration`, the
+  //      legitimate reader. It calls `scanRowsFromTable` from exactly the same
+  //      depth as `hasResettleCandidate` does, so any truncation deep enough
+  //      to hide the frame the negative assertion hunts for also hides this
+  //      one, and the test fails loudly instead of going quiet. Asserting on
+  //      `scanRowsFromTable` itself would not do: it sits one frame shallower
+  //      and survives truncation that has already blinded the real check.
+  // Guard 2 also catches the `?? ''` fallback below storing an unattributable
+  // empty string.
+  const cacheRoot = await makeTmpDir('maint-scan-skip')
+  const originalStackTraceLimit = Error.stackTraceLimit
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ])
+    // Never compacted: `grewSinceCompaction` is true unconditionally, so the
+    // only thing standing between the old code and a resettle scan is the
+    // `compactionDue` gate under test.
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    /** @type {string[]} */
+    const stacks = []
+    const original = fsSync.readFileSync
+    Error.stackTraceLimit = 50
+    t.mock.method(fsSync, 'readFileSync', function (p, ...rest) {
+      if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
+      return original.call(this, p, ...rest)
+    })
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      // compact_file_count: 0 makes `needsCompaction` (and so
+      // `compactionDue`) true on file count alone, with no size heuristic
+      // involved: dueness is settled before the resettle scan would run.
+      config: { compact_file_count: 0 },
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => async (rows) => rows,
+    })
+    assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
+
+    assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
+    assert.ok(
+      stacks.some((s) => s.includes('compactGeneration')),
+      'sanity: captured stacks must be deep enough to name the reader, or the assertion below passes vacuously'
+    )
+    assert.deepEqual(
+      stacks.filter((s) => s.includes('hasResettleCandidate')),
+      [],
+      'the resettle scan must not read the data file'
+    )
+  } finally {
+    Error.stackTraceLimit = originalStackTraceLimit
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
