@@ -13,9 +13,12 @@ export const FALLBACK_LISTEN = '127.0.0.1:0'
 
 /**
  * Validate and normalize the ai-gateway config slice. Returns the
- * compiled shape used by the source/listener. Validation is strict:
- * missing or malformed `upstreams` is rejected loudly because the
- * gateway has nothing useful to do without at least one upstream.
+ * compiled shape used by the source/listener. Missing or malformed
+ * `upstreams` compiles to an empty list rather than an error: adapter
+ * plugins contribute the rest of the routing table as presets after this
+ * runs, and a config that wants the gateway plugin only for its dataset and
+ * materializer (`@hypaware/hermes`) legitimately names no upstream at all.
+ * The source decides what an empty table means, not this function.
  *
  * @param {unknown} raw
  * @returns {AiGatewayConfig}
@@ -34,6 +37,18 @@ export function compileConfig(raw) {
 }
 
 /**
+ * Compile the configured upstream entries into routing-table rows, skipping
+ * any entry that lacks a `name` or a `base_url`.
+ *
+ * The skip is silent by design at this layer: this function has no logger and
+ * no way to tell a typo from a shape the caller meant to ignore. It is not
+ * silent overall. The source compares this list's length against the raw entry
+ * count and both logs the difference and publishes it as
+ * `details.upstreams_dropped`, from which `hyp status` warns
+ * (`gateway_upstreams_dropped`, or `gateway_idle_no_upstreams` when nothing
+ * survived at all). Anything that starts calling this without making that
+ * comparison reopens the blind spot.
+ *
  * @param {unknown} raw
  * @returns {UpstreamConfig[]}
  */

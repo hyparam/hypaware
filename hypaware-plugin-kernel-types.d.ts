@@ -116,6 +116,23 @@ export interface PluginManifest {
   provides?: PluginProvides
   permissions?: PluginPermission[]
   contributes?: PluginContributionManifest
+  /**
+   * Plugins whose presence in a composed config pulls this one in with
+   * them. When the walkthrough composes every plugin named here, it
+   * composes this plugin too; when it composes none of them, this plugin
+   * is not written.
+   *
+   * This is how a **derived-data** plugin rides a pick it does not
+   * contribute: `@hypaware/context-graph` has no picker row of its own,
+   * because "project my sessions into a graph" is not a thing the user is
+   * asked, and it is useless without a source to project.
+   *
+   * Distinct from `requires.plugins`, which is a hard dependency governing
+   * activation order and presence. `requires` says "I cannot run without
+   * this"; `compose_with` says "write me down wherever this is written
+   * down". A plugin may declare either, both, or neither.
+   */
+  compose_with?: PluginName[]
 }
 
 export interface PluginRequirements {
@@ -177,21 +194,55 @@ export interface PluginClientManifest {
    * and attributes its entrypoints automatically.
    */
   transcript_entrypoints?: string[]
+  /**
+   * How to start this client on a question, for the wizard's closing
+   * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
+   * cannot be started on a prompt at all: Claude Desktop is a GUI app
+   * with no prompt argument, so it is detectable, pickable, and
+   * attachable but never launchable.
+   */
+  launch?: PluginClientLaunchManifest
+}
+
+/**
+ * A client's launch spec: the binary to look for on `$PATH` and the
+ * argv to start it with. Exactly one `args` element must contain the
+ * `{prompt}` placeholder, which is replaced with the user's question;
+ * a spec without it would start the client mute, which looks like the
+ * feature working (LLP 0198#split).
+ */
+export interface PluginClientLaunchManifest {
+  /** Executable name resolved against `$PATH` (e.g. `claude`). */
+  bin: string
+  /** Argv template; `{prompt}` in any element is replaced. */
+  args: string[]
+  /** Display name for the launch row (e.g. `Claude Code`). */
+  label?: string
 }
 
 export interface PluginAttachProbeManifest {
   /**
-   * The `json_path` format is gone (LLP 0143 R7): core no longer carries a
-   * read side in `daemon/status.js` or an undo side in
-   * `config/client_detach_disk.js` for it. Keeping it in this union would be
-   * worse than a dead name, because nothing validates `attach_probe` at
-   * runtime (`src/core/manifest.js` treats `contributes` opaquely): a
-   * manifest declaring it would type-check, probe as never-attached, and
-   * then slip past `action_attach.js`'s `!descriptor.attachProbe` orphaning
-   * guard on reverse, dropping the marker with the client's settings still
-   * written. That is exactly #212.
+   * `json_path` returns here (LLP 0173 T1), reversing LLP 0143's removal.
+   * LLP 0143 pulled the format because, at the time, nothing validated
+   * `attach_probe` at runtime (`src/core/manifest.js` treats `contributes`
+   * opaquely): a manifest declaring `json_path` with no runtime support
+   * behind it would type-check, probe as never-attached, and then slip
+   * past `action_attach.js`'s `!descriptor.attachProbe` orphaning guard on
+   * reverse, dropping the marker with the client's settings still written.
+   * That was exactly #212. The danger was in the *gap* between declaring
+   * the format and a runtime that reads/undoes it, not in the format
+   * itself. LLP 0173 T2 restores the undo side
+   * (`client_detach_disk.js`'s `detachJsonPathProviders`) and T3 restores
+   * the read side (`daemon/status.js`'s `json_path` branch) before
+   * OpenClaw's manifest (T5) declares this format again, so the gap #212
+   * warned about is closed by construction: no manifest may reach this
+   * format without both runtime sides already merged.
+   *
+   * @ref LLP 0172#lane-a-detach [implements]: json_path's runtime undo
+   * (client_detach_disk.js) and read (daemon/status.js) sides, which close
+   * the #212 gap this format's prior removal warned about.
    */
-  format: 'json' | 'toml'
+  format: 'json' | 'toml' | 'json_path'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -204,6 +255,26 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /**
+   * `json_path` only: dotted path, relative to the parsed settings file,
+   * to the container object the probe/undo navigate (e.g.
+   * `models.providers`).
+   */
+  container_path?: string
+  /**
+   * `json_path` only: the container's keys the probe/undo consider, in
+   * order (e.g. `['anthropic', 'openai']`). `marker_header` (reused, not
+   * duplicated) is checked against each key's own header value to decide
+   * ownership.
+   */
+  provider_keys?: string[]
+  /**
+   * `json_path` only: glob, relative to the client's config home, of
+   * cache files the undo best-effort purges the same `provider_keys`
+   * entries from after the settings-file write (e.g.
+   * `agents/*\/agent/models.json`).
+   */
+  cache_glob?: string
 }
 
 /**
@@ -229,6 +300,17 @@ export interface PluginPickerContribution {
    * state. A probe failure means "not present," never an error.
    */
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu while
+   * staying a real picker source everywhere else: `hyp init --source
+   * <id>` still composes it, a config that already collects it still
+   * reads back as collecting it, and the id keeps its identity in the
+   * opt-out/sync store and in the dataset-owner map the export-seam
+   * withholding rules key on. For a row whose audience is narrow enough
+   * that a first-run checkbox costs every other user more than it earns
+   * that one.
+   */
+  hidden?: boolean
   /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
@@ -778,8 +860,29 @@ export interface ValidationError {
 
 export interface CommandRegistry {
   register(command: CommandRegistration): void
+  /**
+   * Describe a command *group* (`graph`, `query`) so its `--help` can
+   * carry a header and a paragraph, not just a subcommand table. Core
+   * groups get this from the bare command `makeGroupCommand` builds; a
+   * plugin namespace has no bare command, so it says so here instead.
+   *
+   * Metadata only: a registered group never appears in `list()`, so it
+   * cannot shadow a command or show up as its own subcommand.
+   */
+  registerGroup(group: CommandGroupRegistration): void
   get(name: string): CommandRegistration | undefined
+  getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
+}
+
+export interface CommandGroupRegistration {
+  /** The group prefix, e.g. `'graph'`. */
+  name: string
+  plugin?: PluginName
+  /** One-line group description, rendered as the help header. */
+  summary?: string
+  /** Long help, rendered between the usage line and the subcommand table. */
+  help?: string
 }
 
 export interface CommandRegistration {
@@ -806,6 +909,17 @@ export interface CommandRunContext {
   cwd: string
   config: HypAwareV2Config
   plugins: ActivePlugin[]
+  /**
+   * Plugins this boot selected but whose `activate()` threw (kernel-owned,
+   * populated by the dispatcher). `plugins` alone cannot express a partial
+   * boot: `activatePlugins` catches per plugin and continues, so a command
+   * body that acts on "what the plugin set contributes now" sees a plan with
+   * a hole in it and no way to know. Empty on a clean boot, and on a caller
+   * that pre-built the kernel. Read by the client-asset materializer, which
+   * must not read a failed plugin's missing contribution as a retirement
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
@@ -818,6 +932,35 @@ export interface CommandRunContext {
    * populates it, so it is present for every command body.
    */
   commands: { run(name: string, argv: string[]): Promise<number> }
+  /**
+   * In-process plugin activation seam (kernel-owned). Populated by the
+   * dispatcher, so it is present for every command body, like `commands`.
+   *
+   * Given plugin names, activates them (and their manifest-declared
+   * dependency closure) into THIS process's already-booted kernel, but only
+   * the subset a *fresh disk read* of the effective config would itself
+   * select for a `config`-profile boot - it can never activate a plugin the
+   * on-disk config does not name. Exists for a command body that writes
+   * config mid-invocation (LLP 0031's guarded local-layer writers) and then
+   * needs this same process's own `capabilities`/gateway registries to see
+   * what it just enabled, which a raw kernel handle would allow but this
+   * narrower seam does not: activation only, never a second config writer
+   * and never a network listener bind (a source's own `start()` still owns
+   * that).
+   *
+   * Generalizes the LLP 0139 dispatch-miss seam
+   * (`ctx.commands.run`'s owner-lookup activation) so the manual-attach
+   * enable prompt has the same in-process activation path instead of a
+   * second mechanism. Returns which of `names` are live in this process
+   * afterward (already-active names count as no-ops, never `failed`); never
+   * throws.
+   *
+   * @ref LLP 0174#prompt [implements]: the manual-attach accept path's need
+   * for this same process's kernel to see a plugin a mid-invocation config
+   * write just enabled, resolved by generalizing LLP 0139's seam instead of
+   * adding a second activation mechanism
+   */
+  activatePluginClosure(names: string[]): Promise<{ activated: string[], failed: string[] }>
   /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
@@ -1433,6 +1576,18 @@ export interface VerbInputSchema {
 }
 
 /**
+ * The JSON Schema an MCP tool advertises: a verb's `VerbInputSchema` with the
+ * CLI-only argv-binding hints removed (`positional`, and per-property
+ * `greedy`). It is a projection, never authored by hand, so the flag set and
+ * the wire contract cannot drift apart.
+ */
+export interface McpToolInputSchema {
+  type: 'object'
+  properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
+  required?: string[]
+}
+
+/**
  * Local-execution context handed to a verb's `operation`. The CLI and
  * the local MCP host both build this from the kernel runtime; the
  * operation never touches argv or stdout.
@@ -1488,6 +1643,18 @@ export interface VerbRegistration {
   tool: string
   plugin?: PluginName
   summary: string
+  /**
+   * Long help for the CLI command this verb projects, rendered by
+   * dispatch's central `--help` interception under `summary` and `usage`.
+   * CLI-only, like `render`: the MCP tool describes itself with `summary`
+   * and `inputSchema`.
+   *
+   * This is where a verb's **mechanics** belong (what a flag means, how an
+   * argument resolves, where output is truncated) so a skill does not have
+   * to narrate them. Constraints, the rules with nameable harm, stay in the
+   * skill: the constraint guard reads skill files, not help strings.
+   */
+  help?: string
   inputSchema: VerbInputSchema
   /** Default `'cli+mcp'`. */
   exposure?: VerbExposure
@@ -1852,6 +2019,20 @@ export interface AiGatewayProjectedMessage {
    * otherwise.
    */
   model?: string
+  /**
+   * Per-message provider id, for exchanges that span turns served by
+   * different providers (an OpenClaw session can switch its model, and with
+   * it the provider, mid-session; the backfilled exchange is the whole
+   * session). The gateway prefers this value over the exchange `provider`
+   * when present and falls back to the exchange provider otherwise, the same
+   * precedence `model` carries. Unlike `model`, projectors that supply it
+   * are expected to stamp it on every row of the turn (prompts and tool
+   * results included, via their turn's resolved backend): `provider` is
+   * non-nullable per row, so an unstamped minority-turn prompt would fall
+   * back to the exchange value and misattribute, which is the exact defect
+   * the field exists to fix (LLP 0194).
+   */
+  provider?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string
@@ -2257,6 +2438,21 @@ export interface BackfillContribution {
    * dataset-materializer registry.
    */
   run(ctx: BackfillRunContext): AsyncIterable<BackfillItem | BackfillEvent>
+  /**
+   * Opt-in scheduling metadata for the daemon's periodic sweep (LLP 0173
+   * T9's `backfill_sweep.js`), not a new mechanism: a contribution with no
+   * `sweep` field is never ticked by the sweep driver, so this is
+   * absent-by-default and zero behavior change for every provider that
+   * doesn't set it (Claude's and Codex's contributions today, and
+   * OpenClaw's own prior to LLP 0173). `cron` is a standard 5-field cron
+   * expression, evaluated by `cronMatches` (`src/core/sinks/driver.js`),
+   * the same schedule shape sinks already use.
+   *
+   * @ref LLP 0172#lane-b-sweep [implements]: the daemon-side scheduled
+   * sweep's opt-in contribution field, absent-by-default for every
+   * provider that doesn't set it.
+   */
+  sweep?: { cron: string }
 }
 
 export interface BackfillPlanContext {

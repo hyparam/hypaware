@@ -277,6 +277,17 @@ test('openclawSessionId falls back to the exchange id for a content-less first m
   assert.equal(id, idFromEmpty)
 })
 
+test('openclawSessionId keys on the first input item for an instruction-less Responses request', () => {
+  // A Responses request carries `input`, never `messages`: without this
+  // branch an instruction-less request would fall through to the exchange
+  // id and fragment one conversation into per-exchange session ids.
+  const input = [{ role: 'user', content: 'first turn' }, { role: 'user', content: 'second turn' }]
+  const idA = openclawSessionId({ input }, undefined, 'ex-A')
+  const idB = openclawSessionId({ input }, undefined, 'ex-B')
+  assert.equal(idA, idB)
+  assert.notEqual(idA, openclawSessionId({}, undefined, 'ex-A'))
+})
+
 test('project() does not drop an exchange whose first message has no content', async () => {
   const projector = createOpenclawExchangeProjector()
   const projection = /** @type {any} */ (await projector.project(exchange({

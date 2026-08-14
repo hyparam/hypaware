@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { runAttach } from '../../src/core/commands/clients.js'
+import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 
 /**
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -123,15 +124,40 @@ test('attach without endpoint: already-attached --json reports ok/unchanged', as
   })
 })
 
-test('attach without endpoint: not-attached client fails with actionable message', async () => {
+test('attach without endpoint: no daemon installed names hyp daemon install/start', async () => {
   await withTempHome(async (home) => {
+    // No LaunchAgent/systemd unit under this homeDir: serviceDaemonStatus
+    // reports not-installed, so the give-up message must point at bootstrapping
+    // a service rather than just restarting one.
+    // @ref LLP 0174#bootstrap-floor [tests]: "config exists but no daemon is installed" extends the endpoint give-up message
     /** @type {string[]} */
     const attachCalls = []
     const { ctx, stderr } = makeCtx({ home, attachCalls })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
     assert.match(stderr.text(), /cannot resolve the gateway endpoint/)
-    assert.match(stderr.text(), /hyp start/)
+    assert.match(stderr.text(), /hyp daemon install/)
+    assert.match(stderr.text(), /hyp daemon start/)
+    assert.doesNotMatch(stderr.text(), /localEndpoint\(\) called before/)
+    assert.deepEqual(attachCalls, [])
+  })
+})
+
+test('attach without endpoint: installed-but-unreachable daemon keeps the existing hyp start message', async () => {
+  await withTempHome(async (home) => {
+    // A daemon service IS installed (marker on disk) but not currently
+    // reachable: this is the pre-existing case, and its wording must not
+    // change or gain the daemon-install mention.
+    // @ref LLP 0174#bootstrap-floor [tests]: the installed-but-unreachable give-up message is unchanged
+    installFakeDaemonService(home)
+    /** @type {string[]} */
+    const attachCalls = []
+    const { ctx, stderr } = makeCtx({ home, attachCalls })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 1)
+    assert.match(stderr.text(), /cannot resolve the gateway endpoint/)
+    assert.match(stderr.text(), /\(hyp start\)/)
+    assert.doesNotMatch(stderr.text(), /hyp daemon install/)
     assert.doesNotMatch(stderr.text(), /localEndpoint\(\) called before/)
     assert.deepEqual(attachCalls, [])
   })

@@ -19,8 +19,8 @@
     "picker": [
       {
         "name": "otel",
-        "label": "receive OTEL logs/traces/metrics",
-        "summary": "Starts a local OTLP HTTP receiver for apps that export OpenTelemetry signals.",
+        "label": "OpenTelemetry",
+        "summary": "Records logs, traces, and metrics your tools send over local OTLP HTTP; setup starts a local receiver.",
         "compose": {
           "plugin": { "name": "@hypaware/otel", "config": { "listen_host": "127.0.0.1", "listen_port": 4318 } }
         }

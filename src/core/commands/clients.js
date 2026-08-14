@@ -11,6 +11,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
@@ -18,10 +19,18 @@ import {
   clearClientActionMarker,
   readClientActionStatus,
   readInstalledAssets,
+  rearmRefusedActionMarker,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
+import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { enableClientAdapter } from '../config/client_enable.js'
+import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { askYesNo } from '../cli/confirm.js'
+import { isTty } from '../cli/stdio.js'
+import { defaultBackfillConsentPromptFactory, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
+import { resolveRetentionDays, runBackfillProvider } from './backfill.js'
 import {
   CLASS_RANK,
   createUsagePolicyResolver,
@@ -39,13 +48,14 @@ import { pluginStateDir } from './plugin.js'
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
+ * @import { ClientEnableResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**
- * `hyp attach [client] [--client <name>] [--yes]`
+ * `hyp attach [client] [--client <name>] [--dry-run] [--json]`
  *
  * Resolves the `hypaware.ai-gateway` capability, looks up the named
  * client adapter, and dispatches to the adapter's `attach()`. Each
@@ -134,45 +144,97 @@ async function runClientLifecycle(action, argv, ctx) {
   // Attach dispatches to the per-adapter attach() hook and threads the
   // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
   // capability.
+  // Tracks which single client name (if any) this invocation just enabled
+  // through T9's accept path at THIS gate, so the loop below knows to offer
+  // T10's backfill consent for it once its attach() actually succeeds.
+  // `maybeInteractiveEnableAttach` already refuses `--client all`, so at
+  // most one name can ever be set here.
+  let capMissingActivatedName
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
-    await withSpan(
-      `client.${action}`,
-      {
-        [Attr.COMPONENT]: `cmd-${action}`,
-        [Attr.OPERATION]: `client.${action}`,
-        client_name: parsed.client,
-        hyp_client: parsed.client,
-        dry_run: parsed.dryRun === true,
-        status: 'failed',
-        error_kind: 'cap_missing',
-      },
-      async () => {
-        const message =
-          `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
-        if (parsed.json) {
-          ctx.stdout.write(
-            JSON.stringify({
-              status: 'failed',
-              action,
-              client: parsed.client,
-              dry_run: parsed.dryRun === true,
-              error_kind: 'cap_missing',
-              error: message,
-            }) + '\n'
-          )
-        } else {
-          ctx.stderr.write(`error: ${message}\n`)
-        }
-      },
-      { component: `cmd-${action}` }
-    )
-    return 1
+    // The capability is absent exactly when no *enabled* plugin pulls the
+    // gateway in, which for a catalog-known client means its adapter is not
+    // enabled - not that the capability is missing from the install. Ask the
+    // static catalog which of the two it is before choosing the wording.
+    // @ref LLP 0174#detection [implements]: the capability gate is one of the
+    // two failure sites that must report the enablement layer
+    const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
+    // @ref LLP 0174#prompt [implements]: on `not_enabled` with a TTY and no
+    // `--json`, offer to enable the adapter instead of failing outright; on
+    // acceptance this falls through to the capability now being live
+    const promptResult = await maybeInteractiveEnableAttach({ name: parsed.client, ctx, parsed, enablement })
+    if (!promptResult.activated) {
+      const errorKind = enablement.state === 'unknown' ? 'cap_missing' : enablement.errorKind
+      await withSpan(
+        `client.${action}`,
+        {
+          [Attr.COMPONENT]: `cmd-${action}`,
+          [Attr.OPERATION]: `client.${action}`,
+          client_name: parsed.client,
+          hyp_client: parsed.client,
+          dry_run: parsed.dryRun === true,
+          status: 'failed',
+          error_kind: errorKind,
+        },
+        async () => {
+          const message = enablement.state === 'unknown'
+            ? `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
+            : enablement.message
+          if (parsed.json) {
+            ctx.stdout.write(
+              JSON.stringify({
+                status: 'failed',
+                action,
+                client: parsed.client,
+                dry_run: parsed.dryRun === true,
+                error_kind: errorKind,
+                error: message,
+              }) + '\n'
+            )
+          } else {
+            ctx.stderr.write(`error: ${message}\n`)
+          }
+        },
+        { component: `cmd-${action}` }
+      )
+      return 1
+    }
+    capMissingActivatedName = parsed.client
   }
   /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
   const clientNames = expandClientName(parsed.client, gateway)
+  if (parsed.client === 'all' && !parsed.json) {
+    // `hyp attach all` never prompts mid-run (a gauntlet of enable questions
+    // inside a bulk command is the picker's job, badly reinvented); instead it
+    // names every catalog-known client the live registry silently dropped, so
+    // the fix is one `hyp attach <name>` away instead of a quiet no-op. The
+    // diff is catalog keys minus live keys, so every name here is
+    // catalog-known by construction: no `unknown` id can appear, so this
+    // needs none of resolveAttachEnablementState's central-vs-local split.
+    // Skipped under --json: every other attach path keeps stdout to the
+    // single-line machine payload per client, and a bare `note:` line is not
+    // that shape (see materializeAttachAssets's own --json stdout suppression
+    // for the same convention).
+    // @ref LLP 0174#detection [implements]: `hyp attach all` reports known-
+    //   but-not-enabled clients as notes instead of dispatching only the
+    //   live subset with no explanation
+    const catalog = await buildAttachPluginCatalog(ctx)
+    const liveNames = new Set(clientNames)
+    for (const name of catalog.clientDescriptors.keys()) {
+      if (!liveNames.has(name)) {
+        ctx.stdout.write(
+          `note: ${name} is a known client but its adapter is not enabled; run 'hyp attach ${name}' to enable it\n`
+        )
+      }
+    }
+  }
   if (clientNames.length === 0) {
+    const enablement = await resolveAttachEnablementState({ name: parsed.client, ctx })
+    if (enablement.state !== 'unknown') {
+      reportAttachEnablement({ name: parsed.client, enablement, parsed, ctx })
+      return 1
+    }
     const known = gateway.listClients().map((c) => c.name)
     ctx.stderr.write(
       `error: unknown client '${parsed.client}'. Registered clients: ${known.join(', ') || '(none)'}\n`
@@ -184,12 +246,42 @@ async function runClientLifecycle(action, argv, ctx) {
   /** @type {Map<string, ClientDescriptor> | undefined} */
   let descriptorMap
   for (const name of clientNames) {
+    // Set true only when THIS name was activated via T9's accept path in
+    // THIS invocation (either gate below), never for a client whose adapter
+    // was already enabled coming into this command - that is what confines
+    // T10's backfill offer to the accept branch, per its own scope.
+    let activatedViaPrompt = name === capMissingActivatedName
     try {
-      const client = gateway.getClient(name)
+      let client = gateway.getClient(name)
       if (!client) {
-        ctx.stderr.write(`error: unknown client '${name}'\n`)
-        exitCode = 1
-        continue
+        // The gateway is live but this client never registered. That is the
+        // second failure site the design names: some other gateway-using
+        // plugin is enabled, this client's adapter is not, and reporting it as
+        // "unknown" hides the enablement layer that actually explains it.
+        // @ref LLP 0174#detection [implements]: a catalog-known but
+        // unregistered client reports not_enabled / disabled_central, not unknown
+        const enablement = await resolveAttachEnablementState({ name, ctx })
+        // @ref LLP 0174#prompt [implements]: the same enable prompt as the
+        // capability gate above, reached from the registry-miss site instead
+        const promptResult = await maybeInteractiveEnableAttach({ name, ctx, parsed, enablement })
+        if (promptResult.activated) {
+          // The adapter's own activate() registers it with the SAME `gateway`
+          // api object this closure already holds (it is `ctx.capabilities`'
+          // live registration, not a snapshot), so re-reading it here sees
+          // the just-activated client with no extra capability lookup.
+          client = gateway.getClient(name)
+          activatedViaPrompt = true
+        }
+        if (!client) {
+          if (enablement.state !== 'unknown') {
+            reportAttachEnablement({ name, enablement, parsed, ctx })
+            exitCode = 1
+            continue
+          }
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
+          exitCode = 1
+          continue
+        }
       }
       // In dry-run mode the gateway source may not be started yet,
       // so `localEndpoint()` could throw. Fall back to a placeholder
@@ -283,10 +375,23 @@ async function runClientLifecycle(action, argv, ctx) {
               // which is idempotent and re-points the client at the live port.
               endpoint = liveEndpoint
             } else {
-              const message =
-                `cannot resolve the gateway endpoint: the gateway is not running in this ` +
-                `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
-                `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+              // Which give-up message to show hinges on whether a daemon
+              // service is installed at all: an install-but-unstarted daemon
+              // just needs `hyp start`, but with no service installed that
+              // command has nothing to start, so the message must also point
+              // at `hyp daemon install` / `hyp daemon start`.
+              // @ref LLP 0174#bootstrap-floor [implements]: "config exists but no daemon is installed" extends the endpoint give-up message instead of attach gaining daemon orchestration
+              const { serviceDaemonStatus } = await import('../daemon/install.js')
+              const daemonStatus = await serviceDaemonStatus({ homeDir })
+              const message = daemonStatus.installed
+                ? `cannot resolve the gateway endpoint: the gateway is not running in this ` +
+                  `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
+                  `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+                : `cannot resolve the gateway endpoint: the gateway is not running in this ` +
+                  `process and no ai-gateway 'listen' address is configured, and no daemon ` +
+                  `service is installed on this machine. Run 'hyp daemon install' then ` +
+                  `'hyp daemon start' so it can attach clients, or set 'listen' in the ` +
+                  `ai-gateway config.`
               getLogger('cmd-attach').warn('client.attach.no_endpoint', {
                 [Attr.COMPONENT]: 'cmd-attach',
                 [Attr.OPERATION]: 'client.attach',
@@ -321,6 +426,44 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun,
         json: parsed.json,
       })
+      // A successful manual attach is the only re-arm a `refused` marker gets
+      // in this pass: after it, the next reconcile pass must stop
+      // short-circuiting on the marker and re-`perform()` the request key.
+      //
+      // Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose.
+      // A `done` marker is the only record naming the files an org-driven
+      // attach installed, so clearing it would strand them past any later
+      // `hyp detach`, which reads exactly this marker to know what to remove
+      // (LLP 0138#marker-undo). A `failed` marker needs no help: nothing
+      // short-circuits it, so the next pass already retries it. And a dry run
+      // must leave the marker store exactly as it found it, the same way the
+      // detach path returns before its own clear under `--dry-run`.
+      //
+      // The re-arm itself is a drop only when the marker records no
+      // `installed_assets`. One that carries them is the same undo record a
+      // `done` marker is (a refusal on a re-`perform()` carries the earlier
+      // successful attach's copies forward), so it is rewritten to `failed`
+      // rather than dropped: same re-arm, record intact. That branch lives in
+      // `rearmRefusedActionMarker` beside the store it rewrites.
+      //
+      // Best-effort: a marker-store I/O failure must never fail the attach that
+      // just succeeded.
+      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
+      if (parsed.dryRun !== true) {
+        try {
+          rearmRefusedActionMarker({
+            stateRoot: readObservabilityEnv(ctx.env).stateDir,
+            kind: 'attach',
+            requestKey: name,
+          })
+        } catch (markerErr) {
+          getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
+            hyp_client: name,
+            error_kind: 'marker_retract_failed',
+            detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+          })
+        }
+      }
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated
@@ -336,6 +479,13 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun === true,
         json: parsed.json,
       })
+      // @ref LLP 0174#prompt [implements]: step 4, backfill consent, only for
+      // a client T9's accept branch just enabled in this same invocation -
+      // the registered-state attach path above (activatedViaPrompt false)
+      // is completely unchanged
+      if (activatedViaPrompt) {
+        await maybeBackfillAfterEnable({ name, ctx })
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
@@ -343,6 +493,472 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Resolve *why* `name` cannot be attached right now, so the failure names the
+ * enablement layer instead of dead-ending on "unknown client".
+ *
+ * Three states, per design LLP 0174 #detection:
+ * `unknown` (no bundled or installed plugin contributes this client at all -
+ * keep whichever "unknown client" wording the calling gate already prints),
+ * `not_enabled` (the static catalog knows the client but the effective config
+ * never enabled its owning plugin, or disabled it in the *local* layer, which
+ * the user can fix), and `disabled_central` (a fleet-managed central entry
+ * names the plugin disabled, and LLP 0031's additive merge drops any local
+ * entry with that name, so telling the user to edit their config would be a
+ * lie).
+ *
+ * Reads the static bundled+installed catalog, never the live gateway registry:
+ * this runs precisely when the registry cannot answer, either because the
+ * `hypaware.ai-gateway` capability is absent or because the adapter that would
+ * have registered the client never activated.
+ *
+ * `../cli/dispatch.js` is imported dynamically because it re-enters this module
+ * through `./core_commands.js`; a static edge here would close that cycle for
+ * every `hyp` invocation to serve one cold error path.
+ *
+ * @ref LLP 0174#detection [implements]: attach's failure paths distinguish
+ * unknown client / known-but-not-enabled / registered, instead of reporting
+ * every non-registered name as unknown
+ * @param {{ name: string, ctx: CommandRunContext }} args
+ * @returns {Promise<
+ *   { state: 'unknown' } |
+ *   { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string }
+ * >}
+ */
+async function resolveAttachEnablementState({ name, ctx }) {
+  /** @type {PluginCatalog} */
+  let catalog
+  try {
+    catalog = await buildAttachPluginCatalog(ctx)
+  } catch {
+    return { state: 'unknown' }
+  }
+  const descriptor = catalog.clientDescriptors.get(name)
+  if (!descriptor) return { state: 'unknown' }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  /** @type {'absent' | 'disabled-local' | 'disabled-central'} */
+  let inactive = 'absent'
+  try {
+    const { classifyInactiveState } = await import('../cli/dispatch.js')
+    const layered = await resolveLayeredConfigFromDisk({
+      stateRoot: obsEnv.stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+    inactive = classifyInactiveState(layered, descriptor.plugin)
+  } catch {
+    // An unreadable/invalid config layer cannot prove the central layer
+    // disabled anything, and the adapter is demonstrably not live: report the
+    // fixable state, whose remedy ('hyp init') repairs a broken config too.
+  }
+
+  if (inactive === 'disabled-central') {
+    return {
+      state: 'disabled_central',
+      errorKind: 'adapter_disabled_central',
+      message:
+        `the ${name} adapter is disabled by your fleet config; ` +
+        `a local config cannot override the central-managed setting`,
+    }
+  }
+  return {
+    state: 'not_enabled',
+    errorKind: 'adapter_not_enabled',
+    message:
+      `the ${name} adapter is not enabled on this install; enable it with 'hyp init', ` +
+      `or add ${descriptor.plugin} to ${configPath} and run 'hyp daemon restart', ` +
+      `then re-run attach`,
+  }
+}
+
+/**
+ * Report a resolved `not_enabled` / `disabled_central` attach refusal on the
+ * two registry-miss sites, in the same `--json` payload shape every other
+ * attach failure in this file uses (the capability gate renders its own
+ * because it also owns the failure span).
+ *
+ * @param {{
+ *   name: string,
+ *   enablement: { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
+ *   parsed: { dryRun: boolean, json: boolean },
+ *   ctx: CommandRunContext,
+ * }} args
+ * @returns {void}
+ */
+function reportAttachEnablement({ name, enablement, parsed, ctx }) {
+  getLogger('cmd-attach').warn('client.attach.adapter_inactive', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'failed',
+    [Attr.ERROR_KIND]: enablement.errorKind,
+  })
+  if (parsed.json) {
+    ctx.stdout.write(
+      JSON.stringify({
+        status: 'failed',
+        action: 'attach',
+        client: name,
+        dry_run: parsed.dryRun === true,
+        error_kind: enablement.errorKind,
+        error: enablement.message,
+      }) + '\n'
+    )
+    return
+  }
+  ctx.stderr.write(`error: ${enablement.message}\n`)
+}
+
+/**
+ * The `not_enabled` accept/decline gate, reached from both registry-miss
+ * sites in `runClientLifecycle`'s attach branch. Interactive-only: every
+ * other caller (scripts, `--json`, `hyp attach all`'s bulk loop, a
+ * `disabled_central` refusal) must see the SAME failure it saw before this
+ * task existed, so this returns `{ activated: false }` immediately for
+ * anything that is not a bare, interactive, single-client `not_enabled` ask.
+ *
+ * Decline and every early return are zero-side-effect by construction: none
+ * of them reach {@link enableClientAdapter}, so there is no write, no backup,
+ * and no restart to undo.
+ *
+ * @ref LLP 0174#bootstrap-floor [implements]: no local config file at all
+ * skips the prompt outright and falls through to the caller's existing
+ * `not_enabled` refusal (which already names `hyp init`) rather than asking
+ * a question with nothing on disk to add an entry to
+ * @ref LLP 0174#prompt [implements]: the enable/attach accept path - guarded
+ * write (T8), then this same process's own kernel picks up the newly written
+ * plugin(s) through the activation seam so `attach()` still runs in one
+ * invocation
+ * @param {{
+ *   name: string,
+ *   ctx: CommandRunContext,
+ *   parsed: { client: string, json: boolean, dryRun: boolean },
+ *   enablement: { state: 'unknown' } | { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
+ * }} args
+ * @returns {Promise<{ activated: boolean }>}
+ */
+async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
+  // `disabled_central` never reaches this prompt (LLP 0174 #detection): a
+  // fleet-managed disable has no local remedy, so asking would offer a fix
+  // that cannot work. `unknown` means the catalog does not know this client
+  // at all, which this prompt has nothing to enable either.
+  if (enablement.state !== 'not_enabled') return { activated: false }
+  // `hyp attach all` never prompts mid-run (see the call site's own comment);
+  // a bare `--client all` reaching here would ask once per missing client
+  // with no way to say "no" to the rest.
+  if (parsed.client === 'all') return { activated: false }
+  if (parsed.json || !isTty(ctx.stdin)) return { activated: false }
+  // `--dry-run` is this command's "tell me, change nothing" mode (the same
+  // promise `detachClientViaCore`'s own dry-run branch keeps), and the accept
+  // path is the least dry thing in the file: a config write, a daemon
+  // restart, and a real backfill import. Refuse the question rather than
+  // offer one whose yes would break the flag - a dry run reports the guided
+  // error, and the user re-runs without the flag to act on it.
+  if (parsed.dryRun) return { activated: false }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  if (!(await configFileExists(configPath))) return { activated: false }
+
+  const catalog = await buildAttachPluginCatalog(ctx)
+  const descriptor = catalog.pickerDescriptors.get(name)
+  if (!descriptor) return { activated: false }
+
+  const { pluginNames, entries } = resolveSingleSourceEnablement(descriptor)
+  if (entries.length === 0) return { activated: false }
+  // The same "never prompt when there is nothing to add" floor the missing
+  // config file establishes, applied to the two other shapes it takes on a
+  // config that does exist. `enableClientAdapter`'s write is additive by
+  // contract, so it appends nothing for a name already known to the config,
+  // and neither shape below is repairable by an append - the question would
+  // promise an enable the write cannot deliver, and land a no-op rewrite plus
+  // a stray backup and an untrue "enabled the <name> adapter" line on the way
+  // to the same refusal. Fall through to the caller's guided error instead,
+  // which names `hyp init` (the flow that does rewrite an existing entry).
+  // @ref LLP 0174#bootstrap-floor [constrained-by]: the prompt is only ever
+  // offered where the additive write can actually change the outcome
+  if (await enableWriteCannotDeliver({ ctx, configPath, catalog, pluginNames })) {
+    return { activated: false }
+  }
+  const primary = descriptor.compose?.plugin?.name ?? descriptor.plugin
+  const rest = pluginNames.filter((pluginName) => pluginName !== primary)
+  const depSuffix = rest.length > 0 ? ` (and ${rest.join(', ')})` : ''
+
+  // @ref LLP 0174#openclaw [implements]: OpenClaw's enable question names the
+  // periodic sweep import up front instead of reusing the generic wording,
+  // because enabling it is not attach-shaped like every other adapter here -
+  // it also starts a background backfill the user has not consented to yet
+  const question =
+    name === 'openclaw'
+      ? `The OpenClaw adapter is not enabled on this install. Enabling it starts a periodic sweep ` +
+        `that will import existing OpenClaw session history within about 5 minutes. ` +
+        `Enable ${primary}${depSuffix} now? [y/N] `
+      : `The ${capitalizeClientLabel(name)} adapter is not enabled on this install. Attaching requires ` +
+        `it. Enable ${primary}${depSuffix} now? [y/N] `
+
+  const accepted = await askYesNo(ctx, question)
+  if (!accepted) {
+    getLogger('cmd-attach').info('client.attach.enable_prompt', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'ok',
+      accepted: false,
+    })
+    return { activated: false }
+  }
+
+  const result = await enableClientAdapter({
+    name,
+    entries,
+    ctx,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
+  if (!result.ok) {
+    reportEnableFailure({ name, result, ctx })
+    return { activated: false }
+  }
+
+  // The write and (if a daemon is installed) the restart already landed; what
+  // remains is making THIS process's own kernel see the plugin(s) the config
+  // now names, so `client.attach()` below runs in the same invocation instead
+  // of asking the user to re-run the command.
+  // @ref LLP 0139#seam-fresh-activation [constrained-by]: reuses the
+  // dispatch-miss seam's activation primitive rather than adding a second one
+  await ctx.activatePluginClosure(pluginNames)
+  const allLive = pluginNames.every((pluginName) => ctx.plugins.some((p) => p.name === pluginName))
+  if (!allLive) {
+    ctx.stderr.write(
+      `error: enabled the ${name} adapter (config updated${result.daemonInstalled ? ' and daemon restarted' : ''}), ` +
+      `but could not activate it in this process; re-run 'hyp attach ${name}' to finish\n`
+    )
+    getLogger('cmd-attach').warn('client.attach.enable_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'failed',
+      [Attr.ERROR_KIND]: 'activation_incomplete',
+    })
+    return { activated: false }
+  }
+
+  getLogger('cmd-attach').info('client.attach.enable_prompt', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'ok',
+    accepted: true,
+    added_plugins: result.addedPlugins.join(','),
+  })
+  return { activated: true }
+}
+
+/**
+ * Step 4 of design LLP 0174 #prompt: after T9's accept path enables and
+ * attaches a client in this same invocation, offer to import its local
+ * history too, with the identical question the init finale asks (T5's
+ * exported `defaultBackfillConsentPromptFactory`), so accepting "enable"
+ * does not also silently skip "backfill". Only ever called for a client
+ * `activatedViaPrompt` marked true - a client whose adapter was already
+ * enabled coming into this command takes the unchanged registered-state
+ * attach path and never reaches this function at all.
+ *
+ * No question is asked at all when there is nothing to run: OpenClaw is
+ * excluded outright (its own enable question, LLP 0174 #openclaw, already
+ * disclosed and started the periodic sweep that imports its history within
+ * about 5 minutes - asking again here would contradict that disclosure
+ * rather than reuse it), and any other client with no provider registered
+ * in `ctx.backfills` has nothing this step could import. Declining, like
+ * the finale's own decline, leaves history unimported with no further
+ * action; a prompt failure (including a TUI cancel) degrades to the same
+ * "leave it unimported" outcome rather than turning an attach that already
+ * succeeded into a failed exit code. A run failure is reported to stderr
+ * and swallowed for the same reason.
+ *
+ * @ref LLP 0174#prompt [implements]: step 4, "backfill consent", reusing
+ * the finale's own question and `runBackfillProvider` path instead of a
+ * second bespoke one
+ * @ref LLP 0174#openclaw [constrained-by]: OpenClaw's step 4 is a
+ * disclosure, not a question, so it never reaches this prompt
+ * @param {{ name: string, ctx: CommandRunContext }} args
+ * @returns {Promise<void>}
+ */
+async function maybeBackfillAfterEnable({ name, ctx }) {
+  if (name === 'openclaw') return
+  const provider = ctx.backfills?.get?.(name)
+  if (!provider) return
+
+  const retentionDays = resolveRetentionDays({ flag: undefined, config: ctx.config })
+  const until = new Date().toISOString()
+  const ask = defaultBackfillConsentPromptFactory({
+    ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    stdout: ctx.stdout,
+    env: ctx.env,
+  })
+
+  let consent = false
+  try {
+    consent = await ask({ providers: [name], retentionDays })
+  } catch {
+    consent = false
+  }
+
+  getLogger('cmd-attach').info('client.attach.backfill_prompt', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'ok',
+    accepted: consent,
+  })
+  if (!consent) {
+    ctx.stdout.write(`backfill ${name}: skipped (declined)\n`)
+    return
+  }
+
+  try {
+    ctx.stdout.write(`backfill ${name}: importing local history…\n`)
+    const result = await runBackfillProvider({ ctx, provider: name, dryRun: false, retentionDays, until })
+    ctx.stdout.write(
+      `backfill ${name}: ${result.ok ? 'ok' : 'failed'} ` +
+      `(scanned ${result.scanned}, wrote ${result.rowsWritten}, skipped ${result.skipped})\n`
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`backfill ${name} failed: ${message}\n`)
+  }
+}
+
+/**
+ * Same existence probe {@link prepareLocalConfigWrite} uses internally, so
+ * the bootstrap floor (LLP 0174 #bootstrap-floor) and the guarded write agree
+ * on what "no local config file" means.
+ *
+ * @param {string} configPath
+ * @returns {Promise<boolean>}
+ */
+async function configFileExists(configPath) {
+  try {
+    await fs.access(configPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the additive enable write would leave the config exactly as
+ * inactive as it found it, in which case the prompt has nothing to offer.
+ *
+ * Two shapes, both of them "known but not enabled" states an *append* cannot
+ * repair, and both judged against the same name set `enableClientAdapter`
+ * skips on (the **effective** merge union the local file, so an entry the
+ * merge dropped still counts as physically present):
+ *
+ * - **Present but `enabled: false`.** The entry exists, so nothing is
+ *   appended and the flag keeping the plugin out of the boot selection
+ *   survives untouched. Both layers count deliberately: a locally disabled
+ *   entry and a centrally-disabled one alike. So does every requested name,
+ *   not just the adapter - a disabled `@hypaware/ai-gateway` starves the
+ *   adapter just as effectively.
+ * - **Every requested name already present.** `toAppend` is empty, so the
+ *   write is a byte-identical rewrite. The config already says what the
+ *   prompt would make it say, and whatever is keeping the plugin from
+ *   activating is not something attach can write its way out of.
+ *
+ * An unresolvable config layer answers `false`: it cannot prove either shape,
+ * and `enableClientAdapter`'s own read is what refuses a write it cannot make
+ * safely.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   configPath: string,
+ *   catalog: PluginCatalog,
+ *   pluginNames: string[],
+ * }} args
+ * @returns {Promise<boolean>}
+ */
+async function enableWriteCannotDeliver({ ctx, configPath, catalog, pluginNames }) {
+  try {
+    const layered = await resolveLayeredConfigFromDisk({
+      stateRoot: readObservabilityEnv(ctx.env).stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+    const wanted = new Set(pluginNames)
+    const effectiveEntries = layered.effective?.plugins ?? []
+    if (effectiveEntries.some((entry) => wanted.has(entry.name) && entry.enabled === false)) {
+      return true
+    }
+    const localLoaded = await loadConfigFile(configPath)
+    const present = new Set([
+      ...effectiveEntries.map((entry) => entry.name),
+      ...(localLoaded.ok ? (localLoaded.config.plugins ?? []).map((entry) => entry.name) : []),
+    ])
+    return pluginNames.every((pluginName) => present.has(pluginName))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {string} name
+ * @returns {string}
+ */
+function capitalizeClientLabel(name) {
+  return name.length > 0 ? name.charAt(0).toUpperCase() + name.slice(1) : name
+}
+
+/**
+ * Report `enableClientAdapter`'s failure in the same `--json` / stderr shape
+ * as the rest of this file's attach failures.
+ *
+ * Per design `#prompt`'s "each step reports its own failure" paragraph, the
+ * two shapes are deliberately different:
+ *
+ * - **The write itself failed** (`failedStep === 'write'`, the default when
+ *   `enableClientAdapter` returns no `failedStep` at all): nothing else was
+ *   attempted, so the message says only that the write failed and that
+ *   nothing changed. There is no `backupPath` to name here - a write that
+ *   never landed never had anything worth backing up.
+ * - **The write landed but a later step (`restart` / `wait`) did not**: the
+ *   message names the failed step by name, states that the config change
+ *   already persists, and names the `.bak-<ts>` backup path
+ *   `enableClientAdapter` returned, so a re-run of `hyp attach <name>` knows
+ *   it is resuming from real on-disk state, not repeating a no-op.
+ *
+ * @ref LLP 0174#prompt [implements]: per-step failure reporting and the
+ * resumability instruction on a partial (write-succeeded) failure
+ * @param {{ name: string, result: ClientEnableResult, ctx: CommandRunContext }} args
+ * @returns {void}
+ */
+function reportEnableFailure({ name, result, ctx }) {
+  const failedStep = result.failedStep ?? 'write'
+  getLogger('cmd-attach').warn('client.attach.enable_failed', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: 'failed',
+    [Attr.ERROR_KIND]: `enable_${failedStep}_failed`,
+  })
+  const detail = result.message ?? 'unknown error'
+  const message = failedStep === 'write'
+    ? `could not enable the ${name} adapter: the config write failed (${detail}); nothing changed`
+    : `could not enable the ${name} adapter: the ${failedStep} step failed (${detail}). ` +
+      `The config change already persists` +
+      (result.backupPath ? ` (config backed up to ${result.backupPath})` : '') +
+      `; re-running 'hyp attach ${name}' resumes from the new state.`
+  ctx.stderr.write(`error: ${message}\n`)
 }
 
 /**
@@ -362,12 +978,15 @@ async function runClientLifecycle(action, argv, ctx) {
  * @returns {Promise<void>}
  */
 async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json }) {
+  const homeDir = ctx.env.HOME ?? os.homedir()
   await materializeClientAssets({
     clients: [name],
     descriptors: descriptorMap,
-    homeDir: ctx.env.HOME ?? os.homedir(),
+    homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     dryRun,
     // Under --json the adapter's one-line machine payload stays the only thing
     // on stdout, so the per-copy progress lines are suppressed.
@@ -392,17 +1011,24 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
  * reversal alike - because the read-then-remove lives here, next to the clear,
  * rather than in one caller (LLP 0138 #marker-undo).
  *
+ * `quiet` suppresses this routine's own stdout prose, warnings included, and
+ * hands the full result back instead: a quiet caller takes on the duty of
+ * rendering `result.warning` and `result.restoredPaths` itself, because those
+ * lines can be the only surviving copy of what the undo left behind. The
+ * asset-refusal stderr writes stay unconditional either way.
+ *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
+ *   quiet?: boolean,
  *   ctx: CommandRunContext,
  * }} args
- * @returns {Promise<void>}
+ * @returns {Promise<DetachFromDiskResult | undefined>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -442,7 +1068,11 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         return
       }
       try {
-        const result = await detachClientFromDisk({ descriptor, homeDir, env: ctx.env })
+        const result = await detachClientFromDisk({
+          descriptor,
+          homeDir,
+          env: ctx.env,
+        })
         const restored = result.changed === true
         span.setAttribute('status', 'ok')
         span.setAttribute('restored', restored)
@@ -454,7 +1084,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             changed: true,
           })
         }
-        writeCoreDetachOutput({ ctx, name, json, result })
+        if (!quiet) writeCoreDetachOutput({ ctx, name, json, result })
         const stateRoot = readObservabilityEnv(ctx.env).stateDir
 
         // Retract the attach marker so the CLI undo and the marker store stay in
@@ -508,7 +1138,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
               installedAssets,
               clientAssetBaseDirs(descriptor, homeDir)
             )
-            if (removed.length > 0 && !json) {
+            if (removed.length > 0 && !json && !quiet) {
               ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
             }
             const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
@@ -544,6 +1174,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
           }
         }
         if (assetFailure.length > 0) throw new Error(assetFailure)
+        return result
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)
@@ -552,6 +1183,68 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
     },
     { component: 'cmd-detach' }
   )
+}
+
+/**
+ * Reverse every known client's attach from disk, quietly, and report only what
+ * actually changed.
+ *
+ * This is the sweep `hyp daemon uninstall` runs. Removing the service strands
+ * every attached client on a gateway port that stops answering, and a client
+ * pointed at a dead `ANTHROPIC_BASE_URL` does not degrade to talking to
+ * Anthropic directly - it fails every request. So the level-4 exit finishes the
+ * level-1 exit rather than leaving the machine in that state.
+ *
+ * Every known client is asked, not just the ones this process can prove are
+ * attached: the core undo is already an honest no-op on a client that was never
+ * attached (`changed: false`), so asking is cheaper and more truthful than a
+ * second probe, and the returned `detached` list is exactly the set that had
+ * something to reverse. Per-client failures are collected rather than thrown so
+ * one wedged client cannot strand the rest still attached.
+ *
+ * Each `detached` entry carries the undo's own `warning` and `restoredPaths`
+ * forward. The sweep runs the undo quiet, so these fields are the only copy of
+ * notices like "overridden externally; leaving in place" - a caller that drops
+ * them reports a detach as clean when the user still has a file to fix.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{
+ *   detached: { name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[],
+ *   failed: { name: string, message: string }[],
+ * }>}
+ * @ref LLP 0206#d1 [implements]: uninstalling the service detaches the clients it was serving
+ */
+export async function detachAllClientsFromDisk(ctx) {
+  /** @type {{ name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[]} */
+  const detached = []
+  /** @type {{ name: string, message: string }[]} */
+  const failed = []
+  const descriptors = await buildClientDescriptorMap(ctx)
+  for (const [name, descriptor] of descriptors) {
+    try {
+      const result = await detachClientViaCore({
+        name,
+        descriptor,
+        dryRun: false,
+        json: false,
+        quiet: true,
+        ctx,
+      })
+      if (result?.changed === true) {
+        detached.push({
+          name,
+          ...(result.settingsPath !== undefined ? { settingsPath: result.settingsPath } : {}),
+          ...(result.removed !== undefined ? { removed: result.removed } : {}),
+          ...(result.restoredValue !== undefined ? { restoredValue: result.restoredValue } : {}),
+          ...(result.restoredPaths !== undefined ? { restoredPaths: result.restoredPaths } : {}),
+          ...(result.warning !== undefined ? { warning: result.warning } : {}),
+        })
+      }
+    } catch (err) {
+      failed.push({ name, message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return { detached, failed }
 }
 
 /**
@@ -1263,12 +1956,14 @@ export async function runSkillsInstall(argv, ctx) {
   }
 
   const descriptors = await buildClientDescriptorMap(ctx)
-  const installed = await materializeClientAssets({
+  const { installed } = await materializeClientAssets({
     clients: parsed.client === 'all' ? 'all' : [parsed.client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     stdout: ctx.stdout,
     stderr: ctx.stderr,
   })
@@ -1284,21 +1979,27 @@ export async function runSkillsInstall(argv, ctx) {
 }
 
 /**
- * Build a map from client name to client descriptor by reading plugin
- * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
- * / `.claude/agents` in core.
+ * Build the full bundled+installed plugin catalog (`plugins`,
+ * `pluginMetadata`, `knownDatasets`, `clientDescriptors`,
+ * `pickerDescriptors`) by reading plugin manifests. This avoids
+ * hardcoding `.claude/skills` / `.codex/skills` / `.claude/agents` in
+ * core.
  *
  * Built from the same **bundled + installed** catalog that `boot.js` and
  * `status.js` use, so an installed (non-bundled) client adapter that can
  * attach-on-join is also resolvable here: its `hyp detach` / skill / agent
  * install must not silently miss the descriptor.
  *
+ * @ref LLP 0174#detection [implements]: generalized from a
+ * clientDescriptors-only map so the attach enablement-detection and
+ * prompt flow can also read `pickerDescriptors` (dependency resolution)
+ * and `pluginMetadata`/`knownDatasets` (layered config resolution) from
+ * one catalog build instead of two.
+ *
  * @param {CommandRunContext} ctx
- * @returns {Promise<Map<string, ClientDescriptor>>}
+ * @returns {Promise<PluginCatalog>}
  */
-export async function buildClientDescriptorMap(ctx) {
-  /** @type {Map<string, ClientDescriptor>} */
-  const map = new Map()
+export async function buildAttachPluginCatalog(ctx) {
   /** @type {LoadedManifest[]} */
   let bundledLoaded = []
   /** @type {LoadedManifest[]} */
@@ -1313,12 +2014,29 @@ export async function buildClientDescriptorMap(ctx) {
     installedLoaded = installed.loaded
   } catch { /* installed discovery failure is non-fatal */ }
   try {
-    const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
-    for (const [clientName, descriptor] of catalog.clientDescriptors) {
-      map.set(clientName, descriptor)
+    return buildPluginCatalog(bundledLoaded, installedLoaded)
+  } catch {
+    /* catalog build failure → empty catalog → warnings per contribution */
+    return {
+      plugins: new Map(),
+      pluginMetadata: new Map(),
+      knownDatasets: new Set(),
+      clientDescriptors: new Map(),
+      pickerDescriptors: new Map(),
     }
-  } catch { /* catalog build failure → empty map → warnings per contribution */ }
-  return map
+  }
+}
+
+/**
+ * Build a map from client name to client descriptor. Reimplemented as a
+ * thin projection of {@link buildAttachPluginCatalog}'s `clientDescriptors`
+ * so callers that only need client lookup do not carry the full catalog.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<Map<string, ClientDescriptor>>}
+ */
+export async function buildClientDescriptorMap(ctx) {
+  return (await buildAttachPluginCatalog(ctx)).clientDescriptors
 }
 
 /** @param {string[]} argv */

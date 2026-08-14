@@ -16,7 +16,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
-import { buildSourceWithholdResolver } from './source_withhold.js'
+import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
@@ -173,15 +173,20 @@ export async function bootKernel(opts = {}) {
       // The kernel runtime (and its storage service) is built here, after
       // the catalog and layered config are known, rather than at the top of
       // this function: `sourceWithholdResolver` needs both to classify each
-      // picker source's provenance (LLP 0132 #source-scoped-withholding),
-      // and nothing before this point reads `runtime`.
-      // @ref LLP 0132#source-scoped-withholding [implements]: boot builds the resolver once, from the very catalog + merged config this boot just resolved
+      // picker source's provenance (LLP 0188), and nothing before this
+      // point reads `runtime`. The migration runs first: both the daemon
+      // and the CLI boot through here, so the first invocation after the
+      // default-sync upgrade materializes the pre-0188 withheld set before
+      // any export can read the store.
+      // @ref LLP 0188#migration [implements]: boot materializes the pre-0188 derived withheld set before building the resolver
+      // @ref LLP 0188#opt-out [implements]: boot builds the resolver from the very catalog + merged config this boot just resolved, over the live opt-out store
+      await ensureClientSyncMigration({ catalog, layered: merged, stateDir: stateRoot })
       const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
       const runtime = createKernelRuntime({
         commandRegistry,
         cacheRoot,
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
-        sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged }),
+        sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
       })
 
       // Full plugin pool + selection (shared with help so `hyp --help`
@@ -191,12 +196,47 @@ export async function bootKernel(opts = {}) {
       // bundled skeleton. Excluded plugins are in the pool so they activate
       // when named in config or an init preset, the allowlist only governs
       // default activation, not discoverability.
-      const { installedNames, selected, selectedManifests } = selectBootPlugins({
+      const { installedNames, pool, selected, selectedManifests } = selectBootPlugins({
         discovered,
         installed,
         config,
         bootProfile,
       })
+
+      // Plugins this boot found a manifest for but whose profile did not
+      // select: the profile never gave them a chance to activate. `skipped`
+      // below cannot answer that question for callers, since it only walks
+      // `discovered.loaded` and so omits the V1-excluded bundled plugins
+      // (`@hypaware/central`, …) that `all-bundled`/`all-available` drop even
+      // when the config names them. Dispatch reads this to tell a profile
+      // artifact apart from a config defect when a sink fails to materialize.
+      const withheldByProfile = pool
+        .map((m) => /** @type {PluginName} */ (m.manifest.name))
+        .filter((name) => !selected.has(name))
+
+      // The plugins the user asked for. The profile term of `unavailablePlugins`
+      // below is intersected with this set, and the intersection is what keeps
+      // the field usable: every `config`-profile boot withholds the whole
+      // non-config pool, so an unintersected profile term would report a hole on
+      // every ordinary boot and stand the client-asset prune down forever.
+      // Intersected, `config` yields nothing (a plugin the user genuinely
+      // removed from the config still prunes) and `all-available` yields exactly
+      // the config-enabled names that profile dropped.
+      const configEnabled = new Set(
+        (config?.plugins ?? [])
+          .filter((entry) => entry.enabled !== false)
+          .map((entry) => /** @type {PluginName} */ (entry.name))
+      )
+      const wantedButWithheld = withheldByProfile.filter((name) => configEnabled.has(name))
+
+      // A manifest that would not load contributes nothing and has no plugin
+      // name to be known by, so it is named by the directory it failed in. Both
+      // pools count: an installed plugin whose manifest is unreadable leaves the
+      // same hole a bundled one does.
+      const unloadable = [
+        ...discovered.failed.map((f) => f.rootDir),
+        ...installed.failed.map((f) => f.rootDir),
+      ]
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -245,6 +285,8 @@ export async function bootKernel(opts = {}) {
           mode,
           runId,
           skipped,
+          withheldByProfile,
+          unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
       }
@@ -296,6 +338,22 @@ export async function bootKernel(opts = {}) {
         mode,
         runId,
         skipped,
+        withheldByProfile,
+        // The one list of "this boot did not get its whole plugin set", for
+        // callers that must not read a missing contribution as a withdrawn one.
+        // Four doors, and only the first ever reaches an activation record: a
+        // plugin whose `activate()` threw, one the dep graph eliminated for an
+        // unsatisfied `requires`, one whose manifest would not load, and one the
+        // boot profile withheld although the config enabled it.
+        // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: every
+        //   way a boot comes up short of its plugin set lands in one list, so
+        //   the delete path stands down on all of them and not just on throws
+        unavailablePlugins: [...new Set([
+          ...failed.map((r) => /** @type {string} */ (r.plugin.name)),
+          ...resolution.unsatisfied.map((u) => /** @type {string} */ (u.plugin)),
+          ...unloadable,
+          ...wantedButWithheld,
+        ])],
         clientDescriptors: catalog.clientDescriptors,
       }
     },
@@ -313,12 +371,20 @@ export async function bootKernel(opts = {}) {
  * what "effective" means, so a reload can never silently drop the central
  * layer.
  *
+ * `centralConfig` is `null` for **two different** states: no central layer on
+ * disk, and a central layer that is there but does not load. Boot itself is
+ * right to collapse them (either way there is nothing to merge), but a caller
+ * deciding a *permission* on "is this machine enrolled" is not: it must be
+ * able to tell "not enrolled" from "cannot tell". `centralLoaded` is returned
+ * raw alongside for exactly that, the way `localLoaded` already is.
+ *
  * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string> }} args
  * @returns {Promise<{
  *   centralConfig: HypAwareV2Config | null,
  *   localConfig: HypAwareV2Config | null,
  *   centralConfigPath: string | null,
  *   localLoaded: LoadConfigResult | null,
+ *   centralLoaded: LoadConfigResult | null,
  *   effective: HypAwareV2Config | null,
  *   drops: ConfigLayerDrop[],
  *   centralQueryIgnored: boolean,
@@ -355,6 +421,7 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
     localConfig,
     centralConfigPath,
     localLoaded,
+    centralLoaded,
     effective: (centralConfig || localConfig) ? merged.effective : null,
     drops: merged.drops,
     centralQueryIgnored: merged.centralQueryIgnored,

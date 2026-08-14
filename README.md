@@ -1,20 +1,22 @@
 # HypAware
 
-Modular logs and telemetry collector. Plugin-kernel architecture.
+HypAware records the sessions, logs, and telemetry from your AI agents
+into one queryable history.
 
-HypAware captures conversations and traffic from local AI clients (Claude
+It captures conversations and traffic from local AI clients (Claude
 Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
-logs / traces / metrics into a local query cache and optional Parquet
-exports.
+logs / traces / metrics. Recordings land in a local query cache and can
+stay on your machine or sync to a central server.
 
 There are two ways to run it:
 
+- **Shared.** Each machine signs into your organization on the central
+  server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
+  and forwards its recordings there. One history follows you across
+  machines and harnesses, and usage, spend, and activity can be queried
+  and reported across the whole team.
 - **Solo, fully local.** No central server, no account. Everything stays in
   a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
-- **With your team.** Each machine signs into your organization on the
-  central server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
-  and forwards its recordings there so usage, spend, and activity can be
-  queried and reported across the whole team.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
@@ -53,9 +55,14 @@ On a TTY this launches the interactive walkthrough:
 1. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
    - Codex conversations, CLI and Desktop (`codex`)
-   - Raw Anthropic API traffic (`raw-anthropic`)
-   - Raw OpenAI API traffic (`raw-openai`)
    - OTEL logs / traces / metrics (`otel`)
+
+   The raw proxy sources (`raw-anthropic`, `raw-openai`) are not offered in
+   the menu. They open a gateway upstream but configure no client and carry
+   no projector of their own, so on their own they proxy traffic and record
+   nothing. They remain real sources: `hyp init --source raw-anthropic`
+   still composes one, and a config that already collects one keeps it
+   through a reconfigure (LLP 0202).
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
 3. The **retention window** is not asked: the pathway sets it, `90` days on
@@ -70,6 +77,10 @@ On a TTY this launches the interactive walkthrough:
    per-client attach results, and a first look at what was captured: token
    volume per model, activity per day, which repos the sessions ran in, and
    which tools got called. Reprint it any time with `hyp query overview`.
+6. Last, it offers a few questions worth asking of that data and starts your
+   AI client on the one you pick, opening straight into the answer. Pick it
+   up again any time with `hyp ask`, or skip the menu with
+   `hyp ask "which sessions touched the auth module"`.
 
 For unattended installs (CI, scripted bootstraps, dotfiles) use the
 non-interactive flags:
@@ -235,38 +246,35 @@ plus `--depth`, `--direction out|in|both`, `--type <node_type>`, `--edge-type
 and `edge` datasets are queryable through `hyp query sql` like any other
 dataset.
 
-Claude Code and Codex additionally get a `hypaware-graph` skill (and a
-`graph_neighbors` tool) so an assistant can project and walk the graph on your
-behalf.
+This plugin ships a `graph_neighbors` tool and the `hyp graph` help that
+explains the traversal, and the `hypaware-query` skill covers when to ask the
+graph rather than the messages, so an assistant can project and walk the graph
+on your behalf.
 
 ## Attaching and detaching AI clients
 
 Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
-hyp attach claude
-hyp attach codex
+hyp attach <client>             # claude, codex, openclaw, ...
 # Equivalent flag form:
-hyp attach --client claude
-hyp attach --client codex
+hyp attach --client <client>
 ```
 
 Detach (removes only HypAware-managed settings):
 
 ```sh
-hyp detach claude
-hyp detach codex
+hyp detach <client>
 # Equivalent aliases:
-hyp detach --client claude
-hyp detach --client codex
-hyp unattach claude
-hyp unattach codex
+hyp detach --client <client>
+hyp unattach <client>
 ```
 
 Both commands support `--dry-run` and `--json` for inspection and
-scripting. Claude writes only HypAware-related keys to
-`~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
-`~/.codex/config.toml`. Unrelated keys in either file are preserved.
+scripting. Each adapter writes only HypAware-managed settings to its
+client's own config file (for example `~/.claude/settings.json` for
+Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
+Codex); unrelated keys in every file are preserved.
 
 ### Desktop apps
 
@@ -320,6 +328,20 @@ hyp policy list                       # every machine-local entry
 hyp policy unset <path> [class]       # back to the implicit default
 ```
 
+On a machine connected to a server, folders you have not marked sync
+without asking. If you would rather be asked once per new folder, a session
+opened somewhere new can prompt you to classify it instead:
+
+```sh
+hyp policy folders ask                # ask once per new folder
+hyp policy folders sync               # back to syncing without asking (default)
+hyp policy folders                    # report which is in force
+```
+
+This gates the question only: folders you already marked keep their class,
+and `.hypignore` files are unaffected either way. `hyp init` asks for this
+in its own step, and `hyp status` names it on an enrolled machine.
+
 Markings are prospective only: rows captured before a marking existed stay
 in the cache. Delete those with the separate destructive step:
 
@@ -328,7 +350,8 @@ hyp purge <path> | --session <id> | --ignored | --all   # delete already-cached 
 ```
 
 To pause recording for just the current Claude or Codex session (in-memory,
-reversible) use the `hypaware-ignore` and `hypaware-unignore` skills.
+reversible) run `hyp session ignore` from inside it; `hyp session unignore`
+resumes and `hyp session status` reports the current answer.
 
 The full model, including what enrollment forwards and the first-sync
 privacy review, is in
@@ -345,7 +368,7 @@ hyp daemon start        # ensure the service is started
 hyp daemon status       # health snapshot
 hyp daemon restart      # bounce after a config change
 hyp daemon stop         # signal the running daemon to shut down
-hyp daemon uninstall    # remove the service file (config + recordings are kept)
+hyp daemon uninstall    # remove the service and detach clients (config + recordings are kept)
 ```
 
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
@@ -378,7 +401,7 @@ run directly. The common Phase 8 conditions:
 | `gateway_missing_anthropic_upstream`  | `@hypaware/claude` enabled but no Anthropic upstream is registered on the gateway  | re-run `hyp init` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp init` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp init` and pick "local Parquet export"                        |
-| `client_attach_missing`               | a client plugin with an attach probe is enabled but shows no HypAware marker       | `hyp attach --client claude` or `hyp attach --client codex`              |
+| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | `hyp attach --client claude` or `hyp attach --client codex`              |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
 | `recent_errors`                       | the local telemetry directory has recent error log entries                         | inspect `~/.hyp/hypaware/dev-telemetry`, then `hyp daemon restart`       |
@@ -398,14 +421,16 @@ To remove HypAware from a machine completely:
 
 ```sh
 hyp leave                     # only if enrolled with a team server: stop forwarding, drop the credential
-hyp detach claude             # restore each attached client's own settings
-hyp detach codex
-hyp daemon uninstall          # remove the launchd / systemd service file
+hyp daemon uninstall          # remove the launchd / systemd service and detach every attached client
 npm uninstall -g hypaware     # remove the CLI
 rm -rf ~/.hyp                 # delete all local recordings, config, and state
 ```
 
-The first four steps are non-destructive and reversible; deleting `~/.hyp`
+`hyp daemon uninstall` restores each attached client's own settings on its
+way out, so no client is left pointing at a gateway that no longer exists;
+to detach a single client without uninstalling, use `hyp detach <client>`.
+
+The first three steps are non-destructive and reversible; deleting `~/.hyp`
 permanently removes every local recording. Note that copies already
 forwarded to a team server or exported to Parquet are not affected; see
 [docs/PRIVACY.md](./docs/PRIVACY.md).

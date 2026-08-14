@@ -1,7 +1,7 @@
 # LLP 0143: OpenClaw registers no attach_probe, and json_path retires
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -12,6 +12,12 @@
 > already set for Claude Desktop: register no `attach_probe`, let
 > `detachClientFromDisk` be an honest no-op. The `json_path` probe format
 > LLP 0109 added to core then has zero consumers and is removed with it.
+
+> **Superseded-by [LLP 0169](./0169-openclaw-attach-surface-returns.decision.md):**
+> LLP 0168 writes real config entries again, so the premise (nothing on
+> disk to reverse) no longer holds. The attach surface and the `json_path`
+> format return. The reasoning here stays the correct record for why they
+> left. See LLP 0167.
 
 ## Context
 
@@ -80,34 +86,6 @@ One further fact makes this cheap: **OpenClaw is the sole remaining
 The `MALFORMED_MARKER` guard and the refuse-over-half-reverse principle are
 untouched. Nothing about `json`/`toml` clients changes.
 
-### Status derives by the same gate
-
-<a id="status-derives-by-the-same-gate"></a>**Every `hyp status` attach
-surface reads `descriptor.attachProbe` the way `action_attach.desired()`
-does.** "Inert" above is a statement about the reconciler; status has to make
-the same statement or it reports a state that can never resolve
-([#544](https://github.com/hyparam/hypaware/issues/544)). `desired()` skips a
-probe-less descriptor, so `perform()` never runs and no marker is ever
-written; three status surfaces derived against the attach contract without
-that gate and each turned that permanent silence into a permanent negative:
-
-- the **client actions** row derived `pending` (declared, no marker) forever,
-  where the truthful state is `n/a`, the same answer `on_join: false` and a
-  non-joined host already get, and for the same reason: the reconciler is a
-  no-op for this target;
-- the **clients** row printed `not attached`, where nothing is attachable:
-  it reads `attach n/a`, and the report carries `attachable: false` so the
-  JSON surface says which of the two a `false` in `attached` is;
-- the **`client_attach_missing`** diagnostic fired on `!attached`, printing a
-  repair (`hyp attach --client openclaw`) that resolves this document's own
-  deliberate no-op and so could never clear the warning it was printed under.
-
-A probe-less client is therefore **unattachable, not unattached**. This is
-the LLP 0045 §`settings_file`-is-home-relative rule applied one level up: a
-negative we never actually observed must not be rendered as one we did. It is
-a gate, not a signal: nothing here reports whether OpenClaw is in fact
-routing, which stays the open question below.
-
 ## Consequences
 
 - Core loses a whole probe/undo format that LLP 0109 added and that now has
@@ -117,20 +95,6 @@ routing, which stays the open question below.
   it should learn to report it from OpenClaw's plugin registry instead is
   deliberately left open below; showing nothing is preferable to showing a
   probe that cannot be reversed.
-- Claude Desktop gets the same correction for free, since it dropped its
-  probe first (LLP 0115 #no-attach-on-join, #444/#445): its permanent
-  `attach claude-desktop [pending]` becomes `n/a` too. It also loses its
-  `client_attach_missing` warning, which LLP 0139 #repair-must-be-runnable
-  had pointed at `hyp claude-desktop install`. No signal is lost: with no
-  probe to read back, that warning fired identically before the consent
-  prompt, after a decline, and after a fully successful install, so it never
-  distinguished the case it named. A real "did the plist land?" check is
-  `hyp claude-desktop verify`, or the registry-derived signal left open below.
-- `ClientAttachReport` gains a required `attachable` field, and `hyp status
-  --json` a per-client `attachable` key. `attached` keeps its type and its
-  place for every row, so a consumer pinning it does not break; a consumer
-  that wants to distinguish "no marker" from "no such thing as a marker"
-  reads the new key.
 - Anyone who attached under LLP 0109 keeps a `models.providers.hypaware`
   entry and a repointed `model.primary` in their `openclaw.json`, and
   removing the format removes the code that would have reversed it. This is

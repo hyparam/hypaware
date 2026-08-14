@@ -16,12 +16,12 @@
     "bin",
     "hypaware-plugin-kernel-types.d.ts",
     "hypaware-core",
-    "openclaw-steering-plugin",
     "scripts",
     "src",
     "test"
   ],
   "exclude": [
-    "hypaware-core/plugins-workspace/*/skills"
+    "hypaware-core/plugins-workspace/*/skills",
+    "src/core/reports/assets"
   ]
 }

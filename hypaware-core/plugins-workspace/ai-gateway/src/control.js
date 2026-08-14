@@ -33,6 +33,19 @@ const MAX_BODY_BYTES = 64 * 1024
  * `.total`. The `session_id` is an opaque token: the gateway never
  * interprets it, keeping the LLP 0050 provider-agnostic boundary exact.
  *
+ * **`ignored: true` is set membership, and is not a verified drop.** The
+ * gateway holds tokens, not traffic: the drop happens in the client adapter,
+ * keyed on the `session_id` it stamps on the row (LLP 0066 R5), so this route
+ * cannot tell a live session id from a Codex thread id or a typo and answers
+ * `ignored: true` for all three. Making it able to would mean teaching a
+ * deliberately provider-agnostic route about client grain, which is the
+ * boundary above. So the contract is the narrow one and the CALLER owns
+ * resolving the right key before it posts; responses that read as more than
+ * that are what LLP 0066 R14 forbids.
+ * @ref LLP 0066#receipt-is-membership [constrained-by]: the route confirms the
+ * write only, so callers must resolve the key rather than expect an echo to
+ * prove the drop.
+ *
  * @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`
  * prefix is a local control surface; this handler owns the routes served
  * under it, holding only opaque session-id tokens.

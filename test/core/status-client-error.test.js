@@ -63,7 +63,7 @@ async function reportWithProbeError(hypHome) {
     configured: false,
     // The row under test is one whose probe *was* declared and then failed to
     // resolve, which is the whole point of `error`: an unresolvable probe is
-    // not the same as no probe (LLP 0143 #status-derives-by-the-same-gate).
+    // not the same as no probe (LLP 0229 #status-derives-by-the-same-gate).
     attachable: true,
     attached: false,
     error: PROBE_ERROR,

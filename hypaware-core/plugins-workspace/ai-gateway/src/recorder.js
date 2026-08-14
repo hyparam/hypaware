@@ -52,6 +52,12 @@ export function createRecorder(options = {}) {
     startExchange(init) {
       const exchange = new Exchange({ redactSet, init })
       active.add(exchange)
+      // Membership in `active` means "row not yet finalized". Without this
+      // removal every finished exchange (with its buffered bodies and
+      // stream events) is retained for the life of the listener, which on
+      // a busy daemon grows without bound (gigabytes per day).
+      // @ref LLP 0204#fix [implements]: finished exchanges leave the set
+      exchange.finishedSignal.then(() => active.delete(exchange))
       return exchange
     },
     /** @returns {number} */
@@ -72,16 +78,29 @@ export function createRecorder(options = {}) {
       const settled = Promise.all(
         Array.from(active).map((e) => e.finishedSignal.catch(() => undefined))
       )
+      /** @type {NodeJS.Timeout | undefined} */
+      let handle = undefined
       /** @type {Promise<'timeout'>} */
       const timeout = new Promise((resolve) => {
-        const handle = setTimeout(() => resolve('timeout'), timeoutMs)
-        if (typeof handle.unref === 'function') handle.unref()
+        handle = setTimeout(() => resolve('timeout'), timeoutMs)
       })
-      const outcome = await Promise.race([settled.then(() => 'done'), timeout])
-      if (outcome === 'timeout') {
-        for (const exchange of Array.from(active)) {
-          try { exchange.finalize() } catch { /* swallow */ }
+      // An unref'd timer can be dropped by the event loop before it fires
+      // whenever nothing else is keeping the process alive, leaving this
+      // await pending forever instead of racing to the timeout. drain()
+      // runs while the listener socket is still open in production, but
+      // that's incidental, not a guarantee; ref the timer so the race
+      // always settles, and clear it once it does so drain() doesn't hold
+      // the process open past its own return.
+      // @ref LLP 0204#fix [implements]: drain always settles within timeoutMs
+      try {
+        const outcome = await Promise.race([settled.then(() => 'done'), timeout])
+        if (outcome === 'timeout') {
+          for (const exchange of Array.from(active)) {
+            try { exchange.finalize() } catch { /* swallow */ }
+          }
         }
+      } finally {
+        clearTimeout(handle)
       }
     },
   }
@@ -323,6 +342,11 @@ export class Exchange {
       Buffer.concat(this.requestChunks),
       headerValue(this._rawRequestHeaders, 'content-encoding')
     )
+    // The decoded strings on the row are the durable copies; drop the raw
+    // chunk buffers so a finalized exchange does not hold every body twice
+    // for as long as anything still references it. @ref LLP 0204#fix
+    this.requestChunks = []
+    this.responseChunks = []
     const responseBody = this.isSse
       ? null
       : (decodedResponse.length > 0 ? decodedResponse : null)

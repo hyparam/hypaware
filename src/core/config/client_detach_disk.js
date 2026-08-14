@@ -2,12 +2,16 @@
 
 import fsp from 'node:fs/promises'
 import os from 'node:os'
+import path from 'node:path'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
+import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 /**
+ * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
@@ -96,6 +100,12 @@ export class ClientDetachError extends Error {
  * `attachProbe` and the settings-file marker. No-op (`{ changed: false }`) when
  * the descriptor has no probe, the file is absent, or it carries no marker.
  *
+ * Every format's undo record lives in the settings file itself: a marker key
+ * (`json`), a managed block (`toml`), or the self-identifying signature on the
+ * entries attach wrote (`json_path`, LLP 0210). So this routine needs nothing
+ * from a running daemon, and works identically whether the gateway is alive,
+ * stopped, or already uninstalled.
+ *
  * @param {{
  *   descriptor: ClientDescriptor,
  *   homeDir?: string,
@@ -104,7 +114,12 @@ export class ClientDetachError extends Error {
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-export async function detachClientFromDisk({ descriptor, homeDir = os.homedir(), env, fs = fsp }) {
+export async function detachClientFromDisk({
+  descriptor,
+  homeDir = os.homedir(),
+  env,
+  fs = fsp,
+}) {
   const probe = descriptor.attachProbe
   if (!probe) return { changed: false }
 
@@ -115,6 +130,18 @@ export async function detachClientFromDisk({ descriptor, homeDir = os.homedir(),
   }
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
+  }
+  // @ref LLP 0172#lane-a-detach [implements]: the json_path branch LLP 0143 removed returns, reshaped for two provider entries plus a cache purge
+  if (probe.format === 'json_path') {
+    return await detachJsonPathProviders({
+      settingsPath,
+      settingsFile: probe.settings_file,
+      containerPath: probe.container_path,
+      providerKeys: probe.provider_keys,
+      markerHeader: probe.marker_header,
+      cacheGlob: probe.cache_glob,
+      fs,
+    })
   }
   // Unknown/incomplete probe: nothing this core routine knows how to reverse.
   return { changed: false, settingsPath }
@@ -662,6 +689,394 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
   }
   parent[leaf] = newValue
   return true
+}
+
+/* ----------------------------- json_path format ---------------------------- */
+
+/**
+ * Reverse a `json_path` attach: the format whose undo record is the entries it
+ * wrote. There is no separate marker to replay, because each entry carries its
+ * own signature (the marker header naming its key, plus the shape attach
+ * produces), and that signature is the whole ownership test.
+ *
+ * 1. Absent settings file: `{ changed: false }`, like every other format.
+ * 2. For each `providerKeys` entry under `containerPath` that is present:
+ *    **ours** (its `markerHeader` names the key, its shape is attach's) is
+ *    deleted; anything else is the user's and is **left in place**, warned
+ *    about only when the same file also held ours - the same disposal the
+ *    `json` undo makes for an externally overridden value, and a config that
+ *    was never attached stays untouched and unremarked.
+ * 3. The client's derived caches (`cacheGlob`) are then best-effort purged of
+ *    HypAware's rows, judged per row by the same signature: a row whose
+ *    marker header names its key is ours, a marker-less row rides out only on
+ *    this run's settings deletions, and every other row is the user's and
+ *    stays. Those caches do not self-heal, so a partial purge is strictly
+ *    better than none, and one unreadable cache file must not fail a detach
+ *    whose settings half already landed.
+ *
+ * @param {{
+ *   settingsPath: string,
+ *   settingsFile: string,
+ *   containerPath: string | undefined,
+ *   providerKeys: string[] | undefined,
+ *   markerHeader: string | undefined,
+ *   cacheGlob: string | undefined,
+ *   fs: typeof fsp,
+ * }} args
+ * @returns {Promise<DetachFromDiskResult>}
+ * @ref LLP 0210#d1 [implements]: ownership is the entry's own signature, so the undo runs from disk alone; a not-ours entry is left in place, and the cache purge judges each row by that same signature
+ */
+async function detachJsonPathProviders({
+  settingsPath,
+  settingsFile,
+  containerPath,
+  providerKeys,
+  markerHeader,
+  cacheGlob,
+  fs,
+}) {
+  // `contributes.client` is unvalidated manifest input (the same reason
+  // `resolveClientSettingsPath` guards its own field), so a probe missing any
+  // of the three fields this undo navigates by, or naming a path segment the
+  // restore helper already refuses, reverses nothing rather than guessing.
+  const keys = Array.isArray(providerKeys)
+    ? providerKeys.filter((key) => typeof key === 'string' && key.length > 0 && !UNWRITABLE_PATH_SEGMENTS.has(key))
+    : []
+  const container = typeof containerPath === 'string' && containerPath.length > 0 && !hasUnwritableSegment(containerPath)
+    ? containerPath
+    : undefined
+  if (container === undefined || keys.length === 0 || typeof markerHeader !== 'string' || markerHeader.length === 0) {
+    return { changed: false, settingsPath }
+  }
+
+  const read = await readJson(settingsPath, fs)
+  if (!read.existed) return { changed: false, settingsPath }
+
+  const value = read.value
+  const providers = getAtDottedPath(value, container)
+  const present = isPlainObject(providers)
+    ? keys.filter((key) => Object.hasOwn(providers, key))
+    : []
+
+  /** @type {Record<string, unknown>} */
+  const containerObj = /** @type {Record<string, unknown>} */ (providers)
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {string | undefined} */
+  let removed
+  /** @type {string[]} */
+  const deleted = []
+  /** @type {string[]} */
+  const left = []
+  let changed = false
+
+  for (const key of present) {
+    const entry = containerObj[key]
+    // Deleting on the signature alone is deliberate: the marker header is
+    // HypAware's own name and nothing else writes attach's triple, so a match
+    // is ours whatever URL it carries (an entry from an old port after an
+    // ephemeral rebind is still ours, and still needs to go). This is the same
+    // trust attach itself places in the signature when it overwrites its own
+    // entry, and it is what lets this undo run with the daemon stopped or
+    // uninstalled, when the gateway's live origin no longer exists to compare
+    // against.
+    // @ref LLP 0210#d1 [implements]: the signature is sufficient to delete, so detach works from disk alone like every other format
+    if (isOwnedProviderEntry(entry, key, markerHeader)) {
+      if (removed === undefined) removed = providerBaseUrl(entry)
+      delete containerObj[key]
+      deleted.push(key)
+      changed = true
+      continue
+    }
+    left.push(key)
+  }
+
+  // A not-ours entry is the user's value at a key attach manages, and it is
+  // left exactly where it is: the same disposal the `json` undo makes for an
+  // externally overridden env value, and the reason a never-attached config is
+  // untouched. The warning is gated on `changed` so it names a *partial* undo
+  // (ours came out, theirs stayed); a file that held only their entries is an
+  // honest no-op with nothing to remark on. Named by path, never by value: a
+  // provider entry carries headers, and this string is printed to the terminal
+  // and echoed into `hyp detach --json` (LLP 0163).
+  // @ref LLP 0210#d2 [implements]: a not-ours entry is left in place, not backed up; the backup key is retired with the origin check that motivated it
+  if (changed) {
+    for (const key of left) {
+      warnings.push(`${container}.${key} was not written by this gateway; left in place`)
+    }
+  }
+
+  if (changed) await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+
+  // Always asked, never gated: the purge decides ownership per cache row (a
+  // row carrying the marker header is ours whenever it is seen, a marker-less
+  // row only rides out on this run's settings deletions), so a rerun after a
+  // failed purge still finds our residue, and a never-attached machine's rows
+  // fail the row test rather than depending on this caller to hold back.
+  warnings.push(...await purgeProviderCaches({
+    cacheGlob,
+    configHome: clientConfigHome(settingsPath, settingsFile),
+    containerPath: container,
+    providerKeys: keys,
+    markerHeader,
+    deletedKeys: deleted,
+    fs,
+  }))
+
+  const warning = joinWarnings(warnings)
+
+  /** @type {DetachFromDiskResult} */
+  const result = { changed, settingsPath }
+  if (removed !== undefined) result.removed = removed
+  if (warning !== undefined) result.warning = warning
+  return result
+}
+
+/** @param {unknown} entry @returns {string | undefined} */
+function providerBaseUrl(entry) {
+  if (!isPlainObject(entry)) return undefined
+  return typeof entry.baseUrl === 'string' ? entry.baseUrl : undefined
+}
+
+/**
+ * The client's config home: the already-resolved `settingsPath` with the
+ * manifest's own `settings_file` tail stripped back off, which is what
+ * `cache_glob` is declared relative to. It is the exact inverse of what
+ * `resolveClientSettingsPath` joined on, whose two branches both append
+ * `settings_file`'s segments *after the first* to a base (`$HOME/<first>`
+ * normally, `$<CLIENT>_HOME` under the relocation), so stripping that many
+ * segments recovers the base either way. Derived from the resolved path rather
+ * than re-resolved, so the purge and the settings write can never disagree
+ * about which home they are working in.
+ *
+ * Measuring against `homeDir` instead is what this does *not* do, and the bug
+ * it fixes: taking the first segment of `path.relative(homeDir, settingsPath)`
+ * is only the config home when `$<CLIENT>_HOME` is outside `$HOME` or one level
+ * inside it. A nested relocation (`OPENCLAW_HOME=$HOME/.config/openclaw`) stays
+ * relative to `homeDir`, so the fallback never fires and the first segment is
+ * `.config`: the glob then matches nothing, an unmatched glob is not an error,
+ * and the cache purge silently no-ops while the settings half reports success.
+ *
+ * @param {string} settingsPath
+ * @param {string} settingsFile  the manifest value, home-relative
+ * @returns {string}
+ */
+function clientConfigHome(settingsPath, settingsFile) {
+  const tail = settingsFile.split('/').slice(1)
+  const depth = tail.length === 0 ? 0 : path.join(...tail).split(path.sep).filter((s) => s !== '.').length
+  return path.resolve(settingsPath, ...new Array(depth).fill('..'))
+}
+
+/**
+ * Best-effort removal of HypAware's provider rows from the client's derived
+ * caches. These are files the client regenerates from its config and does not
+ * re-derive on its own after the config changes, so leaving them keeps a
+ * detached client pointed at a dead gateway.
+ *
+ * Ownership is decided per row, with the same signature the settings undo
+ * trusts: the caches carry each provider entry forward wholesale, headers
+ * included (LLP 0167 verify item 3; `docs/ACCEPTANCE.md` greps these very
+ * files for the marker header as the residue test), so a row whose marker
+ * header names its own key is ours and is purged whenever it is seen. A row
+ * with no marker is purged only when this run deleted the matching settings
+ * entry (the row is then derived from a value that was proven ours); any
+ * other row is the user's and stays. That makes the purge retryable in every
+ * case - a rerun still recognizes our residue by its marker - and makes a
+ * never-attached machine's caches untouchable by construction.
+ *
+ * Every failure here is a warning, never a throw: the settings undo has
+ * already landed by the time this runs, and failing the whole detach over one
+ * unreadable cache file would leave the caller unable to finish an operation
+ * that is already most of the way done. A file that will not parse is one the
+ * client itself will have to rebuild.
+ *
+ * @param {{
+ *   cacheGlob: string | undefined,
+ *   configHome: string,
+ *   containerPath: string,
+ *   providerKeys: string[],
+ *   markerHeader: string,
+ *   deletedKeys: string[],
+ *   fs: typeof fsp,
+ * }} args
+ * @returns {Promise<string[]>} the per-file notices, for the caller's `warning`
+ * @ref LLP 0210#d2 [implements]: the purge decides ownership per cache row by the marker header, falling back to this run's settings deletions for marker-less rows
+ */
+async function purgeProviderCaches({ cacheGlob, configHome, containerPath, providerKeys, markerHeader, deletedKeys, fs }) {
+  if (typeof cacheGlob !== 'string' || cacheGlob.length === 0) return []
+  const log = getLogger('client-detach')
+
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {string[]} */
+  let files
+  try {
+    files = await expandCacheGlob(configHome, cacheGlob, fs)
+  } catch (err) {
+    // A glob the manifest declares that this expander refuses (an absolute
+    // pattern, or one that climbs out of the config home) purges nothing.
+    log.warn('client.detach.cache_glob_refused', {
+      [Attr.COMPONENT]: 'client-detach',
+      [Attr.OPERATION]: 'client.detach.cache_purge',
+      [Attr.ERROR_KIND]: 'glob_refused',
+      cache_glob: cacheGlob,
+      detail: errMsg(err),
+    })
+    return [`cache purge skipped: ${errMsg(err)}`]
+  }
+
+  for (const file of files) {
+    /** @type {string} */
+    let raw
+    try {
+      raw = await fs.readFile(file, 'utf8')
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') continue
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'read_failed',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} could not be read; its cached provider entries were left in place`)
+      continue
+    }
+
+    /** @type {unknown} */
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (err) {
+      // Logged and skipped, not fatal (LLP 0172 §2.2 step 6).
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'malformed_json',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} is not valid JSON; its cached provider entries were left in place`)
+      continue
+    }
+    if (!isPlainObject(parsed)) continue
+
+    // The cache may mirror the settings file's container or hold the provider
+    // keys at its root; both spellings are the same keys, so purge whichever
+    // one this file uses rather than pinning a shape core cannot validate.
+    const targets = [parsed, getAtDottedPath(parsed, containerPath)]
+    let purged = false
+    for (const target of targets) {
+      if (!isPlainObject(target)) continue
+      for (const key of providerKeys) {
+        if (!Object.hasOwn(target, key)) continue
+        const row = target[key]
+        const rowIsOurs = isPlainObject(row) &&
+          isPlainObject(row.headers) &&
+          /** @type {Record<string, unknown>} */ (row.headers)[markerHeader] === key
+        if (!rowIsOurs && !deletedKeys.includes(key)) continue
+        delete target[key]
+        purged = true
+      }
+    }
+    if (!purged) continue
+
+    try {
+      await atomicWriteFile(file, JSON.stringify(parsed, null, 2) + '\n', { fsync: true, fs })
+      log.info('client.detach.cache_purged', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.STATUS]: 'ok',
+        cache_path: file,
+      })
+    } catch (err) {
+      log.warn('client.detach.cache_purge_skipped', {
+        [Attr.COMPONENT]: 'client-detach',
+        [Attr.OPERATION]: 'client.detach.cache_purge',
+        [Attr.ERROR_KIND]: 'write_failed',
+        cache_path: file,
+        detail: errMsg(err),
+      })
+      warnings.push(`${file} could not be rewritten; its cached provider entries were left in place`)
+    }
+  }
+  return warnings
+}
+
+/**
+ * Expand a `cache_glob` under the client's config home. `*` matches within one
+ * path segment only, and `..`/absolute patterns are refused outright, so an
+ * expansion can never leave the config home: containment is a property of the
+ * expander rather than a check bolted on after it. A directory that cannot be
+ * listed contributes no matches (the cache simply is not there).
+ *
+ * @param {string} configHome
+ * @param {string} pattern
+ * @param {typeof fsp} fs
+ * @returns {Promise<string[]>}
+ */
+async function expandCacheGlob(configHome, pattern, fs) {
+  if (path.isAbsolute(pattern)) {
+    throw new Error(`cache_glob '${pattern}' must be relative to the client's config home`)
+  }
+  const segments = pattern.split('/').filter((segment) => segment.length > 0 && segment !== '.')
+  if (segments.length === 0) throw new Error('cache_glob names no file')
+  if (segments.some((segment) => segment === '..')) {
+    throw new Error(`cache_glob '${pattern}' must stay under the client's config home`)
+  }
+
+  /** @type {string[]} */
+  let dirs = [configHome]
+  /** @type {string[]} */
+  const matches = []
+  for (const [index, segment] of segments.entries()) {
+    const last = index === segments.length - 1
+    /** @type {string[]} */
+    const next = []
+    for (const dir of dirs) {
+      if (!segment.includes('*')) {
+        const candidate = path.join(dir, segment)
+        if (last) matches.push(candidate)
+        else next.push(candidate)
+        continue
+      }
+      const matcher = segmentMatcher(segment)
+      /** @type {Dirent[]} */
+      let entries
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (!matcher.test(entry.name)) continue
+        const candidate = path.join(dir, entry.name)
+        if (last) {
+          if (entry.isFile()) matches.push(candidate)
+        } else if (entry.isDirectory()) {
+          next.push(candidate)
+        }
+      }
+    }
+    dirs = next
+  }
+  return matches
+}
+
+/**
+ * One glob segment as a whole-segment regex. `*` is the only metacharacter;
+ * everything else is literal, so a cache path with a `.` or `+` in it matches
+ * itself rather than acting as a pattern.
+ *
+ * @param {string} segment
+ * @returns {RegExp}
+ */
+function segmentMatcher(segment) {
+  const source = segment
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/]*')
+  return new RegExp(`^${source}$`)
 }
 
 /* ------------------------------- TOML format ------------------------------ */

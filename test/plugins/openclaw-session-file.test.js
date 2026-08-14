@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  listOpenclawSessionFiles,
   OPENCLAW_SESSION_HEADER_PREFIX_BYTES,
   openclawSessionCwd,
   parseOpenclawSessionHeader,
@@ -181,6 +182,15 @@ test('a session file with no trailing newline is still one whole first line', ()
 /* The full-transcript iteration: message records only                 */
 /* ------------------------------------------------------------------ */
 
+// The record shape is the real one, verified against a live
+// `~/.openclaw/agents/main/sessions/<id>.jsonl` (#543): the record line
+// carries `id`, `parentId`, `timestamp`, `type`, and every message field
+// (`role`, `content`, `model`, `provider`, `api`, `stopReason`, `usage`)
+// lives one level down under `message`. The suite used to assert against a
+// flat envelope OpenClaw never writes, which is why a reader that read flat
+// looked correct while every real session projected zero rows.
+//
+// @ref LLP 0158#decision [tests]: the message-envelope read rule
 test('readOpenclawSessionMessages returns only type:"message" records, in file order', async () => {
   const file = tempSessionFile([
     headerLine({ id: 'session-abc', cwd: '/repo/here' }),
@@ -188,22 +198,31 @@ test('readOpenclawSessionMessages returns only type:"message" records, in file o
     JSON.stringify({
       type: 'message',
       id: 'msg-1',
+      parentId: null,
       timestamp: '2026-07-30T00:00:00.000Z',
-      role: 'user',
-      content: [{ type: 'text', text: 'hi' }],
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'hi' }],
+        timestamp: '2026-07-30T00:00:00.000Z',
+      },
     }),
     JSON.stringify({ type: 'thinking_level_change', level: 'high' }),
     JSON.stringify({
       type: 'message',
       id: 'msg-2',
+      parentId: 'msg-1',
       timestamp: '2026-07-30T00:00:05.000Z',
-      role: 'assistant',
-      model: 'claude-x',
-      provider: 'anthropic',
-      api: 'anthropic-messages',
-      stopReason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 20 },
-      content: [{ type: 'text', text: 'hello' }],
+      message: {
+        role: 'assistant',
+        model: 'claude-x',
+        provider: 'anthropic',
+        api: 'anthropic-messages',
+        stopReason: 'end_turn',
+        idempotencyKey: 'idem-1',
+        usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: 0.01 },
+        content: [{ type: 'text', text: 'hello' }],
+        timestamp: '2026-07-30T00:00:05.000Z',
+      },
     }),
     JSON.stringify({ type: 'custom', note: 'irrelevant' }),
   ].join('\n') + '\n')
@@ -213,17 +232,192 @@ test('readOpenclawSessionMessages returns only type:"message" records, in file o
 
   assert.equal(messages[0].id, 'msg-1')
   assert.equal(messages[0].timestampMs, Date.parse('2026-07-30T00:00:00.000Z'))
+  assert.equal(messages[0].role, 'user')
   assert.equal(messages[0].model, undefined)
   assert.equal(messages[0].usage, undefined)
-  assert.deepEqual(messages[0].record.content, [{ type: 'text', text: 'hi' }])
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: 'hi' }])
 
   assert.equal(messages[1].id, 'msg-2')
+  assert.equal(messages[1].role, 'assistant')
   assert.equal(messages[1].model, 'claude-x')
   assert.equal(messages[1].provider, 'anthropic')
   assert.equal(messages[1].api, 'anthropic-messages')
   assert.equal(messages[1].stopReason, 'end_turn')
-  assert.deepEqual(messages[1].usage, { input_tokens: 10, output_tokens: 20 })
-  assert.deepEqual(messages[1].record.content, [{ type: 'text', text: 'hello' }])
+  assert.deepEqual(messages[1].usage, {
+    input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: 0.01,
+  })
+  assert.deepEqual(messages[1].content, [{ type: 'text', text: 'hello' }])
+  // The untouched record line stays reachable for anything not normalized.
+  assert.equal(messages[1].record.parentId, 'msg-1')
+})
+
+test('a message field the nested envelope states is never read off the record line', async () => {
+  // Both levels state `provider`; the envelope owns the message's fields, so
+  // its value is the one that decides the backfill allowlist. A record line
+  // that happens to carry a same-named field cannot override it.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    provider: 'record-line-value',
+    message: { role: 'assistant', provider: 'anthropic', content: [{ type: 'text', text: 'x' }] },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].provider, 'anthropic')
+})
+
+test('a record with no nested envelope reads its fields off the record line', async () => {
+  // The envelope is where OpenClaw v3 writes them, but the record line is the
+  // envelope's own fallback: a record that nests nothing states whatever it
+  // states, rather than reading as a message with no role and no content.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    timestamp: '2026-07-30T00:00:00.000Z',
+    role: 'assistant',
+    provider: 'anthropic',
+    content: [{ type: 'text', text: 'hello' }],
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].role, 'assistant')
+  assert.equal(messages[0].provider, 'anthropic')
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: 'hello' }])
+})
+
+test('the record line supplies the timestamp when the nested envelope states none', async () => {
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    timestamp: '2026-07-30T00:00:00.000Z',
+    message: { role: 'user', content: 'hi' },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].timestampMs, Date.parse('2026-07-30T00:00:00.000Z'))
+  assert.equal(messages[0].content, 'hi')
+})
+
+// The two fields a real record states at BOTH levels, and they resolve in
+// OPPOSITE directions. `timestamp` is an ordinary message field, so the
+// envelope owns it; it decides `message_created_at` on a backfilled row, the
+// `--since` window, and the window the settlement ordinal match is bounded
+// to, and a well-formed record's two values differ only by append latency.
+// `id` is identity: the record line owns it, because a future OpenClaw that
+// copied the provider's own id into the envelope would otherwise repoint
+// every `message_id`/`part_id` R11's dedupe rests on, silently doubling the
+// history. Pinning both directions is the point of this test.
+//
+// @ref LLP 0158#decision [tests]: envelope-first for a message's own fields,
+// record line first for the identity the line is verified to state
+test('the envelope wins for timestamp, the record line wins for id', async () => {
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'record-line-id',
+    timestamp: '2026-07-30T00:00:00.000Z',
+    message: {
+      id: 'nested-id',
+      timestamp: '2026-07-30T00:00:09.000Z',
+      role: 'user',
+      content: 'hi',
+    },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].id, 'record-line-id')
+  assert.equal(messages[0].timestampMs, Date.parse('2026-07-30T00:00:09.000Z'))
+})
+
+test('a record that states its id only in the envelope still resolves an identity', async () => {
+  // The line owns `id`, but owning it does not mean refusing the envelope's:
+  // with nothing on the line there is no identity to protect, and reading the
+  // nested one beats emitting a hash `message_id` the settled row cannot
+  // match.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    message: { id: 'nested-only-id', role: 'user', content: 'hi' },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].id, 'nested-only-id')
+})
+
+test('a blank or wrong-typed nested field reads as absent, so the record line still supplies it', async () => {
+  // Rule 3 applies at BOTH levels before the fallback decides. A nested value
+  // that reads as absent cannot also be the value that suppresses the line:
+  // that would resolve this record to `unknown` and the backfill allowlist
+  // would exclude it fail-closed, the same silent drop as #543.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    id: 'msg-1',
+    provider: 'anthropic',
+    model: 'claude-x',
+    usage: { input: 10, output: 20 },
+    message: { role: 'assistant', content: 'x', provider: '   ', model: 42, usage: null },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].provider, 'anthropic')
+  assert.equal(messages[0].model, 'claude-x')
+  assert.deepEqual(messages[0].usage, { input: 10, output: 20 })
+})
+
+test('a blank nested field with nothing on the record line is absent, not a substitute', async () => {
+  // The other half of rule 3 at the nested level: with no line-level value to
+  // fall back to, an unconfirmable envelope field stays unresolved rather
+  // than becoming an empty string or a coerced number.
+  const file = tempSessionFile(JSON.stringify({
+    type: 'message',
+    message: { id: '  ', timestamp: '', role: 'assistant', model: 42, stopReason: null, content: 'x' },
+  }) + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].id, undefined)
+  assert.equal(messages[0].timestampMs, undefined)
+  assert.equal(messages[0].model, undefined)
+  assert.equal(messages[0].stopReason, undefined)
+  assert.equal(messages[0].role, 'assistant')
+})
+
+test('a nulled-out nested content is unstated, so the record line still supplies it', async () => {
+  // `content` is the one normalized field with no single shape to test (a
+  // string on some turns, a block array on others), so its present-value test
+  // refuses an explicit `null` and nothing else. That refusal is load-bearing,
+  // not cosmetic: without it a nulled-out envelope field would suppress the
+  // line and land `content: null` on the message, which the backfill projector
+  // drops and the settlement content index hashes into a key no live row can
+  // match, the same silent drop as #543.
+  const file = tempSessionFile([
+    JSON.stringify({
+      type: 'message',
+      id: 'msg-1',
+      content: 'from the record line',
+      message: { role: 'user', content: null },
+    }),
+    JSON.stringify({ type: 'message', id: 'msg-2', message: { role: 'user', content: null } }),
+  ].join('\n') + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].content, 'from the record line')
+  assert.equal(
+    Object.hasOwn(messages[1], 'content'),
+    false,
+    'with nothing on the line either, content is absent, never a null the consumers must re-check'
+  )
+})
+
+test('a `message` key that is not an object leaves the record line as the only address', async () => {
+  // `openclawMessageEnvelope` requires a plain object. A record whose
+  // `message` is a string, an array or `null` is not an envelope, so the
+  // reader does not treat it as one; the line is read instead, and a line that
+  // states no role yields a message the consumers drop rather than a half-read
+  // one. The `null` case is why the guard is a plain-object test rather than a
+  // truthiness one: indexing a field off `null` would throw out of the whole
+  // file read, losing every later record with it.
+  const file = tempSessionFile([
+    JSON.stringify({ type: 'message', id: 'msg-1', message: 'not an envelope', role: 'user', content: 'hi' }),
+    JSON.stringify({ type: 'message', id: 'msg-2', message: [{ type: 'text', text: 'x' }] }),
+    JSON.stringify({ type: 'message', id: 'msg-3', message: null, role: 'assistant', content: 'still read' }),
+  ].join('\n') + '\n')
+  const messages = await readOpenclawSessionMessages(file)
+  assert.equal(messages[0].role, 'user')
+  assert.equal(messages[0].content, 'hi')
+  assert.equal(messages[1].role, undefined)
+  assert.equal(messages[1].content, undefined)
+  assert.equal(messages[2].role, 'assistant')
+  assert.equal(messages[2].content, 'still read')
 })
 
 test('readOpenclawSessionMessages skips blank and unparseable lines without aborting the rest', async () => {
@@ -258,4 +452,32 @@ test('readOpenclawSessionMessages resolves to an empty list for a missing or emp
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-openclaw-session-'))
   assert.deepEqual(await readOpenclawSessionMessages(path.join(dir, 'absent.jsonl')), [])
   assert.deepEqual(await readOpenclawSessionMessages(tempSessionFile('')), [])
+})
+
+/* ------------------------------------------------------------------ */
+/* listOpenclawSessionFiles: rotated names (LLP 0205)                  */
+/* ------------------------------------------------------------------ */
+
+// @ref LLP 0205#decision [tests]: the settlement lane's own enumeration
+// shares `SESSION_FILE_NAME` with the backfill scan, so a session OpenClaw
+// rotated in place (reset or delete) is still a candidate for settlement's
+// mtime-slack filter, not just for backfill. Before this, `endsWith('.jsonl')`
+// excluded a rotated file from settlement even though `rename(2)` preserves
+// mtime, which left it inside any window backfill's scan would also see it
+// in, a straight path to a duplicate row (one fallback-identity, one native).
+test('listOpenclawSessionFiles scans a rotated session file the same way it scans a live one', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-openclaw-session-'))
+  const agentsDir = path.join(dir, 'agents')
+  const sessionsDir = path.join(agentsDir, 'main', 'sessions')
+  fs.mkdirSync(sessionsDir, { recursive: true })
+  fs.writeFileSync(path.join(sessionsDir, 'sess-1.jsonl.reset.2026-08-05T17-28-41.908Z'), headerLine({ id: 'sess-1' }))
+  fs.writeFileSync(path.join(sessionsDir, 'sess-2.jsonl.deleted.2026-07-31T17-26-46.386Z'), headerLine({ id: 'sess-2' }))
+  // Not a session file under any spelling: must stay excluded.
+  fs.writeFileSync(path.join(sessionsDir, 'sess-3.jsonl.bak'), headerLine({ id: 'sess-3' }))
+
+  const files = await listOpenclawSessionFiles(agentsDir)
+  assert.deepEqual(
+    files.map((f) => path.basename(f.path)).sort(),
+    ['sess-1.jsonl.reset.2026-08-05T17-28-41.908Z', 'sess-2.jsonl.deleted.2026-07-31T17-26-46.386Z']
+  )
 })

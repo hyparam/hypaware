@@ -7,7 +7,7 @@
 **Date:** 2026-06-26
 **Related:** LLP 0011, LLP 0016, LLP 0025, LLP 0031, LLP 0036, LLP 0037, LLP 0041
 **Designed-by:** LLP 0045, client attach implementation design
-**Extended-by:** LLP 0086, attach tracks the gateway's ephemeral port (the "attach once, done forever" model becomes endpoint-aware: re-attach on a daemon rebind, and manual `hyp attach` discovers the live port)
+**Extended-by:** LLP 0086, attach tracks the gateway's ephemeral port (the "attach once, done forever" model becomes endpoint-aware: re-attach on a daemon rebind, and manual `hyp attach` discovers the live port); [LLP 0229](./0229-status-derives-attach-state-by-the-desired-gate.decision.md) (#status-derives-by-the-same-gate: the §Status surface `n/a` case is widened to a client `desired()` would never name, because `pending` is a claim the reconciler will act and must be derived by `desired()`'s own gate)
 
 > When a machine joins a fleet the central config pulls and the gateway binds,
 > but nothing is captured until someone runs `hyp attach claude` / `hyp attach
@@ -177,7 +177,7 @@ central config or flip `overall` to `degraded`
 `client_action` section, **per client**: `done` (attached, with when) / `failed`
 (reason + last attempt) / `pending` (named, not yet attached) / `n/a`
 (`on_join: false`, non-joined, or a client `desired()` would never name: see
-[LLP 0143 #status-derives-by-the-same-gate](./0143-openclaw-registers-no-attach-probe.decision.md#status-derives-by-the-same-gate)).
+[LLP 0229 #status-derives-by-the-same-gate](./0229-status-derives-attach-state-by-the-desired-gate.decision.md#status-derives-by-the-same-gate)).
 A failed or pending attach does **not** make `overall` `degraded`.
 
 `pending` is a claim that the reconciler *will* act, so status must derive it

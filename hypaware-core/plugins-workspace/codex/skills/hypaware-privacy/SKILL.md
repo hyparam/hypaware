@@ -8,6 +8,7 @@ description: Audit what HypAware has captured from Claude/Codex sessions on this
 <!-- @ref LLP 0100#skill [implements]: the six-step agent-assisted privacy review the deferred first sync directs the user to run (R3-R8) -->
 <!-- @ref LLP 0142#any-time [constrained-by]: the description advertises the audit itself, not the first-sync window; enrolled-ness gates behavior, not presence (LLP 0107#gating) -->
 <!-- @ref LLP 0142#local-cache-scope [constrained-by]: this machine's cache only; scanning an org server's rows is deliberately out of scope, not an oversight -->
+<!-- @ref LLP 0197#t2-premise-corrected [constrained-by]: the claude and codex copies of this skill are deliberately forked, not drifted. Step 1 resolves the session id by mechanisms only that host has, and the codex copy's version is separately tested (test/plugins/codex-privacy-skill-session-id.test.js). Mirror an edit to the other copy only where it is genuinely host-agnostic; test/plugins/skill-host-parity.test.js records the divergence. -->
 
 This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
 
@@ -127,21 +128,37 @@ response="$(curl --fail-with-body --silent --show-error \
   -H 'content-type: application/json' \
   --data "$(printf '{"session_id":"%s"}' "$SESSION_ID")")"
 
-# Verify the gateway accepted the opt-out. `ignored` must be true. Note the
-# bound of this check: the control route holds the id as an opaque token, so a
-# true here proves the id is in the drop set, not that it is the id this
+# Verify the gateway accepted the opt-out, and that the reply is about THIS
+# session. Same three checks `hyp session ignore` applies (validateControlResponse
+# in ai-gateway/src/session_command.js): `ignored` a real boolean true, `total` a
+# real number, and `session_id` echoed back byte-for-byte. The route echoes the
+# token verbatim, so a reply naming a different session establishes nothing about
+# this one, and reaching *something* on the port is not reaching the gateway.
+#
+# Note the bound of all three: the control route holds the id as an opaque token,
+# so a true here proves the id is in the drop set, not that it is the id this
 # session's exchanges carry. That is why the id above is established from the
 # rollout's container rather than guessed.
 printf '%s' "$response" | python3 -c '
 import json, sys
-r = json.load(sys.stdin)
-if r.get("ignored") is not True:
+expected = sys.argv[1]
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit("opt-out NOT confirmed: the reply was not JSON, so it is not the control route")
+# bool is excluded because isinstance(True, int) is True in Python: the CLI
+# check this mirrors is `typeof total !== "number"`, which a JSON true fails.
+if not isinstance(r, dict) or r.get("ignored") is not True or isinstance(r.get("total"), bool) or not isinstance(r.get("total"), int):
     sys.exit("opt-out NOT confirmed: " + json.dumps(r))
-print("opt-out confirmed for session %s (total ignored: %s)" % (r.get("session_id"), r.get("total")))
-'
+if r.get("session_id") != expected:
+    sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))
+print("opt-out confirmed for session %s (total ignored: %s)" % (expected, r["total"]))
+' "$SESSION_ID"
 ```
 
 If the session id cannot be resolved (the script refuses on ambiguity, staleness, or a missing container by design), the `curl` fails, or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session may still be recorded**. Only proceed if they explicitly accept that risk.
+
+**What `opt-out confirmed` proves, exactly.** `ignored: true` means the id is in the gateway's drop set, and nothing more. The gateway never inspects traffic, so it cannot tell a live session container from a thread id or a finished session's id: it answers `ignored: true` for whatever it was handed. The drop happens later, in the client adapter, against the `session_id` it stamps on the row. Everything that makes this opt-out real therefore happened *before* the POST, in resolving `payload.session_id` above - the reply is a receipt for the write, not a verified drop. Report it to the user that way, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
 
 The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`codex fork <id>`; a plain `codex resume <id>` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point.
 
@@ -204,6 +221,10 @@ Present findings as **short, redacted excerpts** and a proposed class per direct
 
 Then **apply nothing without per-item user confirmation.** Propose, wait for a yes on each item, then mark. Do not batch-apply.
 
+Keep the response tight: a clear list of candidate directories with the proposed
+class for each, minimal prose, no restating of the steps. Flag individual
+sessions separately only when a directory is otherwise fine but one session is not.
+
 ## Step 6 - Apply only via `hyp` verbs, and offer purge for every ignore (R6, R7)
 
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
@@ -238,3 +259,4 @@ hyp policy set <dir> ignore && hyp purge <dir>
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
+- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp policy folders ask` turns that on and `hyp policy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.

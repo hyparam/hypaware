@@ -31,28 +31,31 @@ import { shouldUseTui } from '../../../../src/core/cli/tui-router.js'
  * residue, and the root-owned managed plist. A user who reads only this
  * block should be able to predict every file that changes.
  *
- * @ref LLP 0139#informed-consent [implements]: the Desktop credential decision is made loud at the point of action, replacing config-file friction as the opt-in gate
+ * Printed before {@link confirmProceed}'s one question. The pair replaced
+ * the original mechanism-first consent screen (LLP 0139 #informed-consent
+ * as amended): reaching this command is already the opt-in - the picker
+ * row is never pre-checked, so it was ticked deliberately, or the command
+ * was typed - so the question defaults to yes and exists to say what
+ * enter does next, because the first step can launch a browser sign-in
+ * with no further warning.
+ *
+ * @ref LLP 0139#informed-consent [implements]: the Desktop credential posture is stated loud at the point of action, ahead of the question
  * @param {{ inputs: ProfileInputs, plistPath: string, credentialMode: string, residueDir: string, residuePresent: boolean }} args
  * @returns {string}
  */
 export function buildConsentExplanation(args) {
   const lines = []
-  lines.push('Attaching Claude Desktop to HypAware')
+  lines.push('Claude Desktop needs extra setup')
   lines.push('')
   lines.push(
-    'This points Claude Desktop at your local HypAware gateway '
-    + `(${args.inputs.baseUrl}) so its conversations are recorded on this machine.`,
+    'Unlike Claude Code and Codex, which keep their own sign-in while HypAware only '
+    + 'changes which URL they talk to, Claude Desktop can only reach your local '
+    + `gateway (${args.inputs.baseUrl}) through a credential helper. Attaching it `
+    + 'means HypAware has to hold an Anthropic credential on this machine and hand '
+    + 'it to Claude Desktop on request.',
   )
   lines.push('')
-  lines.push(
-    'Claude Desktop is different from Claude Code and Codex. Those keep their own '
-    + 'sign-in and HypAware only changes which URL they talk to. Claude Desktop has no '
-    + 'such option: pointing it at any non-Anthropic endpoint means it stops using its '
-    + 'built-in login and asks a helper program for a credential instead. So HypAware '
-    + 'has to hold an Anthropic credential on this machine and hand it over on request.',
-  )
-  lines.push('')
-  lines.push('What this will change:')
+  lines.push('Setting it up will:')
   if (args.credentialMode === 'org_key') {
     lines.push('  - use the org API key from your fleet config (no sign-in needed)')
   } else {
@@ -67,84 +70,87 @@ export function buildConsentExplanation(args) {
   lines.push('')
   lines.push(
     'The credential never leaves this machine and is never written into the profile '
-    + 'or into recorded rows. To undo it later, delete the file above and run '
+    + `or into recorded rows. To undo it later, remove ${args.plistPath} (needs `
+    + "sudo) - that is the file that points Claude Desktop here - and run "
     + "'hyp claude-account logout'.",
   )
   return lines.join('\n')
 }
 
 /**
- * Ask for consent before running the install steps, defaulting to no.
+ * The one question in front of the steps, defaulting to yes.
  *
- * Defaults the other way from the backfill consent prompt, which defaults
- * to yes: backfill reads local files this machine already has, whereas
- * this acquires a credential, escalates to root, and writes a file outside
- * the user's home. An accidental bare enter must not do any of that.
+ * It exists because of what a yes does *immediately*: on a machine not
+ * yet signed in, step 1 launches the Claude OAuth flow in a browser, and
+ * being dropped into an auth flow with no prompt reads as the machine
+ * acting on its own (8/13 feedback, the run that removed the prompt
+ * entirely). So the question always stands between the disclosure and
+ * the steps, and wherever a sign-in can come next it says so. It says
+ * "if you are not signed in yet" rather than asserting the launch,
+ * because the caller cannot check the live session without printing
+ * `claude-account status`'s own output onto this screen; `org_key` mode
+ * is the one case rulable out from config, and there the clause is gone.
  *
- * Returns `false` on a cancel (esc / ctrl-c) and on a non-interactive
- * stream. Refusing rather than assuming consent is the point: this runs
- * in-process from the wizard's configure phase, which is attended and so
- * always has a real stdin, while an unattended fleet places the same plist
- * by MDM and never reaches this command (LLP 0133#one-surface).
+ * Defaults to yes, unlike the original gate: the user opted in by
+ * ticking a never-pre-checked row or typing the command, the plist
+ * write still cannot happen without the sudo password, and a browser
+ * tab is dismissable. Only an explicit no declines.
  *
- * "Non-interactive" has to include a stdin that exists but carries no
- * answer. The dispatcher defaults `ctx.stdin` to `process.stdin`, so the
- * falsy check below never fires in a real invocation, and a redirected
- * stdin (`hyp claude-desktop install < /dev/null`) reached the `readline`
- * branch where `question` never settles at EOF: the command hung with the
- * refusal hint unprinted, which is the same unattended-hang class
- * LLP 0139#print-commands-applies-nothing closes for that flag. EOF now
- * resolves to a decline.
+ * Every non-answer that cannot be a real yes still declines: a cancel
+ * (esc / ctrl-c), an absent or non-stream stdin, and a stdin that ends
+ * without a line all return false with the hint naming `--yes` and
+ * `--print-commands`, and the EOF case resolves rather than hanging
+ * (the same line/close race the original gate closed).
  *
- * @ref LLP 0139#default-no [implements]: the Desktop consent prompt defaults to no, and every non-answer (cancel, EOF, absent stdin) is a no
+ * @ref LLP 0139#informed-consent [implements]: the question stands between the disclosure and the sign-in launch, and names the launch
  * @param {CommandRunContext} cmdCtx
- * @param {string} explanation
+ * @param {{ mayNeedSignIn: boolean }} args
  * @returns {Promise<boolean>}
  */
-export async function confirmInstall(cmdCtx, explanation) {
-  cmdCtx.stdout.write(`\n${explanation}\n\n`)
-
-  const promptOpts = {
-    ...(cmdCtx.stdin ? { stdin: cmdCtx.stdin } : {}),
-    stdout: cmdCtx.stdout,
-    env: cmdCtx.env,
-  }
-
-  if (!cmdCtx.stdin) {
+export async function confirmProceed(cmdCtx, { mayNeedSignIn }) {
+  const stdin = /** @type {NodeJS.ReadableStream | undefined} */ (cmdCtx.stdin)
+  if (!stdin || typeof stdin.on !== 'function') {
     writeNonInteractiveHint(cmdCtx)
     return false
   }
 
   try {
-    if (shouldUseTui(promptOpts)) {
+    if (shouldUseTui({ stdin, stdout: cmdCtx.stdout, env: cmdCtx.env })) {
       const choice = await select({
-        title: 'Attach Claude Desktop with the changes above?',
+        title: 'Set up Claude Desktop now?',
         options: [
-          { value: 'no', label: 'No - leave Claude Desktop alone', summary: 'This command changes nothing. Re-run hyp claude-desktop install any time.' },
-          { value: 'yes', label: 'Yes - go ahead', summary: 'Runs the steps listed above.' },
+          {
+            value: 'yes',
+            label: 'Continue',
+            summary: mayNeedSignIn
+              ? 'Opens the Claude sign-in in your browser if you are not signed in yet, then runs the steps above.'
+              : 'Runs the steps listed above.',
+          },
+          { value: 'no', label: 'Skip for now', summary: 'Changes nothing. Re-run hyp claude-desktop install any time.' },
         ],
-        default: 'no',
+        default: 'yes',
         clearOnResolve: true,
-        stdin: /** @type {NodeJS.ReadStream} */ (cmdCtx.stdin),
+        stdin: /** @type {NodeJS.ReadStream} */ (stdin),
         stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
         env: cmdCtx.env,
       })
       return choice === 'yes'
     }
     const rl = readline.createInterface({
-      input: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
+      input: stdin,
       output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
       terminal: false,
     })
     try {
-      cmdCtx.stdout.write('Attach Claude Desktop with the changes above? [y/N]: ')
-      // Deliberately the `line`/`close` events rather than `rl.question`:
-      // that promise never settles when the input reaches EOF without a
-      // line, which is what hung the command on a redirected stdin. One
-      // promise settled by whichever event fires first is decidable, where
-      // racing two promises is not: readline emits `line` for a trailing
-      // partial line before `close`, but the answer would lose a
-      // microtask-ordering race against a stream that ends in the same tick.
+      cmdCtx.stdout.write(
+        mayNeedSignIn
+          ? 'Set up Claude Desktop now? If you are not signed in yet, the first step\n'
+            + 'opens the Claude sign-in in your browser. [Y/n]: '
+          : 'Set up Claude Desktop now? [Y/n]: '
+      )
+      // The `line`/`close` events rather than `rl.question`: that promise
+      // never settles when the input reaches EOF without a line, which is
+      // what hung the original gate on a redirected stdin.
       /** @type {string | undefined} */
       const answer = await new Promise((resolve) => {
         rl.once('line', (line) => resolve(line))
@@ -154,8 +160,9 @@ export async function confirmInstall(cmdCtx, explanation) {
         writeNonInteractiveHint(cmdCtx)
         return false
       }
-      const trimmed = answer.trim().toLowerCase()
-      return trimmed === 'y' || trimmed === 'yes'
+      // Only an explicit no declines; a bare enter (and any stray answer)
+      // takes the stated default, same rule as the overwrite confirm.
+      return !/^n(o)?$/i.test(answer.trim())
     } finally {
       rl.close()
     }

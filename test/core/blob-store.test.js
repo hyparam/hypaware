@@ -196,6 +196,11 @@ test('local-fs BlobStore ifNoneMatch="*" succeeds when the key is new', async ()
     assert.equal(result.key, 'iceberg/metadata/v3.json')
     const got = await store.getObject({ key: 'iceberg/metadata/v3.json' })
     assert.ok(got)
+    // Drain the body so the held FileHandle is released, same discipline as
+    // the delete test above. Node 26 turns a FileHandle closed by the garbage
+    // collector into a hard error rather than a deprecation warning, so a
+    // discarded body fails the whole file rather than leaking quietly.
+    await collectStream(got.body)
   } finally {
     await fs.rm(base, { recursive: true, force: true })
   }

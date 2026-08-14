@@ -30,7 +30,6 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * @ref LLP 0021#exporter-selection [implements]: three-state JSONL / OTLP / no-op exporter choice
  */
 export function installTracerProvider({ env, resource }) {
-  /** @type {object[]} */
   const exporters = []
 
   if (env.devTelemetry) {

@@ -28,12 +28,14 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
+import { colorizeStderr } from './style.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
+ * @import { MaterializeError } from '../../../src/core/sinks/types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 
@@ -83,6 +85,74 @@ function bootProfileActivatesPlugins(bootProfile) {
 }
 
 /**
+ * Plugin names a sink instance needs active to materialize: the single
+ * `plugin` of a request sink, or the `writer` + `destination` pair of a
+ * blob/table-format sink. Mirrors the shape dispatch in `materializeOne`.
+ *
+ * @param {BlobSinkConfigInstance | RequestSinkConfigInstance} raw
+ * @returns {PluginName[]}
+ */
+function sinkPluginNames(raw) {
+  if ('writer' in raw && 'destination' in raw) {
+    return [
+      /** @type {PluginName} */ (raw.writer),
+      /** @type {PluginName} */ (raw.destination),
+    ]
+  }
+  if ('plugin' in raw) return [/** @type {PluginName} */ (raw.plugin)]
+  return []
+}
+
+/**
+ * Whether a `sink_plugin_not_active` failure is an artifact of the boot
+ * profile rather than a config defect the operator can act on.
+ *
+ * Bare `hyp` and `hyp init` boot `all-available`, which selects the default
+ * bundled surface plus installed plugins and drops the opt-in plugins even
+ * when the effective config names them, so the walkthrough picker never
+ * surfaces them. A fleet-joined host's effective config carries both
+ * `@hypaware/central` in `plugins[]` and the central sink pushed by the
+ * fleet layer, so under this profile that sink cannot materialize: the same
+ * structurally guaranteed noise `bootProfileActivatesPlugins` filters for
+ * the zero-plugin profiles, one profile down. The hint is wrong there too,
+ * since it asks for a `plugins[]` entry that already exists.
+ *
+ * Materializing the sink instead is not an option: `@hypaware/central`
+ * acquires a server identity while creating its sink, which a CLI boot must
+ * not do.
+ *
+ * The condition is exactly "the config asked for this plugin and the boot
+ * profile withheld it anyway", read off boot's own selection
+ * (`withheldByProfile`) rather than inferred from the config alone. Being
+ * named in `plugins[]` is not sufficient: a config can name a plugin that no
+ * profile could activate (never installed, or eliminated by dependency
+ * resolution), and those are real defects whose warning and "add it to
+ * plugins[]" repair stay actionable. Neither is the profile alone: a sink
+ * naming a plugin the config never enabled is still misconfigured. Under the
+ * `config` profile the two can never coincide (that profile selects every
+ * config-named plugin it has a manifest for), so it needs no special case.
+ *
+ * @param {MaterializeError} err
+ * @param {{ config: HypAwareV2Config | null, activePlugins: ActivePlugin[], withheldByProfile: PluginName[] }} args
+ * @returns {boolean}
+ */
+function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldByProfile }) {
+  if (err.errorKind !== 'sink_plugin_not_active') return false
+  const raw = config?.sinks?.[err.instance]
+  if (!raw) return false
+  const names = sinkPluginNames(raw)
+  if (names.length === 0) return false
+  const active = new Set(activePlugins.map((p) => p.name))
+  const withheld = new Set(withheldByProfile)
+  const namedByConfig = new Set(
+    (config?.plugins ?? [])
+      .filter((entry) => entry.enabled !== false)
+      .map((entry) => /** @type {PluginName} */ (entry.name))
+  )
+  return names.every((name) => active.has(name) || (namedByConfig.has(name) && withheld.has(name)))
+}
+
+/**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
  *
  * Lifecycle:
@@ -120,7 +190,13 @@ function bootProfileActivatesPlugins(bootProfile) {
  */
 export async function dispatch(argv, opts = {}) {
   const stdout = opts.stdout ?? process.stdout
-  const stderr = opts.stderr ?? process.stderr
+  // Every diagnostic in the CLI - this function's own, and every core or
+  // plugin command's, since they all receive this binding as `ctx.stderr` -
+  // reaches the terminal through here. Colouring the severity prefix at the
+  // one place stderr is bound is what keeps a run from being half-coloured.
+  // A non-TTY (tests, pipes) or `NO_COLOR` returns the stream untouched.
+  // @ref LLP 0189#choke-point [implements]: severity colour is applied where stderr is bound
+  const stderr = colorizeStderr(opts.stderr ?? process.stderr, opts.env ?? process.env)
   // Default stdin to the process stream, exactly as stdout/stderr do. The bin
   // entry calls dispatch(argv) with no opts, so without this fallback every
   // plugin command runs with an undefined ctx.stdin and interactive flows
@@ -169,6 +245,15 @@ export async function dispatch(argv, opts = {}) {
   let kernel
   /** @type {ActivePlugin[]} */
   let activePlugins = []
+  /**
+   * Plugins this boot did not get, by any of the four routes `bootKernel`
+   * tracks: a throwing `activate()`, a dep-graph elimination, a manifest that
+   * would not load, or a config-enabled plugin the boot profile withheld. A
+   * command body cannot otherwise tell a partial boot from a complete one, and
+   * the client-asset materializer (which deletes) has to.
+   * @type {string[]}
+   */
+  let failedPlugins = []
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -188,6 +273,11 @@ export async function dispatch(argv, opts = {}) {
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
+    // Read, never re-derived: `activations` only ever holds the plugins that
+    // reached `activatePlugins`, and three of the four ways a boot comes up
+    // short never put a plugin there at all
+    // (LLP 0219 #incomplete-activation-prunes-nothing).
+    failedPlugins = boot.unavailablePlugins
     if (boot.config) activeConfig = boot.config
 
     // Lifecycle/read-only commands boot with no plugins, so no sink can
@@ -201,6 +291,15 @@ export async function dispatch(argv, opts = {}) {
         runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
       })
       for (const err of sinkResult.errors) {
+        // A profile that ignores `plugins[]` (the walkthrough's
+        // `all-available`) cannot activate an opt-in plugin the config does
+        // name, so its sink failure says nothing about the config.
+        const excluded = sinkPluginExcludedByBootProfile(err, {
+          config: boot.config,
+          activePlugins,
+          withheldByProfile: boot.withheldByProfile,
+        })
+        if (excluded) continue
         stderr.write(
           `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
         )
@@ -237,7 +336,15 @@ export async function dispatch(argv, opts = {}) {
         stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
         stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
       } else {
-        renderGroupHelp({ stdout, group: group.prefix, children: group.children })
+        // A plugin namespace has no bare command, so its header and
+        // paragraph (when it registered one) come from the group registry.
+        // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
+        renderGroupHelp({
+          stdout,
+          group: group.prefix,
+          groupCommand: registry.getGroup?.(group.prefix),
+          children: group.children,
+        })
       }
       if (ownsKernel) {
         await stopBootStartedSources(kernel)
@@ -307,6 +414,7 @@ export async function dispatch(argv, opts = {}) {
     cwd,
     config: activeConfig,
     plugins: activePlugins,
+    failedPlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
@@ -329,6 +437,26 @@ export async function dispatch(argv, opts = {}) {
         return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
       },
     },
+    // Narrow in-process activation seam for a command body that cannot reach
+    // `kernel`/`activePlugins` through `CommandRunContext` otherwise: given
+    // plugin names a *fresh disk read* of the effective config already
+    // selects, make them (and their dependency closure) live in THIS
+    // process's kernel if a config write mid-process just enabled them.
+    // Backs the manual-attach enable prompt's accept path, which needs
+    // `ctx.capabilities`/`gateway.getClient(name)` to see an adapter this
+    // same invocation just wrote to config.
+    // @ref LLP 0174#prompt [implements]: resolves the "CommandRunContext has
+    // no kernel handle" crux by generalizing the LLP 0139 dispatch-miss seam
+    // instead of adding a second activation mechanism
+    activatePluginClosure: (names) =>
+      activatePluginDependencyClosure({
+        seedNames: names,
+        kernel,
+        discovery: helpDiscovery,
+        stateRoot: obsEnv.stateDir,
+        runId: devRunId ?? `cli-${process.pid}`,
+        activePlugins,
+      }),
     verbs: kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
@@ -642,7 +770,8 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   const names = [...rows.keys()].sort()
 
-  stdout.write('hyp - HypAware kernel CLI (also installed as `hypaware`; same binary)\n')
+  stdout.write("hyp - HypAware: your AI agents' sessions, logs, and telemetry in one queryable history\n")
+  stdout.write('      (also installed as `hypaware`; same binary)\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
@@ -808,11 +937,114 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     )
     if (!owner) return
 
-    // Dependency closure of the owner among the config-selected inactive
+    // The dependency-closure activation itself is shared with the manual-
+    // attach enable prompt (LLP 0174 design doc, #prompt section), which
+    // seeds it with the just-written config's plugin names instead of a
+    // command owner. See that function's own @ref annotation below.
+    const { activated, failed } = await activatePluginDependencyClosure({
+      seedNames: [owner.manifest.name],
+      selection,
+      kernel,
+      stateRoot,
+      runId,
+      activePlugins,
+    })
+    // Parity with the pre-generalization guard: if the owner itself never
+    // made it into `activated` (unresolvable, or resolvable but its own
+    // activation failed), there is nothing dispatchable and nothing to log -
+    // the miss path reports unavailable-plus-repair as before.
+    if (!activated.includes(owner.manifest.name)) return
+
+    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      owner_plugin: owner.manifest.name,
+      plugins_activated: activated.length,
+      plugins_failed: failed.length,
+    })
+  } catch (err) {
+    // Best-effort: the dispatch miss path reports unavailable + repair. But
+    // say the attempt happened: without this line a throwing activation
+    // leaves the user at "unknown command" with no record that the seam ran.
+    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      [Attr.ERROR_KIND]: 'seam_activation_failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
+ * Activate `seedNames` (each already known, or expected, to be selected by a
+ * `config`-profile boot of the fresh-read effective config) and their
+ * manifest-declared dependency closure into the running `kernel`, for
+ * whichever of them are not active in this process yet. Never activates a
+ * plugin the fresh config read does not itself select - that boundary is
+ * what makes this safe to expose narrowly outside the dispatcher (see the
+ * LLP 0174 #prompt annotation below).
+ *
+ * Extracted from {@link activateSeamCommandPlugins}, whose one seed is the
+ * plugin owning a dispatch-missed command name (LLP 0139
+ * #seam-fresh-activation): that caller already has a `selection` from
+ * resolving its owner, so it is threaded through here to avoid a second
+ * `computeBootSelection` read. The manual-attach enable prompt
+ * (`runAttach`, via the `CommandRunContext.activatePluginClosure` seam this
+ * function backs) has no owner lookup to do first and lets this compute its
+ * own fresh `selection` instead.
+ *
+ * Best-effort and non-throwing: any internal failure reports every seed as
+ * `failed` rather than propagating, so a caller mid-command can fall back to
+ * its own guided error instead of crashing the command.
+ *
+ * @param {{
+ *   seedNames: string[],
+ *   kernel: ReturnType<typeof createKernelRuntime>,
+ *   discovery?: { workspaceDir?: string, stateRoot: string, configPath: string },
+ *   stateRoot: string,
+ *   runId: string,
+ *   activePlugins: ActivePlugin[],
+ *   selection?: Awaited<ReturnType<typeof computeBootSelection>>,
+ * }} args
+ * @returns {Promise<{ activated: string[], failed: string[] }>}
+ * @ref LLP 0174#prompt [implements]: the manual-attach accept path's
+ * in-process activation seam, generalized from the dispatch-miss seam
+ * (LLP 0139#seam-fresh-activation) rather than a second mechanism
+ */
+export async function activatePluginDependencyClosure({
+  seedNames,
+  kernel,
+  discovery,
+  stateRoot,
+  runId,
+  activePlugins,
+  selection,
+}) {
+  const activeNames = new Set(activePlugins.map((p) => p.name))
+  const seeds = seedNames.filter((n) => typeof n === 'string' && n.length > 0 && !activeNames.has(n))
+  if (seeds.length === 0) return { activated: [], failed: [] }
+
+  try {
+    const resolvedSelection =
+      selection ??
+      (await computeBootSelection(
+        /** @type {{ workspaceDir?: string, stateRoot: string, configPath: string }} */ (discovery)
+      ))
+    // A shadow collision makes real boot throw; there is no coherent plugin
+    // set to activate from, so report every seed unresolved.
+    if (resolvedSelection.shadowing.length > 0) return { activated: [], failed: seeds }
+
+    const inactive = resolvedSelection.selectedManifests.filter(
+      (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
+    )
+    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
+
+    // Dependency closure of the seeds among the config-selected inactive
     // plugins: requires.plugins by name, requires.capabilities through the
     // manifest-declared provider. Providers that are already active need no
     // activation (their capabilities are in the runtime registry).
-    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
     /** @type {Map<string, string>} */
     const providerByCap = new Map()
     // First declaration wins, with active manifests listed first: three
@@ -826,7 +1058,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     }
     /** @type {Set<string>} */
     const closure = new Set()
-    const queue = [owner.manifest.name]
+    const queue = seeds.filter((n) => byName.has(n))
     while (queue.length > 0) {
       const current = /** @type {string} */ (queue.shift())
       if (closure.has(current) || activeNames.has(current)) continue
@@ -843,15 +1075,14 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     // Order the closure the same way boot would: dependency resolution over
     // the union of active and closure manifests, so capabilities provided by
     // already-active plugins count as satisfied. A closure plugin the
-    // resolution eliminates stays inactive; the miss path reports it.
+    // resolution eliminates stays inactive; the caller's `failed` list names it.
     const resolution = await resolveDependencies([
       ...activePlugins.map((p) => p.manifest),
       ...[...closure].map((n) => /** @type {LoadedManifest} */ (byName.get(n)).manifest),
     ])
     const orderIndex = new Map(resolution.order.map((n, i) => [n, i]))
-    if (!orderIndex.has(owner.manifest.name)) return
     const configByName = new Map(
-      (selection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
+      (resolvedSelection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
     )
     const entries = [...closure]
       .filter((n) => orderIndex.has(n))
@@ -862,31 +1093,27 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
         rootDir: entry.rootDir,
         config: /** @type {JsonObject} */ (configByName.get(entry.manifest.name) ?? {}),
       }))
-    if (entries.length === 0) return
+    if (entries.length === 0) return { activated: [], failed: seeds }
 
     const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    /** @type {string[]} */
+    const activated = []
     for (const r of result.results) {
-      if (r.ok) activePlugins.push(r.plugin)
+      if (r.ok) {
+        activePlugins.push(r.plugin)
+        activated.push(r.plugin.name)
+      }
     }
-    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      [Attr.OPERATION]: 'dispatch.seam_activate',
-      command_name: name,
-      owner_plugin: owner.manifest.name,
-      plugins_activated: result.results.filter((r) => r.ok).length,
-      plugins_failed: result.results.filter((r) => !r.ok).length,
-    })
-  } catch (err) {
-    // Best-effort: the dispatch miss path reports unavailable + repair. But
-    // say the attempt happened: without this line a throwing activation
-    // leaves the user at "unknown command" with no record that the seam ran.
-    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      [Attr.OPERATION]: 'dispatch.seam_activate',
-      command_name: name,
-      [Attr.ERROR_KIND]: 'seam_activation_failed',
-      error: err instanceof Error ? err.message : String(err),
-    })
+    // `failed` covers every name this call attempted on the seeds' behalf,
+    // not just the seeds themselves: a seed whose own manifest activates but
+    // whose dependency closure does not is still an incomplete activation,
+    // and the pre-generalization seam counted exactly that in its
+    // `plugins_failed` telemetry (any closure member `activatePlugins`
+    // rejected, not only the one owner it seeded).
+    const attempted = new Set([...seeds, ...entries.map((e) => e.manifest.name)])
+    return { activated, failed: [...attempted].filter((n) => !activated.includes(n)) }
+  } catch {
+    return { activated: [], failed: seeds }
   }
 }
 
@@ -954,7 +1181,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * @param {PluginName} name
  * @returns {'absent' | 'disabled-local' | 'disabled-central'}
  */
-function classifyInactiveState(layered, name) {
+export function classifyInactiveState(layered, name) {
   const effectiveEntry = (layered.effective?.plugins ?? []).find((p) => p.name === name)
   if (!effectiveEntry || effectiveEntry.enabled !== false) return 'absent'
   const disabledByCentral = (layered.centralConfig?.plugins ?? []).some((p) => p.name === name)

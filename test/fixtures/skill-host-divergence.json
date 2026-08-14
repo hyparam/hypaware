@@ -1,0 +1,17 @@
+{
+  "hypaware-privacy": {
+    "claudeOnly": 11,
+    "codexOnly": 88,
+    "hash": "505438ab70f6cf89"
+  },
+  "hypaware-query": {
+    "claudeOnly": 2,
+    "codexOnly": 2,
+    "hash": "e26ca985bf9118dd"
+  },
+  "hypaware-reference": {
+    "claudeOnly": 0,
+    "codexOnly": 0,
+    "hash": "d8156bae0c4243d3"
+  }
+}

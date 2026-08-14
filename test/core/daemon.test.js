@@ -269,6 +269,76 @@ test('probeClientAttachFromDescriptor honors sanitized TOML home overrides', asy
   )
 })
 
+/** @type {ClientDescriptor} */
+const OPENCLAW_JSON_PATH_DESCRIPTOR = /** @type {ClientDescriptor} */ ({
+  plugin: '@hypaware/openclaw',
+  name: 'openclaw',
+  skillDir: '.openclaw/skills',
+  attachProbe: {
+    format: 'json_path',
+    settings_file: '.openclaw/openclaw.json',
+    container_path: 'models.providers',
+    provider_keys: ['anthropic', 'openai'],
+    marker_header: 'x-hypaware-upstream',
+  },
+})
+
+test('probeClientAttachFromDescriptor reads json_path attach markers when the entry is present', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-path-present-'))
+  const settingsPath = path.join(tmp, '.openclaw', 'openclaw.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(settingsPath, JSON.stringify({
+    models: {
+      providers: {
+        anthropic: {
+          baseUrl: 'http://127.0.0.1:4388',
+          headers: { 'x-hypaware-upstream': 'anthropic' },
+          models: [],
+        },
+      },
+    },
+  }))
+
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_JSON_PATH_DESCRIPTOR, homeDir: tmp }),
+    { attached: true, settingsPath }
+  )
+})
+
+test('probeClientAttachFromDescriptor reports json_path as not attached when the entry is absent', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-path-absent-'))
+  const settingsPath = path.join(tmp, '.openclaw', 'openclaw.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(settingsPath, JSON.stringify({ models: { providers: {} } }))
+
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_JSON_PATH_DESCRIPTOR, homeDir: tmp }),
+    { attached: false, settingsPath }
+  )
+})
+
+test('probeClientAttachFromDescriptor reports json_path as not attached when the marker header is wrong', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-path-wrong-header-'))
+  const settingsPath = path.join(tmp, '.openclaw', 'openclaw.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(settingsPath, JSON.stringify({
+    models: {
+      providers: {
+        anthropic: {
+          baseUrl: 'http://somewhere-else:9999',
+          headers: { 'x-hypaware-upstream': 'not-anthropic' },
+          models: [],
+        },
+      },
+    },
+  }))
+
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_JSON_PATH_DESCRIPTOR, homeDir: tmp }),
+    { attached: false, settingsPath }
+  )
+})
+
 test('renderDaemonInstall renders a deterministic systemd dry-run payload', () => {
   const plan = renderDaemonInstall({
     platform: 'linux',

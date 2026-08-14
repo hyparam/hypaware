@@ -6,7 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-07
 **Related:** LLP 0016, LLP 0036, LLP 0041, LLP 0044, LLP 0045
-**Extended-by:** LLP 0114 (the default listen port is now fixed; the ephemeral port and this tracking machinery remain as the fallback)
+**Extended-by:** LLP 0114 (the default listen port is now fixed; the ephemeral port and this tracking machinery remain as the fallback), [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the client drift family gains `client_attached_not_configured`, the mirror of `client_attach_missing`, for a marker no configured adapter accounts for)
 
 > [Issue #277](https://github.com/hyparam/hypaware/issues/277) (a real user
 > report): the daemon's gateway binds an **ephemeral** port by default

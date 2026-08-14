@@ -90,6 +90,15 @@ every file that changes.
 > Read "the picker tick is the consent point" below as scoped to live
 > capture; history is gated separately, by transcript-entrypoint ownership.
 
+> **Amended by [LLP 0224](./0224-desktop-setup-second-pass.decision.md)**:
+> the explanation and every disclosed fact stand, but the screen now
+> leads with the decision rather than the mechanism, the question after
+> it defaults to yes and names the browser sign-in a yes may launch, and
+> it is asked for a new pick only - a reconfigure's carried row is
+> skipped, with the incomplete-setup state surfaced by `hyp status`'s
+> `client_attach_missing` diagnostic (§repair-must-be-runnable) instead
+> of by re-asking. The row itself is never pre-checked by detection.
+
 This is a better gate than the exclusion list was, for three reasons.
 First, the acquisition of a credential was already attended: step 1 of
 `install` runs `claude-account login` interactively and refuses outright
@@ -108,7 +117,15 @@ path, so it composes `subscription`. `org_key` is fleet policy and arrives
 through the central layer on `hyp join`, never through the picker
 ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
 
-<a id="default-no"></a>**The prompt defaults to no**, unlike the backfill
+<a id="default-no"></a>
+
+> **Superseded by [LLP 0224 §one-question-default-yes](./0224-desktop-setup-second-pass.decision.md#one-question-default-yes)**:
+> the prompt now defaults to yes. The non-answer rule below survives
+> unchanged - every non-answer declines, with the hint, without hanging;
+> only an explicit no declines an answered prompt. The original text is
+> kept below as the record of the earlier reasoning.
+
+**The prompt defaults to no**, unlike the backfill
 consent prompt, which defaults to yes. Backfill reads local files this
 machine already has; this acquires a credential, escalates to root, and
 writes a file outside the user's home. A bare enter must not do any of
@@ -209,29 +226,18 @@ back to `hyp attach --client <name>` otherwise. A client that declares
 adapter has to name its own setup command, or the repair we print answers
 `unknown client`.
 
-> **Amended by [LLP 0143 #status-derives-by-the-same-gate](./0143-openclaw-registers-no-attach-probe.decision.md#status-derives-by-the-same-gate)
-> (#544).** The rule stands, and the `configure_command` lookup stays, but
-> `client_attach_missing` no longer fires at all for a client with no
-> `attach_probe`, Claude Desktop included. A runnable repair is necessary and
-> not sufficient: the warning also has to be one the repair can clear, and
-> with no probe to read back this one fired identically before the consent
-> prompt, after a decline, and after a successful install. The lookup below
-> is now reached only by a probed client, and since Claude Desktop was the
-> only picker row declaring a `configure_command`, no plugin shipping today
-> takes its first branch; it stays as the contract for a probed client that
-> still owns its own setup command.
-
 ## Consequences
 
 - Ticking Claude Desktop in `hyp init` now works end to end: compose,
-  explain, confirm, login, helper, residue, plist, restart.
+  explain, confirm, login, helper, residue, plist, restart. *(Amended by
+  [LLP 0224](./0224-desktop-setup-second-pass.decision.md): the confirm
+  defaults to yes, names the sign-in launch, and is asked per pick, not
+  per run.)*
 - Declining leaves `@hypaware/claude-account` and
   `@hypaware/claude-desktop` in the written config with no credential and
   no plist. That is the converging state, not a broken one: the re-run
-  repair works precisely because the plugins are present. `hyp status` named
-  that re-run as the repair until LLP 0143 #status-derives-by-the-same-gate
-  withdrew the warning it hung off, which could not tell a decline from a
-  success; `hyp claude-desktop verify` is the check that can.
+  repair works precisely because the plugins are present, and `hyp status`
+  now names that re-run as the repair.
 - `V1_EXCLUDED_FROM_DEFAULT` still excludes both plugins from default
   activation. Nothing enables them without either a picker tick or an
   explicit `plugins[]` edit; the exclusion governs defaults, and the picker

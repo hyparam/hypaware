@@ -8,7 +8,7 @@ import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
- * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
+ * @import { MetricReader, ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 /** @type {ReturnType<typeof buildHandle> | null} */
@@ -40,7 +40,7 @@ export function installObservability(opts = {}) {
  *   resource: { attributes: Record<string, string|number|boolean> },
  *   tracer: { provider: TracerProvider|null },
  *   logger: { provider: LoggerProvider|null },
- *   meter: { provider: MeterProvider|null, readers: object[] }
+ *   meter: { provider: MeterProvider|null, readers: MetricReader[] }
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {

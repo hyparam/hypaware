@@ -1,7 +1,12 @@
 import type {
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
   CapabilityRegistry,
+  HypAwareV2Config,
   QueryRegistry,
+  QueryStorageService,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { BackfillRunnerContext } from '../commands/types.d.ts'
 import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic } from '../config/types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -9,6 +14,7 @@ import type {
 } from '../registry/types.d.ts'
 import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { CommandRunner, DurableBinResult } from '../cli/types.d.ts'
+import type { FolderAskMode } from '../usage-policy/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -92,10 +98,14 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_attached_not_configured'
   | 'gateway_port_fallback'
+  | 'gateway_idle_no_upstreams'
+  | 'gateway_upstreams_dropped'
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
+  | 'client_sync_list_unreadable'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -112,6 +122,34 @@ export interface StatusDiagnostic {
 }
 
 /**
+ * Which of a bound gateway's dropped upstream names an adapter preset
+ * backfilled into the routing table, and which nothing did. Produced by
+ * intersecting the dropped names with `details.registered_presets`, both of
+ * which the gateway source publishes; the two lists together always account
+ * for every dropped name.
+ *
+ * Both lists are claims about the *table*, not about traffic, because that is
+ * the most an intersection of names can support. Routing is by `path_prefix`
+ * and `match()`, and then by rank, and none of those are published:
+ *
+ * `covered` is not "fine" and it is not "proxied" either. The operator's entry
+ * did not take effect at all, so the preset's own `base_url`, `provider`,
+ * `priority` and routing surface are in force - and where that surface is a
+ * `match()` (as it is for every bundled adapter preset) the preset's
+ * `path_prefix` is only a sort key, never consulted at match time. The
+ * backfilled entry can also be shadowed outright by a surviving config
+ * upstream that outranks it, in which case the preset routes nothing.
+ *
+ * `silent` is scoped to the name, not to the path. A surviving upstream
+ * written with no `path_prefix` is the `/` catch-all, so traffic aimed at a
+ * silent name can still be proxied and recorded under another upstream's name.
+ */
+export interface DroppedUpstreamAttribution {
+  covered: string[]
+  silent: string[]
+}
+
+/**
  * Display state of one reconciler client-action, derived for `hyp status`
  * from the persisted marker store (LLP 0036 / 0041) plus the effective
  * config: `hyp status` never runs a pass. A `failed` entry is
@@ -121,10 +159,14 @@ export interface StatusDiagnostic {
  * - `done`: run-once effect completed (carries `rows` + `at`).
  * - `failed`: last attempt failed; retried next pass (carries `reason`,
  *   `lastAttempt`, `attempts`).
+ * - `refused`: terminal; the reconciler will never retry it on its own,
+ *   needs an explicit `hyp attach <requestKey>` re-run to clear (carries
+ *   `reason` + `at`, no `attempts`). Informational like `failed`: never
+ *   degrades `overall`.
  * - `pending`: desired on this joined host but no marker yet.
  * - `n/a`: suppressed (`on_join: false`) or inert (host never joined).
  */
-export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
+export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a' | 'refused'
 
 /** One reconciler action's state for the status surface. */
 export interface ClientActionReport {
@@ -165,10 +207,12 @@ export interface ClientAttachReport {
   configured: boolean
   /**
    * The client declares an `attach_probe`, so attach is a state that can be
-   * observed (and reversed). False for a probe-less client (openclaw, LLP
-   * 0143; claude-desktop, LLP 0115), whose attach state is not applicable
-   * rather than negative: `attached` is then structurally false and means
-   * nothing (LLP 0143 #status-derives-by-the-same-gate).
+   * observed (and reversed). False for a probe-less client (`claude-desktop`
+   * is the only one shipping today, LLP 0115 #no-attach-on-join), whose attach
+   * state is not applicable rather than negative: `attached` is then
+   * structurally false and means nothing (LLP 0229
+   * #status-derives-by-the-same-gate). Read off the descriptor, so a client
+   * that gains or loses a probe changes this answer with no core change.
    */
   attachable: boolean
   /** Settings file carries the HypAware marker. Only meaningful when `attachable`. */
@@ -266,8 +310,15 @@ export interface HypAwareStatusReport {
    * from forwarding, read from the machine-local exclusion list. Null only
    * when the list itself could not be read or parsed (see the
    * `local_only_list_unreadable` diagnostic) - never a silent zero.
+   *
+   * `folderAsk` is the standing new-folder ask (LLP 0200): `sync` is the
+   * default (unclassified folders sync and nothing interrupts the session),
+   * `ask` means the user opted into a session-start question per new folder.
+   * It rides here for the same never-silent reason as the count: the default
+   * is the mode with data consequences, so it is exactly the one that must
+   * not be silent.
    */
-  usagePolicy: { localOnlyDirCount: number } | null
+  usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
   /**
    * The pending first-sync export hold's absolute deadline (epoch ms), read
    * from the machine-local marker (LLP 0101). Null whenever no hold is live:
@@ -568,4 +619,59 @@ export interface PidFileEntry {
   runId: string
   /** `foreground` (Phase 3) or `detached` (Phase 4 installers). */
   mode: string
+}
+
+/**
+ * The runner the sweep driver fires per due contribution: exactly
+ * `runBackfillProvider`'s (`src/core/commands/backfill.js`) shape, narrowed to
+ * the arguments a sweep passes. Declared as a type rather than taken from the
+ * import so the driver can accept an injected fake in a unit test without the
+ * test having to stand up a real cache, storage service, and materializer set.
+ */
+export interface BackfillSweepRunner {
+  (args: {
+    ctx: BackfillRunnerContext
+    provider: string
+    dryRun: boolean
+    devRunId?: string
+  }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
+}
+
+export interface BackfillSweepDriverOptions {
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
+  env: NodeJS.ProcessEnv
+  storage: QueryStorageService
+  /**
+   * Dataset registry. `runBackfillProvider`'s write/flush path
+   * (`writeRows`/`flushDataset` in `src/core/commands/backfill.js`) resolves
+   * a dataset's registered table path through this before it can commit a
+   * row, so a fired sweep run needs it on `BackfillRunnerContext` exactly
+   * like `hyp backfill`'s CLI path already gets it from `CommandRunContext`.
+   */
+  query: QueryRegistry
+  /** The daemon's effective config; absent on a host with no readable document. */
+  config?: HypAwareV2Config
+  /** Test seam: defaults to `runBackfillProvider`. */
+  runBackfill?: BackfillSweepRunner
+}
+
+export interface BackfillSweepTickOptions {
+  /** Tick instant the cron due-check evaluates against. Defaults to `new Date()`. */
+  now?: Date
+  /** Ignore the cron due-check and fire every sweep-bearing provider (test use). */
+  force?: boolean
+}
+
+/**
+ * What one `tick()` decided, for the caller's telemetry and for tests. Runs are
+ * fired unblocked, so `fired` names the providers a run was *started* for, never
+ * the ones that finished.
+ */
+export interface BackfillSweepTickReport {
+  fired: string[]
+}
+
+export interface BackfillSweepDriver {
+  tick(opts?: BackfillSweepTickOptions): Promise<BackfillSweepTickReport>
 }

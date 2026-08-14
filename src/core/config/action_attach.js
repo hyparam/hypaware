@@ -3,6 +3,7 @@
 import os from 'node:os'
 
 import { Attr } from '../observability/index.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import {
   clientAssetBaseDirs,
   clientAssetsKey,
@@ -10,6 +11,7 @@ import {
   removeClientAssets,
 } from '../runtime/client_assets.js'
 import { readInstalledAssets } from './action_reconciler.js'
+import { isActionRefused } from './action_refusal.js'
 import { readAttachPolicy } from './attach_policy.js'
 import { detachClientFromDisk } from './client_detach_disk.js'
 
@@ -129,7 +131,9 @@ export function createAttachHandler(opts = {}) {
      * stderr, json:true })`, parses the one-line JSON the adapter emits, and
      * records `settings_path` / `prev_value` as the marker detail. A throw
      * (file not writable, malformed settings) becomes a `failed` outcome the
-     * reconciler records and retries next pass.
+     * reconciler records and retries next pass, unless the adapter marked it
+     * a permanent refusal (LLP 0186), which becomes a `refused` outcome the
+     * reconciler short-circuits unconditionally instead.
      *
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
@@ -166,7 +170,14 @@ export function createAttachHandler(opts = {}) {
       try {
         await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
       } catch (err) {
-        return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
+        // A marked refusal (LLP 0186) is a permanent precondition failure only
+        // the user can fix; anything else is the transient `failed` the
+        // reconciler retries next pass.
+        // @ref LLP 0186#markactionrefused--isactionrefused [implements]: perform()'s catch reads the marked-Error convention to tell a refusal from an environmental failure
+        return {
+          status: isActionRefused(err) ? 'refused' : 'failed',
+          reason: err instanceof Error ? err.message : String(err),
+        }
       }
 
       // Attach means "wire this client into HypAware", and the client's
@@ -330,6 +341,11 @@ export function createAttachHandler(opts = {}) {
 
       let result
       try {
+        // No gateway fact is threaded in: every format's undo record lives in
+        // the settings file itself (marker key, managed block, or the entry's
+        // own signature), so reverse works even when the endpoint that
+        // performed the attach no longer exists.
+        // @ref LLP 0210#d1 [constrained-by]: reverse passes no origin; the json_path undo judges ownership by the entry's signature alone
         result = await detach({ descriptor, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
@@ -467,8 +483,13 @@ function attachedAssetOptions(client, ctx) {
     clients: [client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     ...(ctx.skills ? { skills: ctx.skills } : {}),
     ...(ctx.agents ? { agents: ctx.agents } : {}),
+    // A daemon boot where one plugin threw in `activate()` still reconciles;
+    // its attach copies what did activate and prunes nothing, because the
+    // missing contributions are indistinguishable from retired ones.
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
   }
 }
 
@@ -514,7 +535,7 @@ async function materializeAttachedAssets(client, ctx) {
   }
 
   try {
-    const installed = await materializeClientAssets({ ...options, stderr: warnings })
+    const { installed } = await materializeClientAssets({ ...options, stderr: warnings })
     return installed.map((asset) => asset.dest)
   } catch (err) {
     ctx.log.warn('client_action.attach_assets_failed', {

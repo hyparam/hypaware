@@ -222,7 +222,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // only when the exclusion list itself could not be read (see the
     // `local_only_list_unreadable` diagnostic).
     usage_policy: report.usagePolicy
-      ? { local_only_dir_count: report.usagePolicy.localOnlyDirCount }
+      ? {
+        local_only_dir_count: report.usagePolicy.localOnlyDirCount,
+        folder_ask: report.usagePolicy.folderAsk,
+      }
       : null,
     // Pending first-sync export hold (LLP 0101 / LLP 0100 R9): null once the
     // hold has expired or was never written, exactly matching the sink
@@ -363,7 +366,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp attach` that is a documented
       // no-op and can never change the line (#544).
-      // @ref LLP 0143#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
+      // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
       state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.error) stdout.write(`        error: ${c.error}\n`)
@@ -374,11 +377,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  // Never-silent client provenance split (LLP 0132 #never-silent): on a
-  // managed host the picked clients divide into what the fleet forwards
-  // (`syncing`) and what stays on this machine (`local-only`), so a local
-  // addition is never invisible. Null (a solo host) leaves the V1 surface
-  // unchanged.
+  // Never-silent client sync split (LLP 0188 #never-silent): on an enrolled
+  // host the configured sources divide into what forwards (`syncing`, the
+  // default for everything) and what the user opted out (`local-only`), so
+  // a withheld source is never invisible. Null (a solo host) leaves the V1
+  // surface unchanged.
   if (report.clientSync) {
     const list = (/** @type {string[]} */ names) => (names.length > 0 ? names.join(' · ') : '(none)')
     stdout.write(
@@ -419,6 +422,20 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
     stdout.write(
       `  local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
+    )
+  }
+
+  // What happens the next time the user works somewhere new (LLP 0200).
+  // Enrolled hosts only: on a machine with no server the question has no
+  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
+  // host's text output is unchanged. Both modes are stated - the default
+  // is the one with data consequences, so it is exactly the one that must
+  // not be silent.
+  if (report.layered?.hasCentral && report.usagePolicy) {
+    stdout.write(
+      report.usagePolicy.folderAsk === 'sync'
+        ? '  new folders:     sync without asking (`hyp policy folders ask` to be asked instead)\n'
+        : '  new folders:     asked about once each (`hyp policy folders sync` to stop asking)\n'
     )
   }
 
@@ -482,6 +499,17 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'refused') {
+        // The repair hint is unconditional, unlike the reason bits it follows:
+        // the hint is the whole point of the state (a refusal is terminal until
+        // the user acts), so a marker that carries no readable `reason` must
+        // still say what to do rather than render a bare `[refused]`, which is
+        // the attention signal without the action.
+        // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        const repair = `run 'hyp attach ${a.requestKey}' after fixing the cause`
+        detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }

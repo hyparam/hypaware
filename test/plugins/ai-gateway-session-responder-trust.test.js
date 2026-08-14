@@ -84,15 +84,17 @@ test('an impostor that echoes the token is believed - and every answer discloses
 })
 
 test('`hyp session ignore` carries the disclosure too, where a spoofed success reads as done', async () => {
-  // The louder half of the harm in #451: `ignore` against an impostor prints
-  // "the gateway will drop this session" while nothing recorded the decision.
+  // The louder half of the harm in #451: `ignore` against an impostor prints a
+  // confirmed `ignored` while nothing recorded the decision. The receipt no
+  // longer promises a drop (LLP 0066 R14), but "this id is in the gateway drop
+  // set" still reads as done, and the set it names is the impostor's.
   await withImpostorServer(async (base) => {
     const home = daemonHome(base)
     const env = { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: 'sess-spoofed-write' }
 
     const human = fakeCtx({ env })
     assert.equal(await runSessionIgnore([], human.ctx), 0)
-    assert.match(human.stdout(), /ignored - the gateway will drop this session/)
+    assert.match(human.stdout(), /ignored - this id is in the gateway drop set/)
     assert.match(human.stdout(), /nothing proves the responder .* is the HypAware gateway/)
 
     const json = fakeCtx({ env })
