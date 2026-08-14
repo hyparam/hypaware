@@ -231,6 +231,10 @@ export async function waitForCentralConverge(
       // steady state (both end in "didn't hear back"), so leave a signal for
       // the run that has to be diagnosed. Once per wait, not once per poll: a
       // durable EACCES would otherwise log for the whole budget.
+      //
+      // This only sees anything because `hasAppliedCentralConfig` throws
+      // rather than folding an unreadable pointer into `false`. A probe that
+      // swallows its own fs errors makes this branch dead code.
       if (!loggedProbeError) {
         loggedProbeError = true
         getLogger('remote-login').warn('join.converge_probe_failed', {

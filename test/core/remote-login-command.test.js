@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
@@ -492,6 +493,31 @@ test('waitForCentralConverge: default probe converges on the active slot, never 
   await fs.symlink('config.a.json', path.join(controlDir, 'active'))
   const applied = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
   assert.deepEqual(applied, { ok: true })
+})
+
+// The probe error branch is only reachable because the default probe throws
+// on a pointer it cannot read instead of folding it into "not converged".
+// Without this the branch is dead code in production and a stuck host is
+// indistinguishable from the no-org-config steady state.
+test('waitForCentralConverge: an unreadable active pointer reaches the probe-error branch', async () => {
+  const hypHome = await tmpHome()
+  const env = { HYP_HOME: hypHome }
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+
+  // A control directory that simply holds nothing yet is the silent steady
+  // state: not converged, nothing to report.
+  assert.equal(hasAppliedCentralConfig({ stateRoot }), false)
+
+  // An `active` that is not a symlink is a pointer this process cannot read
+  // (readlink EINVAL), which the probe surfaces rather than swallows.
+  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  assert.throws(() => hasAppliedCentralConfig({ stateRoot }))
+
+  // The wait still degrades to the unlocked-picker fallback, never an error.
+  const verdict = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(verdict, { ok: false })
 })
 
 test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {
