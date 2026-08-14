@@ -1076,6 +1076,23 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   assert.match(asked.text(), /carried over/i)
 })
 
+// The confirm is the end of the happy path, after every question was
+// answered: a bare enter completes the run (the backup is what keeps that
+// safe), and only an explicit no declines.
+test('defaultOverwriteConfirmFactory: bare enter proceeds, an explicit no declines', async () => {
+  const enter = defaultOverwriteConfirmFactory({
+    stdin: /** @type {any} */ (Readable.from(['\n'])),
+    stdout: /** @type {any} */ (makeBuf()),
+  })
+  assert.equal(await enter('/home/tester/.hyp/hypaware-config.json'), true)
+
+  const no = defaultOverwriteConfirmFactory({
+    stdin: /** @type {any} */ (Readable.from(['n\n'])),
+    stdout: /** @type {any} */ (makeBuf()),
+  })
+  assert.equal(await no('/home/tester/.hyp/hypaware-config.json'), false)
+})
+
 // --- hidden rows (LLP 0202) ---
 
 test('runWizardPick: a hidden row is absent from the defaults gate as well as the menu', async () => {

@@ -284,9 +284,12 @@ function legacyNumberedPromptFactory(opts) {
 
 /**
  * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **no** (a bare Enter keeps the existing config), so a stray
- * keystroke never destroys a working install. On yes the caller backs
- * the file up before replacing it.
+ * to **yes**: this lands at the end of an attended run, after every
+ * question was answered, so a bare Enter has to complete the run the
+ * user just walked - an enter that silently threw those answers away
+ * read as the wizard failing. It is safe as a yes because nothing is
+ * destroyed either way: the caller backs the file up before replacing
+ * it, and the carried-over list below names what the rewrite keeps.
  *
  * The question says the file is *rewritten from the picks*, not merely
  * "overwritten": the write is a whole-file regeneration, and a user whose
@@ -318,9 +321,11 @@ export function defaultOverwriteConfirmFactory(opts) {
         '  Carried over: retention window, export destinations, hand-edited\n' +
         '  settings, and plugins the picker does not manage. A backup is kept.\n' +
         '\n' +
-        'Continue? [y/N]: '
+        'Continue? [Y/n]: '
       )
-      return /^y(es)?$/i.test(answer.trim())
+      // Only an explicit no declines; a bare enter (and any stray answer)
+      // proceeds, matching the stated default.
+      return !/^n(o)?$/i.test(answer.trim())
     } finally {
       rl.close()
     }
