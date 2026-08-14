@@ -1016,3 +1016,29 @@ test('hyp query overview: the usage line lists every flag the codec accepts', as
     assert.match(stdout.text(), new RegExp(flag.replace(/-/g, '\\-')), flag)
   }
 })
+
+// @ref LLP 0225#decision [tests]: the overview's captured columns are escaped too
+test('renderOverview escapes captured columns and keeps its own colour', () => {
+  const ESC = '\u001b'
+  const RLO = '\u202e'
+  const usage = { input_tokens: 10, cached_tokens: 0, output_tokens: 5 }
+  const out = renderOverview({
+    providerRows: [{ provider: `anth${ESC}[8mropic`, model: `claude${RLO}-opus`, ...usage }],
+    dailyRows: [{ date: `2026-08-1${ESC}[1A`, sessions: 1, ...usage }],
+    repoRows: [{ repo_root: `/a/b${ESC}[2K`, sessions: 1, ...usage }],
+    toolRows: [{ tool_name: `Ba${ESC}[8msh`, calls: 3, sessions: 1 }],
+    // Colour on, so the painted bars keep their own ESC. That is what proves
+    // the escape is applied per captured cell rather than swept over the
+    // finished block, which would take the colour with it.
+    color: true,
+  })
+  assert.match(out, /anth\\u001b\[8mropic/)
+  assert.match(out, /claude\\u202e-opus/)
+  assert.match(out, /2026-08-1\\u001b\[1A/)
+  assert.match(out, /b\\u001b\[2K/)
+  assert.match(out, /Ba\\u001b\[8msh/)
+  // Every raw ESC that is left is one of our own colour codes.
+  for (const found of out.match(/\u001b.{0,4}/g) ?? []) {
+    assert.match(found, /^\u001b\[[0-9;]*m/, JSON.stringify(found))
+  }
+})
