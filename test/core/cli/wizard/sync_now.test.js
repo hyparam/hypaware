@@ -124,6 +124,12 @@ test('the question offers wait first, as the default, and declining spawns nothi
   assert.match(question.options[0].label, /^Wait until /)
   assert.equal(question.options[1].value, 'now')
   assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
+  // The narration upstream dropped its `hyp sync` sentence for this offer,
+  // and the offer's own frame is cleared when it resolves, so the wait has
+  // to leave the way out on screen or nothing names it.
+  // @ref LLP 0188#never-silent [tests]: the modal wait still names the release verb
+  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })
 
 // @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation
@@ -250,4 +256,6 @@ test('a cancelled prompt is a wait, not an error', async () => {
   }
   const result = await runWizardSyncNow(o.args)
   assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
+  // An esc is the same wait, and leaves the same erased frame behind it.
+  assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })

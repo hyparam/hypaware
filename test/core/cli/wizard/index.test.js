@@ -919,6 +919,10 @@ test('runInitWizard: an enrolled run is offered the first sync, after the narrat
   // The offer's "Send now" row states `hyp sync` and the asks-first promise,
   // so the narration must not say the same sentence one screen earlier.
   assert.doesNotMatch(text, /To send it sooner/)
+  // But the offer's frame is cleared when it resolves, so a run that ends on
+  // the wait must still leave the release verb somewhere on screen. Dropping
+  // the sentence upstream is only safe because the wait restates it here.
+  assert.match(text, /run `hyp sync` any time to send it sooner/)
   assert.equal(spawned.length, 1)
 })
 

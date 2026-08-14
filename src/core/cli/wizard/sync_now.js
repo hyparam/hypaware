@@ -80,6 +80,15 @@ export async function runWizardSyncNow(opts) {
         const choice = await askSendNow(opts, opts.deadline)
         span.setAttribute('choice', choice)
         if (choice !== NOW) {
+          // Waiting is the default answer, so this is the modal end of an
+          // enrolled run - and it has to restate the way out, because
+          // neither surface that named it survives. The narration above
+          // dropped its `hyp sync` sentence on the strength of this offer,
+          // and the offer's own frame is erased when it resolves
+          // (`clearOnResolve`, the TUI runtime's cleanup). Without this the
+          // run ends with the release verb nowhere on screen.
+          // @ref LLP 0188#never-silent [implements]: a declined release still leaves the standing way out on screen
+          writeStillHeld(opts, opts.deadline)
           return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
         }
 
@@ -113,6 +122,8 @@ export async function runWizardSyncNow(opts) {
       } catch (err) {
         if (isPromptCancelledError(err)) {
           span.setAttribute('choice', WAIT)
+          // An esc is the same wait, and lands in the same erased frame.
+          if (typeof opts.deadline === 'number') writeStillHeld(opts, opts.deadline)
           return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
         }
         span.setAttribute('status', 'error')

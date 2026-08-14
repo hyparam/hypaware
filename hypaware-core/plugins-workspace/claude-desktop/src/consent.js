@@ -160,7 +160,8 @@ export async function confirmProceed(cmdCtx, { mayNeedSignIn }) {
         writeNonInteractiveHint(cmdCtx)
         return false
       }
-      // Only an explicit no declines; a bare enter takes the stated default.
+      // Only an explicit no declines; a bare enter (and any stray answer)
+      // takes the stated default, same rule as the overwrite confirm.
       return !/^n(o)?$/i.test(answer.trim())
     } finally {
       rl.close()

@@ -148,8 +148,10 @@ through the central layer on `hyp join`, never through the picker
 > the root escalation still cannot happen without the sudo password. What
 > survives of this section is its non-answer rule, unchanged: a cancel,
 > an absent stdin, and a stdin that ends without a line all decline with
-> the hint, and EOF resolves rather than hanging. Only an explicit no
-> declines; only a real enter is a yes. The original text is kept below.
+> the hint, and EOF resolves rather than hanging. What did invert is the
+> reading of an *answered* prompt: only an explicit `n`/`no` declines, and
+> a bare enter (like any other typed answer) takes the stated default.
+> The original text is kept below.
 
 **The prompt defaults to no**, unlike the backfill
 consent prompt, which defaults to yes. Backfill reads local files this
