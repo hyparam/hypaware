@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-10
 **Related:** LLP 0063 (#connection-levels: the ladder this adds a second cascade to), LLP 0045 (#part-3: the one disk undo this reuses), LLP 0138 (#marker-undo: asset reversal comes with that undo), LLP 0017 (daemon service lifecycle), LLP 0210 (#d1: the signature-only ownership rule that lets the sweep run from disk alone)
+**Extended-by:** LLP 0232, Claude Code attaches through an HTTPS proxy rather than a repointed base URL (the cascade matters more under proxy mode: a leftover `HTTPS_PROXY` with nothing listening breaks all of Claude Code's HTTPS, not only its model calls, and a leftover CA is trusted key material with no owner)
 
 > Extends [LLP 0063 #connection-levels](./0063-login-auto-provision-forward-sink.decision.md#connection-levels).
 > The ladder and its verbs stand. What changes is that level 4's exit, like

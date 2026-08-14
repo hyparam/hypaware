@@ -32,8 +32,61 @@ export function compileConfig(raw) {
     : DEFAULT_GATEWAY_ID
   const upstreams = compileUpstreams(cfg.upstreams)
   const redactHeaders = compileStringArray(cfg.redact_headers)
+  // Off unless explicitly enabled. Proxy mode installs a machine-local CA and
+  // decrypts traffic, which is a materially larger ask than repointing a base
+  // URL, so it is never something a config silently acquires.
+  // @ref LLP 0233#proxy-mode-is-explicit [implements]
+  const proxyMode = cfg.proxy_mode === true
+  const upstreamProxy = compileUpstreamProxy(cfg.upstream_proxy)
   // @ref LLP 0114#explicit-listen-fails-loudly [constrained-by]: only a defaulted listen may fall back on EADDRINUSE
-  return { listen, listenConfigured, gatewayId, upstreams, redactHeaders }
+  return {
+    listen,
+    listenConfigured,
+    gatewayId,
+    upstreams,
+    redactHeaders,
+    proxyMode,
+    ...(upstreamProxy ? { upstreamProxy } : {}),
+  }
+}
+
+/**
+ * Compile the optional corporate-proxy setting.
+ *
+ * Accepts a URL string (`http://proxy.corp:8080`, optionally with credentials)
+ * because that is the form customers already have in `HTTPS_PROXY`, so the
+ * value can be copied across rather than retyped into fields.
+ *
+ * A malformed value compiles to `undefined` rather than throwing: the source
+ * reports it, and refusing to boot the gateway over a mistyped proxy would take
+ * capture down entirely rather than degrading to a direct connection.
+ *
+ * @param {unknown} raw
+ * @returns {import('./types.js').UpstreamProxy | undefined}
+ */
+export function compileUpstreamProxy(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  /** @type {URL} */
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    return undefined
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+  const port = url.port ? Number.parseInt(url.port, 10) : url.protocol === 'https:' ? 443 : 80
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  if (!url.hostname) return undefined
+
+  /** @type {import('./types.js').UpstreamProxy} */
+  const proxy = { host: url.hostname, port }
+  if (url.username) {
+    const raw64 = Buffer.from(
+      `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+    ).toString('base64')
+    proxy.authorization = `Basic ${raw64}`
+  }
+  return proxy
 }
 
 /**

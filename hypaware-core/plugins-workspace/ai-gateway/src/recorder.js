@@ -530,3 +530,38 @@ function headerValue(headers, name) {
   }
   return undefined
 }
+
+/**
+ * An exchange that records nothing.
+ *
+ * In reverse-proxy mode every request that reaches the listener was routed
+ * there by a client we attached, so recording all of it is the same aperture
+ * the user opted into. Proxy mode breaks that equivalence: a `HTTPS_PROXY`
+ * client sends its whole conversation with the host through us, including
+ * update checks, MCP registry fetches and other side channels that have
+ * nothing to do with model traffic. Those requests still have to be proxied
+ * faithfully, but buffering their bodies would be both a privacy widening the
+ * user never asked for and, for a multi-hundred-kilobyte registry response, a
+ * pointless allocation.
+ *
+ * This stands in for a real {@link Exchange} on that path so the request
+ * handler stays one code path. Nothing accumulates and no row is ever
+ * produced; callers must skip `onExchangeFinished` for it.
+ *
+ * @ref LLP 0234#recording-is-opt-in-per-path [implements]: unmatched proxy-mode paths pass through unrecorded
+ * @returns {{ isSse: boolean, response: undefined, appendRequestChunk(): void, setResponseStart(): void, appendResponseChunk(): void, consumeStreamChunk(): void, setError(): void, recording: false }}
+ */
+export function createNullExchange() {
+  return {
+    // `false` keeps the handler on the buffered branch, which for this object
+    // is a no-op either way.
+    isSse: false,
+    response: undefined,
+    recording: false,
+    appendRequestChunk() {},
+    setResponseStart() {},
+    appendResponseChunk() {},
+    consumeStreamChunk() {},
+    setError() {},
+  }
+}

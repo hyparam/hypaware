@@ -82,6 +82,27 @@ const MANAGED_ENV_ADDITIONS = [
   { key: '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', value: '1' },
 ]
 
+/**
+ * The env keys proxy-mode attach takes over.
+ *
+ * `HTTPS_PROXY` alone, deliberately: `HTTP_PROXY` would hand us plain-HTTP
+ * requests in absolute-form, which the gateway does not serve, and no traffic
+ * we want is unencrypted. `NO_PROXY` is left entirely alone - it is the user's
+ * escape list and ours to honour, not to write.
+ *
+ * Unlike the base-URL keys these are not add-only: a value already present is
+ * more likely to be a corporate proxy than a stale setting, so attach backs it
+ * up (`prev_env`) before overriding, and detach puts it back.
+ *
+ * @ref LLP 0232#attach-writes-https_proxy-not-a-base-url [implements]
+ */
+const PROXY_MODE_ENV_KEYS = ['HTTPS_PROXY', 'NODE_EXTRA_CA_CERTS']
+
+/** @type {'proxy'} */
+export const MODE_PROXY = 'proxy'
+/** @type {'base_url'} */
+export const MODE_BASE_URL = 'base_url'
+
 export class ClaudeSettingsError extends Error {
   /**
    * @param {string} message
@@ -118,10 +139,49 @@ export function defaultSettingsPath(homeDir) {
  * @returns {Promise<ClaudeAttachResult>}
  */
 export async function attach(opts) {
-  const { port, version, stateFile, settingsPath = defaultSettingsPath(), binPath = 'hyp' } = opts
+  const {
+    port,
+    version,
+    stateFile,
+    settingsPath = defaultSettingsPath(),
+    binPath = 'hyp',
+    mode = MODE_BASE_URL,
+    caCertPath,
+  } = opts
   validatePort(port)
   validateVersion(version)
   validateStateFile(stateFile)
+  if (mode !== MODE_PROXY && mode !== MODE_BASE_URL) {
+    throw new ClaudeSettingsError(`unknown attach mode: ${String(mode)}`, { code: 'INVALID_MODE' })
+  }
+  // Proxy mode routes *all* of Claude Code's HTTPS through the gateway, so an
+  // attach that lands without a working local CA does not degrade to
+  // unrecorded-but-working: it breaks authentication, updates and model calls
+  // alike. The CA file is written by the gateway only after proxy mode boots
+  // successfully, which makes its presence the one preflight worth having.
+  // @ref LLP 0232#proxy-attach-preflight [implements]: refuse rather than write a setting that breaks all egress
+  if (mode === MODE_PROXY) {
+    if (typeof caCertPath !== 'string' || caCertPath.length === 0) {
+      throw new ClaudeSettingsError(
+        'proxy-mode attach requires the local CA certificate path',
+        { code: 'CA_REQUIRED' }
+      )
+    }
+    if (!path.isAbsolute(caCertPath)) {
+      throw new ClaudeSettingsError(
+        `caCertPath must be an absolute path, got '${caCertPath}'`,
+        { code: 'CA_REQUIRED' }
+      )
+    }
+    try {
+      await fs.access(caCertPath)
+    } catch (err) {
+      throw markActionRefused(new ClaudeSettingsError(
+        `no local CA at ${caCertPath}; start the daemon with proxy mode enabled before attaching`,
+        { code: 'CA_MISSING', cause: err }
+      ))
+    }
+  }
 
   const { value, mtimeMs } = await readSettings(settingsPath)
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
@@ -189,33 +249,136 @@ export async function attach(opts) {
   // read it: JSON cannot encode `undefined`, so `undefined` here already means
   // "absent", and the `prevBaseUrl !== undefined` checks below are the presence
   // test - which is precisely what the discarded type test was standing in for.
-  const liveBaseUrl = env.ANTHROPIC_BASE_URL
-  // Preserve the recorded original across a re-attach: once we own the
-  // URL the live value is *our* gateway URL, so keep the marker's
-  // recorded `prev_base_url` rather than backing up the gateway URL
-  // over it. A first attach backs up whatever was live. Presence again:
-  // attach only ever writes the field when there was something to record, so
-  // the field being there is the fact, and `null` is a value we must give back.
-  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
-  const prevBaseUrl = priorMarker
-    ? (Object.hasOwn(priorMarker, 'prev_base_url') ? priorMarker.prev_base_url : undefined)
-    : liveBaseUrl
-
   const baseUrl = `http://127.0.0.1:${port}`
   const commands = managedHookCommands(binPath, stateFile)
 
-  // Undo the defaults Claude Code flips because the gateway URL is not
-  // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
-  // window that inflates the reported context percent. See
-  // MANAGED_ENV_ADDITIONS for the per-key rationale.
-  // @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: attach sets ENABLE_TOOL_SEARCH=true so the non-first-party base URL doesn't force eager tool-schema loading
-  // @ref LLP 0045#_claude_code_assume_first_party_base_url-keep-the-models-real-context-window [implements]: attach declares the pass-through gateway first-party so the assumed window isn't cut to 200k
   const priorManagedEnv = priorMarker && isPlainObject(priorMarker.managed) && isPlainObject(priorMarker.managed.env)
     ? /** @type {Record<string, unknown>} */ (priorMarker.managed.env)
     : undefined
-  const managedAdditions = manageEnvAdditions(env, priorManagedEnv)
+  const priorPrevEnv = priorMarker && isPlainObject(priorMarker.prev_env)
+    ? /** @type {Record<string, unknown>} */ (priorMarker.prev_env)
+    : undefined
 
-  env.ANTHROPIC_BASE_URL = baseUrl
+  /**
+   * What a key held before attach first took it over.
+   *
+   * Three cases, and the middle one is the one a naive version gets wrong. A
+   * backup already on the marker is carried forward untouched (the live value
+   * is ours by now). A key the *prior* marker managed has no user value left to
+   * record. Otherwise this run is the first to claim the key, so whatever is on
+   * disk is the user's and gets backed up - which is also what makes switching
+   * modes safe, because the keys the new mode claims were not managed by the
+   * old one.
+   *
+   * Presence, not type, throughout: a hand-written `null` is a value to give
+   * back, not an absence.
+   *
+   * @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
+   * @param {string} key
+   * @returns {{ value: unknown, carriedForward: boolean }}
+   */
+  function priorValueFor(key) {
+    if (priorPrevEnv && Object.hasOwn(priorPrevEnv, key)) {
+      return { value: priorPrevEnv[key], carriedForward: true }
+    }
+    // Only "ours" if the live value is still the one we wrote. Treating a prior
+    // marker's claim on the key as proof of ownership let a hand-edit in
+    // between two attaches be swallowed and then deleted by detach: the user
+    // pointed the key at their own proxy, the re-attach overwrote it with no
+    // backup, and the detach reported success while removing it. Detach and
+    // `releaseUnmanagedKeys` both compare; this has to agree with them.
+    if (priorManagedEnv && Object.hasOwn(priorManagedEnv, key) && env[key] === priorManagedEnv[key]) {
+      return { value: undefined, carriedForward: true }
+    }
+    return {
+      value: Object.hasOwn(env, key) ? env[key] : undefined,
+      carriedForward: false,
+    }
+  }
+
+  /** @type {Record<string, string>} */
+  const managedEnv = {}
+  /** @type {Record<string, unknown>} */
+  const prevEnv = {}
+
+  // What `env.ANTHROPIC_BASE_URL` held before attach first took it over.
+  //
+  // A recorded `prev_base_url` wins: once we own the URL the live value is
+  // *our* gateway URL, so a re-attach must keep the marker's record rather than
+  // backing up the gateway URL over it. Otherwise fall through to the same
+  // ownership rule every other key uses, which is what makes a prior *proxy*
+  // marker (which never claimed this key) back up the user's own base URL
+  // instead of silently discarding it.
+  // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
+  const prevBaseUrl = priorMarker && Object.hasOwn(priorMarker, 'prev_base_url')
+    ? priorMarker.prev_base_url
+    : priorValueFor('ANTHROPIC_BASE_URL').value
+
+  if (mode === MODE_PROXY) {
+    // The base URL stays `api.anthropic.com`, so Claude Code keeps treating the
+    // endpoint as first party. That is the whole point: Remote Control refuses
+    // to run against any other host, and the two env keys the base-URL mode has
+    // to set to undo first-party-only defaults become unnecessary rather than
+    // merely unset.
+    // @ref LLP 0232#attach-writes-https_proxy-not-a-base-url [implements]
+    /** Backups this run took, as opposed to ones carried forward from the marker. */
+    let displacedProxy
+    for (const key of PROXY_MODE_ENV_KEYS) {
+      const prior = priorValueFor(key)
+      if (prior.value !== undefined) prevEnv[key] = prior.value
+      if (prior.carriedForward || prior.value === undefined) continue
+      if (key === 'HTTPS_PROXY') {
+        displacedProxy = prior.value
+        continue
+      }
+      // Node reads only one file from NODE_EXTRA_CA_CERTS, so taking it over
+      // silently drops whatever trust bundle was there - typically a corporate
+      // root, whose absence shows up as unrelated TLS failures. Backed up and
+      // restored on detach either way, but the user has to be told.
+      warnings.push(
+        `env.${key} was already set to ${String(prior.value)}; ` +
+        'hypaware now manages it and hyp detach restores it'
+      )
+    }
+    // An existing proxy is far more likely to be a corporate egress proxy than
+    // a leftover. Overriding it silently would cut the user's outbound path,
+    // and the failure would look like the gateway breaking their network.
+    //
+    // Warned about only on the run that displaced it: a re-attach carries the
+    // backup forward on the marker and has nothing new to tell the user, so
+    // repeating the notice every time would train them to ignore it.
+    if (typeof displacedProxy === 'string' && displacedProxy.length > 0) {
+      warnings.push(
+        `env.HTTPS_PROXY was already set to ${displacedProxy}; ` +
+        `hypaware now handles it and hyp detach restores it. ` +
+        `If that is a required outbound proxy, set upstream_proxy on the ` +
+        `ai-gateway config to the same value so traffic still chains through it`
+      )
+    }
+    managedEnv.HTTPS_PROXY = `http://127.0.0.1:${port}`
+    managedEnv.NODE_EXTRA_CA_CERTS = /** @type {string} */ (caCertPath)
+    for (const [key, next] of Object.entries(managedEnv)) env[key] = next
+  } else {
+    // Undo the defaults Claude Code flips because the gateway URL is not
+    // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
+    // window that inflates the reported context percent. See
+    // MANAGED_ENV_ADDITIONS for the per-key rationale.
+    // @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: attach sets ENABLE_TOOL_SEARCH=true so the non-first-party base URL doesn't force eager tool-schema loading
+    // @ref LLP 0045#_claude_code_assume_first_party_base_url-keep-the-models-real-context-window [implements]: attach declares the pass-through gateway first-party so the assumed window isn't cut to 200k
+    const managedAdditions = manageEnvAdditions(env, priorManagedEnv)
+    env.ANTHROPIC_BASE_URL = baseUrl
+    managedEnv.ANTHROPIC_BASE_URL = baseUrl
+    Object.assign(managedEnv, managedAdditions)
+  }
+
+  // Switching modes drops keys the previous mode owned. Leaving them behind
+  // would strand a live `ANTHROPIC_BASE_URL` pointing at the gateway - which
+  // is exactly the non-first-party host proxy mode exists to stop sending, so
+  // the attach would silently fail to deliver what it promised. Reverse them
+  // here, by the same rule detach uses.
+  // @ref LLP 0232#mode-migration [implements]: attach releases keys the new mode does not manage
+  releaseUnmanagedKeys({ env, priorManagedEnv, managedEnv, priorPrevEnv, priorMarker, warnings })
+
   installManagedHooks(value, commands, recordDisplaced)
 
   // Preserve a prior backup across a re-attach, for the same reason
@@ -228,24 +391,33 @@ export async function attach(opts) {
   // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, so it must survive re-attach
   const prevMalformed = { ...displaced, ...priorMalformed }
 
-  // Self-describing undo record: enough for the format-aware core undo
-  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
-  // we added, strip the managed hook entries, and delete the marker without
-  // loading this plugin, leaving no orphaned `hyp claude-hook` entries.
-  // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: claude marker records prev_base_url + managed env/hook entries
+  // Self-describing undo record: enough for the format-aware core undo to
+  // restore-or-remove every managed env key, strip the managed hook entries,
+  // and delete the marker without loading this plugin, leaving no orphaned
+  // `hyp claude-hook` entries.
+  //
+  // `mode` is recorded because the undo is no longer the same for both: a
+  // proxy-mode marker also means a machine-local CA has to be removed, and
+  // nothing else on disk says so.
+  // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: claude marker records the managed env/hook entries and what they displaced
+  // @ref LLP 0235#detach-removes-the-ca [implements]: the marker's mode is what tells the plugin-agnostic undo a CA exists
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
     port,
     state_file: stateFile,
+    mode,
     managed: {
-      env: {
-        ANTHROPIC_BASE_URL: baseUrl,
-        ...managedAdditions,
-      },
+      env: managedEnv,
       hooks: managedHookEntries(commands),
     },
-    ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),
+    // `prev_base_url` stays its own field rather than folding into `prev_env`:
+    // markers written by earlier versions carry it, and the core undo still
+    // reads it, so moving it would strand every settings file already on disk.
+    ...(mode === MODE_BASE_URL && prevBaseUrl !== undefined
+      ? { prev_base_url: prevBaseUrl }
+      : {}),
+    ...(Object.keys(prevEnv).length > 0 ? { prev_env: prevEnv } : {}),
     ...(Object.keys(prevMalformed).length > 0 ? { prev_malformed: prevMalformed } : {}),
   }
 
@@ -253,14 +425,54 @@ export async function attach(opts) {
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  if (prevBaseUrl !== undefined) {
-    result.prevValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
+  const reportedPrev = mode === MODE_PROXY ? prevEnv.HTTPS_PROXY : prevBaseUrl
+  if (reportedPrev !== undefined) {
+    result.prevValue = typeof reportedPrev === 'string' ? reportedPrev : String(reportedPrev)
   }
   // Only what *this* run displaced. A re-attach carries the prior backup on the
   // marker but has nothing new to tell the user about, so it warns about
   // nothing.
   if (warnings.length > 0) result.warnings = warnings
   return result
+}
+
+/**
+ * Reverse every env key a previous attach managed that this one does not.
+ *
+ * This is the detach rule applied mid-attach: a key whose live value is still
+ * the one we wrote is ours to give back (to its recorded prior) or remove; a
+ * key the user has since changed is theirs, and is left alone with a notice.
+ * Without it, switching from base-URL to proxy mode leaves
+ * `ANTHROPIC_BASE_URL` and the two first-party override keys behind, still
+ * pointing Claude Code at the gateway.
+ *
+ * @param {object} args
+ * @param {Record<string, unknown>} args.env the live `env` block, mutated in place
+ * @param {Record<string, unknown> | undefined} args.priorManagedEnv
+ * @param {Record<string, string>} args.managedEnv keys the current mode manages
+ * @param {Record<string, unknown> | undefined} args.priorPrevEnv
+ * @param {Record<string, unknown> | undefined} args.priorMarker
+ * @param {string[]} args.warnings
+ */
+function releaseUnmanagedKeys({ env, priorManagedEnv, managedEnv, priorPrevEnv, priorMarker, warnings }) {
+  if (!priorManagedEnv) return
+  for (const [key, ourValue] of Object.entries(priorManagedEnv)) {
+    if (Object.hasOwn(managedEnv, key)) continue
+    if (!Object.hasOwn(env, key)) continue
+    if (env[key] !== ourValue) {
+      warnings.push(`env.${key} was changed externally; leaving it in place`)
+      continue
+    }
+    /** @type {unknown} */
+    let restore
+    if (priorPrevEnv && Object.hasOwn(priorPrevEnv, key)) {
+      restore = priorPrevEnv[key]
+    } else if (key === 'ANTHROPIC_BASE_URL' && priorMarker && Object.hasOwn(priorMarker, 'prev_base_url')) {
+      restore = priorMarker.prev_base_url
+    }
+    if (restore !== undefined) env[key] = restore
+    else delete env[key]
+  }
 }
 
 /**

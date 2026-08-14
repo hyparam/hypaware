@@ -7,12 +7,19 @@ import {
   getLogger,
 } from '../../../../src/core/observability/index.js'
 
+import {
+  createLeafStore,
+  defaultStateRoot,
+  ensureLocalCa,
+  readLocalCaInfo,
+} from '../../../../src/core/tls/ca.js'
+
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from './control.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'
-import { startProxy } from './proxy.js'
+import { createChainedAgent, startProxy } from './proxy.js'
 import { createRecorder } from './recorder.js'
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -37,12 +44,17 @@ export function createStartSource(state) {
    * @returns {Promise<StartedSource>}
    */
   return async function startAiGatewaySource(ctx) {
-    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} */
+    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} */
     const liveState = {
       rowsWritten: 0,
       exchangeBytes: 0,
       lastError: undefined,
       listenFallbackFrom: undefined,
+      // Set by `prepareInterception` on every (re)launch: what the CA vouches
+      // for, or why there is no CA. Both are things an operator has to be able
+      // to read without grepping the boot log.
+      interception: undefined,
+      interceptionError: undefined,
       // Lives on `liveState`, not on the per-bind closure below, so a
       // config reload (which tears the listener down and builds a fresh
       // recorder) does not erase what this daemon has already seen.
@@ -115,6 +127,23 @@ export function createStartSource(state) {
             // cache read (LLP 0164).
             // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: last-seen entrypoints ride the gateway source's status details
             recent_entrypoints: liveState.entrypoints.snapshot(),
+            // Proxy mode is the difference between a listener that only sees
+            // what a client points at it and one that terminates TLS, so it is
+            // never left to be inferred. The fingerprint and expiry are what a
+            // user checks their client's trusted certificate against.
+            // @ref LLP 0235#ca-lifecycle [implements]: the CA is visible in status, not only in a boot log
+            proxy_mode: Boolean(liveState.interception),
+            ...(liveState.interception
+              ? {
+                ca_fingerprint: liveState.interception.fingerprint,
+                ca_not_after: liveState.interception.notAfter,
+                ca_cert_path: liveState.interception.certPath,
+                intercept_hosts: liveState.interception.hosts,
+              }
+              : {}),
+            ...(liveState.interceptionError
+              ? { proxy_mode_error: liveState.interceptionError }
+              : {}),
           },
         }
         if (!proxy) status.message = 'idle: no upstreams configured, nothing to proxy'
@@ -169,7 +198,7 @@ export function createStartSource(state) {
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
- * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
+ * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
  * @returns {Promise<StartedProxy | undefined>}
  */
 async function launchListener(ctx, state, liveState) {
@@ -292,6 +321,17 @@ async function launchListener(ctx, state, liveState) {
     }
   }
 
+  // Proxy mode: mint the machine-local CA for exactly the hosts the routing
+  // table names, and hand the listener a leaf minter. Built before the bind so
+  // a CA failure surfaces as a source-start error rather than as unexplained
+  // TLS failures once traffic arrives.
+  // @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the CA is constrained to the upstream hosts and nothing else
+  const interception = await prepareInterception(ctx, config, upstreams, liveState)
+
+  // Built once, outside `bind`: the EADDRINUSE fallback calls `bind` twice, and
+  // a second agent would leak a keep-alive pool nothing ever closes.
+  const chainedAgent = config.upstreamProxy ? createChainedAgent(config.upstreamProxy) : undefined
+
   /** @param {string} listen */
   const bind = (listen) => startProxy({
     listen,
@@ -303,6 +343,11 @@ async function launchListener(ctx, state, liveState) {
     // before upstream matching, never proxied, no exchange recorded.
     // @ref LLP 0066#control-path
     onControlRequest: createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log }),
+    log: ctx.log,
+    ...(interception?.hooks ? { interception: interception.hooks } : {}),
+    ...(interception?.tunnelOnly ? { tunnelOnly: true } : {}),
+    ...(config.upstreamProxy ? { upstreamProxy: config.upstreamProxy } : {}),
+    ...(chainedAgent ? { chainedAgent } : {}),
   })
 
   liveState.listenFallbackFrom = undefined
@@ -320,9 +365,111 @@ async function launchListener(ctx, state, liveState) {
   proxy.stop = async () => {
     await recorder.drain(5000)
     await originalStop.call(proxy)
+    // Close the chained agent's keep-alive sockets; a config reload builds a
+    // fresh listener and a fresh agent, so the old one must not keep its pool.
+    chainedAgent?.destroy()
   }
 
   return proxy
+}
+
+/**
+ * Prepare TLS interception when proxy mode is on: ensure a machine-local CA
+ * exists for exactly the hosts the routing table names, and return a leaf
+ * minter for the listener.
+ *
+ * Returns `undefined` when proxy mode is off, which leaves the listener a plain
+ * reverse proxy that refuses CONNECT. Also returns `undefined` (loudly) when
+ * the CA cannot be created: a gateway that still proxies is strictly better
+ * than one that fails to start, and the `hyp status` surface reports the
+ * degraded mode rather than leaving it to be discovered as a TLS error.
+ *
+ * @ref LLP 0233#proxy-mode-is-explicit [implements]
+ * @param {PluginActivationContext} ctx
+ * @param {AiGatewayConfig} config
+ * @param {UpstreamConfig[]} upstreams
+ * @param {{ interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined }} liveState
+ * @returns {Promise<{ hooks?: { secureContextFor: (host: string) => import('node:tls').SecureContext }, tunnelOnly: boolean } | undefined>}
+ */
+async function prepareInterception(ctx, config, upstreams, liveState) {
+  liveState.interception = undefined
+  liveState.interceptionError = undefined
+
+  if (!config.proxyMode) {
+    // Proxy mode is off, but a CA on disk means a client was attached in proxy
+    // mode at some point and may still have `HTTPS_PROXY` pointing here. Serve
+    // blind tunnels so its egress keeps working, and say so loudly: the repair
+    // is a re-attach (or a detach), and nothing else on the machine will
+    // volunteer that.
+    const stale = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
+    if (stale) {
+      liveState.interceptionError = 'proxy_mode is off but a local CA is installed'
+      ctx.log.warn('aigw.proxy_mode_stale_ca', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        ca_cert_path: stale.certPath,
+        reason: 'serving blind tunnels so an already-attached client keeps working; ' +
+          'run `hyp attach claude` to move it back to base-URL mode, or `hyp detach claude`',
+      })
+      return { tunnelOnly: true }
+    }
+    return undefined
+  }
+
+  // Exactly the hosts we will decrypt, and nothing else, so the CA's
+  // nameConstraints and the intercept set cannot drift apart.
+  /** @type {string[]} */
+  const hostList = []
+  for (const u of upstreams) {
+    const host = hostOfBaseUrl(u.base_url)
+    if (host) hostList.push(host)
+  }
+  const hosts = [...new Set(hostList)]
+  if (hosts.length === 0) {
+    liveState.interceptionError = 'no upstream host to intercept'
+    ctx.log.warn('aigw.interception_idle', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      reason: 'proxy_mode is on but no upstream names a host to terminate',
+    })
+    return { tunnelOnly: true }
+  }
+
+  try {
+    const ca = await ensureLocalCa({ stateRoot: defaultStateRoot(ctx.env), hosts })
+    const leaves = createLeafStore(ca)
+    liveState.interception = {
+      fingerprint: ca.fingerprint,
+      hosts: ca.hosts,
+      notAfter: ca.notAfter.toISOString(),
+      certPath: ca.certPath,
+    }
+    ctx.log.info('aigw.interception_ready', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      ca_fingerprint: ca.fingerprint,
+      ca_created: ca.created,
+      ca_not_after: ca.notAfter.toISOString(),
+      intercept_hosts: ca.hosts,
+    })
+    return { hooks: { secureContextFor: (host) => leaves.secureContextFor(host) }, tunnelOnly: false }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    liveState.interceptionError = message
+    ctx.log.error('aigw.interception_unavailable', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      error: message,
+      reason: 'proxy mode is configured but no local CA could be prepared; ' +
+        'serving blind tunnels so client egress keeps working, unrecorded',
+    })
+    return { tunnelOnly: true }
+  }
+}
+
+/** @param {string} baseUrl */
+function hostOfBaseUrl(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -389,7 +536,26 @@ export function mergeUpstreams(configUpstreams, state) {
     if (hasPathPrefix) entry.path_prefix = preset.path_prefix
     if (typeof preset.priority === 'number') entry.priority = preset.priority
     if (hasMatch) entry.match = preset.match
-    if (!merged.has(preset.name)) merged.set(preset.name, entry)
+    const existing = merged.get(preset.name)
+    if (!existing) {
+      merged.set(preset.name, entry)
+      continue
+    }
+    // Operator config still wins the *routing* question (where traffic goes),
+    // but two facts belong to the adapter that registered the preset and are
+    // taken from it whenever config did not state them.
+    //
+    // `record_prefix` is the paths this adapter owns, which is what proxy mode
+    // anchors persistence on. Config's `path_prefix` cannot stand in for it: an
+    // operator writing `path_prefix = "/"` is saying "route everything on this
+    // host to this upstream", not "record everything on this host", and the
+    // `hyp init` preset writes exactly that. Reading the routing prefix as a
+    // record anchor made proxy mode record nothing at all on a default install.
+    // @ref LLP 0234#recording-is-opt-in-per-path [implements]: the record anchor comes from the adapter's preset, not from operator routing config
+    if (hasPathPrefix) existing.record_prefix = preset.path_prefix
+    // Likewise the provider label: a config entry that omits it would otherwise
+    // write unattributed rows.
+    if (!existing.provider && preset.provider) existing.provider = preset.provider
   }
   return Array.from(merged.values())
 }

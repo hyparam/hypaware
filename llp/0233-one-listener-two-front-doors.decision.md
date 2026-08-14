@@ -1,0 +1,86 @@
+# LLP 0233: One listener serves both front doors, and proxy mode is explicit
+
+**Type:** Decision
+**Status:** Accepted
+**Systems:** Gateway, Sources, Config
+**Author:** Phil / Claude
+**Date:** 2026-08-14
+**Related:** LLP 0016, LLP 0114, LLP 0195, LLP 0231
+
+> `CONNECT` tunnels and ordinary origin-form requests are served by the same
+> listener on the same port. Proxy mode is off unless a config explicitly turns
+> it on.
+
+## Context
+
+Claude moves to proxy-mode attach (LLP 0232); Codex stays on base-URL attach,
+because it is a Rust client that will not honour `NODE_EXTRA_CA_CERTS`. Both
+mechanisms therefore have to work at once, on the same machine, against the same
+daemon.
+
+A proxy-mode client reaches the gateway with `CONNECT host:443` rather than an
+origin-form request, so the two mechanisms differ in how a request *arrives*,
+not in what happens to it afterwards.
+
+## Decision
+
+<a id="one-listener-two-front-doors"></a>**Both front doors share one
+listener.** `CONNECT` is handled by a handler installed on the existing HTTP
+server; every other request path is unchanged. A terminated tunnel is handed
+back to the same server with `server.emit('connection', tlsSocket)`, after which
+the normal request handler runs with an ordinary request/response pair and no
+knowledge that a tunnel was involved.
+
+This keeps the fixed default port (LLP 0114) meaning one thing, keeps
+`localEndpoint()` and every status and discovery surface unchanged, and means
+proxy mode reuses the entire recording, projection and write path rather than
+duplicating it. The terminated socket is stamped with the host the client named
+in its `CONNECT`, which is the only new fact the request path needs.
+
+Two mechanical constraints make it work, and both are load-bearing:
+
+- The TLS socket must offer **`http/1.1` only** in ALPN. Claude Code negotiates
+  h2 when it is offered, and the HTTP/1.1 server on the other side of the socket
+  cannot parse an h2 frame: the session would hang rather than fail.
+- The `200 Connection Established` must be written to the raw socket, and any
+  early bytes pushed back onto it, **before** it is wrapped in TLS. Replaying
+  those bytes past the decryption layer corrupts the stream.
+
+<a id="proxy-mode-is-explicit"></a>**Proxy mode is off unless configured on.**
+`proxy_mode = true` in the `ai-gateway` config section is the only thing that
+turns it on. Without it the listener behaves exactly as it always has and a
+`CONNECT` is refused.
+
+Installing a certificate authority and decrypting traffic is a materially larger
+ask than repointing a base URL, so it is never something a config acquires by
+inference, by upgrade, or as a side effect of installing an adapter. This is the
+same "config is explicit" invariant the kernel already holds (LLP 0010).
+
+## Consequences
+
+- Shutdown must destroy hijacked tunnel sockets itself. `server.close()` stops
+  accepting and waits on connections it knows about, and a `CONNECT` socket is
+  no longer one of them, so without this `stop()` blocks until every peer gives
+  up.
+- A gateway with `proxy_mode` on but no upstream host to intercept idles the
+  interception path and says so, rather than binding a CA for nothing. This
+  follows LLP 0195's rule that an empty routing table is a legitimate state that
+  must be visible.
+- If the CA cannot be prepared, the gateway still starts and still reverse
+  proxies; the failure is reported in `hyp status` as `proxy_mode_error` rather
+  than taking capture down. A gateway that still proxies is strictly better than
+  one that refuses to boot, and LLP 0232's attach preflight is what stops a
+  client being pointed at the degraded mode.
+
+<a id="degrade-to-blind-tunnels"></a>**A listener that might have a proxy-mode
+client pointed at it always serves CONNECT, even when it cannot intercept.** An
+attached client sends *all* its egress here, so a listener that refuses CONNECT
+kills its authentication and updates, not just its capture - and refusing is
+what a plain reverse-proxy listener does. Whenever interception is unavailable
+but a CA is on disk (the operator turned `proxy_mode` off, or CA preparation
+failed), the front door is installed in blind-tunnel-only mode. The failure
+degrades to unrecorded-but-working, which is the only failure this feature is
+allowed to have, and the condition is logged and surfaced in status so the
+repair (`hyp attach claude`, or `hyp detach claude`) is discoverable.
+- `hyp status` reports `proxy_mode`, the CA fingerprint, its expiry and the
+  intercepted hosts, so the aperture is readable without grepping a boot log.
