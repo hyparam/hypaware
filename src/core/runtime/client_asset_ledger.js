@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
+import { errCode } from '../util/json_util.js'
 
 /**
  * The record of which client-asset paths HypAware itself wrote, and of what it
@@ -36,6 +37,7 @@ import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
 
 /**
  * @import { Hash } from 'node:crypto'
+ * @import { Stats } from 'node:fs'
  * @import { ClientAssetLedgerRecord } from '../../../src/core/runtime/types.js'
  */
 
@@ -169,9 +171,59 @@ export async function writeClientAssetLedger(stateRoot, records) {
  *   hashed in separate domains.
  */
 export async function digestClientAsset(dest) {
+  return (await inspectClientAsset(dest)).digest
+}
+
+/**
+ * {@link digestClientAsset}, plus the one thing a caller that deletes needs and
+ * a digest alone cannot say: whether "no digest" means the path is **gone** or
+ * merely **unreadable**.
+ *
+ * The two are opposite facts about a retired asset. Gone is the end of the
+ * story: there is nothing to remove and nothing to tell anyone about. Unreadable
+ * (an `EACCES` on a file inside an installed skill, a device error, a directory
+ * whose permissions changed) means the copy is still sitting there, still
+ * model-invocable, and still ours to name later - so its record has to survive
+ * and the user has to hear about it. Collapsing the second into the first drops
+ * the only record naming the path, and the leave-behind becomes permanent and
+ * silent, which is the failure LLP 0219 exists to end.
+ *
+ * Only `ENOENT` counts as gone. Every other errno carries the record forward,
+ * because the safe direction of a wrong guess here is "remove less, report
+ * more".
+ *
+ * The `missing` outcome is scoped to the top-level probe: `fs.stat(dest)` is
+ * its own `try`, and only *that* call's `ENOENT` sets `missing`. A dangling
+ * symlink *at* `dest` is this case: `fs.stat` follows it, finds nothing, and
+ * `ENOENT` is exactly right there. Anything thrown while walking a directory
+ * or reading a file (an `EACCES` three levels into a skill tree, a device
+ * error, a file `readdir` just listed that a concurrent actor removes before
+ * the following `readFile` reaches it) falls into a second, narrower `try`
+ * that always reports `missing: false`, so a failure below `dest` can never
+ * be mistaken for `dest` itself being gone. A dangling symlink *inside* the
+ * tree never reaches either `try`'s error path at all: `hashTree` reads
+ * `Dirent` shape from `readdir` without following the entry, so a symlink
+ * whose target is gone hashes as an opaque `o:` entry by name, the same as
+ * one whose target exists.
+ *
+ * @param {string} dest
+ * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
+ *   only for a path that is not there; a digest is present only when the whole
+ *   asset was read
+ * @ref LLP 0223#unreadable-is-not-absent [implements]: an unreadable asset is
+ *   reported and kept on the books, never read as one that is already gone,
+ *   including when the read failure happens below `dest` rather than at it.
+ */
+export async function inspectClientAsset(dest) {
+  /** @type {Stats} */
+  let stat
+  try {
+    stat = await fs.stat(dest)
+  } catch (err) {
+    return { missing: errCode(err) === 'ENOENT' }
+  }
   const hash = createHash('sha256')
   try {
-    const stat = await fs.stat(dest)
     if (stat.isDirectory()) {
       hash.update('dir\n')
       await hashTree(dest, dest, hash)
@@ -180,9 +232,9 @@ export async function digestClientAsset(dest) {
       hash.update(await fs.readFile(dest))
     }
   } catch {
-    return undefined
+    return { missing: false }
   }
-  return hash.digest('hex')
+  return { digest: hash.digest('hex'), missing: false }
 }
 
 /* ------------------------------- Internals ------------------------------- */

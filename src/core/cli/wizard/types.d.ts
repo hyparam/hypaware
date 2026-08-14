@@ -256,6 +256,14 @@ export interface EvaluateReturningGateOptions {
  */
 export interface ConfigurePhasePicked {
   descriptors: PickerDescriptor[]
+  /**
+   * Picked source ids the existing config already composed before this
+   * run. A `needs_setup` row here was consented to when it was first
+   * picked, so a reconfigure that keeps it must not re-run its
+   * `configure_command` and re-ask (8/13 feedback); the standalone
+   * command stays the finish/repair path.
+   */
+  previouslyConfigured?: string[]
 }
 
 /**
@@ -753,6 +761,12 @@ export interface WizardPickResult {
   retentionDays: number
   /** The picked, locked-filtered descriptors, for the configure phase. */
   descriptors: PickerDescriptor[]
+  /**
+   * Picked ids the existing config already composed (a reconfigure's
+   * carried answers). The configure phase skips `needs_setup` rows in
+   * this set: their setup question was asked when they were first picked.
+   */
+  previouslyConfigured: string[]
   /** Source ids rendered locked in this run (central-layer, LLP 0031). */
   lockedSources: string[]
   /**

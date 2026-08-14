@@ -15,6 +15,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
+import { withSpinner } from './spinner.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -283,9 +284,12 @@ function legacyNumberedPromptFactory(opts) {
 
 /**
  * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **no** (a bare Enter keeps the existing config), so a stray
- * keystroke never destroys a working install. On yes the caller backs
- * the file up before replacing it.
+ * to **yes**: this lands at the end of an attended run, after every
+ * question was answered, so a bare Enter has to complete the run the
+ * user just walked - an enter that silently threw those answers away
+ * read as the wizard failing. It is safe as a yes because nothing is
+ * destroyed either way: the caller backs the file up before replacing
+ * it, and the carried-over list below names what the rewrite keeps.
  *
  * The question says the file is *rewritten from the picks*, not merely
  * "overwritten": the write is a whole-file regeneration, and a user whose
@@ -304,7 +308,8 @@ function legacyNumberedPromptFactory(opts) {
  * `queuedLineAsker` rather than `rl.question`, whose promise is left
  * permanently unsettled at EOF. The unanswerable question falls to the
  * default it prints, which is the same answer a bare Enter gives, so the
- * on-screen `[y/N]` stays the whole contract.
+ * on-screen `[Y/n]` stays the whole contract: EOF completes the run the
+ * same way that Enter does, and the backup is taken either way.
  *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
@@ -326,12 +331,13 @@ export function defaultOverwriteConfirmFactory(opts) {
         '  Carried over: retention window, export destinations, hand-edited\n' +
         '  settings, and plugins the picker does not manage. A backup is kept.\n' +
         '\n' +
-        'Continue? [y/N]: '
+        'Continue? [Y/n]: '
       )
-      // `null` is EOF. Reading it as the empty line keeps one parse for both,
-      // so the default this branch takes cannot drift from the default the
-      // printed question advertises.
-      return /^y(es)?$/i.test((answer ?? '').trim())
+      // Only an explicit no declines; a bare enter (and any stray answer)
+      // proceeds, matching the stated default. `null` is EOF, read as that
+      // same empty line so one parse serves both: the answer a spent stdin
+      // takes cannot drift from the default the printed question advertises.
+      return !/^n(o)?$/i.test((answer ?? '').trim())
     } finally {
       rl.close()
     }
@@ -546,7 +552,10 @@ export function backfillConsentTitle(providers, retentionDays) {
   const list = names.length > 1
     ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
     : (names[0] ?? '')
-  return `Import local ${list} history now (last ${retentionDays} days)?`
+  // "up to", not "last N days": the retention window caps the import, but
+  // each client keeps far less on disk (Claude prunes after ~30 days), so
+  // promising the full window would overstate what the import can deliver.
+  return `Import the ${list} history already on this machine (up to ${retentionDays} days)?`
 }
 
 /**
@@ -1964,13 +1973,16 @@ async function runFinaleBackfill(args) {
         }
         try {
           // Importing local history reads and writes potentially
-          // thousands of rows with no other output. Without this line
-          // the resolved consent frame is the last thing on screen, so a
-          // multi-second import looks like the prompt is stuck. Announce
-          // the work before it starts so the wizard visibly moves on.
+          // thousands of rows with no other output. Without this the
+          // resolved consent frame is the last thing on screen, so a
+          // multi-second import looks like the prompt is stuck. On a TTY
+          // the announce line animates with elapsed time and clears when
+          // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
-          stdout.write(`${startTag}backfill ${provider}: importing local history…\n`)
-          const entry = await backfill.run({ provider, dryRun, retentionDays, until })
+          const entry = await withSpinner(
+            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            () => backfill.run({ provider, dryRun, retentionDays, until })
+          )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
           stdout.write(

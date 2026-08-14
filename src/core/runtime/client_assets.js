@@ -9,6 +9,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { copyDir } from '../util/fs_copy.js'
 import {
   digestClientAsset,
+  inspectClientAsset,
   readClientAssetLedger,
   writeClientAssetLedger,
 } from './client_asset_ledger.js'
@@ -256,7 +257,9 @@ export async function removeClientAssets(dests, baseDirs) {
     if (!isRemovableAsset(dest, baseDirs)) {
       failed.push({
         dest,
-        reason: "resolves outside this client's asset directories; refusing to remove",
+        reason:
+          "resolves outside this client's asset directories, or deeper into them than HypAware " +
+          'writes; refusing to remove',
         retryable: false,
       })
       continue
@@ -301,13 +304,16 @@ export async function removeClientAssets(dests, baseDirs) {
  *    run is contributing to. Destinations are physical paths and two clients
  *    can declare the same asset directory (`claude` and `claude-desktop` both
  *    declare `.claude/skills`), so the check is over the whole run's plan.
- * 3. **It sits strictly inside this client's own asset directories**, checked
- *    here and again by {@link removeClientAssets}, whose input is persisted
- *    JSON either way.
+ * 3. **It is a direct child of one of this client's own asset directories** -
+ *    the exact shape the copy side writes, and no deeper - checked here and
+ *    again by {@link removeClientAssets}, whose input is persisted JSON either
+ *    way.
  * 4. **The bytes are still the bytes we wrote**: the recorded digest matches
  *    what is on disk *now*. No recorded digest is not a match. A mismatch, or
  *    an absence, is the end of the evidence and the removal becomes a report
- *    (LLP 0219 #edited-assets-are-not-ours).
+ *    (LLP 0219 #edited-assets-are-not-ours) - as does a copy we could not read
+ *    at all, which is the one case that is neither a match nor a path that has
+ *    already gone (LLP 0219 #unreadable-is-not-absent).
  *
  * The client scope is taken from what *landed*, not from what was asked for. A
  * run that copied nothing for a client - an empty registry, a `--client` filter
@@ -469,7 +475,8 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   if (!isRemovableAsset(dest, baseDirs)) {
     stderr?.write(
       `warning: recorded ${kind} '${name}' at ${dest} resolves outside ${client}'s asset ` +
-        'directories; refusing to remove it - check the install record\n'
+        'directories, or deeper into them than HypAware writes; refusing to remove it - ' +
+        'check the install record\n'
     )
     getLogger('client-assets').warn('client_assets.prune_refused', {
       [Attr.COMPONENT]: 'client-assets',
@@ -508,10 +515,36 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
     return { carried: record, removed: false, removal }
   }
 
-  const digest = await digestClientAsset(dest)
+  const { digest, missing } = await inspectClientAsset(dest)
   // Already gone (removed by hand, or by an earlier pass whose ledger write
   // lost the race). Nothing to report and nothing left to record.
-  if (!digest) return { carried: undefined, removed: false }
+  if (missing) return { carried: undefined, removed: false }
+
+  // Still there, and we could not read it: an `EACCES` on a file inside the
+  // installed skill, a device error, a directory whose mode changed. Dropping
+  // the record here (which is what reading "no digest" as "already gone" does)
+  // takes away the only thing naming the path, and the copy becomes both
+  // unprunable and unreportable forever - the leave-behind LLP 0219 exists to
+  // end. So the record is carried **verbatim**: no digest is taken of what we
+  // could not read, which keeps a later run's removal gated on the digest
+  // recorded when we wrote the bytes and on nothing this run inferred.
+  // @ref LLP 0223#unreadable-is-not-absent [implements]: unreadable is reported
+  //   and kept, never mistaken for absent.
+  if (!digest) {
+    stderr?.write(
+      `warning: retired ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
+        'still ours; left in place - check its permissions\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_withheld', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'digest_unreadable',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
+  }
 
   // The user's own edit outranks the retirement. Overwriting a *contributed*
   // asset's edits is a documented part of `hyp skills install` (the copy is
@@ -630,20 +663,45 @@ const NO_BASE_DIRS_REASON =
   'no asset directories resolved for this client (no home directory, or none declared); refusing to remove'
 
 /**
- * True when `dest` sits strictly beneath one of `baseDirs`. Strictly: a dest
- * equal to a base is the whole skills (or agents) directory, which no write
- * this module makes can produce, so treating it as removable would only ever
- * honour a corrupted marker.
+ * True when `dest` is a **direct child** of one of `baseDirs`. Strictly a
+ * child: a dest equal to a base is the whole skills (or agents) directory,
+ * which no write this module makes can produce, so treating it as removable
+ * would only ever honour a corrupted record.
+ *
+ * Direct, because every write this module makes is `<base>/<name>` or
+ * `<base>/<name>.md` over a name that registration has already forced to a
+ * single safe segment (`isSafeContributionName`). A record naming anything
+ * deeper is therefore a path we did not write, and admitting it lets one entry -
+ * `<skills>/<a-skill-this-run-is-installing>/subdir` - take a subtree out of a
+ * live asset on no authority but the record's. The removal is recursive, so the
+ * predicate has to be as narrow as the writer.
+ *
+ * The equality term is kept rather than folded into the `dirname` comparison:
+ * `path.dirname('/')` is `'/'`, so a degenerate base would otherwise match
+ * itself, and this predicate is only ever allowed to shrink.
+ *
+ * `isWithinDir` is kept as a conjunct alongside the `dirname` check, not
+ * dropped in its favour: `isWithinDir` refuses on a **prefix** test
+ * (`rel.startsWith('..')`), so a basename beginning with `..`
+ * (`<base>/..stash`) is refused by it even though `path.dirname` alone would
+ * admit it as a direct child. Without the conjunct, a `..`-prefixed
+ * user-authored directory name that the old predicate refused becomes
+ * removable, which is a widening, not the narrowing this predicate exists to
+ * be.
  *
  * @param {string} dest
  * @param {string[]} baseDirs
  * @returns {boolean}
+ * @ref LLP 0223#only-direct-children [implements]: the delete side admits
+ *   exactly the shape the copy side writes, and nothing beneath it, without
+ *   widening what the prefix-based containment check already refused.
  */
 function isRemovableAsset(dest, baseDirs) {
   const resolved = path.resolve(dest)
-  return baseDirs.some(
-    (baseDir) => resolved !== path.resolve(baseDir) && isWithinDir(resolved, baseDir)
-  )
+  return baseDirs.some((baseDir) => {
+    const base = path.resolve(baseDir)
+    return resolved !== base && path.dirname(resolved) === base && isWithinDir(resolved, base)
+  })
 }
 
 /**

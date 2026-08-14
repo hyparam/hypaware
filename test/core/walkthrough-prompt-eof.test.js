@@ -70,10 +70,12 @@ test('overwrite confirm takes its printed default on a stdin that ends without a
   const answer = confirm('/tmp/hypaware.toml')
   stdin.end()
 
-  assert.equal(await settles(answer, 'overwrite confirm at EOF'), false)
+  assert.equal(await settles(answer, 'overwrite confirm at EOF'), true)
   // The question is still printed, byte for byte: the default is taken
-  // because it was advertised, not instead of advertising it.
-  assert.match(stdout.text(), /Continue\? \[y\/N\]: $/)
+  // because it was advertised, not instead of advertising it. That default
+  // is a yes, so a spent stdin completes the run (over a backup) rather
+  // than discarding the answers the walk just collected.
+  assert.match(stdout.text(), /Continue\? \[Y\/n\]: $/)
 })
 
 test('overwrite confirm takes its printed default on a stdin that was already spent', async () => {
@@ -86,16 +88,18 @@ test('overwrite confirm takes its printed default on a stdin that was already sp
   await new Promise((resolve) => setImmediate(resolve))
 
   const confirm = defaultOverwriteConfirmFactory({ stdin: /** @type {any} */ (stdin), stdout: makeBuf() })
-  assert.equal(await settles(confirm('/tmp/hypaware.toml'), 'overwrite confirm on a spent stdin'), false)
+  assert.equal(await settles(confirm('/tmp/hypaware.toml'), 'overwrite confirm on a spent stdin'), true)
 })
 
-test('overwrite confirm still honours an explicit yes', async () => {
+// An explicit `n` rather than an explicit `y`: the default is a yes, so only
+// the decline distinguishes an answered prompt from a defaulted one.
+test('overwrite confirm still honours an explicit no', async () => {
   const stdin = new PassThrough()
   const confirm = defaultOverwriteConfirmFactory({ stdin: /** @type {any} */ (stdin), stdout: makeBuf() })
   const answer = confirm('/tmp/hypaware.toml')
-  stdin.write('y\n')
+  stdin.write('n\n')
 
-  assert.equal(await settles(answer, 'overwrite confirm with an answer'), true)
+  assert.equal(await settles(answer, 'overwrite confirm with an answer'), false)
 })
 
 test('defaults gate takes its stated default on a stdin that ends without a line', async () => {

@@ -69,12 +69,26 @@ export async function runWizardSyncNow(opts) {
         if (opts.interactive === false || !canPrompt) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
+          // The privacy narration above dropped its `hyp sync` sentence on
+          // the expectation this step would offer the release as a choice.
+          // A run that cannot prompt still owes the reader the way out, so
+          // the skip states it instead of asking (LLP 0188 #never-silent).
+          opts.stdout.write('To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n')
           return { asked: false, reason: /** @type {const} */ ('not-interactive') }
         }
 
         const choice = await askSendNow(opts, opts.deadline)
         span.setAttribute('choice', choice)
         if (choice !== NOW) {
+          // Waiting is the default answer, so this is the modal end of an
+          // enrolled run - and it has to restate the way out, because
+          // neither surface that named it survives. The narration above
+          // dropped its `hyp sync` sentence on the strength of this offer,
+          // and the offer's own frame is erased when it resolves
+          // (`clearOnResolve`, the TUI runtime's cleanup). Without this the
+          // run ends with the release verb nowhere on screen.
+          // @ref LLP 0188#never-silent [implements]: a declined release still leaves the standing way out on screen
+          writeStillHeld(opts, opts.deadline)
           return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
         }
 
@@ -108,6 +122,8 @@ export async function runWizardSyncNow(opts) {
       } catch (err) {
         if (isPromptCancelledError(err)) {
           span.setAttribute('choice', WAIT)
+          // An esc is the same wait, and lands in the same erased frame.
+          if (typeof opts.deadline === 'number') writeStillHeld(opts, opts.deadline)
           return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
         }
         span.setAttribute('status', 'error')
@@ -122,7 +138,10 @@ export async function runWizardSyncNow(opts) {
 /**
  * The question. Two rows, waiting first and selected by default, so a stray
  * enter can only ever choose the slower, reversible answer - the same
- * polarity the overwrite confirm and the `hyp sync` prompt itself use.
+ * polarity the `hyp sync` prompt itself uses. The overwrite confirm defaults
+ * the other way now, and for the same reason read from its own side: there a
+ * bare enter commits answers the user just gave to a file that is backed up
+ * either way, where here it would send data off the machine.
  *
  * The rows say what each answer does rather than yes/no: "send now" is the
  * kind of choice a reader should not have to reconstruct from the question.
