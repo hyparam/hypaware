@@ -227,7 +227,7 @@ test('runWizardJoin: prints its position above the joining narration', async () 
     catalog: { pickerDescriptors: new Map(), clientDescriptors: new Map() },
     progress: 'Step 1 of 3 · Join your team',
     runLogin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    waitForConverge: async () => ({ ok: false, attached: [] }),
+    waitForConverge: async () => ({ ok: false }),
   }))
   assert.equal(
     stdout.text().startsWith('Step 1 of 3 · Join your team\nJoining your team...\n'),
@@ -245,7 +245,7 @@ test('runWizardJoin: without a position it narrates exactly as it does today', a
     env: {},
     catalog: { pickerDescriptors: new Map(), clientDescriptors: new Map() },
     runLogin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    waitForConverge: async () => ({ ok: false, attached: [] }),
+    waitForConverge: async () => ({ ok: false }),
   }))
   assert.equal(stdout.text().startsWith('Joining your team...\n'), true, stdout.text())
 })

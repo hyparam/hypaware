@@ -98,6 +98,22 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * Whether the daemon's apply engine has committed a pulled org config: the
+ * active-slot pointer resolves to a slot file. Read-only and safe from any
+ * process, like {@link resolveCentralLayerPath}, but deliberately blind to
+ * the join seed: the seed exists the instant enrollment writes it and names
+ * only the central plugin, so it is evidence of *enrollment*, not of the
+ * org's config having arrived.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {boolean}
+ * @ref LLP 0223 [implements]: the join converge wait's probe - applied slot, never the seed
+ */
+export function hasAppliedCentralConfig({ stateRoot }) {
+  return readActiveSlot(path.join(stateRoot, CONTROL_DIRNAME)) !== null
+}
+
+/**
  * The central-layer file names {@link resolveCentralLayerPath} resolves
  * *through*: the pointer it reads and the files it can name. Their presence
  * is the on-disk evidence that this host has a central layer, independent of

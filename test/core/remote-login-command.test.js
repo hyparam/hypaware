@@ -443,22 +443,49 @@ test('waitForClientAttach swallows a probe that throws mid-poll and still times 
   assert.ok(calls >= 1)
 })
 
-// `waitForCentralConverge` (LLP 0129 #join-before-picker) reuses the login
-// lane's own bounded attach-wait to give the wizard join phase a small
-// `{ ok, attached }` convergence verdict, not a second poll loop.
-test('waitForCentralConverge: an attach is convergence (ok:true with the attached list)', async () => {
+// `waitForCentralConverge` (LLP 0129 #join-before-picker, LLP 0223) polls
+// for the applied org-config slot, so the wizard join phase converges when
+// the config lands even if it attaches no clients on this machine.
+test('waitForCentralConverge: the applied slot is convergence (ok:true)', async () => {
   let calls = 0
-  const probe = /** @type {any} */ (async () => { calls += 1; return calls >= 2 ? ['@hypaware/claude'] : [] })
+  const probe = /** @type {any} */ (async () => { calls += 1; return calls >= 2 })
   const sleep = /** @type {any} */ (async () => {})
   const verdict = await waitForCentralConverge({ env: {}, probe, sleep }, { timeoutMs: 10_000, intervalMs: 1 })
-  assert.deepEqual(verdict, { ok: true, attached: ['@hypaware/claude'] })
+  assert.deepEqual(verdict, { ok: true })
 })
 
-test('waitForCentralConverge: a timeout is the no-org-config steady state (ok:false, empty)', async () => {
-  const probe = /** @type {any} */ (async () => [])
+test('waitForCentralConverge: a timeout is the no-org-config steady state (ok:false)', async () => {
+  const probe = /** @type {any} */ (async () => false)
   const sleep = /** @type {any} */ (async () => {})
   const verdict = await waitForCentralConverge({ env: {}, probe, sleep }, { timeoutMs: 0, intervalMs: 1 })
-  assert.deepEqual(verdict, { ok: false, attached: [] })
+  assert.deepEqual(verdict, { ok: false })
+})
+
+test('waitForCentralConverge: a throwing probe is "not converged this tick", polled to timeout', async () => {
+  let calls = 0
+  const probe = /** @type {any} */ (async () => { calls += 1; throw new Error('EACCES') })
+  const sleep = /** @type {any} */ (async () => {})
+  const verdict = await waitForCentralConverge({ env: {}, probe, sleep }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(verdict, { ok: false })
+  assert.ok(calls >= 1)
+})
+
+// The default probe reads the real on-disk fact (LLP 0223): the active-slot
+// pointer under config-control/ converges; the join seed alone does not.
+test('waitForCentralConverge: default probe converges on the active slot, never the seed', async () => {
+  const hypHome = await tmpHome()
+  const env = { HYP_HOME: hypHome }
+  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+
+  await fs.writeFile(path.join(controlDir, 'seed.json'), '{"version": 2}\n')
+  const seedOnly = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(seedOnly, { ok: false })
+
+  await fs.writeFile(path.join(controlDir, 'config.a.json'), '{"version": 2}\n')
+  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  const applied = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(applied, { ok: true })
 })
 
 test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {
