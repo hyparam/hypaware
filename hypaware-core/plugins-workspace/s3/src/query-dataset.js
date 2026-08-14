@@ -3,7 +3,7 @@
 import { Buffer } from 'node:buffer'
 
 import { parquetMetadataAsync } from 'hyparquet'
-import { parquetDataSource, unionSources, emptySource, withSqlCorrectWhere } from 'hypaware/core/query'
+import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/query'
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
@@ -122,10 +122,7 @@ async function createIcebergDataSource(source, blobStore) {
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
     return emptySource(columnNames(source))
   }
-  // Same repair as the local cache: the remote tier reads through the same
-  // `icebergDataSource`, so it inherits the same NULL-wrong converter and the
-  // same claimed-but-wrong `appliedWhere` (issue #744).
-  return withSqlCorrectWhere(await icebergDataSource({ tableUrl, metadata, resolver, lister }))
+  return icebergDataSource({ tableUrl, metadata, resolver, lister })
 }
 
 /**

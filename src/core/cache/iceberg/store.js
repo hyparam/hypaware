@@ -28,7 +28,6 @@ import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
-import { withSqlCorrectWhere } from '../../query/iceberg-source.js'
 import {
   icebergSchemaForColumns,
   mergeFieldIdsFromTable,
@@ -546,16 +545,6 @@ export function seqValue(raw) {
  * yet or has no committed snapshot: the query layer treats that as
  * an empty table.
  *
- * The source is wrapped so user SQL is judged by the kernel's own WHERE
- * converter. icebird's answers a NULL-literal comparison with `IS NULL`
- * semantics, pushes unguarded inequalities, and complements a negated OR
- * two-valued, and `icebergDataSource` reports `appliedWhere: true` for all
- * three, so without the wrapper the same predicate returns different rows
- * over a cache dataset than over a parquet file (issue #744).
- *
- * @ref LLP 0221#wrapper [implements]: every intrinsic dataset reaches the
- * engine through this seam, so this is where the two backends are made to
- * agree.
  * @param {string} tablePath
  * @returns {Promise<AsyncDataSource | null>}
  */
@@ -565,7 +554,7 @@ export async function dataSourceForTable(tablePath) {
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return null
-  return withSqlCorrectWhere(await icebergDataSource({ tableUrl: url, metadata, resolver, lister }))
+  return icebergDataSource({ tableUrl: url, metadata, resolver, lister })
 }
 
 /**

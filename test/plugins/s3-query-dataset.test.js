@@ -167,13 +167,14 @@ test('iceberg query source with no metadata reads as empty (no throw)', async ()
   assert.deepEqual(rows, [])
 })
 
-// The s3 iceberg branch (`createIcebergDataSource`) wraps its
-// `icebergDataSource` in `withSqlCorrectWhere` the same way the local cache's
-// `dataSourceForTable` does (LLP 0221#wrapper, issue #744), but had no test
-// of its own. This writes a real table through a real BlobStore (local-fs
-// standing in for S3, the same adapter shape `@hypaware/s3` uses) and proves
-// the remote branch is NULL-correct, not just the local one.
-test('iceberg query source is NULL-correct through a real BlobStore round trip (issue #744)', async () => {
+// The s3 iceberg branch (`createIcebergDataSource`) reaches the same
+// `icebergDataSource` the local cache's `dataSourceForTable` does, so it
+// inherits the same pushdown converter (LLP 0222), but it is a lazy dynamic
+// import reached only by s3-configured deployments and had no test of its own.
+// This writes a real table through a real BlobStore (local-fs standing in for
+// S3, the same adapter shape `@hypaware/s3` uses) and proves the remote branch
+// is NULL-correct, not just the local one.
+test('iceberg query source is NULL-correct through a real BlobStore round trip', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-s3-iceberg-'))
   try {
     const blobStore = createLocalFsBlobStore({ baseDir: dir })
@@ -212,6 +213,10 @@ test('iceberg query source is NULL-correct through a real BlobStore round trip (
       ['ts != NULL', []],
       ['ts NOT IN (300, NULL)', []],
       ['ts != 300', [1, 5]],
+      // the typed-literal fold has to reach the remote tier too, or an
+      // s3-backed dataset scans unpruned where the local cache does not
+      ['ts > CAST(300 AS BIGINT)', [5]],
+      ['NOT (ts > CAST(300 AS BIGINT))', [1, 3]],
     ]
     /** @type {string[]} */
     const wrong = []

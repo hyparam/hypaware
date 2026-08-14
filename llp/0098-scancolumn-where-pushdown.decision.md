@@ -6,9 +6,6 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-11
 **Related:** LLP 0054, LLP 0055, LLP 0056, LLP 0097
-**Extended-by:** LLP 0221 (the cache source's `appliedWhere` was claimed for a
-predicate icebird had converted wrong; the wrapper makes the claim honest
-without giving up the pushdown this decision relies on)
 
 > Extends [LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md): the
 > column-stream hook now carries the row predicate and reports applied-hint
