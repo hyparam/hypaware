@@ -1,4 +1,4 @@
-# LLP 0223: The prune predicate narrows to direct children, and unreadable is not absent
+# LLP 0227: The prune predicate narrows to direct children, and unreadable is not absent
 
 **Type:** Decision
 **Status:** Accepted

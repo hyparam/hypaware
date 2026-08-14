@@ -395,7 +395,7 @@ test('a ledger record with no digest at all is withheld and reported', async () 
 })
 
 /*
- * @ref LLP 0223#unreadable-is-not-absent [tests]:
+ * @ref LLP 0227#unreadable-is-not-absent [tests]:
  */
 test('a retired asset that cannot be read is named and kept on the books', async (t) => {
   const { home, env } = await makeHome()
@@ -490,7 +490,7 @@ test('a retired asset that cannot be read is named and kept on the books', async
  * throw `ENOENT` for one specific path the walk is mid-way through - the same
  * error a vanish-between-list-and-read race would produce, without depending
  * on winning one.
- * @ref LLP 0223#unreadable-is-not-absent [tests]:
+ * @ref LLP 0227#unreadable-is-not-absent [tests]:
  */
 test('an ENOENT raised reading inside a retired asset, not at dest itself, is reported as unreadable', async (t) => {
   const { home, env } = await makeHome()
@@ -623,7 +623,7 @@ test('a recorded destination outside the client asset directories is refused out
 })
 
 /*
- * @ref LLP 0223#only-direct-children [tests]:
+ * @ref LLP 0227#only-direct-children [tests]:
  */
 test('a recorded destination deeper than a direct child is refused, digest or no digest', async () => {
   const { home, env } = await makeHome()
@@ -682,7 +682,7 @@ test('a recorded destination deeper than a direct child is refused, digest or no
  * (`path.relative(base, '<base>/..stash')` is the string `'..stash'`, which
  * starts with `'..'`), so `isRemovableAsset` must keep both conjuncts or it
  * widens for exactly this shape of name.
- * @ref LLP 0223#only-direct-children [tests]:
+ * @ref LLP 0227#only-direct-children [tests]:
  */
 test('a recorded destination whose basename begins with ".." is refused, not read as a direct child', async () => {
   const { home, env } = await makeHome()
@@ -727,7 +727,7 @@ test('a recorded destination whose basename begins with ".." is refused, not rea
  * directly: `hyp detach` calls `removeClientAssets` with no digest gate at
  * all, so containment is the only thing standing between a corrupt or
  * malicious marker and a user's files.
- * @ref LLP 0223#only-direct-children [tests]:
+ * @ref LLP 0227#only-direct-children [tests]:
  */
 test('removeClientAssets refuses a basename beginning with ".." on posix and win32 alike', async () => {
   const { home } = await makeHome()

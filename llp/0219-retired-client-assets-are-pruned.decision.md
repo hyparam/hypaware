@@ -6,7 +6,7 @@
 **Author:** Claude
 **Date:** 2026-08-13
 **Related:** LLP 0138 (#one-materializer, #marker-undo: the module this extends and the half-record it left), LLP 0107 (#currency, #reversal: why attach re-runs and what reversal may touch), LLP 0142 (the retirement that is still installed), LLP 0212 (the retirement that motivated #726), LLP 0215 (#not-in-scope: named this gap and deferred it)
-**Extended-by:** LLP 0223 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable)
+**Extended-by:** LLP 0227 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable)
 
 > Extends [LLP 0138](./0138-client-assets-one-install.decision.md), which made
 > one routine own copying client assets and recorded, on the org-driven half
@@ -69,7 +69,7 @@ path, and only while the bytes there are still the bytes it wrote.**
   does not contain it; it is a direct child of that client's own asset
   directories (re-checked by `removeClientAssets`, whose input is persisted
   JSON either way; narrowed from "sits strictly inside" by
-  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  [LLP 0227](./0227-prune-direct-children-and-unreadable-assets.decision.md)
   #only-direct-children); and a digest we recorded for it still matches what
   is on disk.
 
@@ -101,7 +101,7 @@ path, and only while the bytes there are still the bytes it wrote.**
   three above narrows to exactly this shape. That narrowing changes what
   condition three decided rather than merely restating it, so it is recorded
   as its own decision in
-  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  [LLP 0227](./0227-prune-direct-children-and-unreadable-assets.decision.md)
   #only-direct-children, minted from the ship review of
   [#745](https://github.com/hyparam/hypaware/pull/745)
   ([#746](https://github.com/hyparam/hypaware/issues/746) item 1).
@@ -205,7 +205,7 @@ path, and only while the bytes there are still the bytes it wrote.**
 
   "No recorded digest" is a fact about the *record*; "could not be read" is a
   fact about the *candidate itself*, and the two are split apart in
-  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  [LLP 0227](./0227-prune-direct-children-and-unreadable-assets.decision.md)
   #unreadable-is-not-absent.
 
   **The digest separates shapes, not only bytes.** A skill is a directory and a
@@ -241,7 +241,7 @@ path, and only while the bytes there are still the bytes it wrote.**
   that is there but could not be read - and only the first two used to be
   told apart. That distinction changes what "no digest" was read to mean
   rather than merely restating it, so it is recorded as its own decision in
-  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  [LLP 0227](./0227-prune-direct-children-and-unreadable-assets.decision.md)
   #unreadable-is-not-absent, minted from the ship review of
   [#745](https://github.com/hyparam/hypaware/pull/745)
   ([#746](https://github.com/hyparam/hypaware/issues/746) item 2).
