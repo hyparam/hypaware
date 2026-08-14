@@ -12,7 +12,6 @@ import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import {
   clearClientActionMarker,
-  markerRecordsNoEffect,
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
@@ -433,27 +432,20 @@ export async function runLeave(argv, ctx) {
         for (const name of attachedNames) {
           const marker = attachMarkers[name]
           const installedAssets = readInstalledAssets(marker)
-          // A marker that recorded nothing applied no effect; just drop it,
-          // through the same `markerRecordsNoEffect` test the reconciler's own
-          // reverse pass uses, so the two gates cannot drift over a marker
-          // state only one of them was taught about. That is not hypothetical:
-          // this gate asked `status === 'failed'` and was left behind when
-          // LLP 0186 added the terminal `refused` state, even though a refusal
-          // records strictly less than a failure does (it stops before touching
-          // the client's settings at all).
-          //
-          // A `failed` or `refused` marker CAN still name assets: an attach that
-          // went `done` and then re-`perform()`ed unsuccessfully is rewritten
-          // with its `installed_assets` carried forward, and those copies are
-          // still on disk. Such a marker falls through to the normal reversal
-          // below, whichever of the two states it now carries.
-          // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: leave's assetless-drop reads refused the way the reverse gap does
-          if (markerRecordsNoEffect(marker)) {
-            try {
-              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
-            } catch { /* best-effort: a stale marker that undoes nothing is a status blemish */ }
-            continue
-          }
+          // Every marker leave holds goes to the real reversal, whatever status
+          // it carries. There used to be a shortcut here that skipped the
+          // reversal for a marker whose status "recorded nothing" (a `failed`
+          // one with no assets), and it read the status as a proxy for what is
+          // on disk: a marker that reached `done`, wrote the client's settings
+          // and installed no files, then re-`perform()`ed into a `failed` or
+          // `refused` rewrite, is indistinguishable from one that never applied
+          // anything, so the shortcut skipped a settings edit that was still
+          // there (#627 review round 2). The undo reads the client's own file
+          // instead of the marker's status, is idempotent, and reports
+          // `changed: false` when there is nothing to reverse, so running it
+          // over a marker that really did record nothing costs one stat.
+          // Leave's own no-op is quiet (`quietNoop`), which is what made the
+          // shortcut look worth having in the first place.
           const descriptor = descriptors.get(name)
           if (!descriptor) {
             // Plugin's gone, so we cannot replay its undo - do the best we can:
@@ -484,12 +476,19 @@ export async function runLeave(argv, ctx) {
           // visible and tells the user how to retry.
           // @ref LLP 0107#reversal [implements]: leave reverses org-installed
           //   assets through the same core detach the CLI verb uses
+          // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: every marker leave holds takes this undo, which decides what to reverse from the client's own settings file rather than from the marker's status
           try {
             await detachClientViaCore({
               name,
               descriptor,
               dryRun: false,
               json: false,
+              // A sweep, not a request about this client: leave runs the undo
+              // for every marker on disk, so a client with nothing to reverse
+              // must not narrate a settings file the user may never have had.
+              // `hyp detach <client>` keeps saying it, because there the line
+              // is the answer to what the user asked.
+              quietNoop: true,
               ctx,
             })
           } catch (err) {

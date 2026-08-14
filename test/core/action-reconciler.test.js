@@ -9,7 +9,6 @@ import path from 'node:path'
 
 import {
   createActionReconciler,
-  markerRecordsNoEffect,
   readClientActionStatus,
   clearClientActionMarker,
   rearmRefusedActionMarker,
@@ -880,81 +879,4 @@ test('the reverse gap drops an assetless refused marker and reverses one that re
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }
-})
-
-test('markerRecordsNoEffect: an unrecognized status records an effect, so a new marker state routes to the real reversal', () => {
-  // The gates' shared drop test is an ALLOWLIST with a safe default, not a
-  // denylist. Both callers (the reverse gap and `hyp leave`) hand every marker
-  // they might drop to this one predicate, so the direction it defaults in is
-  // the whole anti-drift property: a marker state added after this predicate
-  // was written costs a pointless disk probe (the #627 symptom) instead of a
-  // silent drop over an effect nobody has taught it to recognize yet. The
-  // reverse-gap and leave tests both exercise the two known no-effect states;
-  // nothing but this pins which way the unknown ones fall.
-  // @ref LLP 0138#marker-undo [tests]: an unrecognized status is never grounds
-  //   to drop a marker, because only the marker could name what it recorded
-  for (const status of ['applied', 'reversing', '', 'FAILED', 'Refused']) {
-    assert.equal(
-      markerRecordsNoEffect(
-        /** @type {any} */ ({ status, request_key: 'k' })
-      ),
-      false,
-      `status '${status}' must count as recording an effect`
-    )
-  }
-  // A marker with no status at all (a hand edit, a truncated write) is an
-  // unrecognized status too, not an absent marker.
-  assert.equal(markerRecordsNoEffect(/** @type {any} */ ({ request_key: 'k' })), false)
-})
-
-test('markerRecordsNoEffect: both halves are required, and the asset half reads through readInstalledAssets', () => {
-  // No marker records nothing by construction.
-  assert.equal(markerRecordsNoEffect(undefined), true)
-
-  // The two states that never wrote the handler's effect, with nothing carried.
-  assert.equal(markerRecordsNoEffect({ status: 'failed', request_key: 'k' }), true)
-  assert.equal(markerRecordsNoEffect({ status: 'refused', request_key: 'k' }), true)
-
-  // The status half alone is not enough: a `done` attach that copied no files
-  // still owns the settings edit it wrote.
-  assert.equal(markerRecordsNoEffect({ status: 'done', request_key: 'k' }), false)
-
-  // The asset half alone is not enough either: a marker rewritten from `done`
-  // carries the earlier attach's file list forward, and nothing else on disk
-  // names those copies.
-  assert.equal(
-    markerRecordsNoEffect({ status: 'failed', request_key: 'k', installed_assets: ['/a'] }),
-    false
-  )
-  assert.equal(
-    markerRecordsNoEffect({ status: 'refused', request_key: 'k', installed_assets: ['/a'] }),
-    false
-  )
-
-  // The store is a JSON file a hand edit can malform. An `installed_assets`
-  // that holds no usable path names nothing, so it must not pin a marker open
-  // forever: the same defensive read every other dropper makes.
-  assert.equal(
-    markerRecordsNoEffect({ status: 'failed', request_key: 'k', installed_assets: [] }),
-    true
-  )
-  assert.equal(
-    markerRecordsNoEffect(
-      /** @type {any} */ ({ status: 'refused', request_key: 'k', installed_assets: 'nope' })
-    ),
-    true
-  )
-  assert.equal(
-    markerRecordsNoEffect(
-      /** @type {any} */ ({ status: 'failed', request_key: 'k', installed_assets: ['', null, 7] })
-    ),
-    true
-  )
-  // ... but one usable path among the junk still counts.
-  assert.equal(
-    markerRecordsNoEffect(
-      /** @type {any} */ ({ status: 'failed', request_key: 'k', installed_assets: [null, '/a'] })
-    ),
-    false
-  )
 })

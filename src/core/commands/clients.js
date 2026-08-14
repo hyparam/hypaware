@@ -1058,17 +1058,25 @@ function resolveExpectedGatewayBaseUrl(ctx) {
  * reversal alike - because the read-then-remove lives here, next to the clear,
  * rather than in one caller (LLP 0138 #marker-undo).
  *
+ * `quietNoop` suppresses only the human "nothing to do" line, for the callers
+ * that reverse a whole set of markers rather than the one client a user named:
+ * `hyp leave` runs this over every attach marker on disk, and a client with
+ * nothing left to reverse must not narrate a settings file the user may never
+ * have had (#627). It changes nothing else, and never the `--json` payload,
+ * which carries `changed` for exactly this distinction.
+ *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
+ *   quietNoop?: boolean,
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<void>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quietNoop, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -1125,7 +1133,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             changed: true,
           })
         }
-        writeCoreDetachOutput({ ctx, name, json, result })
+        writeCoreDetachOutput({ ctx, name, json, quietNoop, result })
         const stateRoot = readObservabilityEnv(ctx.env).stateDir
 
         // Retract the attach marker so the CLI undo and the marker store stay in
@@ -1235,6 +1243,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
  *   ctx: CommandRunContext,
  *   name: string,
  *   json: boolean,
+ *   quietNoop?: boolean,
  *   result: {
  *     changed: boolean,
  *     settingsPath?: string,
@@ -1245,7 +1254,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
  *   },
  * }} args
  */
-function writeCoreDetachOutput({ ctx, name, json, result }) {
+function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
   const settingsPath = result.settingsPath
   if (json) {
     /** @type {Record<string, unknown>} */
@@ -1275,7 +1284,12 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
       ctx.stdout.write(`  Restored ${restoredPath} from the marker's malformed-block backup\n`)
     }
     if (result.warning !== undefined) ctx.stdout.write(`  warning: ${result.warning}\n`)
-  } else {
+  } else if (quietNoop !== true) {
+    // `changed: false` from a disk-driven undo means "this client's settings
+    // hold nothing of ours", which is an answer when the user named the client
+    // and noise when a sweep is walking every marker it can find (#627). Only
+    // the sweeps pass `quietNoop`; `hyp detach <client>` still reports, since
+    // this line is the whole of its output on an already-clean client.
     ctx.stdout.write(
       `No HypAware marker found${settingsPath !== undefined ? ` in ${settingsPath}` : ''}; nothing to do.\n`
     )
