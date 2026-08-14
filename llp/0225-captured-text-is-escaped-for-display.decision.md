@@ -1,4 +1,4 @@
-# LLP 0224: captured text is escaped where it is rendered for a person, never where it is rendered for a program
+# LLP 0225: captured text is escaped where it is rendered for a person, never where it is rendered for a program
 
 **Type:** Decision
 **Status:** Accepted

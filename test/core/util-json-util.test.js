@@ -72,22 +72,22 @@ test('errCode extracts string codes and nothing else', () => {
 // hand-written literal. A refactor of a security class has to prove it moved no
 // code point, so this is the literal it replaced, held here as the oracle.
 //
-// @ref LLP 0224#one-vocabulary [tests]: the recomposed class is the same set of code points
-const UNSAFE_LABEL_CHARS_BEFORE_LLP_0224 =
+// @ref LLP 0225#one-vocabulary [tests]: the recomposed class is the same set of code points
+const UNSAFE_LABEL_CHARS_BEFORE_LLP_0225 =
   /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\uFEFF]/
 
-test('sanitizeLabel strips exactly the code points it stripped before LLP 0224', () => {
+test('sanitizeLabel strips exactly the code points it stripped before LLP 0225', () => {
   /** @type {number[]} */
   const disagreements = []
   for (let code = 0; code <= 0xffff; code++) {
     const ch = String.fromCharCode(code)
     const stripped = sanitizeLabel(`a${ch}b`) === 'ab'
-    if (stripped !== UNSAFE_LABEL_CHARS_BEFORE_LLP_0224.test(ch)) disagreements.push(code)
+    if (stripped !== UNSAFE_LABEL_CHARS_BEFORE_LLP_0225.test(ch)) disagreements.push(code)
   }
   assert.deepEqual(disagreements, [])
 })
 
-// @ref LLP 0224#escape-not-strip [tests]: nothing is dropped, and the output is printable ASCII
+// @ref LLP 0225#escape-not-strip [tests]: nothing is dropped, and the output is printable ASCII
 test('escapeForDisplay replaces control characters with visible escapes', () => {
   assert.equal(escapeForDisplay('a\u001b[31mb'), 'a\\u001b[31mb')
   assert.equal(escapeForDisplay('a\nb\rc\td'), 'a\\nb\\rc\\td')
@@ -95,7 +95,7 @@ test('escapeForDisplay replaces control characters with visible escapes', () => 
   assert.equal(escapeForDisplay('a\u2028b\u2029c'), 'a\\u2028b\\u2029c')
 })
 
-// @ref LLP 0224#escape-class [tests]: bidi is escaped, zero-width formatting is not
+// @ref LLP 0225#escape-class [tests]: bidi is escaped, zero-width formatting is not
 test('escapeForDisplay escapes bidi formatting and leaves zero-width formatting alone', () => {
   assert.equal(escapeForDisplay('a\u202eb'), 'a\\u202eb')
   assert.equal(escapeForDisplay('a\u2066b\u2069c'), 'a\\u2066b\\u2069c')

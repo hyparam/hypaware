@@ -147,7 +147,7 @@ function rowBytes(row) {
  * stay byte-exact. Deliberately not a TTY test, so a query redirected to a
  * file holds exactly the bytes its terminal showed.
  *
- * @ref LLP 0224#format-not-tty [implements]: escaping is chosen by format, never by isTTY
+ * @ref LLP 0225#format-not-tty [implements]: escaping is chosen by format, never by isTTY
  *
  * @param {QueryResultSet} result
  * @param {QueryFormat} format
@@ -266,7 +266,7 @@ function inferColumns(rows) {
  * Running it over already-stringified JSON is a no-op for the parts
  * `JSON.stringify` already handled.
  *
- * @ref LLP 0224#decision [implements]: human-facing formats escape, machine formats do not
+ * @ref LLP 0225#decision [implements]: human-facing formats escape, machine formats do not
  *
  * @param {unknown} value
  * @returns {string}
@@ -348,7 +348,7 @@ export function buildQuerySqlOutput(full, opts) {
  * rendered line at a time: the newlines between preview rows are structure
  * this function produced, not captured bytes, and must survive.
  *
- * @ref LLP 0224#decision [constrained-by]: the receipt is a human render, so it escapes
+ * @ref LLP 0225#decision [constrained-by]: the receipt is a human render, so it escapes
  *
  * @param {string} content  the already-rendered file content (sized for the receipt)
  * @returns {string}

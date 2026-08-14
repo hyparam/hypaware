@@ -41,7 +41,7 @@ export const MAX_LABEL_CHARS = 120
 // would be a second chance for the two to disagree about what "unsafe"
 // means.
 //
-// @ref LLP 0224#one-vocabulary: one class, two policies over its named groups
+// @ref LLP 0225#one-vocabulary: one class, two policies over its named groups
 
 //   C0/DEL/C1 and the Unicode line/paragraph separators, so a value can
 //   never move the cursor, erase a line, open an escape sequence, or split
@@ -80,7 +80,7 @@ const UNSAFE_LABEL_CHARS = new RegExp(
 // captured text on a large fraction of real rows, to defend against a
 // character that cannot repaint anything.
 //
-// @ref LLP 0224#escape-class [implements]: display escapes control and bidi, not zero-width
+// @ref LLP 0225#escape-class [implements]: display escapes control and bidi, not zero-width
 const DISPLAY_UNSAFE_CHARS = new RegExp(`[${TERMINAL_CONTROL_CHARS}${BIDI_FORMATTING_CHARS}]`, 'g')
 
 // The three C0 characters an operator reads more easily by name than by code
@@ -163,7 +163,7 @@ export function sanitizeLabel(value, max = MAX_LABEL_CHARS) {
  * newline would cost far more legibility than the ambiguity does. The
  * ambiguity is cosmetic; neither spelling can move a cursor.
  *
- * @ref LLP 0224#escape-not-strip [implements]: the display plane escapes where the label plane strips
+ * @ref LLP 0225#escape-not-strip [implements]: the display plane escapes where the label plane strips
  *
  * @param {string} value
  * @returns {string}

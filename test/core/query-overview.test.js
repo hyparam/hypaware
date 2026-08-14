@@ -1017,7 +1017,7 @@ test('hyp query overview: the usage line lists every flag the codec accepts', as
   }
 })
 
-// @ref LLP 0224#decision [tests]: the overview's captured columns are escaped too
+// @ref LLP 0225#decision [tests]: the overview's captured columns are escaped too
 test('renderOverview escapes captured columns and keeps its own colour', () => {
   const ESC = '\u001b'
   const RLO = '\u202e'

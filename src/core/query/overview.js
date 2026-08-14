@@ -1022,7 +1022,7 @@ function bar(value, max) {
  * bars and headings are painted, so a sweep over the finished table would
  * erase the colour along with the attack.
  *
- * @ref LLP 0224#decision [implements]: the same rule on `hyp query overview`, per captured cell
+ * @ref LLP 0225#decision [implements]: the same rule on `hyp query overview`, per captured cell
  *
  * @param {unknown} value
  * @returns {string}

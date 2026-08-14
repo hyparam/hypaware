@@ -5,8 +5,8 @@
 // halves are asserted here, because the whole decision is that the *format*,
 // and nothing else, picks between them.
 //
-// @ref LLP 0224#decision [tests]: table/markdown escape, json/jsonl stay byte-exact
-// @ref LLP 0224#format-not-tty [tests]: no assertion here touches isTTY, and none needs to
+// @ref LLP 0225#decision [tests]: table/markdown escape, json/jsonl stay byte-exact
+// @ref LLP 0225#format-not-tty [tests]: no assertion here touches isTTY, and none needs to
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
