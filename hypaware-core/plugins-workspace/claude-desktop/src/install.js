@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { buildConsentExplanation, confirmInstall } from './consent.js'
+import { buildConsentExplanation, confirmProceed } from './consent.js'
 import { resolveInputs } from './inputs.js'
 import { buildManagedProfile, renderManagedPreferencesPlist, shellQuote } from './profile.js'
 
@@ -96,13 +96,19 @@ function formatCommand(command) {
  * prompt converges on re-run without repeating completed work
  * (`@ref LLP 0131#idempotent-rerun`).
  *
- * A first run explains what it is about to change and asks, defaulting to
- * no (`@ref LLP 0139#informed-consent`). Because the wizard's configure
- * phase invokes this same command through `ctx.commands.run`, that gate
- * covers the wizard too with no second implementation, and a decline lands
- * on the wizard's existing drop-on-failure path (LLP 0131) which prints the
- * catch-up command. `--yes` accepts in advance; `--print-commands` skips
- * the prompt because it applies nothing.
+ * A first run explains what it is about to change, asks once (defaulting
+ * to yes, `@ref LLP 0139#informed-consent` as amended), and runs.
+ * Reaching this command is already the opt-in - the picker row is never
+ * pre-checked, so it was ticked deliberately, or the command was typed -
+ * but a yes immediately launches the Claude sign-in in a browser on a
+ * machine not yet signed in, and that launch must never be a surprise:
+ * the question stands between the disclosure and the steps and names it.
+ * Because the wizard's configure phase invokes this same command through
+ * `ctx.commands.run`, the gate covers the wizard too with no second
+ * implementation; a decline lands on the wizard's drop-on-failure path
+ * (LLP 0131), which prints the catch-up command. `--yes` accepts in
+ * advance; `--print-commands` skips both disclosure and question because
+ * it prints the steps themselves.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
@@ -142,14 +148,14 @@ export async function runInstall(argv, cmdCtx, opts) {
     return 1
   }
 
-  // Consent is asked once, not on every converged re-run: a machine whose
-  // plist already matches AND whose helper is already written has been
-  // through this prompt, and LLP 0131's idempotent re-run has to stay
-  // cheap enough to use as a repair step. `--print-commands` never asks
-  // because it applies nothing.
+  // The disclosure and its question run once, not on every converged
+  // re-run: a machine whose plist already matches AND whose helper is
+  // already written has been through them, and LLP 0131's idempotent
+  // re-run has to stay cheap enough to use as a repair step.
+  // `--print-commands` skips both because it prints the steps themselves.
   const alreadyConfigured = plistUpToDate(plistPath, computeDesiredPlistContent(inputs))
     && fs.existsSync(inputs.helperPath)
-  if (!printCommands && !assumeYes && !alreadyConfigured) {
+  if (!printCommands && !alreadyConfigured) {
     const residueDir = residueDirPath(cmdCtx.env)
     const explanation = buildConsentExplanation({
       inputs,
@@ -158,9 +164,17 @@ export async function runInstall(argv, cmdCtx, opts) {
       residueDir,
       residuePresent: fs.existsSync(residueDir),
     })
-    if (!(await confirmInstall(cmdCtx, explanation))) {
-      cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp claude-desktop install' when you want to.\n")
-      return 1
+    cmdCtx.stdout.write(`\n${explanation}\n\n`)
+    if (!assumeYes) {
+      // Whether a yes launches the sign-in right away is knowable now, so
+      // the question says it: subscription mode with no live session means
+      // step 1 opens a browser.
+      const signInFirst = opts.credential.mode !== 'org_key'
+        && (await cmdCtx.commands.run('claude-account status', [])) !== 0
+      if (!(await confirmProceed(cmdCtx, { signInFirst }))) {
+        cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp claude-desktop install' when you want to.\n")
+        return 1
+      }
     }
   }
 

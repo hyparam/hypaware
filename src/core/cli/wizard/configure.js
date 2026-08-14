@@ -48,8 +48,16 @@ export async function runConfigurePhase(picked, opts) {
     return { results: [] }
   }
 
+  // A row the existing config already composed is a carried answer, not a
+  // new pick: its setup question was asked the run it was first ticked, so
+  // a reconfigure that keeps it re-runs nothing and re-asks nothing (8/13
+  // feedback - reconfiguring dropped the user into the Desktop sign-in
+  // again). The standalone `hyp <configure_command>` stays the finish and
+  // repair path, and `hyp status` names it when setup is incomplete.
+  const carried = new Set(picked?.previouslyConfigured ?? [])
   const descriptors = (picked?.descriptors ?? []).filter(
     (d) => !!d && d.needsSetup === true && typeof d.configureCommand === 'string' && d.configureCommand.length > 0
+      && !carried.has(d.id)
   )
 
   /** @type {ConfigurePhaseEntryResult[]} */

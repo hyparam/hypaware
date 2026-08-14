@@ -90,6 +90,29 @@ every file that changes.
 > Read "the picker tick is the consent point" below as scoped to live
 > capture; history is gated separately, by transcript-entrypoint ownership.
 
+> **Amended 2026-08-13.** The explanation stands and the question stays,
+> but it flips to defaulting to yes and now names its consequence. By the
+> time this command runs the user has already opted in: the picker row is
+> never pre-checked (detection only labels it, per the 2026-08-13 seeding
+> change), so it was ticked deliberately - or the command itself was
+> typed - which is why the old no-default read as the install
+> second-guessing a choice the picker had just recorded (8/12 onboarding
+> feedback). The question cannot be removed outright, though: a yes on a
+> signed-out machine immediately launches the Claude OAuth flow in a
+> browser, and a run that jumps into an auth flow with nothing standing
+> in front of it reads as the machine acting on its own (8/13 feedback,
+> from the build that briefly shipped without the prompt). So one
+> question stands between the disclosure and the steps, defaults to yes,
+> and says "the first step opens the Claude sign-in in your browser"
+> when that is what a yes does next. `--yes` accepts in advance;
+> `--print-commands` skips disclosure and question both; an
+> already-configured machine sees neither. And the question is asked for
+> a *new pick* only: the wizard's configure phase skips a `needs_setup`
+> row the existing config already composed (a reconfigure's carried
+> answer), so reconfiguring an unrelated setting never re-opens Desktop
+> setup - `hyp claude-desktop install` stays the finish and repair path,
+> and `hyp status` names it while setup is incomplete.
+
 This is a better gate than the exclusion list was, for three reasons.
 First, the acquisition of a credential was already attended: step 1 of
 `install` runs `claude-account login` interactively and refuses outright
@@ -108,7 +131,16 @@ path, so it composes `subscription`. `org_key` is fleet policy and arrives
 through the central layer on `hyp join`, never through the picker
 ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
 
-<a id="default-no"></a>**The prompt defaults to no**, unlike the backfill
+<a id="default-no"></a>> **Amended 2026-08-13: the prompt now defaults to
+> yes.** The opt-in this default protected has moved upstream - the row
+> is never pre-checked, so a user at this prompt chose to be here - and
+> the root escalation still cannot happen without the sudo password. What
+> survives of this section is its non-answer rule, unchanged: a cancel,
+> an absent stdin, and a stdin that ends without a line all decline with
+> the hint, and EOF resolves rather than hanging. Only an explicit no
+> declines; only a real enter is a yes. The original text is kept below.
+
+**The prompt defaults to no**, unlike the backfill
 consent prompt, which defaults to yes. Backfill reads local files this
 machine already has; this acquires a credential, escalates to root, and
 writes a file outside the user's home. A bare enter must not do any of
@@ -212,7 +244,8 @@ adapter has to name its own setup command, or the repair we print answers
 ## Consequences
 
 - Ticking Claude Desktop in `hyp init` now works end to end: compose,
-  explain, confirm, login, helper, residue, plist, restart.
+  explain, confirm, login, helper, residue, plist, restart. *(Amended
+  2026-08-13: the confirm defaults to yes and names the sign-in launch.)*
 - Declining leaves `@hypaware/claude-account` and
   `@hypaware/claude-desktop` in the written config with no credential and
   no plist. That is the converging state, not a broken one: the re-run

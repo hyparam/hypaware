@@ -45,10 +45,11 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 /**
  * Label suffix for a `needs_setup` row listed on a defaults gate. Such a
  * row reaches the gate only off a recorded answer (the config on disk, or
- * this run's own confirmed selection - detection never seeds one), and its
- * configure phase will still ask its own consent question later. Saying so
- * on the gate is what keeps "record all of these" from promising a row
- * that a later screen then re-negotiates.
+ * this run's own confirmed selection - detection never seeds one). Its
+ * extra setup (a sign-in, a sudo prompt) runs when it is newly picked;
+ * a reconfigure's carried row is not re-asked. Saying so on the gate is
+ * what keeps "record all of these" from reading as if enter alone
+ * finished the job.
  */
 export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
 
@@ -136,11 +137,10 @@ export async function resolvePickSeeding(opts) {
   }
 
   // A `needs_setup` row never seeds from detection: its configure phase
-  // asks again later (Claude Desktop's consent gate, defaulting to no),
-  // so pre-checking it had the defaults gate say "record all of these"
-  // and the configure phase then talk the user back out of one of them.
-  // Detection still labels the row `· detected`; it arrives unchecked and
-  // checking it is the deliberate opt-in the later consent screen expects.
+  // runs a sign-in and a sudo write later (Claude Desktop), and checking
+  // the row is the opt-in those steps rest on - so it must be the user's
+  // deliberate tick, never a probe's guess pre-checked on their behalf.
+  // Detection still labels the row `· detected`; it arrives unchecked.
   // The other seed tiers are a user's recorded answer, so they keep it.
   // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a suggestion; a row whose setup asks for a credential is not even that
   const detectedSeed = new Set(
@@ -437,6 +437,12 @@ export async function runWizardPick(opts) {
     .map((id) => descriptors.get(id))
     .filter((d) => d !== undefined)
 
+  // The picked ids this run carried forward rather than newly checked: on
+  // a reconfigure the config on disk is the record of an earlier run's
+  // answers, and the configure phase reads this to avoid re-running a
+  // needs_setup row's setup question for an answer already given.
+  const previouslyConfigured = configured ? sources.filter((id) => configured.has(id)) : []
+
   await withSpan(
     'wizard.pick.finish',
     {
@@ -464,6 +470,7 @@ export async function runWizardPick(opts) {
     retentionDays,
     descriptors: pickedDescriptors,
     lockedSources,
+    previouslyConfigured,
     ...(opts.deferWrite ? { configPending: true } : {}),
   }
 }
@@ -785,6 +792,7 @@ async function cancelledResult(opts) {
     retentionDays: DEFAULT_RETENTION_DAYS,
     descriptors: [],
     lockedSources: [],
+    previouslyConfigured: [],
   }
 }
 
@@ -828,6 +836,7 @@ async function backResult(opts) {
     retentionDays: DEFAULT_RETENTION_DAYS,
     descriptors: [],
     lockedSources: [],
+    previouslyConfigured: [],
   }
 }
 
@@ -871,5 +880,6 @@ async function overwriteAbortedResult(args) {
     retentionDays: args.retentionDays,
     descriptors: [],
     lockedSources: args.lockedSources,
+    previouslyConfigured: [],
   }
 }
