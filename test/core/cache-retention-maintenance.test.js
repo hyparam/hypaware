@@ -926,6 +926,58 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
   }
 })
 
+// @ref LLP 0220#walk-survives-a-partition [tests]: a rebaseline is a cursor
+// write with no rewrite behind it, and `writeCursor` can throw same as any
+// other write in this loop. `r.rebaselined` must not be set until that write
+// has actually landed, or a tick that lost this partition would still print
+// "rebaselined" and count it in `totalRebaselined` for a cursor that never
+// changed (round-1 review finding 2).
+test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace-write-fail')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same stale-baseline cursor as the passing recognition test: this is
+    // the fixture that would otherwise re-baseline cleanly.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // `writeCursor` writes `cursor.json` directly into the partition dir,
+    // so making the dir read-only fails exactly that write and nothing
+    // upstream of it (the read of the epoch dir's own metadata is
+    // unaffected).
+    await fs.chmod(partDir, 0o555)
+    try {
+      const report = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(report.partitions[0].failed, true, 'fixture invariant: the cursor write must fail')
+      assert.notEqual(
+        report.partitions[0].rebaselined, true,
+        'a rebaseline that never landed on disk must not be reported as one'
+      )
+      assert.equal(report.totalRebaselined, 0, 'an unpersisted rebaseline must not be counted')
+    } finally {
+      await fs.chmod(partDir, 0o755)
+    }
+
+    // The cursor on disk still carries the pre-rebaseline baseline: the
+    // write failure must not have partially landed.
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction)
+    assert.equal(compaction.resettleBaselineFiles, 99)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('foreign sorted replace recognition works on the source-table layout', async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-source')
   try {
