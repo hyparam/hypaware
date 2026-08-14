@@ -43,6 +43,16 @@ import {
 export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 
 /**
+ * Label suffix for a `needs_setup` row listed on a defaults gate. Such a
+ * row reaches the gate only off a recorded answer (the config on disk, or
+ * this run's own confirmed selection - detection never seeds one), and its
+ * configure phase will still ask its own consent question later. Saying so
+ * on the gate is what keeps "record all of these" from promising a row
+ * that a later screen then re-negotiates.
+ */
+export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
+
+/**
  * Everything the pick lane decides *before* it asks anything: the ordered
  * descriptors, the locked set, the config on disk, the detection pass, and
  * the seed those three produce (LLP 0183 #seed-from-config, LLP 0191
@@ -234,7 +244,14 @@ export async function resolvePickSeeding(opts) {
  * @returns {string[]}
  */
 export function defaultRowLabels({ defaultRows, lockedSet }) {
-  return defaultRows.map((d) => `  ${d.label}${lockedSet.has(d.id) ? LOCKED_LABEL_SUFFIX : ''}`)
+  // Locked wins when both apply: a fleet-managed row's config is the org's,
+  // and stacking both suffixes buys length, not clarity.
+  return defaultRows.map((d) => {
+    const suffix = lockedSet.has(d.id)
+      ? LOCKED_LABEL_SUFFIX
+      : d.needsSetup === true ? NEEDS_SETUP_LABEL_SUFFIX : ''
+    return `  ${d.label}${suffix}`
+  })
 }
 
 /**

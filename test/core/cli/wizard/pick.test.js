@@ -184,6 +184,28 @@ test('runWizardPick: the defaults gate omits a detected needs_setup row, and acc
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
+// A needs_setup row can still reach the gate off a recorded answer (a config
+// already composing it, or this run's own confirmed selection on a re-entry).
+// There the gate keeps it but says the part that is coming: its configure
+// phase will ask its own consent question later.
+test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extra-setup suffix', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(),
+    initialSelection: ['codex', 'claude-desktop'],
+  }))
+  assert.ok(
+    state.question.items.some((/** @type {string} */ i) => /Claude Desktop · needs extra setup/.test(i)),
+    'the gate names the consent still to come'
+  )
+  assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
+})
+
 // --- the defaults gate (LLP 0190 #pick-gate) ---
 // @ref LLP 0190#pick-gate [tests]: the gate exists only when detection or the
 // org's locked set leaves something worth confirming, and accepting it must
