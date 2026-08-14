@@ -210,7 +210,7 @@ export async function digestClientAsset(dest) {
  * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
  *   only for a path that is not there; a digest is present only when the whole
  *   asset was read
- * @ref LLP 0223#unreadable-is-not-absent [implements]: an unreadable asset is
+ * @ref LLP 0226#unreadable-is-not-absent [implements]: an unreadable asset is
  *   reported and kept on the books, never read as one that is already gone,
  *   including when the read failure happens below `dest` rather than at it.
  */
