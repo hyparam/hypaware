@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-22
 **Related:** LLP 0011, LLP 0031, LLP 0058, LLP 0063, LLP 0128
-**Extended-by:** [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md) (§returning-gate below: the managed machine's separate scoped row and `'scoped'` pathway are withdrawn in favour of one `Reconfigure` for every machine; being managed now only pre-locks the org's picker rows); [LLP 0211](./0211-fork-copy-collect-first.decision.md) (§fork below: the fork's copy is re-worded to lead with what gets collected, shared listed first with per-row summaries, and an intro line explaining the product precedes it; the fork's mechanics and quit default are unchanged)
+**Extended-by:** [LLP 0182](./0182-one-reconfigure-for-every-machine.decision.md) (§returning-gate below: the managed machine's separate scoped row and `'scoped'` pathway are withdrawn in favour of one `Reconfigure` for every machine; being managed now only pre-locks the org's picker rows); [LLP 0211](./0211-fork-copy-collect-first.decision.md) (§fork below: the fork's copy is re-worded to lead with what gets collected, shared listed first with per-row summaries, and an intro line explaining the product precedes it; the fork's mechanics and quit default are unchanged); [LLP 0223](./0223-converge-on-applied-config.decision.md) (§join-before-picker below: the bounded wait no longer reuses the login lane's reconcile-wait - it polls the applied org-config slot, so a config that attaches no clients still converges; budget and timeout fallback unchanged)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on
 > acceptance. Amends [LLP 0011](./0011-setup-and-onboarding.decision.md):

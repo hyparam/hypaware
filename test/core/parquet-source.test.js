@@ -84,6 +84,38 @@ async function makeSource() {
   return parquetDataSource(file, metadata)
 }
 
+// `at` is nullable on purpose. Eleven shipped `ColumnSpec`s are nullable
+// TIMESTAMP, `logs.timestamp` and `traces.startTimestamp` among them, and a
+// non-null fixture cannot see whether a folded bound leaks NULL rows past a
+// filter the engine will not re-check.
+/** @type {ColumnSpec[]} */
+const TIMESTAMP_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'at', type: 'TIMESTAMP', nullable: true },
+]
+
+// Two days either side of the 2026-08-11 window the day-bound tests select, so
+// a bound that silently matched everything (or nothing) is visible, plus a NULL
+// that SQL excludes from every bound.
+const TIMESTAMP_ROWS = [
+  { id: 1, at: '2026-08-10T23:59:59Z' },
+  { id: 2, at: '2026-08-11T00:00:00Z' },
+  { id: 3, at: '2026-08-11T23:59:59Z' },
+  { id: 4, at: '2026-08-12T00:00:00Z' },
+  { id: 5, at: null },
+]
+
+/**
+ * @returns {Promise<AsyncDataSource>}
+ */
+async function makeTimestampSource() {
+  const columnData = rowsToColumnSources(TIMESTAMP_COLUMNS, TIMESTAMP_ROWS)
+  const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
+  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const metadata = await parquetMetadataAsync(file)
+  return parquetDataSource(file, metadata)
+}
+
 /**
  * Same, over `NULLABLE_ROWS`.
  *
@@ -116,30 +148,37 @@ async function run(source, query) {
 
 // --- pushdown conversion -----------------------------------------------------
 
-test('whereToParquetFilter converts simple comparisons (integers coerced to bigint)', () => {
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 3')), { id: { $eq: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id > 3')), { id: { $ne: null, $gt: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id <= 3')), { id: { $ne: null, $lte: 3n } })
+// Integer literals stay plain numbers: hyparquet >= 1.28.2 compares them to
+// bigint-decoded INT64 columns through `equals()`, and its bloom hashing
+// rejects a bigint for INT32/FLOAT/DOUBLE, so coercing would cost pruning.
+// Relational bounds push bare: 1.28.2's matchFilter rejects null cells in
+// $lt/$lte/$gt/$gte, so no guard is needed (LLP 0222).
+test('whereToParquetFilter converts simple comparisons', () => {
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 3')), { id: { $eq: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id > 3')), { id: { $gt: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id <= 3')), { id: { $lte: 3 } })
   assert.deepEqual(whereToParquetFilter(whereOf("SELECT * FROM t WHERE name = 'bob'")), { name: { $eq: 'bob' } })
 })
 
 test('whereToParquetFilter mirrors flipped operands (literal on the left)', () => {
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 < id')), { id: { $ne: null, $gt: 3n } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 >= id')), { id: { $ne: null, $lte: 3n } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 < id')), { id: { $gt: 3 } })
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE 3 >= id')), { id: { $lte: 3 } })
 })
 
 test('whereToParquetFilter handles AND / OR / NOT', () => {
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id >= 2 AND id <= 4')),
-    { $and: [{ id: { $ne: null, $gte: 2n } }, { id: { $ne: null, $lte: 4n } }] }
+    { $and: [{ id: { $gte: 2 } }, { id: { $lte: 4 } }] }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = 1 OR id = 2')),
-    { $or: [{ id: { $eq: 1n } }, { id: { $eq: 2n } }] }
+    { $or: [{ id: { $eq: 1 } }, { id: { $eq: 2 } }] }
   )
+  // $ne is true on a null cell in hyparquet (MongoDB semantics), so it is the
+  // one comparison that carries a null guard
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1)')),
-    { $and: [{ id: { $ne: null } }, { id: { $ne: 1n } }] }
+    { $and: [{ id: { $ne: null } }, { id: { $ne: 1 } }] }
   )
   // De Morgan: NOT (a OR b) -> $and of the negated children, never `$nor`,
   // whose two-valued complement matches the rows its children left UNKNOWN
@@ -147,24 +186,58 @@ test('whereToParquetFilter handles AND / OR / NOT', () => {
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 1 OR id = 2)')),
     {
       $and: [
-        { $and: [{ id: { $ne: null } }, { id: { $ne: 1n } }] },
-        { $and: [{ id: { $ne: null } }, { id: { $ne: 2n } }] },
+        { $and: [{ id: { $ne: null } }, { id: { $ne: 1 } }] },
+        { $and: [{ id: { $ne: null } }, { id: { $ne: 2 } }] },
       ],
     }
   )
 })
 
 test('whereToParquetFilter handles IN / NOT IN / IS NULL', () => {
+  // $in never matches a null cell, so it pushes bare; $nin, like $ne, is
+  // true on one, so it carries the guard
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, 2)')),
-    { id: { $ne: null, $in: [1n, 2n] } }
+    { id: { $in: [1, 2] } }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, 2)')),
-    { id: { $ne: null, $nin: [1n, 2n] } }
+    { $and: [{ id: { $ne: null } }, { id: { $nin: [1, 2] } }] }
   )
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NULL')), { name: { $eq: null } })
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NOT NULL')), { name: { $ne: null } })
+})
+
+// The regression that motivated LLP 0222: squirreling parses a typed literal
+// as a cast over a string, and requiring a bare literal operand made every
+// timestamp-bounded predicate convert to undefined and prune nothing.
+test('whereToParquetFilter folds typed literals (TIMESTAMP casts)', () => {
+  assert.deepEqual(
+    whereToParquetFilter(whereOf("SELECT * FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z'")),
+    { at: { $gte: new Date('2026-08-11T00:00:00Z') } }
+  )
+  // AND is all-or-nothing, so a day window only converts if both sides do
+  assert.deepEqual(
+    whereToParquetFilter(whereOf(
+      "SELECT * FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z' AND at < TIMESTAMP '2026-08-12T00:00:00Z'"
+    )),
+    {
+      $and: [
+        { at: { $gte: new Date('2026-08-11T00:00:00Z') } },
+        { at: { $lt: new Date('2026-08-12T00:00:00Z') } },
+      ],
+    }
+  )
+  // A cast the engine would evaluate to null must not become a filter
+  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE at >= TIMESTAMP 'not-a-day'")), undefined)
+})
+
+// Unwrapping a cast at boolean position is only sound when the cast preserves
+// truthiness. CAST(<bool> AS TEXT) yields 'false', which is truthy, so pushing
+// the bare comparison down would drop rows the query selects.
+test('whereToParquetFilter only unwraps truthiness-preserving casts', () => {
+  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE CAST(id = 1 AS INT)')), { id: { $eq: 1 } })
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE CAST(id = 1 AS TEXT)')), undefined)
 })
 
 test('whereToParquetFilter returns undefined for non-convertible predicates', () => {
@@ -174,23 +247,37 @@ test('whereToParquetFilter returns undefined for non-convertible predicates', ()
   assert.equal(whereToParquetFilter(undefined), undefined)
 })
 
-test('whereToParquetFilter handles predicates whose SQL result is always UNKNOWN', () => {
-  // Comparison against a NULL literal never matches a row, not even a NULL
-  // one, and `NOT UNKNOWN` is still UNKNOWN, so the whole family pushes
-  // `$in: []`, hyparquet's never-match. Declining instead would hand the
-  // predicate to squirreling's two-valued WHERE, which returns every row for
-  // the negated shapes (issue #734).
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id != NULL')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id < NULL')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NULL >= id')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = NULL)')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT NOT (id = NULL)')), { id: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name LIKE NULL')), { name: { $in: [] } })
-  assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (name LIKE NULL)')), { name: { $in: [] } })
-  // NOT IN over a list containing NULL matches no row either: `$in: []` is
-  // hyparquet's never-match, and pushing it beats declining, whose fallback
-  // (squirreling's two-valued WHERE) returns rows.
+test('whereToParquetFilter declines NULL-literal comparisons to the engine', () => {
+  // A comparison against a NULL literal is UNKNOWN for every row. icebird
+  // declines it rather than pushing a filter ({$eq: null} would mean IS NULL
+  // to hyparquet), and squirreling >= 0.15.3 answers the fallback with
+  // three-valued logic, so the negated shapes that issue #734 caught
+  // returning every row now correctly return none (asserted end to end
+  // below).
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id != NULL')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id < NULL')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NULL >= id')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = NULL)')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id + 1 = NULL)')), undefined)
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id + NULL')), undefined)
+  // Literal versus literal: no column to key a filter on, so this declines
+  // for lack of a column rather than for the NULL-literal reason above.
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (NULL = 1)')), undefined)
+  // Same NULL-literal branch as the arithmetic case above: the operator is
+  // never consulted, since a NULL literal opposite a bare column declines
+  // first.
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name || NULL')), undefined)
+  // ...and a value expression declines on the operator even without a NULL.
+  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE name || 'x'")), undefined)
+  // A declined conjunct collapses the surrounding tree to the engine too
+  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL OR id = 3')), undefined)
+})
+
+test('whereToParquetFilter handles NULL members of an IN list', () => {
+  // NOT IN over a list containing NULL matches no row: FALSE on a listed
+  // value, UNKNOWN everywhere else, and no negation rescues an UNKNOWN.
+  // `$in: []` is hyparquet's never-match and prunes every row group.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, NULL)')),
     { id: { $in: [] } }
@@ -199,50 +286,21 @@ test('whereToParquetFilter handles predicates whose SQL result is always UNKNOWN
   // it is dropped: same rows, and the leaf keeps its statistics pruning.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, NULL)')),
-    { id: { $ne: null, $in: [1n] } }
+    { id: { $in: [1] } }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (NULL)')),
-    { id: { $ne: null, $in: [] } }
+    { id: { $in: [] } }
   )
-})
-
-test('whereToParquetFilter pushes never-match only where the shape proves it', () => {
-  // A comparison against a non-NULL literal keeps its ordinary filter: the
-  // never-match is for UNKNOWN-for-every-row, not for "has a NULL somewhere".
-  assert.deepEqual(
-    whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id = 3)')),
-    { $and: [{ id: { $ne: null } }, { id: { $ne: 3n } }] }
-  )
-  // A never-match leaf composes: it zeroes an AND and leaves an OR to its
-  // sibling, which is what Kleene logic says (UNKNOWN AND x is never TRUE,
-  // UNKNOWN OR x is TRUE exactly where x is).
-  assert.deepEqual(
-    whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL OR id = 3')),
-    { $or: [{ id: { $in: [] } }, { id: { $eq: 3n } }] }
-  )
-  // The NULL literal has to sit opposite a plain column. Against an
-  // expression there is no leaf to name, and against another literal there is
-  // no column at all, so both keep declining.
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (id + 1 = NULL)')), undefined)
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (NULL = 1)')), undefined)
-  // The branch is for predicates, not values: an arithmetic or concat
-  // expression against a NULL literal still declines even though its column
-  // is a bare identifier.
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id + NULL')), undefined)
-  assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name || NULL')), undefined)
-  // ...and a negated LIKE over a real pattern stays declined (and, on a
-  // nullable column, stays SQL-wrong until the engine speaks three-valued
-  // logic: issue #734, option 1).
-  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE NOT (name LIKE 'a%')")), undefined)
 })
 
 // --- NULL rows must not leak past a pushed-down filter ------------------------
 
 // @ref LLP 0098 [tests]: the scan claims `appliedWhere` for
-// every convertible predicate, so the engine never re-filters. hyparquet
-// evaluates a bare bound with raw JS comparison, where `null <= 300n` is true,
-// so an unguarded filter is a silent wrong answer rather than an error.
+// every convertible predicate, so the engine never re-filters, and a filter
+// that disagrees with SQL on null cells is a silent wrong answer rather than
+// an error. hyparquet >= 1.28.2 rejects null cells in bare relational bounds;
+// $ne and $nin need the converter's explicit guard.
 test('pushed-down comparisons do not leak NULL rows (issue #728)', async () => {
   /** @type {[string, number[]][]} */
   const cases = [
@@ -303,12 +361,11 @@ test('comparison against a NULL literal matches no rows (issue #728)', async () 
   assert.deepEqual(await mismatches(cases), [])
 })
 
-// A predicate the converter declines falls back to squirreling's WHERE, which
-// is two-valued: a comparison with a NULL operand is FALSE rather than
-// UNKNOWN, and unary NOT is JS `!`, so `NOT <UNKNOWN>` comes back TRUE. Every
-// negation of a NULL-literal comparison therefore returned rows SQL excludes.
-// These shapes are UNKNOWN for every row whatever the negation depth, so the
-// converter pushes hyparquet's never-match instead of declining.
+// A NULL-literal comparison is UNKNOWN for every row whatever the negation
+// depth. The converter declines these shapes, and the decline is only safe
+// because squirreling >= 0.15.3 evaluates WHERE with three-valued logic:
+// its old two-valued NOT flipped UNKNOWN to TRUE and returned every row for
+// exactly these predicates (issue #734).
 test('negated comparisons against a NULL literal match no rows (issue #734)', async () => {
   /** @type {[string, number[]][]} */
   const cases = [
@@ -370,6 +427,7 @@ test('predicates that are not always-UNKNOWN keep their ordinary handling (issue
     ["label LIKE 'a%'", [1]],
     ["label LIKE 'a%' OR ts > 300", [1, 5]],
     ["NOT (label LIKE 'a%') AND ts IS NOT NULL", [3, 5]],
+    ["NOT (label LIKE 'a%')", [3, 5]],
   ]
   assert.deepEqual(await mismatches(cases), [])
 })
@@ -537,6 +595,44 @@ test('range WHERE (AND) returns the inclusive window', async () => {
   const source = await makeSource()
   const rows = await run(source, 'SELECT id FROM t WHERE id >= 2 AND id <= 4')
   assert.deepEqual(rows.map((r) => Number(r.id)), [2, 3, 4])
+})
+
+// A converted predicate sets appliedWhere, so the engine does NOT re-filter:
+// a folded literal that compares wrongly against the decoded column would
+// silently drop rows rather than merely lose pruning. This is the check that
+// the TIMESTAMP fold is safe end to end, not just well-shaped.
+test('timestamp day bounds filter correctly through the pushed-down scan', async () => {
+  const source = await makeTimestampSource()
+  const rows = await run(
+    source,
+    "SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z' AND at < TIMESTAMP '2026-08-12T00:00:00Z'"
+  )
+  // id 5 is the NULL row: UNKNOWN against both bounds, so SQL excludes it
+  assert.deepEqual(rows.map((r) => Number(r.id)), [2, 3])
+})
+
+// The rows above come out right whether or not the bound is pushed down, since
+// an unconverted predicate leaves `appliedWhere` false and the engine filters
+// to the same answer. Pushing it down is the entire point of folding the typed
+// literal, so assert the claim itself: without this, an upstream regression
+// that stopped folding `TIMESTAMP '...'` would keep the suite green and
+// silently give back the scan time.
+test('a folded timestamp bound is actually pushed down, not left to the engine', async () => {
+  const source = await makeTimestampSource()
+  const scan = source.scan({
+    columns: ['id'],
+    where: whereOf("SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-11T00:00:00Z'"),
+  })
+  assert.equal(scan.appliedWhere, true)
+})
+
+test('a timestamp bound matching no rows returns none (and one matching all returns all)', async () => {
+  const none = await run(await makeTimestampSource(), "SELECT id FROM t WHERE at >= TIMESTAMP '2099-01-01T00:00:00Z'")
+  assert.deepEqual(none, [])
+  // 4, not 5: the NULL row is UNKNOWN against the bound, so SQL drops it even
+  // though every non-null row qualifies
+  const all = await run(await makeTimestampSource(), "SELECT id FROM t WHERE at >= TIMESTAMP '2000-01-01T00:00:00Z'")
+  assert.equal(all.length, 4)
 })
 
 test('LIKE falls back to engine filtering (not pushed down)', async () => {

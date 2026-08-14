@@ -68,7 +68,7 @@ export interface SinkSnapshot {
 
 /**
  * Why a maintenance tick deliberately left a partition fragmented instead
- * of rewriting it (LLP 0224#reason-ids-are-span-attribute-names). The ids
+ * of rewriting it (LLP 0228#reason-ids-are-span-attribute-names). The ids
  * are the `maintenance.partition` span's attribute names verbatim, which
  * are themselves named after the `MaintenancePartitionReport` fields, so
  * one spelling covers the trace, the status file, `hyp status`, and the
@@ -104,11 +104,11 @@ export interface MaintenanceSkippedPartition {
 
 /**
  * What the daemon's last completed maintenance tick left alone, summarized
- * for a standing surface (LLP 0224). Overwritten whole by every tick,
+ * for a standing surface (LLP 0228). Overwritten whole by every tick,
  * including one that skipped nothing: a skip reason is a state the tick
  * re-derives from the partition cursor, so only the newest tick's answer is
  * current, and a partition that thaws drops off by itself
- * (LLP 0224#last-tick-only).
+ * (LLP 0228#last-tick-only).
  *
  * Absent means no tick has reported (a daemon that has not reached one, or
  * maintenance disabled), which is not the same as "nothing is frozen".
@@ -151,7 +151,7 @@ export interface DaemonStatus {
   sinks: SinkSnapshot[]
   /**
    * What the last completed cache-maintenance tick left fragmented, and why
-   * (LLP 0224#status-file-is-the-surface). Absent until a tick has run.
+   * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
    */
   maintenance?: MaintenanceSkipSnapshot
   warnings?: string[]
@@ -398,7 +398,7 @@ export interface HypAwareStatusReport {
   recentEntrypoints: RecentEntrypoint[]
   /**
    * What the daemon's last cache-maintenance tick deliberately left
-   * fragmented (LLP 0224). Read from `status.json`, like
+   * fragmented (LLP 0228). Read from `status.json`, like
    * `recentEntrypoints`: the daemon runs the hourly walk, and `hyp status`
    * activates no plugins and reads no cache, so re-deriving this would mean
    * running a second walk from a status command. Null when no daemon has

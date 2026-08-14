@@ -427,7 +427,7 @@ export function recentEntrypointsFromSources(sources) {
   return out.slice(0, MAX_RECENT_ENTRYPOINTS)
 }
 
-/* ---------- maintenance skips (LLP 0224) ---------- */
+/* ---------- maintenance skips (LLP 0228) ---------- */
 
 /**
  * How many skipped partitions the standing surface names. The counts beside
@@ -448,13 +448,13 @@ const MAINTENANCE_SKIP_REASONS = Object.freeze(
  * compaction_attempt_failed`. Reasons no partition was skipped for are left
  * out rather than printed as zeros, and the ids are printed verbatim: they
  * are the span attribute names, so this phrase is also the trace query
- * (LLP 0224#reason-ids-are-span-attribute-names).
+ * (LLP 0228#reason-ids-are-span-attribute-names).
  *
  * Both call sites interpolate this unconditionally into a sentence that
  * already committed to a parenthetical, so an empty phrase would render as a
  * bare `()`. That is unreachable from a snapshot this build wrote (every
  * skip has one of the two known reasons by construction), but not from a
- * `status.json` a later build wrote: LLP 0224#consequences names a third
+ * `status.json` a later build wrote: LLP 0228#consequences names a third
  * reason id as exactly the kind of extension this shape absorbs, and a
  * snapshot whose only nonzero reasons are ones this build does not
  * recognize is precisely `skippedTotal > 0` with every known count at zero.
@@ -520,7 +520,7 @@ function skipReasonOf(p) {
  * @param {MaintenanceReport} report
  * @param {{ at?: string }} [opts]
  * @returns {MaintenanceSkipSnapshot}
- * @ref LLP 0224#last-tick-only [implements]: one bounded snapshot per tick, named partitions capped and taken in the walk's own neediest-first order
+ * @ref LLP 0228#last-tick-only [implements]: one bounded snapshot per tick, named partitions capped and taken in the walk's own neediest-first order
  */
 export function summarizeMaintenanceSkips(report, opts = {}) {
   const visited = Array.isArray(report?.partitions) ? report.partitions : []
@@ -539,7 +539,7 @@ export function summarizeMaintenanceSkips(report, opts = {}) {
     // cap are the most fragmented ones by construction.
     if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) continue
     partitions.push({
-      // Sanitized here too, not only on read: LLP 0224#last-tick-only says the
+      // Sanitized here too, not only on read: LLP 0228#last-tick-only says the
       // cap and the sanitizing are both re-applied on read, which only holds
       // if the write side already produced a clean label. `dataset` and
       // `partition` are kernel-side identifiers in the ordinary case, but
@@ -550,7 +550,7 @@ export function summarizeMaintenanceSkips(report, opts = {}) {
       // `runtime.js`'s `worst` field (which reads `partitions[0]` straight)
       // would be the one surface on this path with nothing downstream to
       // clean it.
-      // @ref LLP 0224#last-tick-only [implements]: the write side sanitizes and clamps, not only the read side
+      // @ref LLP 0228#last-tick-only [implements]: the write side sanitizes and clamps, not only the read side
       dataset: sanitizeLabel(p.dataset) ?? 'unknown',
       partition: sanitizeLabel(partitionLabel(p.partition)) ?? 'all',
       reason,
@@ -590,7 +590,7 @@ export function summarizeMaintenanceSkips(report, opts = {}) {
  *
  * @param {DaemonStatus | null} status
  * @returns {MaintenanceSkipSnapshot | null}
- * @ref LLP 0224#status-file-is-the-surface [implements]: hyp status answers from status.json rather than running a second maintenance walk
+ * @ref LLP 0228#status-file-is-the-surface [implements]: hyp status answers from status.json rather than running a second maintenance walk
  */
 export function maintenanceSkipsFromStatus(status) {
   const raw = status?.maintenance
@@ -996,7 +996,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // @ref LLP 0164#not-liveness-gated [implements]: a last-seen timestamp survives its daemon; the rendered age carries the staleness
   const recentEntrypoints = recentEntrypointsFromSources(daemonStatusFile?.sources)
 
-  // ----- partitions maintenance left fragmented (LLP 0224) -----
+  // ----- partitions maintenance left fragmented (LLP 0228) -----
   // Same route and the same reason as the block above: the daemon runs the
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.

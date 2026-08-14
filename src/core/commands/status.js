@@ -206,7 +206,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       rows: e.rows,
     })),
     // What the daemon's last maintenance tick deliberately left fragmented
-    // (LLP 0224). Null until a daemon has reported a tick: absent is "no tick
+    // (LLP 0228). Null until a daemon has reported a tick: absent is "no tick
     // has said", which is not "nothing is frozen".
     maintenance: report.maintenance
       ? {
@@ -459,12 +459,12 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   }
 
   // Partitions the daemon's last maintenance tick deliberately left
-  // fragmented (LLP 0224). Rendered only when there are some, like every
+  // fragmented (LLP 0228). Rendered only when there are some, like every
   // other conditional block here, so an ordinary install's text surface is
   // unchanged. `formatEntrypointAge` is the file's coarse-age formatter (it
   // is named for its first caller): the question is "is this tick's answer
   // hours or weeks old?", not the exact instant.
-  // @ref LLP 0224#status-file-is-the-surface [implements]: hyp status is where an operator who never runs `hyp query maintain` finds a frozen partition
+  // @ref LLP 0228#status-file-is-the-surface [implements]: hyp status is where an operator who never runs `hyp query maintain` finds a frozen partition
   if (report.maintenance && report.maintenance.skippedTotal > 0) {
     const m = report.maintenance
     const breakdown = describeMaintenanceSkipReasons(m.reasons)

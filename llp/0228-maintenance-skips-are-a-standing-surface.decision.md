@@ -1,4 +1,4 @@
-# LLP 0224: A partition maintenance leaves fragmented is named on a standing daemon surface
+# LLP 0228: A partition maintenance leaves fragmented is named on a standing daemon surface
 
 **Type:** Decision
 **Status:** Accepted

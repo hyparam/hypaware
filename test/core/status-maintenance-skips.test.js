@@ -6,7 +6,7 @@
 // walk hourly, threw the report away. These tests pin the standing surface
 // that replaces that silence: the snapshot the tick persists, its bound, the
 // reason vocabulary it uses, and what `hyp status` does with it.
-// @ref LLP 0224#status-file-is-the-surface [tests]:
+// @ref LLP 0228#status-file-is-the-surface [tests]:
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -67,6 +67,12 @@ function maintenanceReport(partitions) {
     totalSnapshotsExpired: 0,
     totalCompacted: partitions.filter((p) => p.compacted).length,
     totalRebaselined: partitions.filter((p) => p.rebaselined).length,
+    // Derived like every other total, so a fixture that seeds a partition
+    // this tick failed on (LLP 0220) stays a report the walk could produce.
+    // A failure is not a skip: it reports no reason here and stays off this
+    // surface, which is what `a partition this tick failed on is not a skip`
+    // pins below.
+    totalFailed: partitions.filter((p) => p.failed).length,
     dryRun: false,
     elapsedMs: 12,
   }
@@ -77,7 +83,7 @@ function maintenanceReport(partitions) {
 // The ids are the `maintenance.partition` span's attribute names, which are
 // themselves the report's field names: one spelling across the trace, the
 // status file, `hyp status`, and the daemon log.
-// @ref LLP 0224#reason-ids-are-span-attribute-names [tests]:
+// @ref LLP 0228#reason-ids-are-span-attribute-names [tests]:
 test('summarizeMaintenanceSkips names both skip reasons in the vocabulary the report already uses', () => {
   const snapshot = summarizeMaintenanceSkips(maintenanceReport([
     partitionReport({
@@ -119,7 +125,7 @@ test('summarizeMaintenanceSkips names both skip reasons in the vocabulary the re
 
 // The cap on write bounds entry *count*; this pins that the write side also
 // sanitizes and clamps the bytes *inside* each entry, not only the count.
-// LLP 0224#last-tick-only says the cap and the sanitizing are "re-applied on
+// LLP 0228#last-tick-only says the cap and the sanitizing are "re-applied on
 // read as well as on write", which presumes the write side already produced
 // something clean. Partition labels are row-derived
 // (`resolveSourceSegments` -> `sanitizePathSegment`, which strips only
@@ -128,7 +134,7 @@ test('summarizeMaintenanceSkips names both skip reasons in the vocabulary the re
 // unsanitized. The daemon log's `worst` field reads `partitions[0]` straight
 // off this snapshot with no read-side cleanup of its own, so this is also
 // the only thing standing between a row-derived label and `tail -f`.
-// @ref LLP 0224#last-tick-only [tests]: the write side sanitizes and clamps too, not only the read side
+// @ref LLP 0228#last-tick-only [tests]: the write side sanitizes and clamps too, not only the read side
 test('summarizeMaintenanceSkips sanitizes and clamps hostile dataset and partition labels on write, into status.json itself', async () => {
   const BIDI = String.fromCharCode(0x202e) // right-to-left override
   const ZW = String.fromCharCode(0x200b) // zero-width space
@@ -189,10 +195,42 @@ test('a converged, rebaselined, or freshly rewritten partition is not on the sur
   assert.equal(snapshot.partitionsVisited, 3)
 })
 
+// LLP 0220 gave the walk a per-partition `failed`, which is a different fact
+// from either reason here: `failed` means this tick attempted work and it
+// threw, while both ids on this surface mean nothing was attempted, for a
+// stated reason. A tick that attempted a rewrite is not a tick that skipped
+// one, so a failed partition stays off the surface and is reported by its own
+// per-partition `daemon.maintenance_failed` line instead. Without this, the
+// two would double-report the same partition under contradictory
+// descriptions.
+// @ref LLP 0220#this-tick-versus-a-recorded-one [tests]: this tick's failure is not a skip, so it does not reach the skip surface
+test('a partition this tick failed on is not a skip', () => {
+  const snapshot = summarizeMaintenanceSkips(maintenanceReport([
+    partitionReport({
+      dataset: 'ai_gateway_messages',
+      failed: true,
+      errorKind: 'maintenance_partition_failed',
+      errorMessage: 'torn data file',
+    }),
+    partitionReport({
+      dataset: 'traces',
+      compactionAttemptFailed: true,
+      compactionAttemptFailedAt: '2026-08-12T21:55:35.168Z',
+    }),
+  ]))
+
+  // Visited counts both: the walk did reach them.
+  assert.equal(snapshot.partitionsVisited, 2)
+  // Only the recorded skip is named, and it is the one an earlier tick froze.
+  assert.equal(snapshot.skippedTotal, 1)
+  assert.deepEqual(snapshot.partitions.map((p) => p.dataset), ['traces'])
+  assert.deepEqual(snapshot.reasons, { compaction_ineffective: 0, compaction_attempt_failed: 1 })
+})
+
 // The status file is read back and printed to a terminal, so the named list
 // is bounded. The counts beside it are not, so the bound never hides the size
 // of the problem.
-// @ref LLP 0224#last-tick-only [tests]:
+// @ref LLP 0228#last-tick-only [tests]:
 test('the named list is capped in the walk order the tick already used, and the count stays exact', () => {
   const snapshot = summarizeMaintenanceSkips(maintenanceReport(
     // Walk order is descending live data-file count (LLP 0199#neediest-first),
@@ -430,7 +468,7 @@ test('an install with nothing frozen keeps the V1 text surface, and a daemon tha
 // unreachable from a file this build wrote (every skip it records has one of
 // the two known reasons by construction), but the read path's whole
 // justification is that this build did not necessarily write the file, and
-// LLP 0224#consequences names exactly this extension ("a new id and a new
+// LLP 0228#consequences names exactly this extension ("a new id and a new
 // count key, not a new shape") as the forward-compatible path. The existing
 // foreign-file test above keeps `compaction_ineffective: 900` alongside its
 // unknown reason id, so that case never hits the all-unknown branch.
@@ -441,7 +479,7 @@ test('an install with nothing frozen keeps the V1 text surface, and a daemon tha
 // older or different build might) alongside a positive `skippedTotal` and an
 // empty `partitions` list rendered "5 of 0 partitions" - a sentence no tick
 // can produce, since visited can never be smaller than skipped.
-// @ref LLP 0224#last-tick-only [tests]: a foreign status file's reason breakdown and visited count stay sentences a tick could actually produce
+// @ref LLP 0228#last-tick-only [tests]: a foreign status file's reason breakdown and visited count stay sentences a tick could actually produce
 test('a status.json carrying only reasons this build does not recognize renders no empty parenthetical and no impossible visited count', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
@@ -565,7 +603,7 @@ test('a real maintenance walk over a frozen partition summarizes into the reason
 
 // The defect itself: `runMaintenance` awaited `maintainCache` and dropped the
 // result, so nothing the walk decided reached any surface the daemon keeps.
-// @ref LLP 0224#status-file-is-the-surface [tests]: the tick persists what it left fragmented
+// @ref LLP 0228#status-file-is-the-surface [tests]: the tick persists what it left fragmented
 test('the daemon maintenance tick persists what it left fragmented into status.json', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-maintenance-'))
   const stateRoot = path.join(hypHome, 'hypaware')

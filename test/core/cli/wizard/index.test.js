@@ -692,6 +692,8 @@ test('runInitWizard: a team-path overwrite refusal narrates the enrolled state a
   assert.match(text, /This machine is enrolled/)
   assert.match(text, /hyp policy client <name> local-only/)
   assert.match(text, /Nothing has been uploaded yet/)
+  // No sync offer follows an abort, so the narration keeps the way out.
+  assert.match(text, /To send it sooner, run `hyp sync`/)
 })
 
 test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hold means no deadline claim', async () => {
@@ -914,6 +916,13 @@ test('runInitWizard: an enrolled run is offered the first sync, after the narrat
   // before the launch that may never give the terminal back.
   const text = stdout.text()
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Starting Claude Code'))
+  // The offer's "Send now" row states `hyp sync` and the asks-first promise,
+  // so the narration must not say the same sentence one screen earlier.
+  assert.doesNotMatch(text, /To send it sooner/)
+  // But the offer's frame is cleared when it resolves, so a run that ends on
+  // the wait must still leave the release verb somewhere on screen. Dropping
+  // the sentence upstream is only safe because the wait restates it here.
+  assert.match(text, /run `hyp sync` any time to send it sooner/)
   assert.equal(spawned.length, 1)
 })
 

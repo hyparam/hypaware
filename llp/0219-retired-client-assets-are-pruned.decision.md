@@ -6,6 +6,7 @@
 **Author:** Claude
 **Date:** 2026-08-13
 **Related:** LLP 0138 (#one-materializer, #marker-undo: the module this extends and the half-record it left), LLP 0107 (#currency, #reversal: why attach re-runs and what reversal may touch), LLP 0142 (the retirement that is still installed), LLP 0212 (the retirement that motivated #726), LLP 0215 (#not-in-scope: named this gap and deferred it)
+**Extended-by:** LLP 0223 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable)
 
 > Extends [LLP 0138](./0138-client-assets-one-install.decision.md), which made
 > one routine own copying client assets and recorded, on the org-driven half
@@ -65,9 +66,12 @@ path, and only while the bytes there are still the bytes it wrote.**
   the copy loop, any recorded destination for a client this run installed for,
   which this run's plan does not contain, is removed. Four conditions gate it,
   and all four must hold: we recorded writing the path; **the whole run's plan**
-  does not contain it; it sits strictly inside that client's own asset
-  directories (re-checked by `removeClientAssets`, whose input is persisted JSON
-  either way); and a digest we recorded for it still matches what is on disk.
+  does not contain it; it is a direct child of that client's own asset
+  directories (re-checked by `removeClientAssets`, whose input is persisted
+  JSON either way; narrowed from "sits strictly inside" by
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #only-direct-children); and a digest we recorded for it still matches what
+  is on disk.
 
   The plan check is over the whole run, not over the one client's share of it,
   because a destination is a physical path and two clients can declare the same
@@ -92,6 +96,15 @@ path, and only while the bytes there are still the bytes it wrote.**
   matching no contribution), and acting on the second reading would empty a
   working install. So a client with no successful copy this pass is not pruned
   at all.
+
+- **A candidate must be a direct child of an asset directory**: condition
+  three above narrows to exactly this shape. That narrowing changes what
+  condition three decided rather than merely restating it, so it is recorded
+  as its own decision in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #only-direct-children, minted from the ship review of
+  [#745](https://github.com/hyparam/hypaware/pull/745)
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 1).
 
 - **A boot that did not reach its whole plugin set prunes nothing**
   {#incomplete-activation-prunes-nothing}: the scope guard above catches *total*
@@ -134,12 +147,45 @@ path, and only while the bytes there are still the bytes it wrote.**
   genuinely removed from the config still prunes) and `all-available` yields
   exactly the config-enabled names that profile dropped.
 
+  The config side of that intersection is **the config as it was at boot**, and
+  the wizard rewrites it mid-run: a user who hand-disables an opt-in plugin,
+  runs `hyp init`, and re-picks it gets that plugin's skill pruned by the finale
+  (the boot's `configEnabled` did not contain it) and re-installed by the next
+  config-profile attach. Transient, self-healing, and only ever HypAware-written
+  bytes, so it is accepted rather than fixed by re-deriving the set after the
+  wizard writes ([#746](https://github.com/hyparam/hypaware/issues/746) item 4).
+
   Coarse on purpose. The finer rule (record the owning plugin per ledger entry
   and skip only that plugin's candidates) buys a partial prune on a broken boot,
   which is worth nothing next to being wrong on a delete path. Together with the
   scope guard, this is what makes the mechanism fail safe: each of the four
   routes a plugin can leave a boot's plan by ends in "prune nothing", never in
   "prune everything it cannot see".
+
+- **A plugin that is not on the machine is retired, not withheld**
+  {#uninstalled-is-retired}: recorded post-acceptance
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 3) for a case the
+  four routes above do not cover and were never meant to. Each of them is a way
+  a plugin *present on the machine* leaves a boot's plan; a config-enabled
+  plugin whose directory is **wholly absent** (an uninstall, a deleted install
+  tree, lost plugin state) never enters the pool, so it is in neither
+  `unloadable` (nothing failed to load) nor the withheld-by-profile term
+  (nothing was there to withhold), and `unavailablePlugins` does not name it.
+  Its ledgered assets therefore prune.
+
+  **That is the intended reading**, not an oversight: an uninstalled plugin is a
+  retired plugin, its assets have no source left on the machine to re-copy from,
+  and what the prune takes is still only a byte-identical copy of what HypAware
+  itself wrote there (#edited-assets-are-not-ours is unchanged and still gates
+  it). Adding `configEnabled - pool` to `unavailablePlugins` would instead make
+  every uninstall stand the prune down permanently, leaving exactly the
+  model-invocable leave-behind this document exists to remove. Pinned by a test
+  so it cannot drift silently.
+
+  "Absent" also covers an install tree that is transiently absent (an
+  unmounted volume, an interrupted upgrade), which this reading deletes and a
+  later attach restores; accepted because the alternative never prunes after
+  a real uninstall.
 
 - **An asset the user changed is no longer ours to delete**
   {#edited-assets-are-not-ours}: the removal proceeds only on a digest we
@@ -157,6 +203,11 @@ path, and only while the bytes there are still the bytes it wrote.**
   whole rather than kept digest-less, so corruption cannot even manufacture a
   candidate.
 
+  "No recorded digest" is a fact about the *record*; "could not be read" is a
+  fact about the *candidate itself*, and the two are split apart in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #unreadable-is-not-absent.
+
   **The digest separates shapes, not only bytes.** A skill is a directory and a
   subagent a single file, and hashing both into one unframed stream let the two
   spaces overlap: an empty directory and an empty file were both the hash of
@@ -173,6 +224,27 @@ path, and only while the bytes there are still the bytes it wrote.**
   replace, and the source is right there to re-copy from). A retired asset has
   no source left, so deleting an edited one is unrecoverable. Different
   recoverability, different rule.
+
+  **The gate is check-then-act, and that residual is accepted**
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 5). Between
+  reading the digest and calling `fs.rm` there is a window in which an edit
+  would be deleted despite the rule. It is inherent to checking a filesystem
+  before writing to it, it is milliseconds wide, it is open only during an
+  attach or an install, and it is open only on the exact path that run has
+  already established is a retired asset whose bytes are still byte-identical to
+  what HypAware wrote. Closing it would mean holding a lock over a user's
+  `~/.claude` for the length of a prune, which buys less than it costs. Recorded
+  here so a later review reaches this line rather than re-deriving it.
+
+- **An unreadable asset is not an absent one**: reading a candidate produces
+  three outcomes, not two - a digest, a path that is not there, and a path
+  that is there but could not be read - and only the first two used to be
+  told apart. That distinction changes what "no digest" was read to mean
+  rather than merely restating it, so it is recorded as its own decision in
+  [LLP 0223](./0223-prune-direct-children-and-unreadable-assets.decision.md)
+  #unreadable-is-not-absent, minted from the ship review of
+  [#745](https://github.com/hyparam/hypaware/pull/745)
+  ([#746](https://github.com/hyparam/hypaware/issues/746) item 2).
 
 - **Pruning is automatic, not confirmed** {#automatic-not-gated}: no prompt.
   What gets removed is a byte-identical copy of a file HypAware itself wrote,

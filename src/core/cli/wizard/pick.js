@@ -43,6 +43,17 @@ import {
 export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 
 /**
+ * Label suffix for a `needs_setup` row listed on a defaults gate. Such a
+ * row reaches the gate only off a recorded answer (the config on disk, or
+ * this run's own confirmed selection - detection never seeds one). Its
+ * extra setup (a sign-in, a sudo prompt) runs when it is newly picked;
+ * a reconfigure's carried row is not re-asked. Saying so on the gate is
+ * what keeps "record all of these" from reading as if enter alone
+ * finished the job.
+ */
+export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
+
+/**
  * Everything the pick lane decides *before* it asks anything: the ordered
  * descriptors, the locked set, the config on disk, the detection pass, and
  * the seed those three produce (LLP 0183 #seed-from-config, LLP 0191
@@ -125,6 +136,17 @@ export async function resolvePickSeeding(opts) {
     }
   }
 
+  // A `needs_setup` row never seeds from detection: its configure phase
+  // runs a sign-in and a sudo write later (Claude Desktop), and checking
+  // the row is the opt-in those steps rest on - so it must be the user's
+  // deliberate tick, never a probe's guess pre-checked on their behalf.
+  // Detection still labels the row `· detected`; it arrives unchecked.
+  // The other seed tiers are a user's recorded answer, so they keep it.
+  // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a suggestion; a row whose setup asks for a credential is not even that
+  const detectedSeed = new Set(
+    [...detected].filter((id) => descriptors.get(id)?.needsSetup !== true)
+  )
+
   // What seeds the checked rows, most-recent answer first: a re-entry
   // after stepping back carries the previous run's confirmed selection;
   // a reconfigure carries the config on disk (the record of what the
@@ -140,7 +162,7 @@ export async function resolvePickSeeding(opts) {
   /** @type {ReadonlySet<string>} */
   const seed = opts.initialSelection
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
-    : configured ?? detected
+    : configured ?? detectedSeed
 
   // Which of the three tiers above produced `seed`. The set itself does not
   // say, and hidden-row carry-through reads differently off each: a
@@ -222,7 +244,14 @@ export async function resolvePickSeeding(opts) {
  * @returns {string[]}
  */
 export function defaultRowLabels({ defaultRows, lockedSet }) {
-  return defaultRows.map((d) => `  ${d.label}${lockedSet.has(d.id) ? LOCKED_LABEL_SUFFIX : ''}`)
+  // Locked wins when both apply: a fleet-managed row's config is the org's,
+  // and stacking both suffixes buys length, not clarity.
+  return defaultRows.map((d) => {
+    const suffix = lockedSet.has(d.id)
+      ? LOCKED_LABEL_SUFFIX
+      : d.needsSetup === true ? NEEDS_SETUP_LABEL_SUFFIX : ''
+    return `  ${d.label}${suffix}`
+  })
 }
 
 /**
@@ -408,6 +437,12 @@ export async function runWizardPick(opts) {
     .map((id) => descriptors.get(id))
     .filter((d) => d !== undefined)
 
+  // The picked ids this run carried forward rather than newly checked: on
+  // a reconfigure the config on disk is the record of an earlier run's
+  // answers, and the configure phase reads this to avoid re-running a
+  // needs_setup row's setup question for an answer already given.
+  const previouslyConfigured = configured ? sources.filter((id) => configured.has(id)) : []
+
   await withSpan(
     'wizard.pick.finish',
     {
@@ -435,6 +470,7 @@ export async function runWizardPick(opts) {
     retentionDays,
     descriptors: pickedDescriptors,
     lockedSources,
+    previouslyConfigured,
     ...(opts.deferWrite ? { configPending: true } : {}),
   }
 }
@@ -756,6 +792,7 @@ async function cancelledResult(opts) {
     retentionDays: DEFAULT_RETENTION_DAYS,
     descriptors: [],
     lockedSources: [],
+    previouslyConfigured: [],
   }
 }
 
@@ -799,6 +836,7 @@ async function backResult(opts) {
     retentionDays: DEFAULT_RETENTION_DAYS,
     descriptors: [],
     lockedSources: [],
+    previouslyConfigured: [],
   }
 }
 
@@ -842,5 +880,6 @@ async function overwriteAbortedResult(args) {
     retentionDays: args.retentionDays,
     descriptors: [],
     lockedSources: args.lockedSources,
+    previouslyConfigured: [],
   }
 }
