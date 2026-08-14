@@ -4,13 +4,17 @@
 // answer. `rl.question()` leaves its promise permanently unsettled at EOF,
 // so a scripted run whose input runs out (or any run whose terminal drops)
 // hung on the prompt forever instead of taking the default it had just
-// printed. `hyp clients enable < /dev/null` reaches the backfill consent
-// directly; the wizard's own prompts are reached once its earlier screens
-// are answered, since `wizard/fork.js` still asks through `rl.question`
-// and so still hangs a fully unanswered `hyp init`. Each
-// case below is raced against a timer, because the pre-fix failure mode is
-// a hang rather than a wrong value and an unraced assertion would never
-// run at all.
+// printed. The run that reaches all three is a partially scripted wizard:
+// answer the fork, let stdin dry up, and the express gate, the commit-point
+// confirm and the backfill consent each read the spent stream. A fully
+// unanswered `hyp init` never gets this far - `wizard/fork.js` still asks
+// through `rl.question` on the wizard's first screen and hangs there.
+// `hyp attach <client>`'s own backfill consent is the other caller, and it
+// is reached only from a terminal (`maybeInteractiveEnableAttach` refuses a
+// non-TTY stdin) with the TUI off, so what lands on it there is a dropped
+// terminal rather than a pipe. Each case below is raced against a timer,
+// because the pre-fix failure mode is a hang rather than a wrong value and
+// an unraced assertion would never run at all.
 //
 // @ref LLP 0190#sync-gate [tests]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
 
