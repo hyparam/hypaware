@@ -762,7 +762,7 @@ function scriptedIo(answers) {
   const input = new PassThrough()
   const pending = [...answers]
   let value = ''
-  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [y/N]: ']
+  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [Y/n]: ']
   return {
     stdin: input,
     pending,
