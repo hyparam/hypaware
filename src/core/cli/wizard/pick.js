@@ -125,6 +125,18 @@ export async function resolvePickSeeding(opts) {
     }
   }
 
+  // A `needs_setup` row never seeds from detection: its configure phase
+  // asks again later (Claude Desktop's consent gate, defaulting to no),
+  // so pre-checking it had the defaults gate say "record all of these"
+  // and the configure phase then talk the user back out of one of them.
+  // Detection still labels the row `· detected`; it arrives unchecked and
+  // checking it is the deliberate opt-in the later consent screen expects.
+  // The other seed tiers are a user's recorded answer, so they keep it.
+  // @ref LLP 0011#autodetect-vs-default [implements]: a detected row is a suggestion; a row whose setup asks for a credential is not even that
+  const detectedSeed = new Set(
+    [...detected].filter((id) => descriptors.get(id)?.needsSetup !== true)
+  )
+
   // What seeds the checked rows, most-recent answer first: a re-entry
   // after stepping back carries the previous run's confirmed selection;
   // a reconfigure carries the config on disk (the record of what the
@@ -140,7 +152,7 @@ export async function resolvePickSeeding(opts) {
   /** @type {ReadonlySet<string>} */
   const seed = opts.initialSelection
     ? new Set(opts.initialSelection.filter((id) => descriptors.has(id)))
-    : configured ?? detected
+    : configured ?? detectedSeed
 
   // Which of the three tiers above produced `seed`. The set itself does not
   // say, and hidden-row carry-through reads differently off each: a

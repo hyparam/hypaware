@@ -150,6 +150,40 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 90)
 })
 
+// A needs_setup row (Claude Desktop) is a deliberate opt-in: its configure
+// phase asks again later with a default of no, so a detection pre-check had
+// the gate say "record all of these" and the consent screen then talk the
+// user back out of one of them.
+// @ref LLP 0011#autodetect-vs-default [tests]: detection labels a needs_setup row but never checks it
+test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detected', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['codex'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(['codex', 'claude-desktop']),
+  }))
+  const desktopRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
+  assert.equal(desktopRow.checked, undefined, 'a needs_setup row is never pre-checked by detection')
+  assert.match(desktopRow.label, /detected/, 'the detection suggestion stays visible on the label')
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+})
+
+test('runWizardPick: the defaults gate omits a detected needs_setup row, and accept does not pick it', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(['codex', 'claude-desktop']),
+  }))
+  assert.ok(!state.question.items.some((/** @type {string} */ i) => /Claude Desktop/.test(i)), 'the gate must not promise a row whose setup asks again with a default of no')
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+})
+
 // --- the defaults gate (LLP 0190 #pick-gate) ---
 // @ref LLP 0190#pick-gate [tests]: the gate exists only when detection or the
 // org's locked set leaves something worth confirming, and accepting it must
