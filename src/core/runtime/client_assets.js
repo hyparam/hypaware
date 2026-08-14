@@ -528,7 +528,7 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   // end. So the record is carried **verbatim**: no digest is taken of what we
   // could not read, which keeps a later run's removal gated on the digest
   // recorded when we wrote the bytes and on nothing this run inferred.
-  // @ref LLP 0223#unreadable-is-not-absent [implements]: unreadable is reported
+  // @ref LLP 0226#unreadable-is-not-absent [implements]: unreadable is reported
   //   and kept, never mistaken for absent.
   if (!digest) {
     stderr?.write(
@@ -692,7 +692,7 @@ const NO_BASE_DIRS_REASON =
  * @param {string} dest
  * @param {string[]} baseDirs
  * @returns {boolean}
- * @ref LLP 0223#only-direct-children [implements]: the delete side admits
+ * @ref LLP 0226#only-direct-children [implements]: the delete side admits
  *   exactly the shape the copy side writes, and nothing beneath it, without
  *   widening what the prefix-based containment check already refused.
  */
