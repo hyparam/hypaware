@@ -54,18 +54,33 @@ nothing substantial after the finale, so it does not repeat, and no path
 prints the warning twice on one screen.
 
 <a id="when"></a>**The repeat is conditional on the closing sequence having
-written something.** The wizard emits it only when the first look actually
-reached the screen. That is a narrower test than "the first look ran", and
-deliberately so: the step is documented to degrade to a silent skip rather
-than fail a finished install
-([LLP 0135 §first-look](./0135-install-experience-overhaul.design.md)), so an
-unregistered dataset, an unreadable cache, or a render that throws leaves an
-attended run that attempted the block and printed none of it. Nothing buried
-the finale's print on such a run, so nothing is repeated.
+written something, and that fact is measured rather than inferred.**
+`runWizardFirstLook` reports `wrote` beside `shown`, counted at the writable
+the step writes through, and the wizard gates on `wrote`.
+
+The two are different questions, and every wrong version of this gate has been
+an attempt to answer the first with the second. "The first look ran" is too
+wide: the step is documented to degrade rather than fail a finished install
+([LLP 0135 §first-look](./0135-install-experience-overhaul.design.md)), and an
+unregistered dataset, an unreadable cache or a render that throws leave an
+attended run that attempted the block and printed none of it, so nothing
+buried the finale's print. "The block rendered" is too narrow: an expired
+deadline with nothing renderable prints two lines saying the look was skipped
+and reports `shown: false`, and those lines bury the finale's print exactly as
+a full render would. On a managed host that is the run where the repeat
+matters most, because §status-backstop of
+[LLP 0185](./0185-unpicked-client-stays-attached.decision.md#status-backstop)
+gates the mirror diagnostic off there.
+
+Measuring closes the class rather than the instance. A skip reason added later
+is counted by the same writable, so it carries its own answer instead of
+requiring this gate to be revisited, and a caller that wants "does the user
+have their numbers" still reads `shown`.
 
 That single condition covers the team pathway as well, because a pathway is
 only ever resolved on an interactive run, so a team run that is neither
-cancelled nor a dry run has already run the first look. Widening the condition
+cancelled nor a dry run has already run the first look and repeats on what it
+wrote. Widening the condition
 to "or the pathway is `team`" on the theory that the privacy narration follows
 would admit only the runs where the first look did *not* run, and those are
 exactly the runs that wrote nothing between the finale and here: the repeat
@@ -96,6 +111,9 @@ decision turns on.
 - `writeAttachedNotConfiguredReminder` is exported from
   `src/core/cli/walkthrough.js` beside the finale's own
   `writeAttachedNotConfiguredWarning`, which stays private to the finale.
+- `FirstLookResult` carries `wrote` as well as `shown`, so the first look
+  answers "did this put text on the screen" for itself. It is the step's fact
+  to report, not the orchestrator's to deduce.
 - `writeWalkthroughRunSummary` is untouched. It still reports only what the
   finale *did*, per
   [LLP 0135](./0135-install-experience-overhaul.design.md); a warning is not

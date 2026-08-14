@@ -484,13 +484,13 @@ test('runInitWizard: a run cancelled at the finale does not repeat the stranded-
   assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
 })
 
-// The first look is documented to degrade to a silent skip rather than fail a
-// finished install (LLP 0135 #first-look): an unregistered dataset, an
-// unreadable cache, or a render that throws all leave an attended run that
-// attempted the block and printed none of it. The gate that admits the repeat
-// is therefore the block having reached the screen, not the run having tried:
-// on a skip the finale's own print is still the last thing above the summary,
-// and repeating under it would be the same-screen double print.
+// The first look is documented to degrade rather than fail a finished install
+// (LLP 0135 #first-look): an unregistered dataset, an unreadable cache, or a
+// render that throws all leave an attended run that attempted the block and
+// printed none of it. The gate that admits the repeat is therefore what the
+// step wrote, not what it attempted: on a silent skip the finale's own print
+// is still the last thing above the summary, and repeating under it would be
+// the same-screen double print.
 // @ref LLP 0188#when [tests]: a first look that printed nothing buried nothing
 test('runInitWizard: an attended run whose first look skips itself does not repeat the stranded-attach warning', async () => {
   const home = await tmpHome()
@@ -498,7 +498,7 @@ test('runInitWizard: an attended run whose first look skips itself does not repe
   const { opts, stdout } = wizardOpts(home, {
     fork: async () => 'team',
     // The shape `firstLookRunnerFromCtx` yields when the overview dataset is
-    // not registered: the step returns `{ shown: false }` without writing.
+    // not registered: the step returns `{ wrote: false }` without writing.
     firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
     finaleRunner: async () => strandedFinale(['codex']),
   })
@@ -506,6 +506,48 @@ test('runInitWizard: an attended run whose first look skips itself does not repe
   const text = stdout.text()
   assert.doesNotMatch(text, /First look/, text)
   assert.doesNotMatch(text, /hyp detach --client/, text)
+})
+
+// The skip that is not silent, and the reason the gate measures writes rather
+// than reading `shown`. When the deadline expires with nothing renderable
+// (`reason: 'slow'`, the branch `FIRST_LOOK_BUDGET_MS` exists for: a
+// pathological day, a disk that stalls), the block does not render and two
+// lines saying so do land on stdout. Those lines, plus the run summary and
+// the privacy narration, bury the finale's own warning exactly as a full
+// render would, so this run must repeat it. A gate reading `shown` drops the
+// repeat here, which on a managed host is the only signal there is: LLP 0185
+// #status-backstop gates `hyp status`'s mirror diagnostic off on a joined
+// machine.
+// @ref LLP 0188#when [tests]: a skip that still wrote buried the finale's print, so it repeats
+test('runInitWizard: an attended run whose first look skips slowly still repeats the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: {
+      hasDataset: () => true,
+      // Far longer than the budget below, so no section ever lands. `unref`
+      // so the abandoned query does not hold the test runner open.
+      run: () => new Promise((resolve) => {
+        setTimeout(() => resolve({ columns: [], rows: [] }), 5000).unref()
+      }),
+    },
+    firstLookBudgetMs: 40,
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  // The block itself never rendered.
+  assert.match(text, /Skipped the first look/, text)
+  assert.doesNotMatch(text, /First look at what HypAware has recorded/, text)
+  // The repeat still ran, under what the skip wrote and ahead of the privacy
+  // narration, which stays the last words.
+  assert.match(text, /Still attached, no longer collected: codex/, text)
+  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('Skipped the first look'), text)
+  assert.ok(
+    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text
+  )
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {

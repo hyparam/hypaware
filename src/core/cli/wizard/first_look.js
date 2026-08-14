@@ -9,7 +9,7 @@
  * This module owns only the wizard's half of the contract: when the step
  * runs, and that it can never fail a finished install.
  *
- * @import { FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
+ * @import { FirstLookOutcome, FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
  * @import { OverviewNotice, OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
@@ -113,7 +113,18 @@ async function withDeadline(promise, ms) {
  * materialized) degrades to a skipped step, because setup itself already
  * succeeded by the time this runs.
  *
+ * Returns `wrote` alongside `shown`, and it is *measured*: the writable the
+ * body sees is a counter in front of the caller's, so every branch, present
+ * or future, reports whether it put text on the screen. The two questions
+ * are not the same one. `shown` is "did the block render", and a caller that
+ * needs "did this push what came before it out of view" cannot infer that
+ * from `shown`: the `slow` skip renders no block and still writes two lines
+ * saying so. The wizard's closing repeat asks the second question
+ * (LLP 0188 #when), and inferring it from `shown` is what broke across the
+ * no-dataset, error and slow branches in turn.
+ *
  * @ref LLP 0135#first-look [implements]: setup ends on the user's own rows, and never fails on them
+ * @ref LLP 0188#when [implements]: the caller needs "wrote something", so measure it here rather than let the caller guess
  *
  * @param {{
  *   runner?: OverviewQueryRunner | undefined,
@@ -123,8 +134,23 @@ async function withDeadline(promise, ms) {
  * }} args
  * @returns {Promise<FirstLookResult>}
  */
-export async function runWizardFirstLook({ runner, stdout, color = false, budgetMs = FIRST_LOOK_BUDGET_MS }) {
-  return withSpan(
+export async function runWizardFirstLook({ runner, stdout: target, color = false, budgetMs = FIRST_LOOK_BUDGET_MS }) {
+  /** @type {boolean} */
+  let wrote = false
+  // The only `stdout` in scope below, so a branch cannot write without being
+  // counted. Set before delegating rather than after: a `write` that throws
+  // part-way (EPIPE on a closed pipe) may have emitted, and the safe error
+  // is an extra reminder, not a lost one.
+  /** @type {{ write(chunk: string): unknown }} */
+  const stdout = {
+    /** @param {string} chunk */
+    write(chunk) {
+      wrote = true
+      return target.write(chunk)
+    },
+  }
+  /** @type {FirstLookOutcome} */
+  const outcome = await withSpan(
     'wizard.first_look',
     {
       [Attr.COMPONENT]: 'wizard',
@@ -230,4 +256,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
     },
     { component: 'wizard' }
   )
+  // One exit, so `wrote` is attached to whatever the body decided rather
+  // than restated per branch.
+  return { ...outcome, wrote }
 }

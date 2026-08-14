@@ -63,7 +63,7 @@ test('runWizardFirstLook: writes every section, names the repeat command, report
     seen,
     [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily, SECTION_SQL.repos, SECTION_SQL.tools]
   )
-  assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1 })
+  assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1, wrote: true })
   const text = stdout.text()
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
@@ -96,6 +96,7 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
   // What completed is shown rather than thrown away.
   assert.equal(result.shown, true)
   assert.equal(result.partial, true)
+  assert.equal(result.wrote, true)
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
   assert.match(text, /2026-07-24/)
@@ -121,7 +122,10 @@ test('runWizardFirstLook: a slow cache skips within budget and says what to run'
       }),
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'slow' })
+  // The block did not render, and the step still put two lines on the
+  // screen. Both facts are reported, because callers ask both questions
+  // (LLP 0188 #when).
+  assert.deepEqual(result, { shown: false, reason: 'slow', wrote: true })
   // Setup moved on rather than waiting out the query.
   assert.ok(Date.now() - started < 2000)
   assert.match(stdout.text(), /Skipped the first look/)
@@ -142,6 +146,7 @@ test('runWizardFirstLook: a cache inside the budget still renders', async () => 
     },
   })
   assert.equal(result.shown, true)
+  assert.equal(result.wrote, true)
   assert.match(stdout.text(), /claude-opus-5/)
   assert.ok(!stdout.text().includes('Skipped the first look'))
 })
@@ -152,7 +157,7 @@ test('runWizardFirstLook: an unregistered dataset skips silently', async () => {
     stdout,
     runner: { hasDataset: () => false, async run() { throw new Error('must not run') } },
   })
-  assert.deepEqual(result, { shown: false, reason: 'no-dataset' })
+  assert.deepEqual(result, { shown: false, reason: 'no-dataset', wrote: false })
   assert.equal(stdout.text(), '')
 })
 
@@ -162,7 +167,7 @@ test('runWizardFirstLook: a query failure degrades to a skipped step, not a thro
     stdout,
     runner: { hasDataset: () => true, async run() { throw new Error('cache unreadable') } },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: false })
   assert.equal(stdout.text(), '')
 })
 
@@ -192,7 +197,10 @@ test('runWizardFirstLook: a synchronous write failure cannot escape and fail a f
       },
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  // `wrote` is true here: the write was attempted and a partial chunk may
+  // have landed before the throw. It is counted before the delegation for
+  // exactly that reason, and the failure direction is the safe one.
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: true })
 })
 
 test('runWizardFirstLook: a render failure is contained too', async () => {
@@ -211,7 +219,8 @@ test('runWizardFirstLook: a render failure is contained too', async () => {
       },
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: false })
+  assert.equal(stdout.text(), '')
 })
 
 test('firstLookNoticeSink: discloses withheld rows, drops the freshness line', async () => {
@@ -239,6 +248,6 @@ test('firstLookNoticeSink: a closed sink drops a late disclosure', async () => {
 test('runWizardFirstLook: no runner (no query registry) skips', async () => {
   const stdout = makeBuf()
   const result = await runWizardFirstLook({ stdout })
-  assert.deepEqual(result, { shown: false, reason: 'no-dataset' })
+  assert.deepEqual(result, { shown: false, reason: 'no-dataset', wrote: false })
   assert.equal(stdout.text(), '')
 })

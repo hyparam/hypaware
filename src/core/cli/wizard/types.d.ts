@@ -301,14 +301,24 @@ export interface RunWizardPickOptions {
 }
 
 /**
- * What the first look did. `shown: false` is a normal outcome, not a
+ * What the first look decided. `shown: false` is a normal outcome, not a
  * failure: `no-dataset` when no gateway source was picked, `error` when the
  * query itself failed, `slow` when summarizing the cache would have
  * outlasted the step's budget (setup had already succeeded in every case).
  */
-export type FirstLookResult =
+export type FirstLookOutcome =
   | { shown: true; providerRows: number; dayRows: number; partial?: true }
   | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
+
+/**
+ * The outcome plus whether the step wrote anything to stdout, which is a
+ * different question and is measured rather than derived from `shown`: the
+ * `slow` skip renders no block and still writes two lines saying so, while
+ * `no-dataset` and `error` write nothing. A caller asking "did this push
+ * earlier output out of view" reads `wrote`; a caller asking "does the user
+ * now have their numbers" reads `shown` (LLP 0188 #when).
+ */
+export type FirstLookResult = FirstLookOutcome & { wrote: boolean }
 
 /**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
@@ -358,6 +368,12 @@ export interface RunInitWizardOptions {
    * built from `ctx`; the step is skipped when neither is available.
    */
   firstLook?: OverviewQueryRunner
+  /**
+   * Override the first look's deadline (tests). Defaults to the step's own
+   * budget; a test driving the slow-skip branch through the orchestrator
+   * would otherwise have to wait out the real one.
+   */
+  firstLookBudgetMs?: number
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>
