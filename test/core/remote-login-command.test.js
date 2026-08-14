@@ -476,6 +476,12 @@ test('waitForCentralConverge: default probe converges on the active slot, never 
   const hypHome = await tmpHome()
   const env = { HYP_HOME: hypHome }
   const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+
+  // A host with no control directory at all (nothing enrolled yet) is a
+  // clean "not converged", not a probe error the loop has to swallow.
+  const neverJoined = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(neverJoined, { ok: false })
+
   await fs.mkdir(controlDir, { recursive: true })
 
   await fs.writeFile(path.join(controlDir, 'seed.json'), '{"version": 2}\n')

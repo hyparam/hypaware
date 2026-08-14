@@ -212,19 +212,34 @@ export async function waitForGatewayBind({
 export async function waitForCentralConverge(
   { env, probe, sleep = defaultSleep },
   // The wizard passes its own budget (ORG_CONFIG_WAIT_MS); the fallback here
-  // matches the attach wait's so a budget-less call stays bounded.
-  { timeoutMs = 30000, intervalMs = 500 } = {}
+  // quotes the attach wait's own constant so a budget-less call stays bounded
+  // and the two cannot drift apart.
+  { timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 500 } = {}
 ) {
   const stateRoot = readObservabilityEnv(env).stateDir
   const applied = probe ?? (() => hasAppliedCentralConfig({ stateRoot }))
   const deadline = Date.now() + timeoutMs
+  let loggedProbeError = false
   for (;;) {
     let ok = false
     try {
       ok = Boolean(await applied())
-    } catch {
+    } catch (err) {
       // A transient fs error mid-poll is "not converged this tick", never a
-      // join failure: keep polling to the timeout fallback.
+      // join failure: keep polling to the timeout fallback. But an fs error
+      // that persists is indistinguishable at the wizard from the no-org-config
+      // steady state (both end in "didn't hear back"), so leave a signal for
+      // the run that has to be diagnosed. Once per wait, not once per poll: a
+      // durable EACCES would otherwise log for the whole budget.
+      if (!loggedProbeError) {
+        loggedProbeError = true
+        getLogger('remote-login').warn('join.converge_probe_failed', {
+          [Attr.COMPONENT]: 'cmd-remote-login',
+          [Attr.OPERATION]: 'join.converge',
+          [Attr.ERROR_KIND]: 'converge_probe_unreadable',
+          error_message: err instanceof Error ? err.message : String(err),
+        })
+      }
       ok = false
     }
     if (ok) return { ok: true }
