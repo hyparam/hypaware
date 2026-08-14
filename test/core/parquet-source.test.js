@@ -264,8 +264,12 @@ test('whereToParquetFilter declines NULL-literal comparisons to the engine', () 
   // Literal versus literal: no column to key a filter on, so this declines
   // for lack of a column rather than for the NULL-literal reason above.
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE NOT (NULL = 1)')), undefined)
-  // A value expression (concatenation), not a predicate.
+  // Same NULL-literal branch as the arithmetic case above: the operator is
+  // never consulted, since a NULL literal opposite a bare column declines
+  // first.
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name || NULL')), undefined)
+  // ...and a value expression declines on the operator even without a NULL.
+  assert.equal(whereToParquetFilter(whereOf("SELECT * FROM t WHERE name || 'x'")), undefined)
   // A declined conjunct collapses the surrounding tree to the engine too
   assert.equal(whereToParquetFilter(whereOf('SELECT * FROM t WHERE id = NULL OR id = 3')), undefined)
 })
