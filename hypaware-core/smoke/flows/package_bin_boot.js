@@ -72,10 +72,23 @@ export async function run({ harness, expect }) {
         helpResult.stdout,
         (v) => typeof v === 'string' && v.includes('usage: hyp <command> [args...]')
       )
+      // Match the rendered command rows, not the whole blob: `daemon` and
+      // `status` both also appear in incidental prose (the epilogue and the
+      // `query`/`join` row summaries), so a plain substring check would stay
+      // green even if the command table itself lost every daemon*/status
+      // row. `renderHelp` writes each row as a two-space indent, the name,
+      // then two-or-more spaces (src/core/cli/dispatch.js), so that shape
+      // uniquely identifies a row.
+      const helpRows = String(helpResult.stdout ?? '')
+        .split('\n')
+        .flatMap((line) => {
+          const m = /^ {2}(\S+) {2,}\S/.exec(line)
+          return m ? [m[1]] : []
+        })
       expect.that(
-        'hypaware --help lists known commands',
-        helpResult.stdout,
-        (v) => typeof v === 'string' && v.includes('daemon') && v.includes('status')
+        `hypaware --help lists the core command rows (got rows=${helpRows.join(',') || '<none>'})`,
+        helpRows,
+        (v) => v.includes('daemon') && v.includes('status') && v.length >= 10
       )
 
       const smokeResult = spawnSync(
