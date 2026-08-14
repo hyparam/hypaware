@@ -245,3 +245,69 @@ test('hyp status --json still reports the etag and probe error the files hold', 
   assert.equal(payload.remote_config?.probation?.etag, HOSTILE_ETAG)
   assert.equal(payload.client_attach.find((c) => c.name === 'codex')?.error, probeError)
 })
+
+// The guard above seeds `probation`, which only ever reaches the text render,
+// so on its own it would let you believe `--json` is untouched everywhere. It
+// is not, and this pins the one place it is not. `remote_config_rolled_back`'s
+// message is assembled once, in the collector, out of cleaned components, so
+// the machine render receives that same cleaned prose. The split that actually
+// holds is prose-versus-values, not text-versus-json: the assembled sentence is
+// cleaned wherever it is read, and the values it was assembled from stay
+// byte-exact one key away at `remote_config.last_rollback`.
+test('hyp status --json carries the cleaned rollback prose, and the raw values beside it', async () => {
+  const hypHome = await makeHome()
+  const rollback = {
+    etag: `W/"rev-7${ERASE_LINE}`,
+    reason: 'probation_expired\nFORGED',
+    at: `2026-05-21T00:00:00.000Z${ZERO_WIDTH}`,
+  }
+  await writeControlState(hypHome, { last_rollback: rollback })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+
+  const diag = payload.diagnostics.find((d) => d.kind === 'remote_config_rolled_back')
+  assert.ok(diag, 'the rollback is diagnosed under --json too')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(diag.message), 'the --json message carries no control byte')
+  assert.ok(!diag.message.includes(ZERO_WIDTH), 'nor a zero-width run')
+  assert.ok(!diag.message.includes('\n'), 'and it is still one line under --json')
+  // The strip is a strip, not an escape (LLP 0225 #escape-not-strip applies to
+  // the query plane; this is the label plane), so the newline closes up and a
+  // consumer of this string cannot tell the two spellings apart. That is the
+  // cost of assembling the sentence once, and it is why the values below and
+  // not this sentence are what a program should read.
+  assert.ok(diag.message.includes('probation_expiredFORGED'), 'the stripped reason closes up')
+
+  assert.deepEqual(
+    payload.remote_config?.last_rollback,
+    rollback,
+    'the values the file holds are reported byte-exact under --json',
+  )
+})
+
+test('a long rollback etag is clamped in the --json message but whole in the --json values', async () => {
+  const hypHome = await makeHome()
+  const long = 'a'.repeat(5000)
+  await writeControlState(hypHome, {
+    last_rollback: { etag: long, reason: 'probation_expired', at: '2026-05-21T00:00:00.000Z' },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+
+  const diag = payload.diagnostics.find((d) => d.kind === 'remote_config_rolled_back')
+  assert.ok(diag, 'the rollback is diagnosed')
+  assert.ok(!diag.message.includes(long), 'the assembled sentence does not carry the whole etag')
+  assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped at a label width, and marked truncated')
+  assert.equal(payload.remote_config?.last_rollback?.etag, long, 'the values beside it are not clamped')
+})
