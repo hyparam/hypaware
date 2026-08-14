@@ -15,7 +15,9 @@ import {
   chooseOverviewWindow,
   collectOverview,
   describeWindow,
+  emptyOverview,
   formatCount,
+  missingSections,
   overviewRunnerFromCtx,
   renderDailyActivity,
   renderOverview,
@@ -524,6 +526,35 @@ test('chooseOverviewWindow: with no probe timing, the row cap decides alone', ()
   assert.equal(win?.boundBy, 'rows')
 })
 
+/** 20 days x 10k rows, newest first, on dates that sort as strings. */
+function twentyDayProbe() {
+  return Array.from({ length: 20 }, (_, i) => ({
+    date: `2026-07-${String(20 - i).padStart(2, '0')}`,
+    n: 10_000,
+  }))
+}
+
+test('chooseOverviewWindow: the plan charges for the sections it will run, not all four', () => {
+  // LLP 0135 #window states the estimate as `remaining / (perRowMs x 1.9 x
+  // sections)`, and `collectOverview` runs only the sections it was asked
+  // for. Half the work is half the cost, so a two-section caller can afford
+  // roughly twice the rows on the same machine and the same budget.
+  const probe = twentyDayProbe()
+  const opts = { targetRows: 1e9, budgetMs: 5000, probeMs: 2000 }
+
+  const four = chooseOverviewWindow(probe, opts)
+  const two = chooseOverviewWindow(probe, { ...opts, sections: ['models', 'daily'] })
+
+  assert.ok(four && two)
+  assert.equal(four.boundBy, 'time')
+  assert.equal(two.boundBy, 'time')
+  // 3000ms left after the probe, at 0.01ms/row: 39,473 rows for four
+  // sections, 78,947 for two - three days against seven.
+  assert.equal(four.days, 3)
+  assert.equal(two.days, 7)
+  assert.ok(two.rows > four.rows * 2, `${two.rows} should be over twice ${four.rows}`)
+})
+
 test('chooseOverviewWindow: an explicit --days request outranks both caps', () => {
   const probe = Array.from({ length: 10 }, (_, i) => ({ date: `2026-07-${20 - i}`, n: 1_000_000 }))
   // Row cap tiny, machine measured as glacial: the user asked anyway.
@@ -601,6 +632,56 @@ test('collectOverview: probes first, then runs only the requested sections', asy
   assert.deepEqual(seen, [OVERVIEW_PROBE_SQL, sql.models, sql.daily])
   assert.deepEqual(rows.repoRows, [])
   assert.deepEqual(rows.toolRows, [])
+})
+
+/** A runner that answers the probe with `probe` and every section one row. */
+function answeringRunner(probe) {
+  return {
+    hasDataset: () => true,
+    /** @param {string} sql */
+    async run(sql) {
+      return { columns: [], rows: sql === OVERVIEW_PROBE_SQL ? probe : [{ n: 1 }] }
+    },
+  }
+}
+
+/** A clock whose second reading is `ms` later, so the probe times exactly. */
+function clockSpending(ms) {
+  let calls = 0
+  return () => (calls++ === 0 ? 0 : ms)
+}
+
+test('collectOverview: the window is planned for the sections actually requested', async () => {
+  // The same machine, the same budget, the same cache - only the section
+  // list differs, and the subset caller is not charged for work it will
+  // never do.
+  const probe = twentyDayProbe()
+  const four = await collectOverview(answeringRunner(probe), {
+    targetRows: 1e9,
+    clock: clockSpending(2000),
+  })
+  const two = await collectOverview(answeringRunner(probe), {
+    sections: ['models', 'daily'],
+    targetRows: 1e9,
+    clock: clockSpending(2000),
+  })
+  assert.equal(four.window?.days, 3)
+  assert.equal(two.window?.days, 7)
+})
+
+test('missingSections: a section nobody asked for is not reported as unfinished', async () => {
+  // "The repos section did not finish" and "you did not ask for repos" are
+  // different claims, and the wizard prints the first one verbatim
+  // (LLP 0135 #overrun). A subset run has nothing missing.
+  const probe = [{ date: '2026-07-24', n: 10 }]
+  const two = await collectOverview(answeringRunner(probe), { sections: ['models', 'daily'] })
+  assert.deepEqual(missingSections(two), [])
+
+  // And a section that was asked for and did not land is still named.
+  const { runner } = probingRunner(probe)
+  const none = await collectOverview(runner, { sections: ['models', 'repos'] })
+  assert.deepEqual(missingSections(none), ['models', 'repos'])
+  assert.deepEqual(missingSections(emptyOverview()), ['models', 'daily', 'repos', 'tools'])
 })
 
 test('collectOverview: runs all four sections by default, in display order', async () => {
@@ -933,5 +1014,31 @@ test('hyp query overview: the usage line lists every flag the codec accepts', as
   // undeclared is one that exits 2 when they try it.
   for (const flag of ['--json', '--sql', '--days', '--include-local-only']) {
     assert.match(stdout.text(), new RegExp(flag.replace(/-/g, '\\-')), flag)
+  }
+})
+
+// @ref LLP 0225#decision [tests]: the overview's captured columns are escaped too
+test('renderOverview escapes captured columns and keeps its own colour', () => {
+  const ESC = '\u001b'
+  const RLO = '\u202e'
+  const usage = { input_tokens: 10, cached_tokens: 0, output_tokens: 5 }
+  const out = renderOverview({
+    providerRows: [{ provider: `anth${ESC}[8mropic`, model: `claude${RLO}-opus`, ...usage }],
+    dailyRows: [{ date: `2026-08-1${ESC}[1A`, sessions: 1, ...usage }],
+    repoRows: [{ repo_root: `/a/b${ESC}[2K`, sessions: 1, ...usage }],
+    toolRows: [{ tool_name: `Ba${ESC}[8msh`, calls: 3, sessions: 1 }],
+    // Colour on, so the painted bars keep their own ESC. That is what proves
+    // the escape is applied per captured cell rather than swept over the
+    // finished block, which would take the colour with it.
+    color: true,
+  })
+  assert.match(out, /anth\\u001b\[8mropic/)
+  assert.match(out, /claude\\u202e-opus/)
+  assert.match(out, /2026-08-1\\u001b\[1A/)
+  assert.match(out, /b\\u001b\[2K/)
+  assert.match(out, /Ba\\u001b\[8msh/)
+  // Every raw ESC that is left is one of our own colour codes.
+  for (const found of out.match(/\u001b.{0,4}/g) ?? []) {
+    assert.match(found, /^\u001b\[[0-9;]*m/, JSON.stringify(found))
   }
 })

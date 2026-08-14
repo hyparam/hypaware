@@ -76,6 +76,10 @@ Its job, in order:
    review conversation necessarily discusses the most sensitive content on
    the machine; it must never itself become a captured, forwardable
    transcript.
+   **Superseded-by: [LLP 0212](./0212-session-opt-out-is-a-cli-verb.decision.md#cli-is-the-verb)**
+   for the *surface* only (2026-08-12): the `/hypaware-ignore` skill is
+   retired and `hyp session ignore` is the mechanism to call. The requirement
+   itself, opt out and verify it took effect, is unchanged and still binds.
 2. **Check settlement.** Confirm the backfill has settled before surveying;
    warn and offer to wait if rows are still landing (the failure mode that
    killed the picker, [LLP 0094](./0094-enrollment-picker-suspended.decision.md)).

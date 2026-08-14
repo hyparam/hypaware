@@ -3,6 +3,7 @@
 import os from 'node:os'
 
 import { Attr } from '../observability/index.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import {
   clientAssetBaseDirs,
   clientAssetsKey,
@@ -340,12 +341,12 @@ export function createAttachHandler(opts = {}) {
 
       let result
       try {
-        // `ctx.endpoint` is the proven-bound gateway URL `perform()` already
-        // attaches with, so reverse decides ownership against the very origin
-        // the forward action wrote. The `json_path` format needs it (its undo
-        // record is the entry it wrote); the marker-carrying formats ignore it.
-        // @ref LLP 0172#lane-a-detach [implements]: reverse threads the gateway's own base URL into the one core undo, from the ActionContext perform() already uses
-        result = await detach({ descriptor, env: ctx.env, expectedBaseUrl: ctx.endpoint })
+        // No gateway fact is threaded in: every format's undo record lives in
+        // the settings file itself (marker key, managed block, or the entry's
+        // own signature), so reverse works even when the endpoint that
+        // performed the attach no longer exists.
+        // @ref LLP 0210#d1 [constrained-by]: reverse passes no origin; the json_path undo judges ownership by the entry's signature alone
+        result = await detach({ descriptor, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
       }
@@ -482,8 +483,13 @@ function attachedAssetOptions(client, ctx) {
     clients: [client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     ...(ctx.skills ? { skills: ctx.skills } : {}),
     ...(ctx.agents ? { agents: ctx.agents } : {}),
+    // A daemon boot where one plugin threw in `activate()` still reconciles;
+    // its attach copies what did activate and prunes nothing, because the
+    // missing contributions are indistinguishable from retired ones.
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
   }
 }
 
@@ -529,7 +535,7 @@ async function materializeAttachedAssets(client, ctx) {
   }
 
   try {
-    const installed = await materializeClientAssets({ ...options, stderr: warnings })
+    const { installed } = await materializeClientAssets({ ...options, stderr: warnings })
     return installed.map((asset) => asset.dest)
   } catch (err) {
     ctx.log.warn('client_action.attach_assets_failed', {

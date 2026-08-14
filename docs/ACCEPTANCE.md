@@ -444,6 +444,26 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    Record in the release notes that all three still hold on
    `openclaw --version` as run, not only that this document says they do.
 
+8. Codex-backend stamping probe
+   ([LLP 0193#verify](../llp/0193-openclaw-backfill-cli-denylist.decision.md#verify)):
+   run **one** OpenClaw turn on a codex CLI backend (a `codex-cli/<model>`
+   ref, or whatever ref your install resolves to the `codex` binary), then
+   read the newest records of the session file it wrote:
+
+   ```sh
+   tail -5 ~/.openclaw/agents/main/sessions/<session-id>.jsonl | \
+     grep -o '"provider":"[^"]*"\|"api":"[^"]*"'
+   ```
+
+   Expected: the turn's assistant record stamps `api: "cli"` (any provider
+   string). Record the observed `provider`/`api` pair and
+   `openclaw --version` in LLP 0193's verify section. If the record stamps
+   a wire-shape api (`openai-responses`, `openai-completions`) instead,
+   that is the LLP 0193 fail-open residual observed live: the turn
+   double-counts against `@hypaware/codex` unless its provider string
+   matches the `codex` prefix, so file it and extend
+   `SIBLING_ADAPTER_COVERAGE` with the observed provider before release.
+
 ### If it fails
 
 - Step 1's pre-restart probe finds a *new* row before you restart the

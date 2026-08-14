@@ -11,6 +11,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
@@ -50,7 +51,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
- * @import { ClientEnableResult } from '../../../src/core/config/types.js'
+ * @import { ClientEnableResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -977,69 +978,21 @@ function reportEnableFailure({ name, result, ctx }) {
  * @returns {Promise<void>}
  */
 async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json }) {
+  const homeDir = ctx.env.HOME ?? os.homedir()
   await materializeClientAssets({
     clients: [name],
     descriptors: descriptorMap,
-    homeDir: ctx.env.HOME ?? os.homedir(),
+    homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     dryRun,
     // Under --json the adapter's one-line machine payload stays the only thing
     // on stdout, so the per-copy progress lines are suppressed.
     ...(json ? {} : { stdout: ctx.stdout }),
     stderr: ctx.stderr,
   })
-}
-
-/**
- * The gateway's own base origin, for the `json_path` undo's ownership check:
- * that format's undo record is the entry attach wrote, so telling our entry
- * from a user's is a comparison against this URL and nothing else
- * (LLP 0172 §2.1).
- *
- * Same three rungs the manual attach path already walks, in the same order,
- * so a detach can never decide ownership against a different origin than the
- * attach it is reversing wrote: the live `localEndpoint()` first, the
- * configured `listen` next, the running daemon's persisted bound port last.
- *
- * Every rung is optional, deliberately. Detach must keep working with the
- * `@hypaware/ai-gateway` capability absent or unloaded (that is why the
- * detach branch of `runClientLifecycle` runs ahead of the capability gate),
- * so this resolves what it can and hands back `undefined` otherwise; the
- * formats that carry their own marker do not need it, and the one that does
- * refuses loudly rather than guessing.
- *
- * @param {CommandRunContext} ctx
- * @returns {string | undefined}
- * @ref LLP 0172#lane-a-detach [implements]: detachClientViaCore resolves the gateway base URL through the existing AiGatewayCapability lookup plus the manual path's fallbacks, and threads it into the one core undo
- */
-function resolveExpectedGatewayBaseUrl(ctx) {
-  // Every rung is wrapped, and the whole walk is optional. Detach is reached
-  // with the capability registry, the config, or the state dir missing - that
-  // is the point of resolving the undo ahead of the capability gate - so a rung
-  // that cannot answer must yield to the next one rather than turn a detach
-  // into an internal error.
-  try {
-    if (ctx.capabilities?.has('hypaware.ai-gateway') === true) {
-      /** @type {AiGatewayCapability} */
-      const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
-      const live = gateway.localEndpoint()
-      if (typeof live === 'string' && live.length > 0) return live
-    }
-  } catch {
-    // Registered but not bound in this process (the usual CLI case).
-  }
-  try {
-    const configured = ctx.config ? configuredGatewayEndpoint(ctx.config) : undefined
-    if (configured !== undefined) return configured
-  } catch {
-    // A config shape this helper cannot read is not a detach failure.
-  }
-  try {
-    return resolveLiveGatewayEndpointFromStatus({ stateRoot: readObservabilityEnv(ctx.env).stateDir })
-  } catch {
-    return undefined
-  }
 }
 
 /**
@@ -1058,25 +1011,34 @@ function resolveExpectedGatewayBaseUrl(ctx) {
  * reversal alike - because the read-then-remove lives here, next to the clear,
  * rather than in one caller (LLP 0138 #marker-undo).
  *
- * `quietNoop` suppresses only the human "nothing to do" line, for the callers
- * that reverse a whole set of markers rather than the one client a user named:
+ * `quiet` suppresses this routine's own stdout prose, warnings included, and
+ * hands the full result back instead: a quiet caller takes on the duty of
+ * rendering `result.warning` and `result.restoredPaths` itself, because those
+ * lines can be the only surviving copy of what the undo left behind. The
+ * asset-refusal stderr writes stay unconditional either way.
+ *
+ * `quietNoop` is the narrower cut, for a caller that still wants the prose:
+ * it suppresses only the human "nothing to do" line, for the callers that
+ * reverse a whole set of markers rather than the one client a user named.
  * `hyp leave` runs this over every attach marker on disk, and a client with
  * nothing left to reverse must not narrate a settings file the user may never
  * have had (#627). It changes nothing else, and never the `--json` payload,
- * which carries `changed` for exactly this distinction.
+ * which carries `changed` for exactly this distinction. It is moot under
+ * `quiet`, which already withholds every stdout line this routine writes.
  *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
+ *   quiet?: boolean,
  *   quietNoop?: boolean,
  *   ctx: CommandRunContext,
  * }} args
- * @returns {Promise<void>}
+ * @returns {Promise<DetachFromDiskResult | undefined>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, quietNoop, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, quietNoop, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -1120,7 +1082,6 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
           descriptor,
           homeDir,
           env: ctx.env,
-          expectedBaseUrl: resolveExpectedGatewayBaseUrl(ctx),
         })
         const restored = result.changed === true
         span.setAttribute('status', 'ok')
@@ -1133,7 +1094,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
             changed: true,
           })
         }
-        writeCoreDetachOutput({ ctx, name, json, quietNoop, result })
+        if (!quiet) writeCoreDetachOutput({ ctx, name, json, quietNoop, result })
         const stateRoot = readObservabilityEnv(ctx.env).stateDir
 
         // Retract the attach marker so the CLI undo and the marker store stay in
@@ -1187,7 +1148,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
               installedAssets,
               clientAssetBaseDirs(descriptor, homeDir)
             )
-            if (removed.length > 0 && !json) {
+            if (removed.length > 0 && !json && !quiet) {
               ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
             }
             const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
@@ -1223,6 +1184,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
           }
         }
         if (assetFailure.length > 0) throw new Error(assetFailure)
+        return result
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)
@@ -1231,6 +1193,68 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
     },
     { component: 'cmd-detach' }
   )
+}
+
+/**
+ * Reverse every known client's attach from disk, quietly, and report only what
+ * actually changed.
+ *
+ * This is the sweep `hyp daemon uninstall` runs. Removing the service strands
+ * every attached client on a gateway port that stops answering, and a client
+ * pointed at a dead `ANTHROPIC_BASE_URL` does not degrade to talking to
+ * Anthropic directly - it fails every request. So the level-4 exit finishes the
+ * level-1 exit rather than leaving the machine in that state.
+ *
+ * Every known client is asked, not just the ones this process can prove are
+ * attached: the core undo is already an honest no-op on a client that was never
+ * attached (`changed: false`), so asking is cheaper and more truthful than a
+ * second probe, and the returned `detached` list is exactly the set that had
+ * something to reverse. Per-client failures are collected rather than thrown so
+ * one wedged client cannot strand the rest still attached.
+ *
+ * Each `detached` entry carries the undo's own `warning` and `restoredPaths`
+ * forward. The sweep runs the undo quiet, so these fields are the only copy of
+ * notices like "overridden externally; leaving in place" - a caller that drops
+ * them reports a detach as clean when the user still has a file to fix.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{
+ *   detached: { name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[],
+ *   failed: { name: string, message: string }[],
+ * }>}
+ * @ref LLP 0206#d1 [implements]: uninstalling the service detaches the clients it was serving
+ */
+export async function detachAllClientsFromDisk(ctx) {
+  /** @type {{ name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[]} */
+  const detached = []
+  /** @type {{ name: string, message: string }[]} */
+  const failed = []
+  const descriptors = await buildClientDescriptorMap(ctx)
+  for (const [name, descriptor] of descriptors) {
+    try {
+      const result = await detachClientViaCore({
+        name,
+        descriptor,
+        dryRun: false,
+        json: false,
+        quiet: true,
+        ctx,
+      })
+      if (result?.changed === true) {
+        detached.push({
+          name,
+          ...(result.settingsPath !== undefined ? { settingsPath: result.settingsPath } : {}),
+          ...(result.removed !== undefined ? { removed: result.removed } : {}),
+          ...(result.restoredValue !== undefined ? { restoredValue: result.restoredValue } : {}),
+          ...(result.restoredPaths !== undefined ? { restoredPaths: result.restoredPaths } : {}),
+          ...(result.warning !== undefined ? { warning: result.warning } : {}),
+        })
+      }
+    } catch (err) {
+      failed.push({ name, message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return { detached, failed }
 }
 
 /**
@@ -1948,12 +1972,14 @@ export async function runSkillsInstall(argv, ctx) {
   }
 
   const descriptors = await buildClientDescriptorMap(ctx)
-  const installed = await materializeClientAssets({
+  const { installed } = await materializeClientAssets({
     clients: parsed.client === 'all' ? 'all' : [parsed.client],
     descriptors,
     homeDir,
+    stateRoot: clientAssetStateRoot(ctx.env, homeDir),
     skills: ctx.skills,
     agents: ctx.agents,
+    ...(ctx.failedPlugins?.length ? { failedPlugins: ctx.failedPlugins } : {}),
     stdout: ctx.stdout,
     stderr: ctx.stderr,
   })

@@ -156,6 +156,14 @@ export interface OverviewRows {
   toolRows: Record<string, unknown>[]
   window?: OverviewWindow
   sql?: { models: string; daily: string; repos: string; tools: string }
+  /**
+   * The sections this run set out to fill, stamped by `collectOverview`
+   * before it runs anything. It is what tells an empty section that was
+   * never requested from one that did not finish, which is the difference
+   * between the two sentences LLP 0135 #overrun insists on. Absent on a
+   * result nobody collected into, where all four are assumed.
+   */
+  sections?: readonly ('models' | 'daily' | 'repos' | 'tools')[]
 }
 
 /**

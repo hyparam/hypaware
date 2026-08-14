@@ -2,6 +2,7 @@
 
 **Type:** plan
 **Status:** Active
+**Extended-by:** LLP 0193 (the backfill provider allowlist this plan lands is retired for a turn-scoped CLI-backend denylist)
 **Related:** LLP 0172
 **Generated-by:** neutral
 

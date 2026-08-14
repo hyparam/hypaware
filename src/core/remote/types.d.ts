@@ -4,7 +4,32 @@
  * specifier so the published declaration build resolves them identically.
  */
 
+import type { ConfigLoadErrorKind } from '../../../src/core/config/types.js'
 import type { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
+
+/**
+ * What the central config layer says about this machine's enrollment
+ * (LLP 0063 D4). Keeps "not enrolled" and "cannot tell" apart: an empty
+ * `origins` with a non-null `unreadable` is a layer this process could not
+ * read, which the D4 gate must refuse rather than read as a free machine.
+ * Not enrolled is a control directory with no central layer left in it.
+ */
+export interface CentralEnrollment {
+  /** URL origins the central layer's `@hypaware/central` sinks target. */
+  origins: string[]
+  /**
+   * Why the layer could not be read: it loaded no config (a missing file at a
+   * resolved path included), or its path could not be resolved at all while
+   * central-layer state was still on disk, in which case `configPath` is the
+   * control directory rather than a layer file. `null` when the layer loaded,
+   * or when there is verifiably no layer.
+   */
+  unreadable: {
+    configPath: string
+    errorKind: ConfigLoadErrorKind
+    message: string
+  } | null
+}
 
 /**
  * One central forward sink seeded from a login-minted gateway credential
@@ -102,3 +127,40 @@ export interface RemoteOidcRecord {
  * dropped by the same `removeToken`.
  */
 export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
+
+/**
+ * Why a `hyp remote login` ended the way it did (LLP 0179#outcome). A code,
+ * never a message: the login lane prints its own English, and a caller that
+ * has to branch reads this instead of the prose.
+ *
+ * `no_membership` / `org_not_permitted` / `org_selection_required` are the
+ * server-surfaced LLP 0058 D7 refusals, definitive in the sense that the same
+ * bare login cannot fix them. `denied` is a provider denial and `login_failed`
+ * a transient or local failure (timeout, network, an abandoned browser flow);
+ * both are worth retrying. The rest name a step that failed after the sign-in
+ * itself succeeded, which is why they are not folded into one `failed`.
+ */
+export type LoginOutcomeReason =
+  | 'ok'
+  | 'usage'
+  | 'connected_elsewhere'
+  | 'no_membership'
+  | 'org_not_permitted'
+  | 'org_selection_required'
+  | 'denied'
+  | 'login_failed'
+  | 'store_failed'
+  | 'seed_failed'
+  | 'enroll_failed'
+  | 'daemon_incomplete'
+
+/**
+ * What the login lane returns: the exit code `hyp remote login` reports, and
+ * the reason behind it. `exitCode === 0` iff `reason === 'ok'`, except for
+ * `daemon_incomplete`, which carries the daemon installer's own non-zero code
+ * (LLP 0179#outcome).
+ */
+export interface LoginOutcome {
+  exitCode: number
+  reason: LoginOutcomeReason
+}

@@ -47,8 +47,8 @@ test('defaultBackfillConsentPromptFactory, imported directly, asks the exact fin
   const consent = await ask({ providers: ['claude'], retentionDays: 14 })
 
   // Same title/copy shape the init finale shows today for this client:
-  // "Import local <providers> history now (last <days> days)?"
-  assert.equal(stdout.text(), 'Import local claude history now (last 14 days)? [Y/n]: ')
+  // "Import the <providers> history already on this machine (up to <days> days)?"
+  assert.equal(stdout.text(), 'Import the Claude history already on this machine (up to 14 days)? [Y/n]: ')
   // Bare enter defaults to yes.
   assert.equal(consent, true)
 })
@@ -64,6 +64,6 @@ test('defaultBackfillConsentPromptFactory renders the multi-provider title ident
   })
   const consent = await ask({ providers: ['claude', 'codex'], retentionDays: 30 })
 
-  assert.equal(stdout.text(), 'Import local claude, codex history now (last 30 days)? [Y/n]: ')
+  assert.equal(stdout.text(), 'Import the Claude and Codex history already on this machine (up to 30 days)? [Y/n]: ')
   assert.equal(consent, false)
 })

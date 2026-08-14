@@ -453,6 +453,12 @@ async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
  * and be dropped (see scanSpooledPartIds's hazard note). That spool scan
  * belongs to backfill alone.
  *
+ * The committed scan is restricted to the `part_id`s present in THIS
+ * batch: the flush only needs membership answers for the rows in hand,
+ * and the unrestricted variant materialized every part_id ever written
+ * (millions of entries, hundreds of MB) on every fallback-carrying
+ * flush tick, a main driver of daemon GC thrash (LLP 0204#fix).
+ *
  * @param {Record<string, unknown>[]} rows
  * @param {DatasetSettleContext} ctx
  * @returns {Promise<Record<string, unknown>[]>}
@@ -460,7 +466,13 @@ async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
 async function dedupeByPartId(rows, ctx) {
   const storage = ctx?.storage
   if (rows.length === 0 || !canScanExistingRows(storage)) return rows
-  const seen = await scanExistingPartIds(storage)
+  /** @type {Set<string>} */
+  const batchKeys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) batchKeys.add(key)
+  }
+  const seen = await scanExistingPartIds(storage, batchKeys)
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
@@ -613,19 +625,27 @@ function canScanExistingRows(storage) {
 }
 
 /**
- * Scan every committed `ai_gateway_messages` partition and collect the
- * set of `part_id`s already present. Reads are projected to the three
- * identity columns so the scan stays cheap, and every failure mode
- * (unreadable partition, missing table) degrades to "not seen" rather
- * than aborting the backfill (a dedupe miss only risks a duplicate that
- * compaction will later collapse, whereas throwing would drop real rows).
+ * Scan committed `ai_gateway_messages` partitions and collect the set of
+ * `part_id`s already present. Reads are projected to the three identity
+ * columns so the scan stays cheap, and every failure mode (unreadable
+ * partition, missing table) degrades to "not seen" rather than aborting
+ * the caller (a dedupe miss only risks a duplicate that compaction will
+ * later collapse, whereas throwing would drop real rows).
+ *
+ * `restrictTo` bounds the result: only keys in that set are collected,
+ * and the scan stops early once all of them have been found. The
+ * flush-time settle passes its batch keys here so a steady-state flush
+ * holds O(batch) memory; backfill omits it because its per-run memo
+ * legitimately needs the full committed set (see createBackfillDedupe).
  *
  * @param {QueryStorageService} storage
+ * @param {ReadonlySet<string>} [restrictTo]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage) {
+async function scanExistingPartIds(storage, restrictTo) {
   /** @type {Set<string>} */
   const seen = new Set()
+  if (restrictTo && restrictTo.size === 0) return seen
   /** @type {CachePartitionMeta[]} */
   let partitions = []
   try {
@@ -639,7 +659,14 @@ async function scanExistingPartIds(storage) {
     try {
       for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
         const key = partIdKey(row)
-        if (key !== undefined) seen.add(key)
+        if (key === undefined) continue
+        if (restrictTo) {
+          if (!restrictTo.has(key)) continue
+          seen.add(key)
+          if (seen.size >= restrictTo.size) return seen
+        } else {
+          seen.add(key)
+        }
       }
     } catch {
       // Skip an unreadable partition; other partitions still contribute.

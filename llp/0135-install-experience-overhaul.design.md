@@ -154,6 +154,12 @@ sites share it:
 
 ## Wizard orchestration {#orchestration}
 
+> **Extended-by [LLP 0191](./0191-wizard-back-navigation.decision.md):**
+> the phase sequence below also runs backwards one step at a time -
+> escape at a question lane returns to the lane before it, with a
+> completed join reused rather than re-run. The forward flow and every
+> phase's contract are unchanged.
+
 `runInitWizard(opts)` (`src/core/cli/wizard/index.js`) replaces
 `runPickerWalkthrough` as `runInit`'s entry point for the interactive case
 (`opts.picks` absent). Non-interactive callers (`--yes`, `--dry-run`, presets,
@@ -324,7 +330,27 @@ transient network error) to `'failed' | 'abandoned'` for
 `runInitWizard`'s retry-or-local-or-quit prompt
 (`@ref LLP 0129#failed-join-returns-to-fork`).
 
+Extended-by: [LLP 0179](./0179-login-lane-returns-its-outcome.decision.md).
+The taxonomy and the classification it feeds are unchanged; how the wizard
+*learns* them is not. The implementation read the login lane's captured
+stderr and substring-matched the messages it printed; the lane now returns
+`{ exitCode, reason }` and `classifyLoginFailure` switches on the code.
+
+Extended-by: [LLP 0223](./0223-converge-on-applied-config.decision.md).
+The reuse-the-reconcile-wait sketch above is withdrawn:
+`waitForCentralConverge` now runs its own bounded poll over the applied
+org-config slot under `config-control/`, because an attach marker is
+sufficient but not necessary evidence that the org config landed. It stays
+a small exported helper of `remote_commands.js`, with the same budget and
+the same unlocked-picker timeout fallback, and returns `{ ok }` only.
+
 ## Pick phase {#pick}
+
+> **Extended-by [LLP 0190](./0190-wizard-defaults-gate.decision.md):**
+> when detection or the locked set yields a non-empty default, the lane
+> now opens with a defaults gate (state the selection, accept on a bare
+> enter, menu on request). The menu described below is unchanged and one
+> keypress away.
 
 `runWizardPick` keeps `walkthrough.js`'s existing shape (prompt, write, guard,
 overwrite confirm) but two things change:
@@ -525,6 +551,13 @@ over a file core can neither read nor reverse.
 
 ## Export-seam source-scoped withholding {#export-seam}
 
+> **Extended-by [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md):**
+> the withheld set is no longer "the picker source ids classified
+> `'local'`"; it is the explicit per-client opt-out store, minus
+> central-classified sources. The seam mechanics below (attribution
+> column, drop-but-advance) are unchanged, and datasets without an
+> attribution column gain a dataset-scoped withholding rule.
+
 Extends `readRowsSince` (`src/core/cache/storage.js:243`), which already
 enforces `cwd`-derived `local-only` withholding via `usagePolicyResolver`
 (`@ref LLP 0070#enforce`). A second, optional resolver is threaded the same
@@ -594,6 +627,19 @@ requires no new code beyond `claude-desktop`'s manifest declaring
 under [LLP 0037](./0037-backfill-on-join.decision.md) default-on doctrine.
 
 ## First look {#first-look}
+
+> **Extended-by [LLP 0198](./0198-setup-ends-on-a-question.decision.md):**
+> two changes to what is settled below. (1) The block is no longer the
+> run's last step: a closing "first ask" follows the privacy narration
+> with a few questions worth putting to the rows this block just showed,
+> and starts the user's own client on the one they pick. The narration
+> keeps its position as the wizard's last words. (2) **Setup renders
+> `['models', 'daily']`, not all four sections**
+> ([#wizard-sections](./0198-setup-ends-on-a-question.decision.md#wizard-sections)),
+> taking up the seam this section left open; "Both callers render all
+> four" below is superseded for the wizard. `hyp query overview` is
+> unchanged and still renders all four. The look's budget and placement
+> are otherwise untouched.
 
 Setup used to end on a hint: `next: hyp query sql 'select count(*) from
 logs'`. That command fails on most installs, because `logs` only exists

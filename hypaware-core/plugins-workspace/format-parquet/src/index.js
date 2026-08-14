@@ -18,15 +18,17 @@ const EXTENSION = 'parquet'
 const DEFAULT_CODEC = 'SNAPPY'
 const DEFAULT_ZSTD_LEVEL = 3
 
-// Row-group clustering. hyparquet-writer keeps a column dictionary-encoded
-// only while a row group's DISTINCT values fit under its ~1 MiB dictionary-
-// page cap. Columns denormalized onto every row but constant per conversation
-// (e.g. `tools`, `system_text`) explode to PLAIN: re-storing every copy in
-// full once a single row group spans the whole partition's distinct values.
-// Bounding each row group to a small number of distinct cluster keys (and a
-// max row count) keeps the dictionary alive. The dictionary decision depends
-// on the distinct-value COUNT, not row order, and the source rows already
-// arrive grouped by conversation, so no sort is needed.
+// Row-group clustering. Originally this existed because hyparquet-writer
+// (< 0.16.6) kept a column dictionary-encoded only while a row group's
+// DISTINCT values fit under its ~1 MiB dictionary-page cap, so columns
+// denormalized onto every row but constant per conversation (e.g. `tools`,
+// `system_text`) exploded to PLAIN once one row group spanned the whole
+// partition's distinct values. Since 0.16.6 the writer keeps any dictionary
+// that at least halves the encoded bytes (hyparquet-writer#35), so the
+// dictionary survives with or without clustering. Clustering stays for the
+// byte cap below (the encoder's peak-heap bound) and for conversation-
+// contiguous row groups, which prune better on read. The source rows
+// already arrive grouped by conversation, so no sort is needed.
 const DEFAULT_MAX_CLUSTER_KEYS = 16
 const DEFAULT_MAX_ROWS_PER_GROUP = 50_000
 // Hard ceiling on how many estimated row bytes accumulate in one in-memory

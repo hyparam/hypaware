@@ -48,7 +48,10 @@ const CLIENT_HEADER = 'x-hypaware-client'
 /** The two provider keys attach owns, in write order. */
 const PROVIDER_KEYS = ['anthropic', 'openai']
 
-const RESTART_COMMAND = 'openclaw gateway restart'
+// Exported so the picker-disclosure test can assert the manifest summary
+// names this exact command, not a copy it could silently drift from
+// (test/plugins/picker-disclosure.test.js).
+export const RESTART_COMMAND = 'openclaw gateway restart'
 
 /**
  * The instruction R4 requires both surfaces to end with. A running OpenClaw
@@ -245,10 +248,10 @@ function conflictingProviderKeys(config) {
   return PROVIDER_KEYS.filter(
     (key) =>
       Object.hasOwn(container, key) &&
-      // No base-URL set: the endpoint has moved by the time a drift re-attach
-      // runs, so our own entry carries the *old* origin. See the shared
-      // predicate's note on why detach passes one and attach does not.
-      !isOwnedProviderEntry(container[key], key, MARKER_HEADER, undefined)
+      // Signature-only, like every caller of the shared predicate: the
+      // endpoint has moved by the time a drift re-attach runs, so our own
+      // entry carries the *old* origin and a URL check would refuse it.
+      !isOwnedProviderEntry(container[key], key, MARKER_HEADER)
   )
 }
 

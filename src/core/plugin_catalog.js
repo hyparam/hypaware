@@ -40,6 +40,8 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
   const clientDescriptors = new Map()
   /** @type {Map<string, PickerDescriptor>} */
   const pickerDescriptors = new Map()
+  /** @type {Map<PluginName, PluginName[]>} */
+  const composeWith = new Map()
 
   for (const source of [bundledManifests, installedManifests]) {
     for (const entry of source) {
@@ -54,6 +56,10 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
         contributes: entry.manifest.contributes,
       })
       pluginMetadata.set(name, meta)
+
+      // @ref LLP 0213#d1 [implements]: a rider names the plugins whose composition pulls it in
+      const riders = entry.manifest.compose_with
+      if (Array.isArray(riders) && riders.length > 0) composeWith.set(name, [...riders])
 
       const datasets = entry.manifest.contributes?.datasets
       if (Array.isArray(datasets)) {
@@ -83,6 +89,23 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
               (v) => typeof v === 'string' && v.length > 0
             )
           }
+          // A launch spec that cannot carry the question is dropped here
+          // rather than downstream: an accepted-but-mute spec starts the
+          // client with no prompt, which reads as the feature working.
+          // @ref LLP 0198#split [implements]: the manifest owns how to start a client; a spec missing `{prompt}` is not a launch spec
+          const launch = client.launch
+          if (
+            launch && typeof launch.bin === 'string' && launch.bin.length > 0 &&
+            Array.isArray(launch.args) &&
+            launch.args.every((a) => typeof a === 'string') &&
+            launch.args.some((a) => a.includes('{prompt}'))
+          ) {
+            descriptor.launch = {
+              bin: launch.bin,
+              args: [...launch.args],
+              ...(typeof launch.label === 'string' && launch.label.length > 0 ? { label: launch.label } : {}),
+            }
+          }
           clientDescriptors.set(client.name, descriptor)
         }
       }
@@ -100,6 +123,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           }
           if (typeof row.summary === 'string') descriptor.summary = row.summary
           if (row.detect) descriptor.detect = row.detect
+          if (typeof row.hidden === 'boolean') descriptor.hidden = row.hidden
           if (typeof row.needs_setup === 'boolean') descriptor.needsSetup = row.needs_setup
           if (typeof row.configure_command === 'string') descriptor.configureCommand = row.configure_command
           if (row.compose && typeof row.compose === 'object') descriptor.compose = row.compose
@@ -109,7 +133,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
     }
   }
 
-  return { plugins, pluginMetadata, knownDatasets, clientDescriptors, pickerDescriptors }
+  return { plugins, pluginMetadata, knownDatasets, clientDescriptors, pickerDescriptors, composeWith }
 }
 
 /**

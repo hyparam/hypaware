@@ -9,6 +9,7 @@ import {
   select,
   text,
   PromptCancelledError,
+  PromptBackRequestedError,
 } from '../../../../src/core/cli/tui/index.js'
 import { isPromptCancelledError, countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
 
@@ -92,6 +93,71 @@ test('runtime: multiselect cancel via ctrl+c throws PromptCancelledError', async
   // unhandled-rejection detector never fires.
   const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
   await feed(io.stdin, ['\x03'])
+  await rejection
+})
+
+// The reducer settling a state as `backed` only matters if the runtime
+// turns that into a rejection: without the `backed` arm in `run`'s settle
+// switch the promise never settles at all, and escape on a wizard prompt
+// hangs the CLI. Every caller's back handling is written against this
+// throw, so it is pinned end-to-end (a real key byte, a real io loop)
+// rather than by constructing the error by hand.
+// @ref LLP 0191#esc-back [tests]: escape on an allowBack prompt settles the prompt as a back request
+test('runtime: escape on an allowBack multiselect throws PromptBackRequestedError', async () => {
+  const io = makeTty()
+  const promise = multiselect({
+    title: 'pick',
+    allowBack: true,
+    options: [{ value: 'a', label: 'A' }],
+    stdin: io.stdin,
+    stdout: io.stdout,
+  })
+  const rejection = assert.rejects(promise, (err) => err instanceof PromptBackRequestedError)
+  await feed(io.stdin, ['\x1b'])
+  await rejection
+})
+
+test('runtime: escape on an allowBack select throws PromptBackRequestedError', async () => {
+  const io = makeTty()
+  const promise = select({
+    title: 'pick',
+    allowBack: true,
+    options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }],
+    stdin: io.stdin,
+    stdout: io.stdout,
+  })
+  const rejection = assert.rejects(promise, (err) => err instanceof PromptBackRequestedError)
+  await feed(io.stdin, ['\x1b'])
+  await rejection
+})
+
+// Ctrl+C outranks `allowBack`: "get me out" never needs the flag.
+// @ref LLP 0191#esc-back [tests]: ctrl+c still cancels on a prompt that offers back
+test('runtime: ctrl+c on an allowBack prompt still cancels', async () => {
+  const io = makeTty()
+  const promise = multiselect({
+    title: 'pick',
+    allowBack: true,
+    options: [{ value: 'a', label: 'A' }],
+    stdin: io.stdin,
+    stdout: io.stdout,
+  })
+  const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
+  await feed(io.stdin, ['\x03'])
+  await rejection
+})
+
+// Escape without the flag keeps its long-standing cancel meaning.
+test('runtime: escape on a prompt without allowBack still cancels', async () => {
+  const io = makeTty()
+  const promise = multiselect({
+    title: 'pick',
+    options: [{ value: 'a', label: 'A' }],
+    stdin: io.stdin,
+    stdout: io.stdout,
+  })
+  const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
+  await feed(io.stdin, ['\x1b'])
   await rejection
 })
 

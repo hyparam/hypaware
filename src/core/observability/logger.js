@@ -37,7 +37,6 @@ const SEVERITY_TEXT = Object.freeze({
  * @returns {{ provider: LoggerProvider|null, exporters: object[] }}
  */
 export function installLoggerProvider({ env, resource }) {
-  /** @type {object[]} */
   const exporters = []
 
   if (env.devTelemetry) {

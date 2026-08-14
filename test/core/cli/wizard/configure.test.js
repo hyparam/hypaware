@@ -165,3 +165,36 @@ test('runConfigurePhase: never runs off a non-interactive opts.picks path', asyn
   assert.deepEqual(calls, [])
   assert.equal(stdout.text(), '')
 })
+
+// A reconfigure's carried answer is not a new pick: its setup question was
+// asked the run it was first ticked, so the phase must not re-run its
+// configure command (and re-launch a sign-in) on every reconfigure.
+// @ref LLP 0131#drop-on-failure [tests]: skipping a carried row is not a drop - no catch-up hint prints
+test('a needs_setup row the existing config already composed is skipped, not re-run', async () => {
+  const { calls, ctx } = fakeCommands({})
+  const stdout = makeBuf()
+  const result = await runConfigurePhase(
+    /** @type {any} */ ({
+      descriptors: [descriptor()],
+      previouslyConfigured: ['claude-desktop'],
+    }),
+    /** @type {any} */ ({ stdout, ctx })
+  )
+  assert.deepEqual(calls, [], 'the configure command never runs for a carried row')
+  assert.deepEqual(result.results, [])
+  assert.doesNotMatch(stdout.text(), /Setting up/)
+  assert.doesNotMatch(stdout.text(), /Skipping/)
+})
+
+test('a newly picked needs_setup row still runs when another row is carried', async () => {
+  const { calls, ctx } = fakeCommands({})
+  const stdout = makeBuf()
+  await runConfigurePhase(
+    /** @type {any} */ ({
+      descriptors: [descriptor(), descriptor({ id: 'other-setup', label: 'Other', configureCommand: 'other install' })],
+      previouslyConfigured: ['claude-desktop'],
+    }),
+    /** @type {any} */ ({ stdout, ctx })
+  )
+  assert.deepEqual(calls.map((c) => c.name), ['other install'])
+})

@@ -20,7 +20,15 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
-import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
+import {
+  ClientSyncListUnreadableError,
+  localOnlyListPath,
+  LocalOnlyListUnreadableError,
+  optedOutClientSourceIds,
+  readClientSyncEntries,
+  readFolderAskModeSafe,
+  readLocalOnlyDirs,
+} from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
@@ -40,9 +48,10 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -105,13 +114,8 @@ const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
  * @ref LLP 0086#endpoint-discovery [implements]: the daemon's live bound port is read from status.json sources[].details, not guessed
  */
 export function gatewaySourceDetails(sources) {
-  const list = Array.isArray(sources) ? sources : []
-  const source =
-    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
-    list.find((s) => s && s.name === 'ai-gateway')
-  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
-  if (!rawDetails) return undefined
-  const details = /** @type {Record<string, unknown>} */ (rawDetails)
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return undefined
   const port = details.port
   if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
@@ -122,6 +126,239 @@ export function gatewaySourceDetails(sources) {
       ? details.listen_fallback_from
       : undefined
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
+}
+
+/**
+ * The gateway source's `status()` details as the daemon captured them, before
+ * any "is it bound?" filtering. `gatewaySourceDetails` above answers "where do
+ * I send traffic?" and so returns nothing for a gateway that never bound; the
+ * dropped-upstream check below needs the details of exactly that case.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {Record<string, unknown> | undefined}
+ */
+function gatewaySourceRawDetails(sources) {
+  const list = Array.isArray(sources) ? sources : []
+  const source =
+    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
+    list.find((s) => s && s.name === 'ai-gateway')
+  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
+  if (!rawDetails) return undefined
+  return /** @type {Record<string, unknown>} */ (rawDetails)
+}
+
+/**
+ * The upstreams the gateway's config asked for and did not get, or `undefined`
+ * when it got everything it asked for (which includes asking for nothing).
+ *
+ * `compileUpstreams` drops an upstream entry missing either `name` or
+ * `base_url`, per entry and without complaint. Nothing downstream can see
+ * that from the routing table alone, so the gateway source reports the raw
+ * configured count next to the number that fell out, and this reads the
+ * difference. One comparison covers both shapes of the fault:
+ *
+ * - **Every entry dropped.** The routing table is empty, so the source binds
+ *   no listener at all (`listening: false`). An upstream-less gateway is a
+ *   legitimate config (LLP 0120: hermes composes the plugin for its
+ *   materializer alone and contributes no upstream), so this cannot be a start
+ *   failure any more; without a diagnostic it reports `started` and `healthy`
+ *   while every client gets ECONNREFUSED.
+ * - **Some entries dropped.** The table is non-empty, the proxy binds, and
+ *   `listening` is never set. Nothing about that install looks wrong, and the
+ *   traffic for the typo'd provider is simply never proxied or captured.
+ *
+ * `idle` distinguishes them so the caller can say which one happened; the two
+ * are mutually exclusive by construction, so they never double-report.
+ *
+ * Neither shape is caught anywhere else: `@hypaware/ai-gateway` registers no
+ * config section, so nothing validates upstream shape, and `diagnoseV1Config`'s
+ * `gateway_missing_*_upstream` check matches an upstream by its `provider`
+ * field, which a nameless entry still has.
+ *
+ * Counts lead, names follow, because `name` is one of the two keys whose
+ * absence drops an entry: `provider = "anthropic", base_url = "..."` yields no
+ * name at all yet is exactly the config that needs the warning.
+ *
+ * A status file written before `upstreams_dropped` existed answers only the
+ * all-dropped question, from `listening: false` plus whatever it did record of
+ * the configured entries. A partial loss recorded by such a build stays
+ * invisible rather than being guessed at.
+ *
+ * `attribution` answers the question the bound-gateway message would otherwise
+ * have to hedge on: see `attributeDroppedUpstreams` below.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {{ idle: boolean, configured: number, dropped: number, names: string[], attribution: DroppedUpstreamAttribution | undefined } | undefined}
+ */
+function gatewayDroppedUpstreams(sources) {
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return undefined
+  const idle = details.listening === false
+  const names = stringList(details.upstreams)
+  const configured = nonNegativeInt(details.upstreams_configured) ?? names.length
+  const rawDropped = nonNegativeInt(details.upstreams_dropped)
+  // Older status file: an idle gateway lost every entry it had by definition,
+  // which is what that build's own check inferred. A bound one tells us
+  // nothing, so claim nothing.
+  const dropped = rawDropped ?? (idle ? configured : 0)
+  if (dropped <= 0) return undefined
+  const droppedNames = stringList(details.upstreams_dropped_names)
+  // On the older status file the dropped names are exactly the configured
+  // ones, since none survived.
+  const reportedNames = droppedNames.length > 0 ? droppedNames : idle ? names : []
+  return {
+    idle,
+    configured,
+    dropped,
+    names: reportedNames,
+    // Only the bound gateway has a routing table for a preset to have filled,
+    // so only it has this question. An idle one bound nothing, which already
+    // proves no preset covered anything.
+    attribution: idle ? undefined : attributeDroppedUpstreams(details, dropped, reportedNames),
+  }
+}
+
+/**
+ * Split the dropped upstream names into the ones an adapter preset is still
+ * proxying and the ones nothing is, or `undefined` when the status file does
+ * not support the split.
+ *
+ * A dropped entry is absent from the compiled config table by definition, and
+ * `mergeUpstreams` (the gateway source) backfills a registered preset into
+ * exactly the names that table is missing. So a dropped name that is also a
+ * registered preset name is still routed, by the preset's own entry rather
+ * than the one the operator wrote; a dropped name that is not has no route of
+ * its own at all. The daemon publishes both halves already
+ * (`registered_presets`, `upstreams_dropped_names`), so the message can say
+ * which one happened rather than hedging over both.
+ *
+ * Two shapes withhold the answer rather than inventing one, because this reads
+ * a *file* that some other build may have written:
+ *
+ * - **No `registered_presets` key.** Absent is not empty. Reading a missing
+ *   field as "no presets are registered" would turn every dropped name into a
+ *   confident claim of silence on a build that never recorded the list.
+ * - **A drop with no name.** `name` is one of the two keys whose absence drops
+ *   an entry, so an unnamed drop has nothing to intersect with, and its
+ *   destination is unknowable from status. Requiring one name per dropped
+ *   entry also covers the deduped case (two same-named entries both dropping
+ *   yield one name for two drops), where the shortfall is real but which entry
+ *   the preset covers is not decidable.
+ *
+ * @param {Record<string, unknown>} details
+ * @param {number} dropped
+ * @param {string[]} names
+ * @returns {DroppedUpstreamAttribution | undefined}
+ */
+function attributeDroppedUpstreams(details, dropped, names) {
+  if (!Array.isArray(details.registered_presets)) return undefined
+  if (names.length !== dropped) return undefined
+  const presets = new Set(stringList(details.registered_presets))
+  return {
+    covered: names.filter((n) => presets.has(n)),
+    silent: names.filter((n) => !presets.has(n)),
+  }
+}
+
+/**
+ * What a bound gateway's dropped upstreams mean for the traffic aimed at them.
+ *
+ * Two fates, and they are not close: a name no preset covers has no entry in
+ * the routing table at all, while a name a preset covers has one, backfilled
+ * from the preset rather than from what the operator wrote. Both are worth
+ * the warning and they call for different fixes, so when `attribution` can
+ * tell them apart the message names each set rather than hedging across both.
+ *
+ * Every clause is a claim about the *routing table*, never about the traffic,
+ * because the table is all a name-set intersection can reach. Routing is by
+ * `path_prefix` and `match()` and then by rank (`matchUpstream` and
+ * `compileUpstreams` in the gateway's `proxy.js` sort on `priority`, then
+ * prefix length, then merge order), and none of that is published:
+ *
+ * - **A dropped name is not a dead path.** A surviving upstream written with
+ *   no `path_prefix` compiles to `/`, which `pathMatchesPrefix` matches every
+ *   path against, so a request aimed at the dropped name can still be proxied
+ *   and recorded - under the *other* upstream's name. The gateway source says
+ *   the same where it logs this fault ("falls through to whatever the
+ *   remaining routes match (or nothing)"). Hence "under the name X", with the
+ *   fall-through spelled out, rather than a flat claim that nothing happens.
+ * - **A covered name is a table entry, not a guarantee of traffic.** The
+ *   backfilled preset can be shadowed outright: `mergeUpstreams` appends
+ *   presets after the config entries, and `compileUpstreams` breaks a rank
+ *   tie on that order, so a surviving config upstream at an equal
+ *   `path_prefix` (or at a higher `priority`) wins every path the preset
+ *   would have taken. Hence "in the routing table only as the preset", plus
+ *   the outranking note, rather than "is still proxied".
+ * - **A covered name loses more than its `base_url`, and not only its
+ *   `path_prefix`.** `mergeUpstreams` backfills the preset's whole entry, so
+ *   its `provider` and `priority` come too, and a preset carrying a `match()`
+ *   (which every bundled adapter preset does) routes by that function while
+ *   `path_prefix` degrades to a sort key `matchUpstream` never consults. The
+ *   claude preset's `match()` takes `/v1/complete` and any anthropic-headered
+ *   path, so naming `path_prefix` as "what is in force" understates its
+ *   reach as badly as it overstates the operator's. Hence "routing rules".
+ *
+ * The hedge survives for the case that still deserves it, where the status
+ * file does not say which of the two happened. It hedges only that question,
+ * though. The catch-all above is a fact about the *routing table*, not about
+ * the preset list, so it holds on the hedged branch identically and the
+ * hedged sentence is bounded to the name in the same way. Hedging the preset
+ * question is not licence to assert the traffic one: the shape that most
+ * often reaches this branch is an entry that lost its `name` (nothing to
+ * intersect), which is an ordinary current-build config, not only an old
+ * status file.
+ *
+ * @ref LLP 0195#visible-when-unintended [constrained-by]: the kind still fires on the configured-vs-compiled comparison alone; this only reports which fate each dropped name met
+ *
+ * @param {number} dropped
+ * @param {string[]} names
+ * @param {DroppedUpstreamAttribution | undefined} attribution
+ * @returns {string}
+ */
+function droppedUpstreamConsequence(dropped, names, attribution) {
+  if (!attribution) {
+    // Labelled, because unlike the idle branch these are not the configured
+    // set: an unlabelled `(openai)` next to "2 configured upstreams" invites
+    // exactly the wrong reading.
+    const named = names.length > 0 ? ` (dropped: ${names.join(', ')})` : ''
+    const oneEntry = dropped === 1
+    // The entry nouns count entries and the name nouns count names, because
+    // the two differ: the dedupe in `readConfiguredUpstreams` prints one name
+    // for two same-named dropped entries, which is one of the shapes that
+    // lands here. With no names to print at all there is nothing to
+    // disagree with, so the entry count stands in.
+    const oneName = (names.length > 0 ? names.length : dropped) === 1
+    return `${oneEntry ? 'that entry is' : 'those entries are'} not in the routing table${named}, so unless an adapter preset already covers the same ${oneName ? 'name' : 'names'}, nothing is proxied or captured under ${oneName ? 'that name' : 'those names'}, and ${oneName ? 'a request' : 'requests'} aimed at ${oneName ? 'it' : 'them'} ${oneName ? 'gets' : 'get'} a 404 or ${oneName ? 'falls' : 'fall'} through to whatever surviving route ${oneName ? 'its path matches' : 'their paths match'}`
+  }
+  /** @type {string[]} */
+  const parts = []
+  const { silent, covered } = attribution
+  // Silence leads: it is the more damaging of the two, and the reason the
+  // operator is reading this line at all.
+  if (silent.length > 0) {
+    const one = silent.length === 1
+    parts.push(
+      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its path matches' : 'their paths match'}`,
+    )
+  }
+  if (covered.length > 0) {
+    const one = covered.length === 1
+    parts.push(
+      `${covered.join(', ')} ${one ? 'is' : 'are'} in the routing table only as the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and routing rules are in force, nothing this config set for ${one ? 'it' : 'them'} took effect, and a surviving upstream can still outrank ${one ? 'the preset' : 'a preset'} on any path`,
+    )
+  }
+  return parts.join('; ')
+}
+
+/** @param {unknown} v @returns {string[]} */
+function stringList(v) {
+  if (!Array.isArray(v)) return []
+  return /** @type {string[]} */ (v.filter((s) => typeof s === 'string' && s.length > 0))
+}
+
+/** @param {unknown} v @returns {number | undefined} */
+function nonNegativeInt(v) {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined
 }
 
 /**
@@ -591,6 +828,66 @@ export async function collectHypAwareStatus(opts = {}) {
       repair: [`free ${from} and restart the daemon - attached clients re-point automatically`],
     })
   }
+  const droppedGatewayUpstreams = daemon.running
+    ? gatewayDroppedUpstreams(daemonStatusFile?.sources)
+    : undefined
+  if (droppedGatewayUpstreams) {
+    // The config named upstreams the gateway is not proxying, because
+    // `compileUpstreams` dropped them one by one and said nothing. Neither
+    // half of that produces an error: the total loss idles the source (before
+    // it was allowed to idle, this was a start failure and `hyp status` said
+    // `[failed]`), and the partial loss binds a listener that looks entirely
+    // healthy. Either way the reason must not live only in a boot log line.
+    //
+    // Non-degrading like `gateway_port_fallback`. An install that *wanted* no
+    // upstream (hermes-only) drops nothing and never reaches this branch, so
+    // it stays healthy and silent.
+    // @ref LLP 0114#fallback-is-visible [implements]: an exception to "the gateway proxies what the config asked for" is readable from status.json steadily, not only from a boot-time log line
+    // @ref LLP 0195#visible-when-unintended [implements]: one configured-vs-compiled comparison covers both the total loss and the partial one
+    // @ref LLP 0195#consequences [constrained-by]: the warning stays loud in diagnostics and does not flip overall's health verdict
+    const { idle, configured, dropped, names, attribution } = droppedGatewayUpstreams
+    // Counts first, names in parentheses when there are any: `name` is itself
+    // one of the two keys that drops an entry, so the config that most needs
+    // this warning is exactly the one that can supply no name to print.
+    //
+    // The parenthetical stays only on the idle branch, where every configured
+    // entry is also a dropped one, so hanging the names off "are configured"
+    // states a fact. On the bound branch the two sets differ, and the same
+    // placement reads "1 of its 2 configured upstreams (openai)" as if openai
+    // were the configured set; there the names move to the consequence they
+    // actually belong to.
+    const named = names.length > 0 ? ` (${names.join(', ')})` : ''
+    const message = idle
+      // Kept verbatim for the total loss. "Listening on nothing" and
+      // "connection refused" are true only here, and an operator reading
+      // `hyp status` against a dead gateway needs that sentence, not a
+      // count of what a working one is missing.
+      ? `the gateway is running but listening on nothing: ${configured} ${configured === 1 ? 'upstream' : 'upstreams'}${named} ${configured === 1 ? 'is' : 'are'} configured but none compiled to a route (each needs both a 'name' and a 'base_url') - clients will get connection refused`
+      : `the gateway is listening, but ${dropped} of its ${configured} configured ${configured === 1 ? 'upstream' : 'upstreams'} did not compile to a route (each needs both a 'name' and a 'base_url') - ${droppedUpstreamConsequence(dropped, names, attribution)}`
+    diagnostics.push({
+      severity: 'warning',
+      // Two kinds, one check. They cannot both fire (a gateway is either
+      // bound or it is not), and consumers gate on `kind`: calling a
+      // listening gateway `idle` to save a name would make the kind a lie
+      // about the one thing its name asserts, and would merge an install
+      // that refuses every connection with one that quietly misroutes a
+      // single provider.
+      kind: idle ? 'gateway_idle_no_upstreams' : 'gateway_upstreams_dropped',
+      message,
+      // Not `hyp config validate`: it prints `config ok` for this config and
+      // exits 0. `@hypaware/ai-gateway` registers no config section, so
+      // nothing validates upstream shape, and `diagnoseV1Config` matches an
+      // upstream by its `provider` field, so a nameless anthropic entry
+      // satisfies the one check that does look. A repair line that sends the
+      // user to a command which affirms the broken config is worse than no
+      // repair line, so point at the file and the two required keys instead.
+      // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
+      repair: [
+        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        `hyp daemon restart  # the daemon reads the file only at boot`,
+      ],
+    })
+  }
   /** @type {ClientAttachReport[]} */
   const clients = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
@@ -670,31 +967,51 @@ export async function collectHypAwareStatus(opts = {}) {
     }
   }
 
-  // ----- client sync provenance split (LLP 0132 #never-silent) -----
-  // On a managed machine the central sink exports the whole cache, so a
-  // source the user added to the *local* layer (LLP 0031) is collected and
-  // locally queryable but never forwarded (LLP 0132 #rule). That withholding
-  // must never be a silent state: group the picked (configured) clients by
-  // provenance so `hyp status` can show the "syncing / local-only" split.
-  // A solo host (no central layer) has nothing to withhold from, so the
-  // split is null there and the V1 surface is unchanged.
-  // @ref LLP 0132#never-silent [implements]: hyp status shows the syncing vs local-only client split so a local addition on a managed machine is never silent
+  // ----- client sync split (LLP 0188 #never-silent) -----
+  // On an enrolled machine every configured source syncs by default; only
+  // the machine-local opt-out store (LLP 0188 #opt-out) keeps one local.
+  // That withholding must never be a silent state: split every configured
+  // picker source (not just attach-probed clients - a hermes opt-out must
+  // be visible too) into syncing vs local-only. A solo host (no central
+  // layer) has nothing to withhold from, so the split is null there and
+  // the V1 surface is unchanged. A corrupt opt-out store degrades to a
+  // null split plus a warning diagnostic: status is best-effort, the
+  // export seam is what enforces (and fails closed on the same file).
+  // @ref LLP 0188#never-silent [implements]: hyp status shows the syncing vs local-only split, driven by the opt-out store
   /** @type {{ syncing: string[], localOnly: string[] } | null} */
   let clientSync = null
   if (hasCentral && catalog) {
     const layeredForProvenance = { centralConfig, effective: config }
-    /** @type {string[]} */
-    const syncing = []
-    /** @type {string[]} */
-    const localOnly = []
-    for (const c of clients) {
-      if (!c.configured) continue
-      const provenance = classifyClientProvenance(c.name, layeredForProvenance, catalog)
-      if (provenance === 'local') localOnly.push(c.name)
-      else syncing.push(c.name)
+    /** @type {Set<string> | null} */
+    let optedOut = null
+    try {
+      optedOut = new Set(optedOutClientSourceIds(await readClientSyncEntries({ stateDir: stateRoot })))
+    } catch (err) {
+      if (!(err instanceof ClientSyncListUnreadableError)) throw err
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_sync_list_unreadable',
+        message: `the machine-local client policy store at '${err.filePath}' is unreadable or malformed - exports fail until it is repaired or removed`,
+        repair: ['inspect and fix or remove the file, then rerun hyp status'],
+      })
     }
-    if (syncing.length > 0 || localOnly.length > 0) {
-      clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+    if (optedOut !== null) {
+      /** @type {string[]} */
+      const syncing = []
+      /** @type {string[]} */
+      const localOnly = []
+      for (const id of catalog.pickerDescriptors.keys()) {
+        const provenance = classifyClientProvenance(id, layeredForProvenance, catalog)
+        if (provenance === 'absent') continue
+        // Central sources always sync; an opt-out entry for one is inert
+        // (LLP 0188 #locked), so only a 'local'-provenance opt-out lands
+        // in the local-only column.
+        if (provenance === 'local' && optedOut.has(id)) localOnly.push(id)
+        else syncing.push(id)
+      }
+      if (syncing.length > 0 || localOnly.length > 0) {
+        clientSync = { syncing: syncing.sort(), localOnly: localOnly.sort() }
+      }
     }
   }
 
@@ -752,11 +1069,19 @@ export async function collectHypAwareStatus(opts = {}) {
   // it surfaces as a loud diagnostic and a null count rather than a silent 0
   // ("enrolled but withholding" must never be a silent state, R9).
   // @ref LLP 0069#requirements [implements]: R9 - hyp status surfaces the local-only list's presence and size
-  /** @type {{ localOnlyDirCount: number } | null} */
+  // The standing new-folder ask (LLP 0200) rides in the same section: a
+  // machine that stopped asking has a consent prompt switched off, which is
+  // exactly the kind of state R9 says must never be silent. The safe reader
+  // never throws and reads a corrupt preference as `ask`, the mode that is
+  // actually in force when the hook cannot read it either.
+  // @ref LLP 0200#cli [implements]: hyp status names a suppressed folder ask alongside the withholding counts
+  const folderAsk = await readFolderAskModeSafe({ stateDir: stateRoot })
+
+  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode } | null} */
   let usagePolicy = null
   try {
     const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
-    usagePolicy = { localOnlyDirCount: localOnlyDirs.length }
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk }
   } catch (err) {
     const filePath = err instanceof LocalOnlyListUnreadableError
       ? err.filePath

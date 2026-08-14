@@ -48,8 +48,22 @@ export async function runConfigurePhase(picked, opts) {
     return { results: [] }
   }
 
+  // A row the existing config already composed is a carried answer, not a
+  // new pick: its setup question was asked the run it was first ticked, so
+  // a reconfigure that keeps it re-runs nothing and re-asks nothing (8/13
+  // feedback - reconfiguring dropped the user into the Desktop sign-in
+  // again). A declined or failed setup is carried the same way - this
+  // phase cannot distinguish finished from abandoned - and that is the
+  // accepted trade: the incomplete state is surfaced by `hyp status`'s
+  // `client_attach_missing` diagnostic, whose repair names the row's own
+  // `configure_command` (LLP 0139 #repair-must-be-runnable, test-pinned
+  // in status-needs-setup-repair.test.js), so the standalone
+  // `hyp <configure_command>` stays the finish and repair path.
+  // @ref LLP 0224#ask-once-per-pick [implements]: carried rows skip the configure command; only a new pick is asked
+  const carried = new Set(picked?.previouslyConfigured ?? [])
   const descriptors = (picked?.descriptors ?? []).filter(
     (d) => !!d && d.needsSetup === true && typeof d.configureCommand === 'string' && d.configureCommand.length > 0
+      && !carried.has(d.id)
   )
 
   /** @type {ConfigurePhaseEntryResult[]} */

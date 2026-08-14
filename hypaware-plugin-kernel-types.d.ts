@@ -116,6 +116,23 @@ export interface PluginManifest {
   provides?: PluginProvides
   permissions?: PluginPermission[]
   contributes?: PluginContributionManifest
+  /**
+   * Plugins whose presence in a composed config pulls this one in with
+   * them. When the walkthrough composes every plugin named here, it
+   * composes this plugin too; when it composes none of them, this plugin
+   * is not written.
+   *
+   * This is how a **derived-data** plugin rides a pick it does not
+   * contribute: `@hypaware/context-graph` has no picker row of its own,
+   * because "project my sessions into a graph" is not a thing the user is
+   * asked, and it is useless without a source to project.
+   *
+   * Distinct from `requires.plugins`, which is a hard dependency governing
+   * activation order and presence. `requires` says "I cannot run without
+   * this"; `compose_with` says "write me down wherever this is written
+   * down". A plugin may declare either, both, or neither.
+   */
+  compose_with?: PluginName[]
 }
 
 export interface PluginRequirements {
@@ -177,6 +194,30 @@ export interface PluginClientManifest {
    * and attributes its entrypoints automatically.
    */
   transcript_entrypoints?: string[]
+  /**
+   * How to start this client on a question, for the wizard's closing
+   * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
+   * cannot be started on a prompt at all: Claude Desktop is a GUI app
+   * with no prompt argument, so it is detectable, pickable, and
+   * attachable but never launchable.
+   */
+  launch?: PluginClientLaunchManifest
+}
+
+/**
+ * A client's launch spec: the binary to look for on `$PATH` and the
+ * argv to start it with. Exactly one `args` element must contain the
+ * `{prompt}` placeholder, which is replaced with the user's question;
+ * a spec without it would start the client mute, which looks like the
+ * feature working (LLP 0198#split).
+ */
+export interface PluginClientLaunchManifest {
+  /** Executable name resolved against `$PATH` (e.g. `claude`). */
+  bin: string
+  /** Argv template; `{prompt}` in any element is replaced. */
+  args: string[]
+  /** Display name for the launch row (e.g. `Claude Code`). */
+  label?: string
 }
 
 export interface PluginAttachProbeManifest {
@@ -259,6 +300,17 @@ export interface PluginPickerContribution {
    * state. A probe failure means "not present," never an error.
    */
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu while
+   * staying a real picker source everywhere else: `hyp init --source
+   * <id>` still composes it, a config that already collects it still
+   * reads back as collecting it, and the id keeps its identity in the
+   * opt-out/sync store and in the dataset-owner map the export-seam
+   * withholding rules key on. For a row whose audience is narrow enough
+   * that a first-run checkbox costs every other user more than it earns
+   * that one.
+   */
+  hidden?: boolean
   /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
@@ -808,8 +860,29 @@ export interface ValidationError {
 
 export interface CommandRegistry {
   register(command: CommandRegistration): void
+  /**
+   * Describe a command *group* (`graph`, `query`) so its `--help` can
+   * carry a header and a paragraph, not just a subcommand table. Core
+   * groups get this from the bare command `makeGroupCommand` builds; a
+   * plugin namespace has no bare command, so it says so here instead.
+   *
+   * Metadata only: a registered group never appears in `list()`, so it
+   * cannot shadow a command or show up as its own subcommand.
+   */
+  registerGroup(group: CommandGroupRegistration): void
   get(name: string): CommandRegistration | undefined
+  getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
+}
+
+export interface CommandGroupRegistration {
+  /** The group prefix, e.g. `'graph'`. */
+  name: string
+  plugin?: PluginName
+  /** One-line group description, rendered as the help header. */
+  summary?: string
+  /** Long help, rendered between the usage line and the subcommand table. */
+  help?: string
 }
 
 export interface CommandRegistration {
@@ -836,6 +909,17 @@ export interface CommandRunContext {
   cwd: string
   config: HypAwareV2Config
   plugins: ActivePlugin[]
+  /**
+   * Plugins this boot selected but whose `activate()` threw (kernel-owned,
+   * populated by the dispatcher). `plugins` alone cannot express a partial
+   * boot: `activatePlugins` catches per plugin and continues, so a command
+   * body that acts on "what the plugin set contributes now" sees a plan with
+   * a hole in it and no way to know. Empty on a clean boot, and on a caller
+   * that pre-built the kernel. Read by the client-asset materializer, which
+   * must not read a failed plugin's missing contribution as a retirement
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
@@ -1492,6 +1576,18 @@ export interface VerbInputSchema {
 }
 
 /**
+ * The JSON Schema an MCP tool advertises: a verb's `VerbInputSchema` with the
+ * CLI-only argv-binding hints removed (`positional`, and per-property
+ * `greedy`). It is a projection, never authored by hand, so the flag set and
+ * the wire contract cannot drift apart.
+ */
+export interface McpToolInputSchema {
+  type: 'object'
+  properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
+  required?: string[]
+}
+
+/**
  * Local-execution context handed to a verb's `operation`. The CLI and
  * the local MCP host both build this from the kernel runtime; the
  * operation never touches argv or stdout.
@@ -1547,6 +1643,18 @@ export interface VerbRegistration {
   tool: string
   plugin?: PluginName
   summary: string
+  /**
+   * Long help for the CLI command this verb projects, rendered by
+   * dispatch's central `--help` interception under `summary` and `usage`.
+   * CLI-only, like `render`: the MCP tool describes itself with `summary`
+   * and `inputSchema`.
+   *
+   * This is where a verb's **mechanics** belong (what a flag means, how an
+   * argument resolves, where output is truncated) so a skill does not have
+   * to narrate them. Constraints, the rules with nameable harm, stay in the
+   * skill: the constraint guard reads skill files, not help strings.
+   */
+  help?: string
   inputSchema: VerbInputSchema
   /** Default `'cli+mcp'`. */
   exposure?: VerbExposure
@@ -1911,6 +2019,20 @@ export interface AiGatewayProjectedMessage {
    * otherwise.
    */
   model?: string
+  /**
+   * Per-message provider id, for exchanges that span turns served by
+   * different providers (an OpenClaw session can switch its model, and with
+   * it the provider, mid-session; the backfilled exchange is the whole
+   * session). The gateway prefers this value over the exchange `provider`
+   * when present and falls back to the exchange provider otherwise, the same
+   * precedence `model` carries. Unlike `model`, projectors that supply it
+   * are expected to stamp it on every row of the turn (prompts and tool
+   * results included, via their turn's resolved backend): `provider` is
+   * non-nullable per row, so an unstamped minority-turn prompt would fall
+   * back to the exchange value and misattribute, which is the exact defect
+   * the field exists to fix (LLP 0194).
+   */
+  provider?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string

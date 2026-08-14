@@ -28,6 +28,7 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
+import { colorizeStderr } from './style.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
@@ -189,7 +190,13 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
  */
 export async function dispatch(argv, opts = {}) {
   const stdout = opts.stdout ?? process.stdout
-  const stderr = opts.stderr ?? process.stderr
+  // Every diagnostic in the CLI - this function's own, and every core or
+  // plugin command's, since they all receive this binding as `ctx.stderr` -
+  // reaches the terminal through here. Colouring the severity prefix at the
+  // one place stderr is bound is what keeps a run from being half-coloured.
+  // A non-TTY (tests, pipes) or `NO_COLOR` returns the stream untouched.
+  // @ref LLP 0189#choke-point [implements]: severity colour is applied where stderr is bound
+  const stderr = colorizeStderr(opts.stderr ?? process.stderr, opts.env ?? process.env)
   // Default stdin to the process stream, exactly as stdout/stderr do. The bin
   // entry calls dispatch(argv) with no opts, so without this fallback every
   // plugin command runs with an undefined ctx.stdin and interactive flows
@@ -238,6 +245,15 @@ export async function dispatch(argv, opts = {}) {
   let kernel
   /** @type {ActivePlugin[]} */
   let activePlugins = []
+  /**
+   * Plugins this boot did not get, by any of the four routes `bootKernel`
+   * tracks: a throwing `activate()`, a dep-graph elimination, a manifest that
+   * would not load, or a config-enabled plugin the boot profile withheld. A
+   * command body cannot otherwise tell a partial boot from a complete one, and
+   * the client-asset materializer (which deletes) has to.
+   * @type {string[]}
+   */
+  let failedPlugins = []
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -257,6 +273,11 @@ export async function dispatch(argv, opts = {}) {
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
+    // Read, never re-derived: `activations` only ever holds the plugins that
+    // reached `activatePlugins`, and three of the four ways a boot comes up
+    // short never put a plugin there at all
+    // (LLP 0219 #incomplete-activation-prunes-nothing).
+    failedPlugins = boot.unavailablePlugins
     if (boot.config) activeConfig = boot.config
 
     // Lifecycle/read-only commands boot with no plugins, so no sink can
@@ -315,7 +336,15 @@ export async function dispatch(argv, opts = {}) {
         stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
         stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
       } else {
-        renderGroupHelp({ stdout, group: group.prefix, children: group.children })
+        // A plugin namespace has no bare command, so its header and
+        // paragraph (when it registered one) come from the group registry.
+        // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
+        renderGroupHelp({
+          stdout,
+          group: group.prefix,
+          groupCommand: registry.getGroup?.(group.prefix),
+          children: group.children,
+        })
       }
       if (ownsKernel) {
         await stopBootStartedSources(kernel)
@@ -385,6 +414,7 @@ export async function dispatch(argv, opts = {}) {
     cwd,
     config: activeConfig,
     plugins: activePlugins,
+    failedPlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
@@ -740,7 +770,8 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   const names = [...rows.keys()].sort()
 
-  stdout.write('hyp - HypAware kernel CLI (also installed as `hypaware`; same binary)\n')
+  stdout.write("hyp - HypAware: your AI agents' sessions, logs, and telemetry in one queryable history\n")
+  stdout.write('      (also installed as `hypaware`; same binary)\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')

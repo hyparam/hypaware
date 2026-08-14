@@ -4,10 +4,13 @@ import process from 'node:process'
 
 import {
   Attr,
+  buildAttrs,
   getKernelInstruments,
   getLogger,
+  getTracer,
   installObservability,
   runRoot,
+  SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -386,6 +389,15 @@ export async function runDaemon(opts = {}) {
           //   skills without anyone re-running login
           skills: boot.runtime.skills,
           agents: boot.runtime.agents,
+          // What this boot did NOT get. The registries above describe a partial
+          // plugin set whenever a plugin threw, was eliminated by the dep graph,
+          // failed to load, or was withheld by the profile, and the materializer
+          // has no other way to tell that hole from a set of retirements. Taken
+          // whole from boot rather than re-derived from `activations`, which
+          // only ever sees the first of those four.
+          // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: an
+          //   incomplete activation copies but removes nothing
+          failedPlugins: boot.unavailablePlugins,
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,
@@ -659,17 +671,28 @@ export async function runDaemon(opts = {}) {
     const { maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
     const mCfg = normalizeMaintenanceConfig(maintenanceCfg)
     const intervalMs = mCfg.interval_minutes * 60 * 1000
+    // @ref LLP 0220#tick-reports-degraded [constrained-by]: not built on
+    // `withSpan`. `withSpan` (src/core/observability/span_helpers.js)
+    // derives the span's status code from the `status` attribute snapshot
+    // taken at span-creation time, and sets it from that snapshot after the
+    // callback resolves - so a status only known once the tick's report is
+    // in hand (clean vs. degraded) cannot be conveyed by setting the
+    // attribute inside the callback, the way every other `withSpan` caller
+    // does: the post-hoc `setStatus(OK)` clobbers it. Managed inline here
+    // with the tracer directly instead, so only this one call site's status
+    // handling changes and `withSpan` (and everything else that calls it)
+    // is untouched.
     async function runMaintenance() {
-      await withSpan(
-        'maintenance.tick',
-        {
-          [Attr.COMPONENT]: 'daemon',
-          [Attr.OPERATION]: 'maintenance.tick',
-          daemon_mode: mode,
-          status: 'ok',
-        },
-        async () => {
-          await maintainCache({
+      const tracer = getTracer('daemon')
+      const attrs = buildAttrs({
+        [Attr.COMPONENT]: 'daemon',
+        [Attr.OPERATION]: 'maintenance.tick',
+        daemon_mode: mode,
+        status: 'ok',
+      })
+      await tracer.startActiveSpan('maintenance.tick', { attributes: attrs }, async (span) => {
+        try {
+          const report = await maintainCache({
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
             config: mCfg,
@@ -680,9 +703,46 @@ export async function runDaemon(opts = {}) {
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
           })
-        },
-        { component: 'daemon' }
-      ).catch((err) => {
+          // @ref LLP 0220#tick-reports-degraded [implements]: the walk now
+          // survives a partition that throws, so the rejected promise has
+          // stopped being how the daemon hears about one. Read the failures
+          // off the report instead, or a tick that lost its neediest
+          // partition would log exactly as a clean one does. The line names
+          // the partitions, which the propagated exception never could.
+          for (const p of report.partitions) {
+            if (!p.failed) continue
+            fileLog.error('daemon.maintenance_failed', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              [Attr.ERROR_KIND]: p.errorKind,
+              message: p.errorMessage,
+            })
+          }
+          const degraded = report.totalFailed > 0
+          if (degraded) {
+            span.setAttribute('status', 'degraded')
+            span.setAttribute('partitions_failed', report.totalFailed)
+          }
+          span.setAttribute('partitions_maintained', report.partitions.length - report.totalFailed)
+          // The status code itself, not just the attribute: only knowable
+          // now that the report is in hand, so set directly rather than
+          // through the status-attribute snapshot `withSpan` would
+          // otherwise have read before the callback ran.
+          span.setStatus(degraded
+            ? { code: SpanStatusCode.ERROR, message: `${report.totalFailed} partition(s) failed` }
+            : { code: SpanStatusCode.OK })
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error))
+          span.recordException(err)
+          span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+          span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
+          throw err
+        } finally {
+          span.end()
+        }
+      }).catch((err) => {
+        // Still reachable: partition discovery, the retired-generation
+        // sweep, and anything else outside the per-partition catch.
         const message = err instanceof Error ? err.message : String(err)
         fileLog.error('daemon.maintenance_failed', { message })
       })

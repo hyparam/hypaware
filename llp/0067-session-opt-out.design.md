@@ -17,6 +17,18 @@
 > (`hypaware-core/plugins-workspace/claude/skills/hypaware-ignore/SKILL.md`) is
 > the contract and is **not changed**.
 
+**Extended-by: [LLP 0212 #cli-is-the-verb](./0212-session-opt-out-is-a-cli-verb.decision.md#cli-is-the-verb)**
+(2026-08-12), on the *surface* only. The design below is unchanged and still
+built: the control route, the adapter drop, and `hyp session ignore` /
+`hyp session unignore` are exactly as specified. What changed is that the
+`hypaware-ignore` and `hypaware-unignore` skills were retired, having become a
+second implementation of the same route call. Two consequences for reading this
+document: the header note above names a `SKILL.md` path that no longer exists
+(the CLI verb is now the contract), and every passage below describing what
+"the skill" reads, asserts, or prints (notably
+[§cli-response-check](#cli-response-check) and the `hypaware-unignore`
+paragraph under it) describes the behaviour as it now lives in the verb.
+
 ## Overview
 
 Two seams, three change sets. **(1) Gateway:** a new *local control request*
