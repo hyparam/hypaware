@@ -142,18 +142,41 @@ rather than left implicit.
   `SELECT * FROM t WHERE git_remote IS NULL` threw, now returns the narrow
   row; `WHERE git_remote = 'zzz'` threw, now returns no rows; `ORDER BY
   git_remote` (either direction) threw, now returns both rows. So the fix is
-  wider than the star expansion that motivated it: `Object.keys(row).length`
-  is the only change to a query that already succeeded, not the only change
-  overall.
+  wider than the star expansion that motivated it, and the key-count growth
+  above is not the only change overall. The answers are the ones the hinted
+  form of each query already gave on both trees (`SELECT id FROM t WHERE
+  git_remote IS NULL` and friends carry a `columns` hint, so they never went
+  short and never threw), which is the reference these were checked against.
+- A star over a partition whose physical column order differs from the
+  advertised list now renders its keys in the advertised order. Measured at
+  the core union over partitions declaring `[a, b]` and `[b, a]`, `SELECT *`
+  returned `{"b":4,"a":3}` for the second partition before and `{"a":3,"b":4}`
+  now. The values are unchanged, and the new order is the one
+  `QueryResults.columns` already reported, so this settles a disagreement
+  rather than creating one. Carrying the advertised list means carrying its
+  order, not just its membership.
 - The padding is a per-row rebuild, and it is not free on a drifted
   partition. Measured over 20k rows of a 3-of-57 partition, `SELECT *` went
   from ~25ms to ~150ms; over a partition holding every declared column it is
   unchanged (~550ms both ways), because such rows match by content and the
   per-stream memo then costs one reference compare. The multi-partition
   AI-gateway path rebuilds a narrow row twice, once to the union's physical
-  column list and again to the wrapper's declared list. Accepted: the cost
-  buys row objects that agree with the schema the engine already promised,
-  and it scales with the declared width the caller asked for.
+  column list and again to the wrapper's declared list, and **neither pass is
+  removable**. The wrapper cannot defer to the union: the union aligns to the
+  union of what its partitions **physically** hold, while the wrapper
+  advertises the **declared** schema, a strict superset whenever a column is
+  absent from every partition (the normal post-bump state, LLP 0032).
+  Removing only the wrapper's pass puts the reported defect straight back on
+  the multi-partition path, `SELECT *, <literal>` crash included. The union
+  cannot defer to the wrapper either: `unionSources` is a core export with no
+  wrapper above it in otel, gascity, s3 and the context-graph datasets, so
+  skipping there would need a flag threaded down from the wrapper. And that
+  coupling would buy nothing measurable: the union rebuild spans the handful
+  of columns a partition physically holds while the wrapper rebuild spans all
+  57, so dropping the union pass measured ~178ms against ~173ms with it,
+  inside the run-to-run noise. Accepted: the cost buys row objects that agree
+  with the schema the engine already promised, and it scales with the
+  declared width the caller asked for.
 - The duty is on the **source**, not the engine. HypAware does not own
   squirreling, and an engine that fixed this by re-deriving output names per
   row would have to abandon the single static `columns` a result set

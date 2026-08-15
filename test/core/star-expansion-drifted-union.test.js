@@ -247,6 +247,21 @@ test('union: a partition missing a unioned column still yields the union column 
   assert.strictEqual(rows[1].c, 5)
 })
 
+test('union: a star renders keys in the advertised order, not each partition physical order', async () => {
+  // Carrying the advertised list means carrying its ORDER, not just its
+  // membership. Recorded run: before the fix the second partition's row came
+  // back as {"b":4,"a":3}, which disagreed with the ["a","b"] that
+  // QueryResults.columns had already reported for the same query.
+  const union = unionSources([
+    narrowSource(['a', 'b'], [{ a: 1, b: 2 }]),
+    narrowSource(['b', 'a'], [{ b: 4, a: 3 }]),
+  ])
+  assert.deepEqual(union.columns, ['a', 'b'])
+  const rows = await runSql(union, 'SELECT * FROM t ORDER BY a')
+  assert.deepEqual(rows.map((r) => Object.keys(r)), [['a', 'b'], ['a', 'b']])
+  assert.deepEqual(rows, [{ a: 1, b: 2 }, { a: 3, b: 4 }], 'reordering keys moved no value')
+})
+
 // --- the alignment helper itself ---
 
 test('alignRowColumns: pads a short row and leaves an already-aligned row untouched', async () => {
