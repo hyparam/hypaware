@@ -32,12 +32,7 @@
  * delivered line settles first. Readline also routes the last line of a
  * stream that ends without a trailing newline to `line` rather than to
  * the pending question, which is a second answer `question` alone never
- * sees, so that one is taken too - but only at EOF, and only if the
- * question never got a line of its own. Readline emits `line` while no
- * question is pending, so the same event also carries anything typed or
- * pasted PAST the answer ("n\ny\n" in one burst), and settling on that
- * directly would answer with the last line of the burst rather than the
- * first: a typed `n` at an irreversible confirm would read as `y`.
+ * sees, so that one is taken too.
  *
  * `rl.question`'s own promise is left permanently unsettled at EOF rather
  * than rejected, so nothing here can leak an unhandled rejection; the
@@ -60,24 +55,13 @@ export function askLineOnce(rl, input, prompt) {
       settled = true
       resolve(line)
     }
-    /**
-     * The last line readline emitted outside the question, held rather
-     * than settled on. Only read if the question itself never answered.
-     * @type {string | null}
-     */
-    let unaskedLine = null
     // A turn behind the answer, never ahead of it: an answer delivered in
     // the same burst as the EOF has to settle first.
-    const endOfInput = () => setImmediate(() => done(unaskedLine))
+    const endOfInput = () => setImmediate(() => done(null))
     rl.once('close', endOfInput)
-    // Readline emits `line` only while no question is pending, so this is
-    // either the unterminated last line of the stream (an answer the
-    // question never sees) or a line that arrived past the answer. Holding
-    // it for EOF takes the first without letting the second overwrite an
-    // answer the question already has.
-    rl.on('line', (line) => {
-      unaskedLine = line
-    })
+    // The last line of a stream that ends without a trailing newline goes
+    // here rather than to the pending question.
+    rl.on('line', done)
     // Writes the query synchronously, on a spent stream too.
     rl.question(prompt).then(done, () => done(null))
     if (/** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true) endOfInput()

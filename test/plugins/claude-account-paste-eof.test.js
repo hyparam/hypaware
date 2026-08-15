@@ -130,6 +130,20 @@ test('paste lane parses a code delivered in the same burst as the EOF', async ()
   rl.close()
 })
 
+test('paste lane parses the pasted code, not a line that followed it', async () => {
+  // Readline hands the first line to the pending question and emits every
+  // later one as `line`. Settling on `line` directly would exchange the
+  // last line of the burst for the code that actually answered the prompt.
+  const stdin = Readable.from(['the-code#the-state\nnoise#noise\n'])
+  const rl = readline.createInterface({ input: stdin, output: /** @type {any} */ (makeBuf()), terminal: false })
+
+  const settled = /** @type {any} */ (await raceSettle(
+    pasteAuthorizationLane({ rl, stdin: /** @type {any} */ (stdin), hasCallback: false })
+  ))
+  assert.deepEqual(settled.ok, { code: 'the-code', state: 'the-state' })
+  rl.close()
+})
+
 test('paste lane still parses a pasted code', async () => {
   const stdin = new PassThrough()
   const rl = makeRl(stdin, makeBuf())

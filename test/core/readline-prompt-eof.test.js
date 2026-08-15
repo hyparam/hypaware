@@ -190,6 +190,31 @@ test('askYesNo takes a final answer with no trailing newline', async () => {
   assert.equal(await settles(answered, 'askYesNo on an unterminated answer'), true)
 })
 
+test('askYesNo answers with the line that answered it, not one that arrived after', async () => {
+  // Readline gives the first line to the pending question and emits every
+  // later one as `line`, so a burst carrying more than one line (a paste,
+  // or type-ahead for the next prompt) offers a second candidate answer.
+  // Taking it would read a typed `n` at an irreversible confirm as `y`,
+  // which is the one direction a `[y/N]` must never drift in.
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin: Readable.from(['n\ny\n']), stderr: makeBuf() }),
+    'Delete everything? [y/N] '
+  )
+
+  assert.equal(await settles(answered, 'askYesNo on a two-line burst'), false)
+})
+
+test('askYesNo keeps its answer when an unterminated line follows it', async () => {
+  // Same shape, with the trailing line arriving through the end-of-stream
+  // flush rather than as a line of its own.
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin: Readable.from(['n\ny']), stderr: makeBuf() }),
+    'Delete everything? [y/N] '
+  )
+
+  assert.equal(await settles(answered, 'askYesNo on a burst with an unterminated tail'), false)
+})
+
 test('plugin install confirm declines on a stdin that ends without a line', async () => {
   const stdin = new PassThrough()
   const stdout = makeBuf()

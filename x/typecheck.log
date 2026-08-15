@@ -1,0 +1,5 @@
+
+> hypaware@1.22.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+TC EXIT=0

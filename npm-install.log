@@ -1,0 +1,11 @@
+
+> hypaware@1.22.0 prepare
+> npm run build:types
+
+
+> hypaware@1.22.0 build:types
+> tsc -p tsconfig.build.json
+
+
+added 44 packages in 2s
+INSTALL EXIT=0
