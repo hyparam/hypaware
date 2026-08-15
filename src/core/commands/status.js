@@ -280,11 +280,12 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         ...(a.attempts !== undefined ? { attempts: a.attempts } : {}),
       }))
       : null,
-    // Proxy-mode trust (LLP 0237 / LLP 0239). Null on a host where the
-    // question does not apply (not darwin, or no CA), so the V1 JSON shape is
-    // unchanged for an ordinary install. `ca_trusted` / `launchd_env_set` are
-    // tri-state: `null` means the probe could not run, which a consumer must
-    // not read as "not trusted".
+    // Proxy-mode trust (LLP 0237 / LLP 0239). Additive: the key is emitted on
+    // every platform, and is `null` wherever the question does not apply (not
+    // darwin, or no CA), following this renderer's null-not-omitted contract
+    // rather than leaving an ordinary install's payload byte-identical to V1.
+    // `ca_trusted` / `launchd_env_set` are tri-state: `null` means the probe
+    // could not run, which a consumer must not read as "not trusted".
     // @ref LLP 0237#consequences [implements]: --json carries the trust state next to the CA fingerprint
     proxy_trust: report.proxyTrust
       ? {

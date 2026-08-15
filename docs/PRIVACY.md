@@ -44,11 +44,28 @@ the hostname and the number of bytes, and nothing inside.
 
 **The certificate.** Decrypting one host requires a certificate authority,
 which is generated on your machine, stored in `~/.hyp/hypaware/tls`
-readable only by you, and restricted so it cannot vouch for any host other
-than the one being intercepted. It is trusted only by Claude Code, through
-that client's own settings; your system trust store is never modified, and
-no other application on the machine is affected. `hyp status` shows its
-fingerprint, and `hyp detach claude` deletes it.
+readable only by you, and name-constrained so it cannot vouch for any host
+outside the provider set HypAware's client adapters intercept (today
+`api.anthropic.com`, `api.openai.com`, `chatgpt.com`). All IP addresses are
+excluded.
+
+**Where it is trusted.** On macOS, attach installs the CA into your **login
+keychain** as a user-domain trusted root, because Claude Code's Remote
+Control transport trusts only the keychain and nothing else. This does
+change your account's certificate trust settings, which is why macOS itself
+raises the password dialog: an application running as you that consults the
+login keychain will accept certificates this CA signs, for those hosts.
+Declining the dialog is supported and capture keeps working without it, with
+only Remote Control's inbound channel lost. The change never needs admin
+rights, and the machine-wide system keychain and other user accounts are
+never modified. On other platforms the CA is trusted only by Claude Code,
+through that client's own settings.
+
+**Its lifetime.** `hyp status` shows the fingerprint and whether the
+keychain still trusts it. `hyp detach claude` deliberately keeps the CA and
+the trust in place, so re-attaching later does not ask for your password
+again; `hyp detach claude --purge` and `hyp daemon uninstall` remove the CA
+and its keychain trust.
 
 ## Where it goes
 
