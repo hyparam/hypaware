@@ -98,6 +98,43 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * Whether the daemon's apply engine has committed a pulled org config: the
+ * active-slot pointer resolves to a slot file. Read-only and safe from any
+ * process, like {@link resolveCentralLayerPath}, but deliberately blind to
+ * the join seed: the seed exists the instant enrollment writes it and names
+ * only the central plugin, so it is evidence of *enrollment*, not of the
+ * org's config having arrived.
+ *
+ * Unlike {@link resolveCentralLayerPath} this one *throws* on a pointer it
+ * cannot read. `readActiveSlot` answers `null` for both "no pointer yet" and
+ * "pointer unreadable", and the converge wait polling this has to tell them
+ * apart: the first is its ordinary steady state, polled to the timeout in
+ * silence, the second is a stuck host it has to log. Same
+ * ENOENT/ENOTDIR-is-the-answer discrimination
+ * {@link centralLayerResolutionFailure} makes.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {boolean}
+ * @throws {NodeJS.ErrnoException} when the active pointer exists but cannot be read
+ * @ref LLP 0223 [implements]: the join converge wait's probe - applied slot, never the seed
+ */
+export function hasAppliedCentralConfig({ stateRoot }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  if (readActiveSlot(controlDir) !== null) return true
+  // Only on the not-converged answer, so the happy path stays one readlink:
+  // re-read the pointer to separate a control directory that holds nothing
+  // yet from one this process cannot read (EACCES, EIO, a pointer that is
+  // not a symlink at all).
+  try {
+    fs.readlinkSync(path.join(controlDir, ACTIVE_BASENAME))
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
+  }
+  return false
+}
+
+/**
  * The central-layer file names {@link resolveCentralLayerPath} resolves
  * *through*: the pointer it reads and the files it can name. Their presence
  * is the on-disk evidence that this host has a central layer, independent of

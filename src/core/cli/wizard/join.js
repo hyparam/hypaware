@@ -12,13 +12,14 @@ import {
   remoteLogin,
   waitForCentralConverge,
 } from '../remote_commands.js'
+import { withSpinner } from '../spinner.js'
 import { classifyClientProvenance } from './provenance.js'
 
 /**
  * The join phase's org-config convergence budget (LLP 0129: "seconds to a
- * minute"). Reuses the login lane's own reconcile-wait via
- * `waitForCentralConverge`; this is the ceiling the wizard is willing to
- * block for a locked picker before falling through to an unlocked one.
+ * minute"). `waitForCentralConverge` polls for the applied org-config slot
+ * on disk (LLP 0223); this is the ceiling the wizard is willing to block
+ * for a locked picker before falling through to an unlocked one.
  */
 export const ORG_CONFIG_WAIT_MS = 60000
 
@@ -93,10 +94,15 @@ async function runJoinFlow(opts, span) {
     return { status, detail: login.stderr, ...(login.reason ? { reason: login.reason } : {}) }
   }
 
-  opts.stdout.write("Applying your org's configuration...\n")
+  // The converge wait can honestly take up to its full minute, and a static
+  // line over a minute of silence reads as a hang: on a TTY the line
+  // animates with elapsed time and clears when the wait settles.
   const waitForConverge = opts.waitForConverge ?? waitForCentralConverge
   const started = Date.now()
-  const converge = await waitForConverge({ env: opts.env }, { timeoutMs: ORG_CONFIG_WAIT_MS })
+  const converge = await withSpinner(
+    { stdout: opts.stdout, env: opts.env, label: "Applying your org's configuration..." },
+    () => waitForConverge({ env: opts.env }, { timeoutMs: ORG_CONFIG_WAIT_MS })
+  )
   setSpanAttr(span, 'wait_ms', Date.now() - started)
   setSpanAttr(span, 'converged', converge.ok)
   if (!converge.ok) {

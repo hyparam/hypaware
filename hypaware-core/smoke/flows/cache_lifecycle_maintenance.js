@@ -110,6 +110,10 @@ export async function run({ harness, expect }) {
     report.totalCompacted,
     (v) => typeof v === 'number' && v > 0
   )
+  // @ref LLP 0220#tick-reports-degraded: the walk no longer aborts on a
+  // partition that throws, so a failure it swallowed would otherwise reach
+  // this smoke only as a missing compaction somewhere else in the cache.
+  expect.that('maintenance: no partition failed', report.totalFailed, (v) => v === 0)
 
   // --- 4. Verify post-maintenance state ---
   // Source-table layout: data lives under source=unknown (no client columns)

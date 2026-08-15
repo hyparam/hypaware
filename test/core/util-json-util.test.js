@@ -6,9 +6,11 @@ import assert from 'node:assert/strict'
 import {
   canonicalJson,
   errCode,
+  escapeForDisplay,
   isPlainObject,
   parseMaybeJson,
   redactUrlUserinfo,
+  sanitizeLabel,
   sha256Hex,
   sortKeys,
   stringValue,
@@ -92,4 +94,54 @@ test('redactUrlUserinfo does not run past the authority', () => {
   // coerced, because callers pass whatever was on disk.
   assert.equal(redactUrlUserinfo('not a url'), 'not a url')
   assert.equal(redactUrlUserinfo(''), '')
+})
+
+// The character class `sanitizeLabel` strips is now composed from three named
+// groups so that `escapeForDisplay` can reuse two of them instead of a second
+// hand-written literal. A refactor of a security class has to prove it moved no
+// code point, so this is the literal it replaced, held here as the oracle.
+//
+// @ref LLP 0225#one-vocabulary [tests]: the recomposed class is the same set of code points
+const UNSAFE_LABEL_CHARS_BEFORE_LLP_0225 =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\uFEFF]/
+
+test('sanitizeLabel strips exactly the code points it stripped before LLP 0225', () => {
+  /** @type {number[]} */
+  const disagreements = []
+  for (let code = 0; code <= 0xffff; code++) {
+    const ch = String.fromCharCode(code)
+    const stripped = sanitizeLabel(`a${ch}b`) === 'ab'
+    if (stripped !== UNSAFE_LABEL_CHARS_BEFORE_LLP_0225.test(ch)) disagreements.push(code)
+  }
+  assert.deepEqual(disagreements, [])
+})
+
+// @ref LLP 0225#escape-not-strip [tests]: nothing is dropped, and the output is printable ASCII
+test('escapeForDisplay replaces control characters with visible escapes', () => {
+  assert.equal(escapeForDisplay('a\u001b[31mb'), 'a\\u001b[31mb')
+  assert.equal(escapeForDisplay('a\nb\rc\td'), 'a\\nb\\rc\\td')
+  assert.equal(escapeForDisplay('a\u0000b\u007fc\u009bd'), 'a\\u0000b\\u007fc\\u009bd')
+  assert.equal(escapeForDisplay('a\u2028b\u2029c'), 'a\\u2028b\\u2029c')
+})
+
+// @ref LLP 0225#escape-class [tests]: bidi is escaped, zero-width formatting is not
+test('escapeForDisplay escapes bidi formatting and leaves zero-width formatting alone', () => {
+  assert.equal(escapeForDisplay('a\u202eb'), 'a\\u202eb')
+  assert.equal(escapeForDisplay('a\u2066b\u2069c'), 'a\\u2066b\\u2069c')
+  assert.equal(escapeForDisplay('a\u200eb\u200fc'), 'a\\u200eb\\u200fc')
+  assert.equal(escapeForDisplay('a\u061cb'), 'a\\u061cb')
+  // Left alone: a family emoji is a ZWJ sequence and U+FE0F colours a heart.
+  const emoji = '\ud83d\udc68\u200d\ud83d\udc69 \u2764\ufe0f'
+  assert.equal(escapeForDisplay(emoji), emoji)
+  assert.equal(escapeForDisplay('a\u200bb\ufeffc\u00add'), 'a\u200bb\ufeffc\u00add')
+})
+
+test('escapeForDisplay never truncates, never drops, and passes clean text through', () => {
+  const clean = 'caf\u00e9 \u65e5\u672c\u8a9e plain/path\\with\\backslashes'
+  assert.equal(escapeForDisplay(clean), clean)
+  assert.equal(escapeForDisplay(''), '')
+  // Unlike sanitizeLabel, no clamp: a long value comes back whole.
+  const long = 'z'.repeat(500)
+  assert.equal(escapeForDisplay(long), long)
+  assert.equal(sanitizeLabel(long)?.length, 120)
 })

@@ -456,6 +456,14 @@ export interface ActionContext {
   skills?: SkillRegistry
   agents?: AgentRegistry
   /**
+   * Plugins the daemon's boot failed to activate. The attach handler threads it
+   * to the client-asset materializer, which then copies but prunes nothing: a
+   * partial activation leaves the failed plugin's assets missing from the plan
+   * in exactly the way a retired asset is
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
+  /**
    * The local gateway base URL clients attach to, resolved from
    * `gateway.localEndpoint()` with the configured-`listen` fallback the CLI
    * uses. Set whenever `clients` is (LLP 0045 §Part 1).
@@ -536,6 +544,13 @@ export interface ReconcileInput {
    */
   skills?: SkillRegistry
   agents?: AgentRegistry
+  /**
+   * Plugins the daemon's boot failed to activate, threaded onto
+   * {@link ActionContext} so an org-driven attach installs a partial asset set
+   * without reading the hole as a set of retirements
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
   /**
    * The local gateway base URL clients attach to; set whenever `clients` is
    * (LLP 0045 §Part 1).

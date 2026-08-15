@@ -101,6 +101,20 @@ export interface BootKernelResult {
    */
   withheldByProfile: PluginName[]
   /**
+   * Everything this boot did not get, in one list: plugins whose `activate()`
+   * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
+   * plugins the boot profile withheld although the config enabled them, and
+   * manifests that would not load (named by their directory, since a manifest
+   * that did not parse has no plugin name to be known by).
+   *
+   * Read by every caller that must not mistake a contribution this boot never
+   * saw for one this version withdrew - above all the client-asset prune, which
+   * deletes files out of the user's home and stands down entirely while this is
+   * non-empty (LLP 0219 #incomplete-activation-prunes-nothing). Strictly wider
+   * than the failed activations, which are only the first of the four doors.
+   */
+  unavailablePlugins: string[]
+  /**
    * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
    * derived from the very manifests this boot discovered. The daemon threads
    * it onto the client-action reconcile context so the attach handler can
@@ -235,6 +249,35 @@ export interface ClientAssetInstall {
   dryRun: boolean
 }
 
+/**
+ * One retired destination the materializer acted on: removed, or named and
+ * left alone. Same shape as an install because it is the same asset seen from
+ * the other end, and callers that summarize a run need the two to line up.
+ */
+export interface ClientAssetRemoval {
+  kind: ClientAssetKind
+  name: string
+  client: string
+  dest: string
+  dryRun: boolean
+}
+
+/**
+ * What one materialization did, in full. `installed` is the copies; the other
+ * two are the removals, which used to be reportable only by watching `stdout`.
+ * A caller that withholds `stdout` (the wizard finale suppresses the per-copy
+ * lines so a dozen paths do not bury its step summary) would otherwise have no
+ * way at all to say a file was deleted, which is the one thing LLP 0219
+ * #automatic-not-gated requires every removal to say.
+ */
+export interface ClientAssetMaterialization {
+  installed: ClientAssetInstall[]
+  /** Destinations this run removed, or under `dryRun` would remove. */
+  pruned: ClientAssetRemoval[]
+  /** Retired destinations left in place and reported (edited, digest-less, refused, or un-removable). */
+  withheld: ClientAssetRemoval[]
+}
+
 export interface MaterializeClientAssetsOptions {
   /**
    * Client names to install for; contributions targeting others are skipped.
@@ -253,10 +296,49 @@ export interface MaterializeClientAssetsOptions {
    */
   skills?: { list(): { name: string; clients: string[]; sourceDir: string }[] }
   agents?: { list(): { name: string; clients: string[]; sourceFile: string }[] }
+  /**
+   * State root (`<HYP_HOME>/hypaware`) holding the install ledger: the record
+   * of which destinations HypAware itself wrote, which is what makes removing
+   * a no-longer-contributed asset safe. Omitted, the install still copies but
+   * records nothing and removes nothing, which is what every pre-LLP-0219
+   * caller did. Resolve it with `clientAssetStateRoot(env, homeDir)` so it is
+   * anchored on the same home the assets land in.
+   */
+  stateRoot?: string
+  /**
+   * Plugins this boot failed to activate. Non-empty stands the prune down
+   * entirely: `activatePlugins` catches per plugin and `bootKernel` returns
+   * normally, so the realistic failure is *partial* - the client is still in
+   * scope, and the failed plugin's assets are missing from the plan in exactly
+   * the way a retired one is. Nothing in the plan or the ledger can tell them
+   * apart, so an incomplete activation removes nothing at all
+   * (LLP 0219 #incomplete-activation-prunes-nothing). Copying is unaffected.
+   */
+  failedPlugins?: string[]
   /** Report what would be copied without touching the filesystem. */
   dryRun?: boolean
   /** Progress lines, one per copy. Omitted on non-interactive callers. */
   stdout?: { write(chunk: string): unknown }
   /** Per-contribution warnings for the skips that are worth surfacing. */
   stderr?: { write(chunk: string): unknown }
+}
+
+/**
+ * One line of the client-asset install ledger: a destination HypAware wrote,
+ * and enough about it to answer, on a later upgrade, both "did we put this
+ * here?" and "is what is there still what we put?".
+ */
+export interface ClientAssetLedgerRecord {
+  kind: 'skill' | 'agent'
+  /** Contribution name, for the line a removal prints. */
+  name: string
+  /** Client whose asset directories this destination belongs to. */
+  client: string
+  /** Absolute destination path. */
+  dest: string
+  /**
+   * Content digest taken right after the copy. Absent on a record carried from
+   * a failed write, which is why a missing digest never reads as a match.
+   */
+  digest?: string
 }

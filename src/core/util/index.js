@@ -20,6 +20,7 @@ export {
   VOLATILE_BLOCK_FIELDS,
   canonicalJson,
   errCode,
+  escapeForDisplay,
   isPlainObject,
   parseMaybeJson,
   redactUrlUserinfo,

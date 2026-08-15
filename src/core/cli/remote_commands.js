@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
@@ -186,30 +187,72 @@ export async function waitForGatewayBind({
 }
 
 /**
- * Wait for the daemon's first reconcile to converge on the org config after
- * an enrolling login, so the wizard's join phase can lock the org-owned
- * picker rows before it composes (LLP 0129). "Converged" means at least one
- * client attached: the daemon only attaches after it has pulled and applied
- * the org config, so an attach is proof the central layer landed. This reuses
- * the bounded attach-wait `runBrowserLogin` already performs internally
- * (`waitForClientAttach`) rather than adding a second poll loop; the join
- * phase gets a small `{ ok, attached }` verdict instead of the raw list.
+ * Wait for the daemon to converge on the org config after an enrolling
+ * login, so the wizard's join phase can lock the org-owned picker rows
+ * before it composes (LLP 0129). "Converged" means the apply engine has
+ * committed a pulled config to an active slot - the on-disk fact the
+ * locked-row computation reads right after this wait - NOT that a client
+ * attached: an org config that names no client for this machine converges
+ * without ever writing an attach marker, and polling the markers made this
+ * wait burn its whole budget in exactly that steady state. The join seed is
+ * deliberately not convergence either ({@link hasAppliedCentralConfig}).
  *
  * A timeout (the org has no published config - the no-config 404 steady
- * state - or a slow first pull) returns `{ ok: false, attached: [] }`, and
- * the wizard shows an unlocked picker rather than blocking. Timing out is not
- * an error here for the same reason it is not one for `waitForClientAttach`.
+ * state, which lands nothing on disk to observe - or a slow first pull)
+ * returns `{ ok: false }`, and the wizard shows an unlocked picker rather
+ * than blocking. Timing out is not an error here for the same reason it is
+ * not one for `waitForClientAttach`.
  *
- * @ref LLP 0129#join-before-picker [implements]: the bounded org-config wait before the picker composes, reusing the login lane's own reconcile-wait instead of a second poll loop
- * @param {{ env: NodeJS.ProcessEnv, homeDir?: string, probe?: () => Promise<string[]>, sleep?: (ms: number) => Promise<void> }} opts
+ * @ref LLP 0129#join-before-picker [implements]: the bounded org-config wait before the picker composes; budget and timeout fallback per the decision
+ * @ref LLP 0223 [implements]: convergence is the applied slot on disk, never the attach markers or the join seed
+ * @param {{ env: NodeJS.ProcessEnv, probe?: () => boolean | Promise<boolean>, sleep?: (ms: number) => Promise<void> }} opts
  * @param {{ timeoutMs?: number, intervalMs?: number }} [waitOpts]
- * @returns {Promise<{ ok: boolean, attached: string[] }>}
+ * @returns {Promise<{ ok: boolean }>}
  */
-export async function waitForCentralConverge({ env, homeDir, probe, sleep }, { timeoutMs, intervalMs } = {}) {
-  // `waitForClientAttach` defaults `timeoutMs`/`intervalMs`/`sleep` on
-  // `undefined`, so forwarding an unset value keeps its own defaults.
-  const attached = await waitForClientAttach({ env, homeDir, timeoutMs, intervalMs, probe, sleep })
-  return { ok: attached.length > 0, attached }
+export async function waitForCentralConverge(
+  { env, probe, sleep = defaultSleep },
+  // The wizard passes its own budget (ORG_CONFIG_WAIT_MS); the fallback here
+  // quotes the attach wait's own constant so a budget-less call stays bounded
+  // and the two cannot drift apart.
+  { timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 500 } = {}
+) {
+  const stateRoot = readObservabilityEnv(env).stateDir
+  const applied = probe ?? (() => hasAppliedCentralConfig({ stateRoot }))
+  const deadline = Date.now() + timeoutMs
+  let loggedProbeError = false
+  for (;;) {
+    let ok = false
+    try {
+      ok = Boolean(await applied())
+    } catch (err) {
+      // A transient fs error mid-poll is "not converged this tick", never a
+      // join failure: keep polling to the timeout fallback. But an fs error
+      // that persists is indistinguishable at the wizard from the no-org-config
+      // steady state (both end in "didn't hear back"), so leave a signal for
+      // the run that has to be diagnosed. Once per wait, not once per poll: a
+      // durable EACCES would otherwise log for the whole budget.
+      //
+      // This only sees anything because `hasAppliedCentralConfig` throws
+      // rather than folding an unreadable pointer into `false`. A probe that
+      // swallows its own fs errors makes this branch dead code.
+      if (!loggedProbeError) {
+        loggedProbeError = true
+        getLogger('remote-login').warn('join.converge_probe_failed', {
+          [Attr.COMPONENT]: 'cmd-remote-login',
+          [Attr.OPERATION]: 'join.converge',
+          [Attr.ERROR_KIND]: 'converge_probe_unreadable',
+          error_message: err instanceof Error ? err.message : String(err),
+        })
+      }
+      ok = false
+    }
+    if (ok) return { ok: true }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return { ok: false }
+    // Floor at 1ms so a non-positive intervalMs cannot busy-spin; cap at the
+    // remaining budget so we never oversleep it. Same guard as the attach wait.
+    await sleep(Math.max(1, Math.min(intervalMs, remaining)))
+  }
 }
 
 /**

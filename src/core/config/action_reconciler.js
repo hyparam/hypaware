@@ -96,6 +96,7 @@ export function createActionReconciler(opts) {
       endpoint: input.endpoint,
       skills: input.skills,
       agents: input.agents,
+      failedPlugins: input.failedPlugins,
       now,
       log,
     }

@@ -150,6 +150,103 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 90)
 })
 
+// A needs_setup row (Claude Desktop) is a deliberate opt-in: its configure
+// phase runs a sign-in and a sudo write on the strength of the tick, so a
+// probe's guess must never arrive pre-checked on the user's behalf.
+// @ref LLP 0011#autodetect-vs-default [tests]: detection labels a needs_setup row but never checks it
+test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detected', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['codex'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(['codex', 'claude-desktop']),
+  }))
+  const desktopRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
+  assert.equal(desktopRow.checked, undefined, 'a needs_setup row is never pre-checked by detection')
+  assert.match(desktopRow.label, /detected/, 'the detection suggestion stays visible on the label')
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+})
+
+test('runWizardPick: the defaults gate omits a detected needs_setup row, and accept does not pick it', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(['codex', 'claude-desktop']),
+  }))
+  assert.ok(!state.question.items.some((/** @type {string} */ i) => /Claude Desktop/.test(i)), 'the gate must not promise a row the user never ticked')
+  assert.deepEqual(result.sourcesPicked, ['codex'])
+})
+
+// A reconfigure reports which picks it carried from the config on disk, so
+// the configure phase can skip a carried needs_setup row's setup question
+// instead of re-asking an answer already given.
+test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+      { name: '@hypaware/claude-account', config: { mode: 'subscription' } },
+      { name: '@hypaware/claude-desktop' },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { confirm } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.ok(result.sourcesPicked.includes('claude-desktop'))
+  assert.ok(result.previouslyConfigured.includes('claude-desktop'), 'the carried pick is reported')
+})
+
+test('runWizardPick: a fresh pick reports nothing as previously configured', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(['codex']),
+  }))
+  assert.deepEqual(result.previouslyConfigured, [])
+})
+
+// A needs_setup row can still reach the gate off a recorded answer (a config
+// already composing it, or this run's own confirmed selection on a re-entry).
+// There the gate keeps it but says the part that is coming: its configure
+// phase walks a sign-in and a sudo prompt when it is newly picked.
+test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extra-setup suffix', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { confirm, state } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: async () => { throw new Error('menu must not open on accept') },
+    confirm,
+    detect: async () => new Set(),
+    initialSelection: ['codex', 'claude-desktop'],
+  }))
+  assert.ok(
+    state.question.items.some((/** @type {string} */ i) => /Claude Desktop · needs extra setup/.test(i)),
+    'the gate names the consent still to come'
+  )
+  assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
+})
+
 // --- the defaults gate (LLP 0190 #pick-gate) ---
 // @ref LLP 0190#pick-gate [tests]: the gate exists only when detection or the
 // org's locked set leaves something worth confirming, and accepting it must
@@ -1018,6 +1115,23 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   // from the picks, and the prompt has to say so before the y/N.
   assert.match(asked.text(), /rewritten from your picks/i)
   assert.match(asked.text(), /carried over/i)
+})
+
+// The confirm is the end of the happy path, after every question was
+// answered: a bare enter completes the run (the backup is what keeps that
+// safe), and only an explicit no declines.
+test('defaultOverwriteConfirmFactory: bare enter proceeds, an explicit no declines', async () => {
+  const enter = defaultOverwriteConfirmFactory({
+    stdin: /** @type {any} */ (Readable.from(['\n'])),
+    stdout: /** @type {any} */ (makeBuf()),
+  })
+  assert.equal(await enter('/home/tester/.hyp/hypaware-config.json'), true)
+
+  const no = defaultOverwriteConfirmFactory({
+    stdin: /** @type {any} */ (Readable.from(['n\n'])),
+    stdout: /** @type {any} */ (makeBuf()),
+  })
+  assert.equal(await no('/home/tester/.hyp/hypaware-config.json'), false)
 })
 
 // --- hidden rows (LLP 0202) ---
