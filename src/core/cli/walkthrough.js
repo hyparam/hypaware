@@ -15,6 +15,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
+import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
@@ -29,7 +30,6 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
@@ -84,74 +84,11 @@ export function resolveHypHome(env) {
  */
 const MAX_MALFORMED_REASKS = 1
 
-/**
- * Ceiling on the answer lines held for a still-unasked prompt. An
- * interface asks at most `1 + MAX_MALFORMED_REASKS` questions and is
- * closed straight after, so anything past a handful is unreadable
- * backlog: a pipe that floods stdin (`yes |`) must not grow an array
- * for as long as the prompt is on screen.
- */
-const MAX_QUEUED_LINES = 4
-
-/**
- * Read answer lines off a readline interface without losing one and
- * without ever waiting on a stream that can no longer answer.
- *
- * `rl.question()` cannot do either job here. It registers its `line`
- * listener only when it is called, so a second answer line arriving in
- * the same chunk as the first ("y\n3\n" from a pipe) is emitted and
- * dropped before a re-ask can ask: readline emits both synchronously
- * and the next `question()` is a microtask away. And at EOF its promise
- * is left permanently unsettled - the interface closes, `question`
- * neither resolves nor rejects - which is a hang, or a silent
- * "unsettled top-level await" exit. Queueing every line from
- * construction fixes the first; resolving the pending ask as `null` on
- * `close` fixes the second.
- *
- * `close` alone is not enough for the second job. Readline registers its
- * `end` listener when the interface is built, so an interface built over
- * a stream that has ALREADY ended never sees an `end` and never emits
- * `close` - the second prompt asked on a spent stdin would wait forever
- * even though the first resolved. The stream's own `readableEnded` is
- * the answer readline can no longer give, so it seeds `closed` here.
- *
- * @param {Interface} rl
- * @param {NodeJS.ReadableStream} input
- * @param {NodeJS.WritableStream} output
- * @returns {(prompt: string) => Promise<string | null>} writes one prompt and takes the next line, `null` once the stream is spent
- */
-function queuedLineAsker(rl, input, output) {
-  /** @type {string[]} */
-  const queued = []
-  /** @type {((line: string | null) => void) | null} */
-  let waiting = null
-  let closed = /** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true
-  const take = () => {
-    const resolve = waiting
-    waiting = null
-    return resolve
-  }
-  rl.on('line', (line) => {
-    const resolve = take()
-    if (resolve) resolve(line)
-    else if (queued.length < MAX_QUEUED_LINES) queued.push(line)
-  })
-  rl.on('close', () => {
-    closed = true
-    const resolve = take()
-    if (resolve) resolve(null)
-  })
-  return function askLine(prompt) {
-    // Byte-identical to what `rl.question` writes: with `terminal: false`
-    // readline puts the query straight on the output stream.
-    output.write(prompt)
-    if (queued.length > 0) return Promise.resolve(/** @type {string} */ (queued.shift()))
-    if (closed) return Promise.resolve(null)
-    return new Promise((resolve) => {
-      waiting = resolve
-    })
-  }
-}
+// `queuedLineAsker` used to live here, module-private. It is now shared
+// from `./line_asker.js`: the same EOF defect it was written for exists at
+// every readline prompt in the tree (the wizard's fork menu, the y/N
+// confirms, a plugin's OAuth paste fallback), and one asker they all read
+// through is what keeps the answer in one place.
 
 /**
  * Build the default interactive prompt. Uses Node's `readline` against

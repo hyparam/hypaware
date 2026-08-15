@@ -125,6 +125,38 @@ everything behind the prompt - the store schema, editor semantics over
 shown candidates, seam enforcement, corrupt-store fail-closed - is
 LLP 0188's and is unchanged.
 
+<a id="eof-everywhere"></a>**The EOF rule is the tree's, not this
+lane's, and the asker that implements it is shared.** The defect is
+`node:readline`'s, so it is at every readline prompt HypAware has, and
+the rule above answers all of them: **a stdin that can no longer answer
+takes the default the prompt printed; a prompt whose enter has no
+default settles as a cancel or a failure instead, never as an invented
+answer.** `queuedLineAsker` moves out of `walkthrough.js` into
+`src/core/cli/line_asker.js`, beside `stdio.js` and `flush-streams.js`,
+where a plugin workspace can import it too; `askLineOnce` joins it for
+the prompts that ask once on an interface that may be a real terminal,
+keeping `rl.question` as the thing that writes the query (readline
+redraws a terminal line from its own bookkeeping, so a query it never
+saw is a query it cannot redraw) and replacing only its promise.
+
+Applied outward, the rule settles the exit code the class kept raising.
+The wizard's fork menu prints `default 3`, and LLP 0129 #fork already
+settled that the default is Quit, so EOF there is Quit and the wizard
+exits 0 having written nothing: the same result the fork's TUI path
+already returns for a real ctrl+c at that screen. 130 is not the answer
+for a dropped terminal at a prompt that advertised a default, because a
+prompt with a default cannot tell a dropped terminal from a bare enter
+and should not pretend to; 130 stays where LLP 0135's cancel put it, at
+the prompts whose enter answers nothing. The two `[y/N]` confirms
+(`src/core/cli/confirm.js`, `src/core/plugin_install/confirm.js`) take
+their printed no, which is the safe direction for the irreversible verbs
+behind them, and their callers' exit codes are unchanged: an EOF decline
+is reported exactly as a typed `n` is. The one prompt with no default is
+`claude-account login`'s `Code: ` paste, and it does not invent one: with
+no loopback listener left to finish the sign-in, EOF is a failure that
+says so, and with a listener up the paste lane stays pending rather than
+losing a race the browser may still win.
+
 <a id="prompt-shape"></a>**One gate prompt shape for both lanes.** The
 gate is a `ConfirmSelectQuestion` asked through
 `defaultConfirmSelectPromptFactory`: a TUI select on a real TTY, a
