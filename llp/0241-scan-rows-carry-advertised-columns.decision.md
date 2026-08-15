@@ -107,9 +107,19 @@ A padded cell resolves to `undefined` and the row's `resolved` map is left
 alone, so a padded column is simply absent from it. That is deliberately the
 **same** value the engine already read for a declared-but-absent column on
 the row path (measured in issue #778), so this decision does not touch the
-`null`/`undefined` split between the `scanColumn` and row paths, and does not
-change what any existing query answers for an absent column. Whether that
-split should be collapsed remains an open design question, not settled here.
+`null`/`undefined` split between the `scanColumn` and row paths, and no query
+that already returned a value returns a different one. Whether that split
+should be collapsed remains an open design question, not settled here.
+
+It does change queries that did not return a value at all. A clause the
+engine evaluates above the scan (a `WHERE` a partition could not accept, an
+`ORDER BY`) reads the absent column off `row.cells`, and on a short row that
+lookup missed and raised `ColumnNotFoundError`. On a padded row it reads
+`undefined`, so those queries now answer instead of throwing. That is the
+behaviour [LLP 0015](./0015-query-and-datasets.spec.md) already required of a
+union ("projecting an absent column reads as null, never throws"); the throw
+was the same short row surfacing on a different path. It is recorded below
+rather than left implicit.
 
 ## Consequences
 
@@ -126,6 +136,24 @@ split should be collapsed remains an open design question, not settled here.
   `QueryResults.columns` already reported the declared list.
 - `SELECT *, <literal>` over a drifted partition stops throwing
   `TypeError: asyncRow.cells[k] is not a function`.
+- A query whose `WHERE` or `ORDER BY` names a column some partition lacks
+  stops throwing `ColumnNotFoundError` and answers. Measured on the drifted
+  two-partition fixture, before to after:
+  `SELECT * FROM t WHERE git_remote IS NULL` threw, now returns the narrow
+  row; `WHERE git_remote = 'zzz'` threw, now returns no rows; `ORDER BY
+  git_remote` (either direction) threw, now returns both rows. So the fix is
+  wider than the star expansion that motivated it: `Object.keys(row).length`
+  is the only change to a query that already succeeded, not the only change
+  overall.
+- The padding is a per-row rebuild, and it is not free on a drifted
+  partition. Measured over 20k rows of a 3-of-57 partition, `SELECT *` went
+  from ~25ms to ~150ms; over a partition holding every declared column it is
+  unchanged (~550ms both ways), because such rows match by content and the
+  per-stream memo then costs one reference compare. The multi-partition
+  AI-gateway path rebuilds a narrow row twice, once to the union's physical
+  column list and again to the wrapper's declared list. Accepted: the cost
+  buys row objects that agree with the schema the engine already promised,
+  and it scales with the declared width the caller asked for.
 - The duty is on the **source**, not the engine. HypAware does not own
   squirreling, and an engine that fixed this by re-deriving output names per
   row would have to abandon the single static `columns` a result set

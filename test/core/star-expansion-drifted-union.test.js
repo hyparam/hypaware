@@ -176,6 +176,30 @@ test('star expansion: a bare star still renders only the columns a partition hol
   })
 })
 
+test('a clause above the scan reads a column some partition lacks without throwing', async () => {
+  // Padding is wider than the star expansion that motivated it. A `WHERE` the
+  // union could not push down, or an `ORDER BY`, is evaluated above the scan
+  // and reads the column off `row.cells`; on master that lookup missed on the
+  // narrow partition's short row and raised
+  // `ColumnNotFoundError: Column "git_remote" not found. Available columns:
+  // id, gateway_id, date (row 1)`. LLP 0015 already required that a union
+  // never throws here, so this pins the recorded before/after.
+  // The star matters: only a star scan carries no `columns` hint, so only a
+  // star leaves the partition free to yield a row narrower than the clause
+  // needs. `SELECT id FROM t WHERE git_remote IS NULL` hints both columns and
+  // never reproduced this.
+  await withFixture('drifted', async (source) => {
+    const isNull = await runSql(source, 'SELECT * FROM t WHERE git_remote IS NULL ORDER BY id')
+    assert.deepEqual(isNull.map((r) => r.id), [1], 'only the partition lacking the column matches IS NULL')
+
+    const noMatch = await runSql(source, "SELECT * FROM t WHERE git_remote = 'zzz' ORDER BY id")
+    assert.deepEqual(noMatch, [], 'a predicate no row satisfies answers empty, it does not throw')
+
+    const ordered = await runSql(source, 'SELECT * FROM t ORDER BY git_remote')
+    assert.deepEqual(ordered.map((r) => r.id).sort(), [1, 2], 'ordering by the drifted column keeps every row')
+  })
+})
+
 // --- the same defect at the core union, independent of icebird ---
 
 /**
