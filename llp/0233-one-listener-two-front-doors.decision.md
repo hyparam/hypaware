@@ -60,6 +60,25 @@ ask than repointing a base URL, so it is never something a config acquires by
 inference, by upgrade, or as a side effect of installing an adapter. This is the
 same "config is explicit" invariant the kernel already holds (LLP 0010).
 
+### Loopback peers only
+
+**The CONNECT front door answers the machine it runs on and nobody else.** A
+`CONNECT` whose peer address is not loopback (127.0.0.0/8, `::1`, or their
+IPv4-mapped forms) is refused with `403` and logged, before the target is even
+parsed.
+
+The check is on the *peer*, not the bind, and the distinction is the decision.
+`listen` is operator-configurable to a non-loopback address, and before proxy
+mode that exposed only reverse-proxying to registered upstreams. `CONNECT` is
+categorically more: an unauthenticated tunnel to any host and any port,
+including services on the gateway machine that trust 127.0.0.1, which would
+make a `listen = "0.0.0.0"` install an open relay for its whole network.
+Refusing the peer rather than the bind keeps that install working unchanged
+for its own client - attach always writes `http://127.0.0.1:<port>` whatever
+the bind host says - while closing the relay to everyone else. Blind tunnels
+are refused on the same rule as terminated ones: an unrecorded relay is still
+a relay.
+
 ## Consequences
 
 - Shutdown must destroy hijacked tunnel sockets itself. `server.close()` stops

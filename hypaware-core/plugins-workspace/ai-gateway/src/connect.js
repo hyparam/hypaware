@@ -60,6 +60,23 @@ export const CONNECT_PORT = Symbol('hypaware.connectPort')
 const CONNECT_TIMEOUT_MS = 30_000
 
 /**
+ * Whether a peer address is the machine itself.
+ *
+ * IPv4 loopback is the whole 127.0.0.0/8 block, not just 127.0.0.1, and a
+ * dual-stack listener reports an IPv4 peer as an IPv4-mapped IPv6 address
+ * (`::ffff:127.0.0.1`).
+ *
+ * @param {string | undefined} address
+ * @returns {boolean}
+ */
+export function isLoopbackAddress(address) {
+  if (!address) return false
+  const bare = address.startsWith('::ffff:') ? address.slice(7) : address
+  if (bare === '::1') return true
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)
+}
+
+/**
  * Stamp the CONNECT target onto a terminated socket.
  *
  * @param {Duplex} socket
@@ -130,16 +147,31 @@ export function attachConnectFrontDoor(opts) {
    * @param {Buffer} head
    */
   function onConnect(req, clientSocket, head) {
+    // A tunnel that dies mid-transfer is ordinary (the client navigated away,
+    // the daemon is stopping). Without a listener it is an unhandled 'error'
+    // that takes the process down.
+    clientSocket.on('error', () => clientSocket.destroy())
+
+    // The peer, not the bind. `listen` may legitimately be non-loopback for
+    // reverse-proxy traffic, but a CONNECT relay that answers the network is an
+    // open forward proxy into any host and port, so tunnels are only ever
+    // opened for the machine's own processes. Attach writes
+    // `http://127.0.0.1:<port>` regardless of the bind host, so the documented
+    // client loses nothing.
+    // @ref LLP 0233#loopback-peers-only [implements]: CONNECT from any peer that is not the machine itself is refused
+    const peer = /** @type {net.Socket} */ (clientSocket).remoteAddress
+    if (!isLoopbackAddress(peer)) {
+      log?.warn?.('aigw.connect_refused_remote_peer', { peer: peer ?? 'unknown' })
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
+      return
+    }
+
     const target = parseAuthority(req.url ?? '')
     if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
       return
     }
     track(clientSocket)
-    // A tunnel that dies mid-transfer is ordinary (the client navigated away,
-    // the daemon is stopping). Without a listener it is an unhandled 'error'
-    // that takes the process down.
-    clientSocket.on('error', () => clientSocket.destroy())
 
     let intercept = false
     try {

@@ -12,6 +12,7 @@ import tls from 'node:tls'
 import {
   CONNECT_HOST,
   attachConnectFrontDoor,
+  isLoopbackAddress,
   parseAuthority,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/connect.js'
 import {
@@ -208,6 +209,60 @@ test('parseAuthority handles ports, defaults, and IPv6 literals', () => {
   assert.equal(parseAuthority('example.com:0'), undefined)
   assert.equal(parseAuthority('example.com:notaport'), undefined)
   assert.equal(parseAuthority(''), undefined)
+})
+
+test('isLoopbackAddress accepts the whole loopback block and nothing else', () => {
+  assert.equal(isLoopbackAddress('127.0.0.1'), true)
+  assert.equal(isLoopbackAddress('127.8.9.10'), true)
+  assert.equal(isLoopbackAddress('::1'), true)
+  assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true)
+  assert.equal(isLoopbackAddress('192.168.1.50'), false)
+  assert.equal(isLoopbackAddress('::ffff:192.168.1.50'), false)
+  assert.equal(isLoopbackAddress('10.0.0.1'), false)
+  assert.equal(isLoopbackAddress('1270.0.0.1'), false)
+  assert.equal(isLoopbackAddress(undefined), false)
+  assert.equal(isLoopbackAddress(''), false)
+})
+
+// A non-loopback bind must not turn the daemon into an open relay: the check
+// is on the peer, not the bind, so the machine's own client keeps working while
+// the network gets a refusal.
+// @ref LLP 0233#loopback-peers-only [tests]
+test('a CONNECT from a non-loopback peer is refused before the target is parsed', async (t) => {
+  const rig = await bootFrontDoor({ shouldIntercept: () => true })
+  t.after(() => rig.cleanup())
+
+  // A real socket pair whose gateway-facing end reports a LAN peer. Tests can
+  // only ever connect from loopback, so the peer address is overridden on the
+  // accepted socket rather than faked with a stub stream.
+  const pair = net.createServer()
+  const pairPort = await listen(pair)
+  const accepted = new Promise((resolve) => pair.once('connection', resolve))
+  const client = net.connect(pairPort, '127.0.0.1')
+  const gatewaySide = /** @type {net.Socket} */ (await accepted)
+  t.after(() => {
+    client.destroy()
+    pair.close()
+  })
+  Object.defineProperty(gatewaySide, 'remoteAddress', { value: '192.168.1.50' })
+
+  rig.server.emit('connect', { url: `${HOST}:443` }, gatewaySide, Buffer.alloc(0))
+
+  const response = await new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
+    const chunks = []
+    client.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+    client.on('end', () => resolve(Buffer.concat(chunks).toString('ascii')))
+    client.on('error', reject)
+  })
+
+  assert.match(response, /^HTTP\/1\.1 403 /)
+  // The refusal happened before interception: nothing reached the HTTP server.
+  assert.equal(rig.seen.length, 0)
+  assert.equal(
+    rig.warns.some((w) => w.message === 'aigw.connect_refused_remote_peer'),
+    true
+  )
 })
 
 test('a malformed CONNECT target is refused', async (t) => {
