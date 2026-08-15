@@ -39,6 +39,19 @@ import tls from 'node:tls'
 export const CONNECT_HOST = Symbol('hypaware.connectHost')
 
 /**
+ * The port half of the same CONNECT target.
+ *
+ * Separate from {@link CONNECT_HOST} because that symbol is also the
+ * proxy-mode discriminator (`handleRequest` reads "is this defined?" to tell
+ * the two front doors apart), and folding a port into it would change what an
+ * absent value means. The pair is what routing keys on: `interceptsHost` made
+ * the trust decision on host AND port, so resolving the upstream on the host
+ * alone could hand the decrypted request to an entry addressing a different
+ * port on the same name.
+ */
+export const CONNECT_PORT = Symbol('hypaware.connectPort')
+
+/**
  * How long to wait for a tunnel's far end before answering the client 502.
  *
  * Generous: this bounds a blackholed destination, not a slow one, and the
@@ -51,10 +64,12 @@ const CONNECT_TIMEOUT_MS = 30_000
  *
  * @param {Duplex} socket
  * @param {string} host
+ * @param {number} port
  */
-function markConnectHost(socket, host) {
-  const bag = /** @type {Record<symbol, string>} */ (/** @type {unknown} */ (socket))
+function markConnectTarget(socket, host, port) {
+  const bag = /** @type {Record<symbol, string | number>} */ (/** @type {unknown} */ (socket))
   bag[CONNECT_HOST] = host
+  bag[CONNECT_PORT] = port
 }
 
 /**
@@ -69,6 +84,19 @@ export function connectHostOf(socket) {
   if (!socket) return undefined
   const bag = /** @type {Record<symbol, string | undefined>} */ (/** @type {unknown} */ (socket))
   return bag[CONNECT_HOST]
+}
+
+/**
+ * The port of the CONNECT target a request arrived through, or `undefined` for
+ * reverse-proxy traffic.
+ *
+ * @param {Duplex | null | undefined} socket
+ * @returns {number | undefined}
+ */
+export function connectPortOf(socket) {
+  if (!socket) return undefined
+  const bag = /** @type {Record<symbol, number | undefined>} */ (/** @type {unknown} */ (socket))
+  return bag[CONNECT_PORT]
 }
 
 /**
@@ -174,10 +202,10 @@ export function attachConnectFrontDoor(opts) {
     track(tlsSocket)
     tlsSocket.on('error', () => tlsSocket.destroy())
 
-    // The host the client asked for, not the SNI name: this is what the
+    // The authority the client asked for, not the SNI name: this is what the
     // request path routes on, and it is the value we made a trust decision
-    // about.
-    markConnectHost(tlsSocket, target.host)
+    // about. The port travels with the host because the decision did.
+    markConnectTarget(tlsSocket, target.host, target.port)
 
     // Hand the decrypted socket to the HTTP server. From here `handleRequest`
     // sees an ordinary req/res pair and needs no knowledge of tunnels.

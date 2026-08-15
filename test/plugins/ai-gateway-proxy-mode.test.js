@@ -260,6 +260,30 @@ test('matchUpstreamByHost resolves the CONNECT target', () => {
   assert.equal(matchUpstreamByHost(upstreams, 'example.com'), undefined)
 })
 
+// `interceptsHost` keys the trust decision on host AND port, deliberately, so
+// that terminating `CONNECT host:8443` cannot end up forwarded to 443. The
+// resolve that runs inside the terminated tunnel has to agree with it, or the
+// port check is decoration: with two upstreams on one hostname, a
+// hostname-only resolve returns whichever sorts first and sends the decrypted
+// request to a port the client never named.
+// @ref LLP 0234#intercept-set-is-the-routing-table [tests]
+test('matchUpstreamByHost agrees with interceptsHost on the port', () => {
+  const upstreams = compileUpstreams([
+    { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages' },
+    { name: 'anthropic-alt', base_url: 'https://api.anthropic.com:8443', path_prefix: '/v1' },
+  ])
+  // Both are intercepted, each on its own port and neither on the other's.
+  assert.equal(interceptsHost(upstreams, 'api.anthropic.com', 443), true)
+  assert.equal(interceptsHost(upstreams, 'api.anthropic.com', 8443), true)
+  assert.equal(interceptsHost(upstreams, 'api.anthropic.com', 9999), false)
+
+  // And each tunnel resolves to the entry that authorised it, not to the one
+  // that happens to come first.
+  assert.equal(matchUpstreamByHost(upstreams, 'api.anthropic.com', 443)?.name, 'anthropic')
+  assert.equal(matchUpstreamByHost(upstreams, 'api.anthropic.com', 8443)?.name, 'anthropic-alt')
+  assert.equal(matchUpstreamByHost(upstreams, 'api.anthropic.com', 9999), undefined)
+})
+
 /**
  * Boot the real source with a pinned HYP_HOME so the CA lands in a temp tree.
  *

@@ -8,6 +8,7 @@ import {
   errCode,
   isPlainObject,
   parseMaybeJson,
+  redactUrlUserinfo,
   sha256Hex,
   sortKeys,
   stringValue,
@@ -63,4 +64,32 @@ test('errCode extracts string codes and nothing else', () => {
   assert.equal(errCode(Object.assign(new Error('x'), { code: 42 })), undefined)
   assert.equal(errCode(null), undefined)
   assert.equal(errCode('ENOENT'), undefined)
+})
+
+// The displaced `HTTPS_PROXY` a proxy-mode attach reports, and the one detach
+// gives back, reach a terminal, a `--json` payload and a log record. A
+// corporate proxy URL routinely carries `user:pass@`, and none of those three
+// is allowed to record a credential.
+test('redactUrlUserinfo strips credentials and keeps the rest of the URL', () => {
+  assert.equal(
+    redactUrlUserinfo('http://alice:s3cr3t@proxy.corp:8080'),
+    'http://***@proxy.corp:8080',
+  )
+  // A token in the username position alone is still a credential.
+  assert.equal(redactUrlUserinfo('https://tok3n@proxy.corp'), 'https://***@proxy.corp')
+  // Nothing to hide, nothing changed: the common case must stay readable.
+  assert.equal(redactUrlUserinfo('http://proxy.corp:8080'), 'http://proxy.corp:8080')
+  assert.equal(redactUrlUserinfo('http://127.0.0.1:18521'), 'http://127.0.0.1:18521')
+})
+
+test('redactUrlUserinfo does not run past the authority', () => {
+  // An `@` in a path or a query is not userinfo, and eating up to it would
+  // delete the host the notice exists to name.
+  assert.equal(redactUrlUserinfo('http://proxy.corp/a@b'), 'http://proxy.corp/a@b')
+  assert.equal(redactUrlUserinfo('http://proxy.corp?u=a@b'), 'http://proxy.corp?u=a@b')
+  assert.equal(redactUrlUserinfo('http://proxy.corp#a@b'), 'http://proxy.corp#a@b')
+  // Not a URL at all, and the empty string: returned untouched rather than
+  // coerced, because callers pass whatever was on disk.
+  assert.equal(redactUrlUserinfo('not a url'), 'not a url')
+  assert.equal(redactUrlUserinfo(''), '')
 })

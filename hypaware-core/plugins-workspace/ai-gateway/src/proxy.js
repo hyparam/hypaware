@@ -5,7 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { parseListen } from './config.js'
-import { attachConnectFrontDoor, connectHostOf, openUpstream } from './connect.js'
+import { attachConnectFrontDoor, connectHostOf, connectPortOf, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
 
 /**
@@ -184,13 +184,26 @@ function upstreamPortOf(upstream) {
  * both more accurate and the only way to forward a request whose path no
  * preset claims.
  *
+ * Host AND port, matching {@link interceptsHost} exactly. The two have to agree
+ * or the port check there is defeated: `interceptsHost` decides *whether* to
+ * decrypt on the full authority, and this decides *where the decrypted request
+ * then goes*. With two upstreams naming the same host on different ports (an
+ * ordinary `upstreams` config, even though no shipping preset does it), a
+ * hostname-only resolve returns whichever sorts first, and the request is
+ * forwarded to a port the client never asked for - the precise outcome the
+ * comment in `interceptsHost` says its port check exists to prevent. A miss is
+ * impossible in practice: this is only ever reached on a tunnel
+ * `interceptsHost` already matched, so an exact host+port entry exists.
+ *
+ * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
  * @param {CompiledUpstream[]} upstreams
  * @param {string} host
+ * @param {number} [port]
  * @returns {CompiledUpstream | undefined}
  */
-export function matchUpstreamByHost(upstreams, host) {
+export function matchUpstreamByHost(upstreams, host, port = 443) {
   const wanted = host.toLowerCase()
-  return upstreams.find((u) => u.baseUrl.hostname === wanted)
+  return upstreams.find((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
 }
 
 /**
@@ -298,7 +311,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   }
 
   const upstream = proxyMode
-    ? matchUpstreamByHost(upstreams, connectHost)
+    ? matchUpstreamByHost(upstreams, connectHost, connectPortOf(req.socket))
     : matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
@@ -306,7 +319,13 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     // to resolve it is our bug, not a routing miss: say so rather than
     // reporting a path that was never the question.
     if (proxyMode) {
-      sendJson(res, 502, { error: 'no upstream matches connect host', host: connectHost })
+      // The port is named too: it is half of both the trust decision and the
+      // routing key, so a report that omits it cannot describe this miss.
+      sendJson(res, 502, {
+        error: 'no upstream matches connect host',
+        host: connectHost,
+        port: connectPortOf(req.socket) ?? 443,
+      })
       return
     }
     sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })

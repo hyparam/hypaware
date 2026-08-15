@@ -8,7 +8,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
-import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
+import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 /**
@@ -243,12 +243,23 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
           // `restoredValue` is a single display field, so it reports the key a
           // user would ask about: the one that decided where their client
           // pointed.
+          //
+          // Redacted for the display copy only. The write above put the user's
+          // true value back on disk; this string is printed by `hyp detach` and
+          // `hyp daemon uninstall` and serialised as `restored_value`, and the
+          // key it most often describes is a corporate `HTTPS_PROXY` carrying
+          // `user:pass@`. Handing a credential back to its owner is the point
+          // of the restore; echoing it is not.
           if (key === 'ANTHROPIC_BASE_URL' || key === 'HTTPS_PROXY') {
-            restoredValue = typeof restore === 'string' ? restore : String(restore)
+            const shown = typeof restore === 'string' ? restore : String(restore)
+            restoredValue = redactUrlUserinfo(shown)
           }
         } else {
           if (key === 'ANTHROPIC_BASE_URL' || key === 'HTTPS_PROXY') {
-            removed = typeof current === 'string' ? current : String(current)
+            // Our own `http://127.0.0.1:<port>` in every real case, so there is
+            // nothing to hide; redacted anyway so no path out of this function
+            // is the one that has to be remembered.
+            removed = redactUrlUserinfo(typeof current === 'string' ? current : String(current))
           }
           delete envObj[key]
         }

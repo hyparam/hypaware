@@ -533,3 +533,39 @@ test('a damaged base-URL marker leaves the CA alone', async (t) => {
 
   await fsp.stat(caPaths(r.stateRoot).keyPath)
 })
+
+// A corporate `HTTPS_PROXY` routinely carries `user:pass@`. Attach reports what
+// it displaced and detach reports what it gave back, and both reports reach a
+// terminal, a `--json` payload and (for the warning) a log record a sink may
+// ship off the machine. The backup on the marker must stay verbatim, because it
+// is the only copy the restore has.
+test('a credential-bearing HTTPS_PROXY is redacted in every report but restored intact', async (t) => {
+  const secret = 'http://alice:s3cr3t@proxy.corp:8080'
+  const r = await rig({ env: { HTTPS_PROXY: secret } })
+  t.after(() => r.cleanup())
+
+  const result = await proxyAttach(r)
+  assert.equal(result.changed, true)
+
+  // What the user is shown, and what a scripted caller reads out of
+  // `prev_value`.
+  assert.equal(result.prevValue, 'http://***@proxy.corp:8080')
+  const warned = String(result.warnings?.join(' '))
+  assert.equal(warned.includes('s3cr3t'), false, 'the warning must not carry the password')
+  assert.equal(warned.includes('alice'), false, 'nor the username')
+  assert.match(warned, /proxy\.corp:8080/, 'but must still name the proxy that was displaced')
+
+  // The backup is the restore's only copy, so it stays exactly as it was.
+  const attached = await r.read()
+  assert.equal(attached._hypaware.prev_env.HTTPS_PROXY, secret)
+
+  const detached = await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: r.env,
+  })
+  // The reversal is unaffected: the user's own proxy comes back byte for byte.
+  assert.equal((await r.read()).env.HTTPS_PROXY, secret)
+  // The detach report is not.
+  assert.equal(detached.restoredValue, 'http://***@proxy.corp:8080')
+})

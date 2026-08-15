@@ -4,7 +4,13 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
+import {
+  ConcurrentEditError,
+  atomicWriteFile,
+  errCode,
+  isPlainObject,
+  redactUrlUserinfo,
+} from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 
 /**
@@ -347,9 +353,18 @@ export async function attach(opts) {
     // Warned about only on the run that displaced it: a re-attach carries the
     // backup forward on the marker and has nothing new to tell the user, so
     // repeating the notice every time would train them to ignore it.
+    //
+    // Redacted, and only here: the value is written to the marker verbatim
+    // (that copy is the backup detach restores from) but this one is printed to
+    // a terminal, echoed into `--json`, and logged as `client.attach.
+    // malformed_block`, which an operator's own sink may ship off the machine.
+    // A corporate proxy URL is exactly the field that carries `user:pass@`, and
+    // recording credentials is not something any of those three surfaces is
+    // allowed to do. Host and port survive, so the user can still recognise
+    // which proxy was displaced.
     if (typeof displacedProxy === 'string' && displacedProxy.length > 0) {
       warnings.push(
-        `env.HTTPS_PROXY was already set to ${displacedProxy}; ` +
+        `env.HTTPS_PROXY was already set to ${redactUrlUserinfo(displacedProxy)}; ` +
         `hypaware now handles it and hyp detach restores it. ` +
         `If that is a required outbound proxy, set upstream_proxy on the ` +
         `ai-gateway config to the same value so traffic still chains through it`
@@ -427,7 +442,14 @@ export async function attach(opts) {
   const result = { changed: true }
   const reportedPrev = mode === MODE_PROXY ? prevEnv.HTTPS_PROXY : prevBaseUrl
   if (reportedPrev !== undefined) {
-    result.prevValue = typeof reportedPrev === 'string' ? reportedPrev : String(reportedPrev)
+    const shown = typeof reportedPrev === 'string' ? reportedPrev : String(reportedPrev)
+    // A display field, not the backup: the marker above already holds the true
+    // value, and this one is printed and serialised into `prev_value`. In proxy
+    // mode it is a `HTTPS_PROXY` that routinely carries `user:pass@`, so the
+    // userinfo comes off the copy the user and any `--json` consumer see. Base
+    // URLs go through unchanged: `ANTHROPIC_BASE_URL` carries no userinfo, and
+    // the value is the whole point of the notice.
+    result.prevValue = mode === MODE_PROXY ? redactUrlUserinfo(shown) : shown
   }
   // Only what *this* run displaced. A re-attach carries the prior backup on the
   // marker but has nothing new to tell the user about, so it warns about
