@@ -14,6 +14,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { removeCaTrust } from '../tls/darwin_trust.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
@@ -1391,9 +1392,9 @@ function parseClientArgs(argv) {
 
 /**
  * Remove the proxy-mode trust residue routine detach keeps: the on-disk CA
- * and, on macOS, its login-keychain trust entry. Called by `hyp detach
- * --purge` and by the uninstall sweep - the two paths allowed to end the
- * once-per-machine trust grant.
+ * and, on macOS, its login-keychain trust entry and the launchd environment
+ * delivery. Called by `hyp detach --purge` and by the uninstall sweep - the
+ * two paths allowed to end the once-per-machine trust grant.
  * @ref LLP 0238#ca-survives-detach [implements]
  *
  * Best-effort and idempotent: each failure becomes a line, never a throw, so
@@ -1424,6 +1425,29 @@ async function purgeProxyTrustResidue({ ctx }) {
     } catch (err) {
       lines.push(
         `! keychain trust could not be removed (${err instanceof Error ? err.message : String(err)})`
+      )
+    }
+    // The marker-driven undo releases the launchd environment (LLP 0239), but
+    // only when it finds a proxy marker to read. A settings file the user
+    // deleted, or a marker damaged past its `mode` field, skips that branch
+    // and would leave `NODE_USE_SYSTEM_CA=1` plus its login LaunchAgent
+    // re-applying it forever on a machine HypAware has been removed from.
+    // Idempotent, so the ordinary path that already released it is unharmed.
+    // @ref LLP 0239#launchctl-setenv [implements]: uninstall and purge release the env even with no marker to read
+    try {
+      const env = await removeLaunchdEnv({ homeDir })
+      if (env.removedPlist) lines.push('removed the NODE_USE_SYSTEM_CA login agent')
+      if (!env.unset && env.detail) {
+        lines.push(
+          `! NODE_USE_SYSTEM_CA could not be unset (${env.detail}); ` +
+          'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
+        )
+      }
+    } catch (err) {
+      lines.push(
+        '! NODE_USE_SYSTEM_CA could not be released ' +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
       )
     }
   }
