@@ -163,11 +163,13 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * (e.g. `git_remote`/`head_sha`/`repo_root` in v7, LLP 0032). Squirreling's
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
- * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
- * itself is unchanged: a row object that lacks the key simply reads as null,
- * which is the correct value for "this partition predates the column".
+ * column would throw `ColumnNotFoundError` over any pre-bump partition. Over
+ * the icebird-backed cache the value such a read yields is `null` on the
+ * single-column `scanColumn` path and `undefined` on the row path, never a
+ * throw; LLP 0240 records the measured contract and the tests that pin it.
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
+ * @ref LLP 0240#contract [implements]: the wrapper is what makes an absent column addressable; its read values are pinned at the SQL surface
  * @param {AsyncDataSource} source
  * @returns {AsyncDataSource}
  */
@@ -177,8 +179,28 @@ function withSchemaColumns(source) {
   const wrapped = {
     columns,
     numRows: source.numRows,
+    // The row path owes the same predicate gate as `scanColumn` below. A
+    // `where` naming a declared-but-physically-absent column must not reach
+    // the source: an icebird partition builds a hyparquet filter on a column
+    // its schema never had, matches nothing away, and still reports
+    // `appliedWhere: true`, so the engine trusts the unfiltered stream and
+    // `WHERE git_remote = 'x'` returns every row. Forwarding it verbatim was
+    // wrong in exactly the shape LLP 0098 already forbids; the union hides it
+    // (its own gate fires first) so only a single-partition cache was hit.
+    // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped on the row path too, not only on scanColumn
+    // @ref LLP 0240#where-gate [implements]: an ungated row-path where made a single icebird partition answer predicates on an absent column wrongly
     scan(options) {
-      return source.scan(options)
+      const pushable = !options?.where || canPushWhere(source, whereColumns(options.where))
+      if (pushable) return source.scan(options)
+      // Stripping the predicate also strips limit/offset: they are only
+      // meaningful after the filter, and a source that ignored the predicate
+      // but honored a slice would silently drop matching rows.
+      const inner = source.scan({ ...options, where: undefined, limit: undefined, offset: undefined })
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        rows: () => inner.rows(),
+      }
     },
   }
   // Forward the column-stream hook so single-column aggregates stay on the

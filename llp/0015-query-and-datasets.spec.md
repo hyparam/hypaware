@@ -22,6 +22,14 @@
 > OOM the host by buffering an unbounded scan
 > ([hyparam/hypaware-server#9](https://github.com/hyparam/hypaware-server/issues/9)).
 
+> **Extended by [LLP 0240](./0240-icebird-absent-column-contract.decision.md).**
+> The union section below describes the parquet-backed sources it was written
+> against. Over the **icebird**-backed cache (which is what
+> `ai_gateway_messages` reads from) a declared-but-physically-absent column
+> never throws, and reads as `null` or `undefined` depending on which scan
+> path the engine takes. LLP 0240 records the measured values and the
+> SQL-surface tests that pin them.
+
 ## Query is intrinsic
 
 Query and Iceberg storage are intrinsic services. Plugins register datasets;

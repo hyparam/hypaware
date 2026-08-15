@@ -12,6 +12,13 @@
 > flags, so a filtered `COUNT` keeps the streaming fast path instead of
 > falling back to per-row materialization.
 
+> **Extended by [LLP 0240](./0240-icebird-absent-column-contract.decision.md).**
+> `#wrapper-duties` below states the `withSchemaColumns` predicate gate as a
+> duty of the wrapper; it was implemented only on `scanColumn`, and the row
+> `scan` forwarded the predicate verbatim. LLP 0240 extends the same gate to
+> the row path and records what the gap cost on an icebird-backed partition,
+> which reports the filter applied instead of throwing.
+
 ## Context
 
 LLP 0055 lit the engine's streaming-aggregate fast path by implementing
