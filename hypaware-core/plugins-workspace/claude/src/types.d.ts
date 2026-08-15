@@ -74,7 +74,10 @@ export interface TranscriptEntry {
 }
 
 export interface ClaudeAttachOptions {
-  /** Gateway listener port; written into `env.ANTHROPIC_BASE_URL`. */
+  /**
+   * Gateway listener port. Written into `env.ANTHROPIC_BASE_URL` in
+   * `base_url` mode, or `env.HTTPS_PROXY` in `proxy` mode.
+   */
   port: number
   version: string
   /**
@@ -85,6 +88,25 @@ export interface ClaudeAttachOptions {
   stateFile: string
   settingsPath?: string
   binPath?: string
+  /**
+   * How Claude Code is routed through the gateway.
+   *
+   * `proxy` sets `HTTPS_PROXY` plus `NODE_EXTRA_CA_CERTS` and leaves the base
+   * URL alone, so the endpoint stays `api.anthropic.com` and Claude Code keeps
+   * treating it as first party (Remote Control refuses to run against any other
+   * host). `base_url` is the original mechanism, repointing
+   * `ANTHROPIC_BASE_URL` at the local gateway. Defaults to `base_url` so a
+   * caller that has not been taught about proxy mode cannot acquire it by
+   * accident. See LLP 0231.
+   */
+  mode?: 'proxy' | 'base_url'
+  /**
+   * Absolute path to the machine-local CA certificate. Required in `proxy`
+   * mode, and its existence is the preflight: the gateway writes it only once
+   * proxy mode has booted, and attaching without it would break all of Claude
+   * Code's HTTPS rather than just its capture.
+   */
+  caCertPath?: string
 }
 
 export interface ClaudeAttachChanged {

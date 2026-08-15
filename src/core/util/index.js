@@ -23,6 +23,7 @@ export {
   escapeForDisplay,
   isPlainObject,
   parseMaybeJson,
+  redactUrlUserinfo,
   sanitizeLabel,
   sha256Hex,
   sortKeys,

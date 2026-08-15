@@ -3,14 +3,18 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { defaultStateRoot, readLocalCaInfo } from '../../../../src/core/tls/ca.js'
+import { installCaTrust, isCaTrusted } from '../../../../src/core/tls/darwin_trust.js'
+import { installLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { attach, defaultSettingsPath } from './settings.js'
+import { MODE_BASE_URL, MODE_PROXY, attach, defaultSettingsPath } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
@@ -173,6 +177,7 @@ export async function activate(ctx) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
             const port = safeEndpointPort(attachCtx.endpoint)
+            const dryRunCa = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
@@ -181,23 +186,61 @@ export async function activate(ctx) {
               port,
               changed: false,
               prevValue: undefined,
+              mode: dryRunCa ? MODE_PROXY : MODE_BASE_URL,
+              caCertPath: dryRunCa?.certPath,
             })
             return
           }
           const port = endpointPort(attachCtx.endpoint)
           try {
+            // Proxy mode is used when the daemon is actually running it, which
+            // is exactly when a machine-local CA exists. Reading it here rather
+            // than from config keeps attach honest: the mode it writes is the
+            // mode the gateway is serving, not the one someone asked for.
+            // @ref LLP 0232#proxy-attach-preflight [implements]
+            const ca = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
             const result = await attach({
               port,
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
               binPath: resolveHookBinPath(ctx.env),
+              ...(ca ? { mode: MODE_PROXY, caCertPath: ca.certPath } : {}),
             })
             // Malformed `env` / `hooks` blocks attach rebuilt after backing the
             // displaced value up into the marker (LLP 0163). Reported on the
             // span, in the log, and to the user - the whole point of the
             // decision is that the repair stops being silent.
-            const warnings = result.changed && result.warnings !== undefined ? result.warnings : []
+            const warnings = result.changed && result.warnings !== undefined
+              ? [...result.warnings]
+              : []
+
+            // The settings keys alone leave Remote Control's inbound channel
+            // broken (LLP 0236): its transport trusts only the keychain, and
+            // only when NODE_USE_SYSTEM_CA=1 was in the environment at boot.
+            // Both halves are macOS-only, both degrade to a warning rather
+            // than failing the attach - capture works without them.
+            /** @type {'granted' | 'already' | 'refused' | undefined} */
+            let trustState
+            /** @type {boolean | undefined} */
+            let launchdEnvSet
+            if (ca && process.platform === 'darwin') {
+              const darwin = await ensureDarwinProxyTrust({
+                certPath: ca.certPath,
+                hosts: ca.hosts,
+                stdout: attachCtx.stdout,
+              })
+              trustState = darwin.trustState
+              launchdEnvSet = darwin.launchdEnvSet
+              warnings.push(...darwin.warnings)
+              span.setAttribute('proxy_trust', darwin.trustState)
+              span.setAttribute('launchd_env_set', darwin.launchdEnvSet)
+            } else if (ca) {
+              // @ref LLP 0237#darwin-only [implements]
+              warnings.push(
+                'Remote Control inbound is not supported under proxy mode on this platform yet'
+              )
+            }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
             span.setAttribute('malformed_blocks_repaired', warnings.length)
@@ -227,6 +270,10 @@ export async function activate(ctx) {
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
                 : undefined,
+              mode: ca ? MODE_PROXY : MODE_BASE_URL,
+              caCertPath: ca?.certPath,
+              trust: trustState,
+              launchdEnvSet,
               warnings,
             })
           } catch (err) {
@@ -458,6 +505,67 @@ function safeEndpointPort(endpoint) {
 }
 
 /**
+ * The two macOS-only halves of a working proxy attach: user-domain keychain
+ * trust for the CA, and `NODE_USE_SYSTEM_CA=1` in the launchd user
+ * environment. Every failure is a warning, never a throw: capture works
+ * without either half, and the attach must say what is degraded rather than
+ * refuse to deliver what still works.
+ * @ref LLP 0237#attach-anyway-on-refusal [implements]
+ *
+ * The pre-dialog line is written directly: the macOS password dialog appears
+ * mid-attach, and a user who has not been told why gets a scary
+ * trust-settings prompt with no context.
+ *
+ * @param {{ certPath: string, hosts: string[], stdout: { write(s: string): unknown } }} args
+ * @returns {Promise<{
+ *   trustState: 'granted' | 'already' | 'refused',
+ *   launchdEnvSet: boolean,
+ *   warnings: string[],
+ * }>}
+ */
+async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {'granted' | 'already' | 'refused'} */
+  let trustState
+
+  if (await isCaTrusted({ certPath })) {
+    trustState = 'already'
+  } else {
+    // Name every host the trust will cover, so the grant is informed - the
+    // constraint set is wider than the one provider being attached.
+    // @ref LLP 0238#full-provider-constraints [constrained-by]: the dialog context must name all permitted hosts
+    stdout.write(
+      `  Requesting keychain trust for the HypAware Local CA (limited to: ${hosts.join(', ')}).\n` +
+      '  macOS will ask for your login password.\n'
+    )
+    const install = await installCaTrust({ certPath })
+    if (install.installed) {
+      trustState = 'granted'
+    } else {
+      trustState = 'refused'
+      warnings.push(
+        'keychain trust was not granted' +
+        `${install.detail ? ` (${install.detail})` : ''}; ` +
+        'capture works, but Remote Control messages sent from other devices will not arrive. ' +
+        'Re-run `hyp attach claude` to retry.'
+      )
+    }
+  }
+
+  const env = await installLaunchdEnv({})
+  if (!env.set) {
+    warnings.push(
+      'NODE_USE_SYSTEM_CA could not be set in the launchd environment' +
+      `${env.detail ? ` (${env.detail})` : ''}; ` +
+      'launch Claude Code with `NODE_USE_SYSTEM_CA=1` in the shell until this is fixed.'
+    )
+  }
+
+  return { trustState, launchdEnvSet: env.set, warnings }
+}
+
+/**
  * Render attach output: machine-readable JSON when `json` is set on
  * the attach context, otherwise the human prose the V0 adapter
  * emitted. Keeps the JSON shape stable so callers can grep it.
@@ -471,6 +579,10 @@ function safeEndpointPort(endpoint) {
  *   port: number | undefined,
  *   changed: boolean,
  *   prevValue?: string,
+ *   mode?: 'proxy' | 'base_url',
+ *   caCertPath?: string,
+ *   trust?: 'granted' | 'already' | 'refused',
+ *   launchdEnvSet?: boolean,
  *   warnings?: string[],
  * }} fields
  */
@@ -486,27 +598,56 @@ function writeAttachOutput(attachCtx, fields) {
       changed: fields.changed,
     }
     if (fields.port !== undefined) payload.port = fields.port
-    if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
+    if (fields.mode !== undefined) payload.mode = fields.mode
+    if (fields.caCertPath !== undefined) payload.ca_cert_path = fields.caCertPath
+    if (fields.trust !== undefined) payload.keychain_trust = fields.trust
+    if (fields.launchdEnvSet !== undefined) payload.launchd_env_set = fields.launchdEnvSet
+    // Named, because `prev_value` alone does not say which key it belonged to
+    // and the two modes manage different ones.
+    if (fields.prevValue !== undefined) {
+      payload.prev_value = fields.prevValue
+      payload.prev_value_key = fields.mode === MODE_PROXY ? 'HTTPS_PROXY' : 'ANTHROPIC_BASE_URL'
+    }
     // Echoed as an array, not folded into a string: the field exists so a
     // scripted caller can see *which* blocks were moved aside.
     if (fields.warnings !== undefined && fields.warnings.length > 0) payload.warnings = fields.warnings
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
     return
   }
+  // Name the key actually written. Proxy mode does not set a base URL at all,
+  // and reporting one is both wrong and the first thing a user would check when
+  // debugging why their own base URL is still in place.
+  const managedKey = fields.mode === MODE_PROXY ? 'HTTPS_PROXY' : 'ANTHROPIC_BASE_URL'
   if (fields.dryRun) {
     attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${fields.settingsPath}\n`)
-    attachCtx.stdout.write(`  Would set ANTHROPIC_BASE_URL to the local gateway endpoint\n`)
+    attachCtx.stdout.write(`  Would set ${managedKey} to the local gateway endpoint\n`)
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
   if (fields.port !== undefined) {
-    attachCtx.stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${fields.port}\n`)
+    attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
+  }
+  if (fields.mode === MODE_PROXY && fields.caCertPath !== undefined) {
+    attachCtx.stdout.write(`  NODE_EXTRA_CA_CERTS = ${fields.caCertPath}\n`)
   }
   if (fields.prevValue !== undefined) {
-    attachCtx.stdout.write(`  (previous ANTHROPIC_BASE_URL was ${fields.prevValue})\n`)
+    attachCtx.stdout.write(`  (previous ${managedKey} was ${fields.prevValue})\n`)
   }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)
+  }
+  // Last, so it is the line the user acts on. `launchctl setenv` reaches only
+  // processes launchd starts afterwards; windows of an already-running
+  // terminal app inherit the app's stale environment, so "open a new window"
+  // is not enough (proven in the run G acceptance test).
+  // @ref LLP 0239#terminals-predating-attach [implements]: already-open terminal apps are told to relaunch, not fixed
+  if (fields.mode === MODE_PROXY && fields.launchdEnvSet === true && fields.trust !== 'refused') {
+    attachCtx.stdout.write(
+      '  One more step for Remote Control: quit your terminal app completely ' +
+      '(Cmd-Q) and reopen it.\n' +
+      '  A new window or tab is not enough; apps launched from now on pick up ' +
+      'the change automatically.\n'
+    )
   }
 }
 

@@ -79,6 +79,12 @@ export interface UpstreamConfig {
   provider?: string
   priority?: number
   match?: (input: AiGatewayRouteInput) => boolean
+  /**
+   * Paths the registering adapter claims, carried from its preset when
+   * operator config overrode the entry by name. Proxy mode's record anchor
+   * (LLP 0234); never a routing input.
+   */
+  record_prefix?: string
 }
 
 export interface AiGatewayConfig {
@@ -93,6 +99,13 @@ export interface AiGatewayConfig {
   upstreams: UpstreamConfig[]
   /** Extra headers to redact in stored rows. */
   redactHeaders: string[]
+  /**
+   * Serve `CONNECT` tunnels and TLS-terminate the hosts the routing table
+   * names. Off unless explicitly enabled (LLP 0231).
+   */
+  proxyMode: boolean
+  /** Corporate proxy to chain outbound connections through, when configured. */
+  upstreamProxy?: UpstreamProxy
 }
 
 export interface CompiledUpstream {
@@ -100,6 +113,13 @@ export interface CompiledUpstream {
   provider?: string
   baseUrl: URL
   prefix: string | undefined
+  /**
+   * The paths the registering adapter claims, used as proxy mode's record
+   * anchor. Distinct from `prefix`, which is the operator's routing question:
+   * `path_prefix = "/"` means "route everything here", never "record
+   * everything here" (LLP 0234).
+   */
+  recordPrefix?: string
   priority: number
   seq: number
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
@@ -126,6 +146,31 @@ export interface ProxyOptions {
    * locally, so an opt-out can never be forwarded upstream as a real request.
    */
   onControlRequest?(req: IncomingMessage, res: ServerResponse, url: URL): void
+  /**
+   * Turns proxy mode on. Present only when the operator enabled it and a
+   * machine-local CA is available; absent, the listener serves reverse-proxy
+   * traffic only and a CONNECT is refused.
+   *
+   * @ref LLP 0233#one-listener-two-front-doors
+   */
+  interception?: {
+    secureContextFor(host: string): import('node:tls').SecureContext
+  }
+  /**
+   * Serve CONNECT as blind tunnels only, with no interception. Set when a
+   * client may still have `HTTPS_PROXY` pointed here but TLS termination is
+   * unavailable, so its egress keeps working unrecorded rather than failing
+   * entirely (LLP 0233).
+   */
+  tunnelOnly?: boolean
+  /** Corporate proxy to chain both tunnels and the intercepted leg through. */
+  upstreamProxy?: UpstreamProxy
+  /** Agent that routes the intercepted upstream leg through {@link upstreamProxy}. */
+  chainedAgent?: import('node:https').Agent
+  log?: {
+    warn?(message: string, fields?: Record<string, unknown>): void
+    info?(message: string, fields?: Record<string, unknown>): void
+  }
 }
 
 export interface StartedProxy {
@@ -252,4 +297,39 @@ export interface AiGatewayRuntime {
   state: GatewayState
   sources: ExtendedSourceRegistry
   started: boolean
+}
+
+/**
+ * A corporate proxy to chain outbound connections through. Present only when
+ * the operator configured `upstream_proxy`, and applied to both blind tunnels
+ * and the intercepted upstream leg so proxy mode never silently cuts egress a
+ * customer already depended on.
+ */
+export interface UpstreamProxy {
+  host: string
+  port: number
+  /** Pre-encoded `Proxy-Authorization` header value, when the proxy needs one. */
+  authorization?: string
+}
+
+/** Wiring for {@link attachConnectFrontDoor}. */
+export interface ConnectFrontDoorOptions {
+  /** The HTTP server terminated tunnels are handed back to. */
+  server: import('node:http').Server
+  /**
+   * Whether to decrypt this tunnel. False means blind-pipe, which is the
+   * default disposition for every host no upstream names.
+   */
+  shouldIntercept(host: string, port: number): boolean
+  /** Leaf certificate for an intercepted host; throws for a host the CA cannot vouch for. */
+  secureContextFor(host: string): import('node:tls').SecureContext
+  upstreamProxy?: UpstreamProxy
+  log?: { warn?(message: string, fields?: Record<string, unknown>): void }
+}
+
+export interface ConnectFrontDoor {
+  /** Sockets this handler currently owns; used by tests and shutdown. */
+  openCount(): number
+  /** Detach the handler and destroy every socket it owns. */
+  close(): void
 }

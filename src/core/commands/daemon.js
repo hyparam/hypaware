@@ -298,6 +298,9 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
     }
     if (client.warning !== undefined) ctx.stdout.write(`    warning: ${client.warning}\n`)
   }
+  for (const line of sweep.purgeLines ?? []) {
+    ctx.stdout.write(`  ${line}\n`)
+  }
   for (const failure of sweep.failed) {
     ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
     ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
