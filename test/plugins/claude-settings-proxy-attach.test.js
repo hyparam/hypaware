@@ -499,12 +499,13 @@ test('a damaged proxy marker leaves an externally changed proxy alone', async (t
   assert.match(String(result.warning), /HTTPS_PROXY was overridden externally/)
 })
 
-// The trust pointer and the signing key have to come off together. This branch
-// already reverses `HTTPS_PROXY` by convention, so leaving the CA behind here
-// would strand trusted key material on exactly the path where the user has the
-// least evidence anything was missed.
-// @ref LLP 0235#detach-removes-the-ca [tests]
-test('a damaged proxy marker still deletes the CA', async (t) => {
+// The damaged branch follows the same lifecycle as the record-driven one: the
+// CA and its keychain trust stay (they carry the once-per-machine grant), and
+// the launchd environment is released, on exactly the path where the user has
+// the least evidence anything was missed.
+// @ref LLP 0238#ca-survives-detach [tests]
+// @ref LLP 0239#launchctl-setenv [tests]
+test('a damaged proxy marker keeps the CA and releases the launchd env', async (t) => {
   const r = await rig({})
   t.after(() => r.cleanup())
 
@@ -515,41 +516,22 @@ test('a damaged proxy marker still deletes the CA', async (t) => {
   delete value._hypaware.managed
   await fsp.writeFile(r.settingsPath, JSON.stringify(value, null, 2) + '\n')
 
+  /** @type {{ cmd: string, args: string[] }[]} */
+  const calls = []
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
     homeDir: r.root,
     env: r.env,
+    platform: 'darwin',
+    runCommand: async (cmd, args) => {
+      calls.push({ cmd, args })
+      return { exitCode: 0, stdout: '', stderr: '' }
+    },
   })
 
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).certPath), /ENOENT/)
-})
-
-// Same branch, same homeDir rule as the record-driven one: a sandboxed undo
-// must not reach into the ambient home for the key it deletes.
-// @ref LLP 0235#detach-removes-the-ca [tests]
-test('a damaged proxy marker deletes the CA under homeDir, not the ambient one', async (t) => {
-  const r = await rig({})
-  t.after(() => r.cleanup())
-  await proxyAttach(r)
-
-  const decoyHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-decoy-damaged-'))
-  t.after(() => fsp.rm(decoyHome, { recursive: true, force: true }))
-  const decoyRoot = path.join(decoyHome, '.hyp', 'hypaware')
-  await ensureLocalCa({ stateRoot: decoyRoot, hosts: ['api.anthropic.com'] })
-
-  const value = await r.read()
-  delete value._hypaware.managed
-  await fsp.writeFile(r.settingsPath, JSON.stringify(value, null, 2) + '\n')
-
-  await detachClientFromDisk({
-    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
-    homeDir: r.root,
-    env: {},
-  })
-
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
-  await fsp.stat(caPaths(decoyRoot).keyPath)
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
+  await fsp.stat(caPaths(r.stateRoot).certPath)
+  assert.deepEqual(calls, [{ cmd: 'launchctl', args: ['unsetenv', 'NODE_USE_SYSTEM_CA'] }])
 })
 
 // A damaged *base-URL* marker must not delete a CA: nothing it wrote installed
