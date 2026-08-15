@@ -131,4 +131,5 @@ while the suite stayed green.
 - `SELECT *, git_remote FROM t` over a drifted union was observed to
   mis-assign a value into a neighbouring declared column. That is a star
   expansion defect above this layer, is not part of this contract, and is left
-  unaddressed here; the tests deliberately do not cover it.
+  unaddressed here; the tests deliberately do not cover it. It is tracked as
+  [hyparam/hypaware#788](https://github.com/hyparam/hypaware/issues/788).
