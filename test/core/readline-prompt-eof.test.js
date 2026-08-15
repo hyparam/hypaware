@@ -20,7 +20,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 
 import { askYesNo } from '../../src/core/cli/confirm.js'
 import {
@@ -163,6 +163,31 @@ test('askYesNo still honours an explicit yes', async () => {
   stdin.write('yes\n')
 
   assert.equal(await settles(answered, 'askYesNo with an answer'), true)
+})
+
+test('askYesNo takes an answer delivered in the same burst as the EOF', async () => {
+  // `Readable.from` pushes the line and the EOF together, which is how a
+  // caller that injects a stdin usually builds one. The answer is there,
+  // so only a settlement that outran it could turn this `y` into a no.
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin: Readable.from(['y\n']), stderr: makeBuf() }),
+    'Delete everything? [y/N] '
+  )
+
+  assert.equal(await settles(answered, 'askYesNo on a one-burst stdin'), true)
+})
+
+test('askYesNo takes a final answer with no trailing newline', async () => {
+  const stdin = new PassThrough()
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin, stderr: makeBuf() }),
+    'Delete everything? [y/N] '
+  )
+  // Readline hands this one to `line` rather than to the pending
+  // question, so it is an answer `rl.question` alone never sees.
+  stdin.end('y')
+
+  assert.equal(await settles(answered, 'askYesNo on an unterminated answer'), true)
 })
 
 test('plugin install confirm declines on a stdin that ends without a line', async () => {

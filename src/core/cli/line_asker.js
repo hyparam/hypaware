@@ -23,6 +23,17 @@
  * `close`-only guard still hangs on it. Both resolve `null`, which callers
  * read as the empty line - the answer a bare enter would have given.
  *
+ * Neither settlement may outrun an answer that did arrive, and both can:
+ * `close` fires synchronously, while `rl.question` hands its answer back
+ * through a promise, a microtask later. A stream that delivers the line
+ * and EOF in one burst (`Readable.from(['y\n'])`, any readable that
+ * pushes data and `null` together) would have `close` win that race and
+ * discard a real `y`, so the EOF settlements are deferred a turn and the
+ * delivered line settles first. Readline also routes the last line of a
+ * stream that ends without a trailing newline to `line` rather than to
+ * the pending question, which is a second answer `question` alone never
+ * sees, so that one is taken too.
+ *
  * `rl.question`'s own promise is left permanently unsettled at EOF rather
  * than rejected, so nothing here can leak an unhandled rejection; the
  * handler attached to it is only there for the abort/close rejections
@@ -44,10 +55,16 @@ export function askLineOnce(rl, input, prompt) {
       settled = true
       resolve(line)
     }
-    rl.once('close', () => done(null))
+    // A turn behind the answer, never ahead of it: an answer delivered in
+    // the same burst as the EOF has to settle first.
+    const endOfInput = () => setImmediate(() => done(null))
+    rl.once('close', endOfInput)
+    // The last line of a stream that ends without a trailing newline goes
+    // here rather than to the pending question.
+    rl.on('line', done)
     // Writes the query synchronously, on a spent stream too.
     rl.question(prompt).then(done, () => done(null))
-    if (/** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true) done(null)
+    if (/** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true) endOfInput()
   })
 }
 

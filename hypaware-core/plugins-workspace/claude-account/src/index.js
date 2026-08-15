@@ -208,8 +208,10 @@ async function runLogin(cmdCtx, mode, stateDir) {
       stdin: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
       hasCallback: callback !== null && callback !== undefined,
     })
-    // A settled race leaves the loser pending; readline close (finally)
-    // rejects a pending question, so keep that rejection handled.
+    // A settled race leaves the loser pending. Closing the interface does
+    // not settle it either way (that is the defect `askLineOnce` works
+    // around), so what is guarded here is a malformed paste landing after
+    // the callback already won: keep that rejection handled.
     pastePromise.catch(() => {})
     const { code, state } = await (callback
       ? Promise.race([callback.result, pastePromise])

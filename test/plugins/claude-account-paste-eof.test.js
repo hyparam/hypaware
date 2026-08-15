@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import readline from 'node:readline/promises'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 
 import { pasteAuthorizationLane } from '../../hypaware-core/plugins-workspace/claude-account/src/index.js'
 
@@ -113,6 +113,20 @@ test('paste lane leaves the loopback listener to finish when stdin ends under it
   })
   const settled = /** @type {any} */ (await raceSettle(Promise.race([callbackResult, lane])))
   assert.deepEqual(settled.ok, { code: 'from-browser', state: 'st' })
+  rl.close()
+})
+
+test('paste lane parses a code delivered in the same burst as the EOF', async () => {
+  // The paste and the EOF arrive together, which is what a stdin built
+  // from a string does. The EOF must not take the race off a paste that
+  // landed.
+  const stdin = Readable.from(['the-code#the-state\n'])
+  const rl = readline.createInterface({ input: stdin, output: /** @type {any} */ (makeBuf()), terminal: false })
+
+  const settled = /** @type {any} */ (await raceSettle(
+    pasteAuthorizationLane({ rl, stdin: /** @type {any} */ (stdin), hasCallback: false })
+  ))
+  assert.deepEqual(settled.ok, { code: 'the-code', state: 'the-state' })
   rl.close()
 })
 
