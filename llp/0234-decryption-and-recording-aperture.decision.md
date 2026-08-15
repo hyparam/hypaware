@@ -29,7 +29,9 @@ it, something else must.
 
 ## Decision
 
-<a id="blind-tunnel-by-default"></a>**Blind tunnel is the default
+### Blind tunnel by default
+
+**Blind tunnel is the default
 disposition.** A `CONNECT` to any host outside the intercept set is piped
 between client and destination without being decrypted. The gateway learns the
 host and the byte counts and nothing else. This is not a performance choice: a
@@ -37,7 +39,9 @@ proxy that decrypts everything it *could* decrypt would be reading the user's
 package installs and telemetry, which no part of this product has ever asked
 for.
 
-<a id="intercept-set-is-the-routing-table"></a>**The intercept set is derived
+### Intercept set is the routing table
+
+**The intercept set is derived
 from the routing table, never configured separately.** A host is decrypted only
 when a registered upstream's `base_url` names it. One fact lives in one place:
 adding an adapter widens what is decrypted, and nothing else does. The CA's
@@ -45,7 +49,9 @@ adding an adapter widens what is decrypted, and nothing else does. The CA's
 we can technically impersonate and the set we intend to intercept cannot drift
 apart.
 
-<a id="recording-is-opt-in-per-path"></a>**Recording is opt-in per path, and the
+### Recording is opt-in per path
+
+**Recording is opt-in per path, and the
 opt-in is the upstream's declared `path_prefix`.** Decrypting a host does not
 imply persisting it. An exchange is recorded only when the path matches the
 prefix its upstream declares, which for the Anthropic preset is `/v1/messages`,

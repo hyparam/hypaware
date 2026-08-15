@@ -13,6 +13,8 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
+import { removeCaTrust } from '../tls/darwin_trust.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
 import {
   clearClientActionMarker,
@@ -135,6 +137,16 @@ async function runClientLifecycle(action, argv, ctx) {
         const message = err instanceof Error ? err.message : String(err)
         ctx.stderr.write(`error: detach client '${name}' failed: ${message}\n`)
         exitCode = 1
+      }
+    }
+    // Zero-residue exit for a user who wants it without uninstalling: routine
+    // detach deliberately keeps the CA and its keychain trust so the password
+    // dialog stays once-per-machine; `--purge` is the explicit opt-out.
+    // @ref LLP 0238#ca-survives-detach [implements]: purge is the explicit removal path, never the default
+    if (parsed.purge && !parsed.dryRun) {
+      const purged = await purgeProxyTrustResidue({ ctx })
+      if (!parsed.json) {
+        for (const line of purged.lines) ctx.stdout.write(`${line}\n`)
       }
     }
     return exitCode
@@ -1207,6 +1219,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
  * @returns {Promise<{
  *   detached: { name: string, settingsPath?: string, removed?: string, restoredValue?: string, restoredPaths?: string[], warning?: string }[],
  *   failed: { name: string, message: string }[],
+ *   purgeLines: string[],
  * }>}
  * @ref LLP 0206#d1 [implements]: uninstalling the service detaches the clients it was serving
  */
@@ -1240,7 +1253,12 @@ export async function detachAllClientsFromDisk(ctx) {
       failed.push({ name, message: err instanceof Error ? err.message : String(err) })
     }
   }
-  return { detached, failed }
+  // Uninstall is the exit that ends the machine's trust grant: routine detach
+  // keeps the CA and its keychain trust, so this sweep is where both must go,
+  // or an uninstalled machine is left trusting a signing key with no owner.
+  // @ref LLP 0238#ca-survives-detach [implements]: uninstall removes what detach keeps
+  const purged = await purgeProxyTrustResidue({ ctx })
+  return { detached, failed, purgeLines: purged.lines }
 }
 
 /**
@@ -1306,8 +1324,8 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
-  /** @type {{ client: string, dryRun: boolean, json: boolean, error?: string }} */
-  const r = { client: 'claude', dryRun: false, json: false }
+  /** @type {{ client: string, dryRun: boolean, json: boolean, purge: boolean, error?: string }} */
+  const r = { client: 'claude', dryRun: false, json: false, purge: false }
   /** @type {string | undefined} */
   let requestedClient
   /**
@@ -1348,6 +1366,10 @@ function parseClientArgs(argv) {
       r.json = true
       continue
     }
+    if (arg === '--purge') {
+      r.purge = true
+      continue
+    }
     if (arg === '--client' || arg.startsWith('--client=')) {
       const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
       if (!setClient(value, '--client')) return r
@@ -1361,6 +1383,47 @@ function parseClientArgs(argv) {
     return r
   }
   return r
+}
+
+/**
+ * Remove the proxy-mode trust residue routine detach keeps: the on-disk CA
+ * and, on macOS, its login-keychain trust entry. Called by `hyp detach
+ * --purge` and by the uninstall sweep - the two paths allowed to end the
+ * once-per-machine trust grant.
+ * @ref LLP 0238#ca-survives-detach [implements]
+ *
+ * Best-effort and idempotent: each failure becomes a line, never a throw, so
+ * a keychain hiccup cannot fail an uninstall whose settings undo already
+ * landed.
+ *
+ * @param {{ ctx: CommandRunContext }} args
+ * @returns {Promise<{ lines: string[] }>}
+ */
+async function purgeProxyTrustResidue({ ctx }) {
+  /** @type {string[]} */
+  const lines = []
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  try {
+    const { removed } = await deleteLocalCa({ stateRoot: defaultStateRoot(ctx.env, homeDir) })
+    if (removed.length > 0) lines.push('removed the local interception CA')
+  } catch (err) {
+    lines.push(
+      `! the local CA could not be removed (${err instanceof Error ? err.message : String(err)}); ` +
+      'delete it by hand'
+    )
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const trust = await removeCaTrust({ homeDir })
+      if (trust.removed) lines.push('removed the HypAware Local CA keychain trust')
+      else if (trust.detail) lines.push(`! keychain trust could not be removed (${trust.detail})`)
+    } catch (err) {
+      lines.push(
+        `! keychain trust could not be removed (${err instanceof Error ? err.message : String(err)})`
+      )
+    }
+  }
+  return { lines }
 }
 
 /**

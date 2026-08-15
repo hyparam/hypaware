@@ -32,3 +32,20 @@ export interface LocalCaInfo {
   notAfter: Date
   hosts: string[]
 }
+
+/**
+ * What a shelled-out trust command returned. Structurally identical to the
+ * daemon module's ServiceCommandResult so the same spawn wrapper satisfies
+ * both.
+ */
+export interface TrustCommandResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * Injectable runner for `security` invocations, so tests never touch the
+ * real keychain.
+ */
+export type TrustCommandRunner = (cmd: string, args: string[]) => Promise<TrustCommandResult>

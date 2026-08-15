@@ -6,6 +6,9 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-14
 **Related:** LLP 0016, LLP 0045, LLP 0114, LLP 0116, LLP 0206, LLP 0231
+**Superseded-by (in part):** LLP 0237 (#client-scoped-trust), LLP 0238
+(#detach-removes-the-ca, #ca-name-constraints mint-from-routing-table,
+#ca-lifecycle one-year validity)
 
 > The machine-local certificate authority is generated in-process with no
 > `openssl` shell-out and no new dependency, constrained to the hosts it
@@ -35,13 +38,23 @@ Node can parse and verify certificates but cannot generate them.
 
 ## Decision
 
-<a id="minted-in-process"></a>**Option 3.** Certificates are assembled as DER in
+### Minted in process
+
+**Option 3.** Certificates are assembled as DER in
 about two hundred lines and signed with `node:crypto`, scoped deliberately to EC
 P-256 with ECDSA-SHA256, UTCTime only, and only the extensions the interception
 path needs. This is not a general certificate authority and should not grow into
 one.
 
-<a id="ca-name-constraints"></a>**The CA carries `nameConstraints` permitting
+### CA name constraints
+
+*Superseded in part by
+LLP 0238#full-provider-constraints: the permitted set is now the full static
+provider list rather than minted from the routing table, so a trusted CA is
+never regenerated when a provider is enabled. The encoding rules and the
+IP-exclusion below carry forward unchanged.*
+
+**The CA carries `nameConstraints` permitting
 only the hosts it intercepts.** This is the containment property the design
 rests on: a leaked CA key must not be a universal signing key for any client
 that trusts it. The permitted set is minted from the routing table (LLP 0234),
@@ -63,7 +76,9 @@ which silently voids the constraint and takes chain validation down with it. It
 is asserted by a test that mints a leaf for another host and requires the
 handshake to fail with `permitted subtree violation`.
 
-<a id="constraints-are-read-back-structurally"></a>**Reading the constraints
+### Constraints are read back structurally
+
+**Reading the constraints
 back is a DER walk, not a byte scan.** The stored constraint set decides whether
 a CA can be reused, so it has to be read accurately. Scanning the certificate
 for context-tag bytes also matches the two key-identifier hashes and the
@@ -72,14 +87,28 @@ any name needing a long-form length read back as absent (regenerating the
 machine's CA on every single boot), and excluded names could be reported as
 permitted.
 
-<a id="client-scoped-trust"></a>**Trust is client-scoped, never system-wide.**
+### Client-scoped trust
+
+*Superseded in part by LLP 0237: on macOS,
+attach now also installs the CA as a user-domain trusted root in the login
+keychain, because file-scoped trust does not reach Claude Code's SSE
+transport (LLP 0236#split-trust). Trust remains never machine-wide.*
+
+**Trust is client-scoped, never system-wide.**
 The CA is referenced by `NODE_EXTRA_CA_CERTS` in the attached client's own
 settings file. Nothing installs it into the system trust store, so nothing else
 on the machine is affected. This is a materially smaller ask than the
 Zscaler-style system-wide trust enterprise TLS inspection normally requires, and
 it is the reason proxy mode needs no privileged install step.
 
-<a id="ca-lifecycle"></a>**Per-machine, 0600, never shipped, and visible.** The
+### CA lifecycle
+
+*Extended by LLP 0238#ten-year-validity: CA
+validity is now ten years, because an annual re-mint would strand the
+keychain trust of LLP 0237 every year. The renewal roll and visibility
+rules below stand.*
+
+**Per-machine, 0600, never shipped, and visible.** The
 key is generated locally at gateway start, written mode 0600 inside the state
 root, and is never an export, a sink payload or a support-bundle file. Leaves
 are minted per host in memory and never written to disk at all: they are cheap
@@ -87,7 +116,13 @@ to recreate, and every file holding a private key is one more thing to exclude
 from exports and clean up. The CA rolls when it is within thirty days of expiry.
 `hyp status` shows the fingerprint, expiry and intercepted hosts.
 
-<a id="detach-removes-the-ca"></a>**Detach deletes the CA.** A trusted signing
+### Detach removes the CA
+
+*Superseded by
+LLP 0238#ca-survives-detach: detach keeps the CA and its keychain trust;
+uninstall and `hyp detach --purge` remove them.*
+
+**Detach deletes the CA.** A trusted signing
 key that outlives the thing that installed it is the worst residue this feature
 can leave, so removal runs in the same plugin-agnostic, disk-driven undo that
 removes the trust pointer (LLP 0045 Part 3), keyed on the marker's `mode`. This

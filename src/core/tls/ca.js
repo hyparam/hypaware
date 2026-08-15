@@ -14,22 +14,25 @@ import { generateKeyPair, mintCertificate, readNameConstraints } from './x509.js
  * TLS with.
  *
  * This lives in core rather than in the gateway plugin for the same reason the
- * attach undo does (LLP 0045 Part 3): `hyp detach` and `hyp daemon uninstall`
- * must be able to delete the CA with the plugin unloaded. A trusted signing key
- * that outlives the thing that installed it is the worst failure mode this
+ * attach undo does (LLP 0045 Part 3): `hyp daemon uninstall` and `hyp detach
+ * --purge` must be able to delete the CA with the plugin unloaded. A trusted
+ * signing key that outlives the *install* is the worst failure mode this
  * feature has, so its removal cannot depend on a plugin being loadable.
+ * Routine detach keeps the CA (LLP 0238#ca-survives-detach) so the keychain
+ * trust granted for it stays valid across attach cycles.
  *
  * Three properties do the security work, and each is tested:
  *
  * - **Per-machine, never shipped.** The key is generated locally at attach and
  *   written 0600 inside the state root. It is never an export, a sink payload,
  *   or a support-bundle file.
- * - **Constrained.** The CA carries `nameConstraints` permitting only the hosts
- *   actually intercepted, so a leaked key cannot mint a working certificate for
- *   anything else against a client that trusts it.
- * - **Client-scoped trust.** Nothing installs this into the system trust store.
- *   Only the attached client trusts it, via `NODE_EXTRA_CA_CERTS` in its own
- *   settings file.
+ * - **Constrained.** The CA carries `nameConstraints` permitting only the
+ *   provider hosts this product can intercept, so a leaked key cannot mint a
+ *   working certificate for anything else against a client that trusts it.
+ * - **User-scoped trust.** On macOS the CA is additionally trusted in the
+ *   user's login keychain (`darwin_trust.js`), because file-scoped
+ *   `NODE_EXTRA_CA_CERTS` trust does not reach Claude Code's SSE transport
+ *   (LLP 0236). Trust is never machine-wide.
  *
  * @import { LocalCa, LocalCaInfo } from '../../../src/core/tls/types.js'
  * @ref LLP 0235#client-scoped-trust: trust is scoped to the attached client's own settings file, which is why proxy mode needs no privileged install step
@@ -39,8 +42,10 @@ const CA_DIR_NAME = 'tls'
 const CA_KEY_FILE = 'ca-key.pem'
 const CA_CERT_FILE = 'ca-cert.pem'
 
-/** CA lifetime. Long enough not to churn client settings, short enough to roll. */
-const CA_VALID_DAYS = 365
+// Ten years, because the CA is now a keychain-trusted root and every re-mint
+// strands that trust and costs the user a password dialog. Leaves stay short.
+// @ref LLP 0238#ten-year-validity [implements]
+const CA_VALID_DAYS = 3650
 
 /** Leaf lifetime. Leaves are cheap and never leave the process, so keep them short. */
 const LEAF_VALID_DAYS = 30
@@ -58,6 +63,19 @@ const CA_RENEW_WITHIN_DAYS = 45
 const CA_SUBJECT = /** @type {[string, string][]} */ ([
   ['2.5.4.3', 'HypAware Local CA'],
   ['2.5.4.10', 'HypAware'],
+])
+
+// Every host a HypAware client adapter can route through the gateway, not the
+// subset this install has configured. The CA is minted against this full list
+// so the one keychain trust grant covers a provider enabled later; which hosts
+// are actually decrypted is still decided per-connection by the routing table.
+// Widening this list is a real design change that goes through a doc, and only
+// reaches users when their CA is next minted.
+// @ref LLP 0238#full-provider-constraints [implements]
+export const INTERCEPT_PROVIDER_HOSTS = Object.freeze([
+  'api.anthropic.com',
+  'api.openai.com',
+  'chatgpt.com',
 ])
 
 /**
@@ -218,9 +236,10 @@ async function loadLocalCa(paths, hosts, now) {
   if (Number.isNaN(notAfter.getTime())) return undefined
   if (notAfter.getTime() - now.getTime() < CA_RENEW_WITHIN_DAYS * 86_400_000) return undefined
 
-  // The stored constraint set must be exactly the hosts asked for. Superset
-  // reuse would keep vouching for an upstream the operator has since removed,
-  // which is a wider CA than the config now describes.
+  // The stored constraint set must be exactly the hosts asked for. Callers
+  // now always ask for the full provider list (LLP 0238), so a mismatch means
+  // a CA minted under the old routing-table rule - regenerate it once and the
+  // new trust grant covers every provider from then on.
   const permitted = permittedHosts(cert)
   if (permitted.length !== hosts.length) return undefined
   for (const host of hosts) {
@@ -357,8 +376,10 @@ export async function readLocalCaInfo({ stateRoot }) {
 }
 
 /**
- * Delete the CA key and certificate. Called by detach and by daemon uninstall:
- * a trusted signing key must not outlive the thing that installed it.
+ * Delete the CA key and certificate. Called by `hyp daemon uninstall` and
+ * `hyp detach --purge`; plain detach keeps the CA so the keychain trust
+ * granted for it stays valid across attach cycles.
+ * @ref LLP 0238#ca-survives-detach [constrained-by]: routine detach must not call this
  *
  * Idempotent, and reports what it actually removed so callers can tell the user.
  *

@@ -319,13 +319,16 @@ function buildCoreCommands(registry) {
     {
       name: 'detach',
       summary: 'Detach an AI client from the local gateway',
-      usage: 'hyp detach [client] [--client <name>] [--dry-run] [--json]',
+      usage: 'hyp detach [client] [--client <name>] [--dry-run] [--purge] [--json]',
       help: [
         'Removes the HypAware-managed settings hyp attach wrote, leaving the',
         'client\'s own configuration otherwise intact. hyp unattach is an alias.',
         '',
         'Detaching stops future capture for that client; it does not delete',
         'anything already recorded (see hyp purge for that).',
+        'A proxy-mode detach keeps the local interception CA and its keychain',
+        'trust so a later re-attach needs no new password dialog; --purge',
+        'removes both as well.',
         '--dry-run reports what would change without writing.',
       ].join('\n'),
       aliases: ['unattach'],

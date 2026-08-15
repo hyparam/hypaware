@@ -337,12 +337,17 @@ test('the source mints a CA and reports proxy mode when it is enabled', async (t
   const details = /** @type {any} */ (status.details)
   assert.equal(details.proxy_mode, true)
   assert.match(details.ca_fingerprint, /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/)
+  // What is decrypted is still exactly what the routing table named...
   assert.deepEqual(details.intercept_hosts, ['api.anthropic.com'])
+  // ...while the CA is constrained to the full static provider set, so the
+  // user's one trust grant covers a provider enabled later, and status
+  // reports that wider grant honestly.
+  // @ref LLP 0238#full-provider-constraints [tests]
+  assert.deepEqual(details.ca_permitted_hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
 
-  // The CA is constrained to exactly the host the routing table named.
   const info = await readLocalCaInfo({ stateRoot: rig.stateRoot })
   assert.ok(info)
-  assert.deepEqual(info.hosts, ['api.anthropic.com'])
+  assert.deepEqual(info.hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
   assert.equal(info.fingerprint, details.ca_fingerprint)
 })
 

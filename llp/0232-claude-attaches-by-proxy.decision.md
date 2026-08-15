@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-14
 **Related:** LLP 0044, LLP 0045, LLP 0086, LLP 0163, LLP 0206, LLP 0231
+**Extended-by:** LLP 0237, LLP 0239 (on macOS, proxy-mode attach additionally
+installs user-domain keychain trust and the launchd `NODE_USE_SYSTEM_CA`
+environment, because the two-key attach alone breaks Remote Control inbound;
+see LLP 0236)
 
 > Attach stops writing `env.ANTHROPIC_BASE_URL` and writes `env.HTTPS_PROXY`
 > plus `env.NODE_EXTRA_CA_CERTS` instead. The endpoint stays
@@ -24,7 +28,9 @@ See LLP 0231 for why proxy mode at all, and what it costs.
 
 ## Decision
 
-<a id="attach-writes-https_proxy-not-a-base-url"></a>**Proxy-mode attach writes
+### Attach writes HTTPS_PROXY not a base URL
+
+**Proxy-mode attach writes
 `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`, and nothing else.** The base URL is
 left exactly as the user had it. `HTTP_PROXY` is deliberately not written: it
 would hand the gateway plain-HTTP requests in absolute-form, which it does not
@@ -35,7 +41,9 @@ Because the endpoint is genuinely first-party, neither `ENABLE_TOOL_SEARCH` nor
 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is written in proxy mode. The
 standing duty to re-verify an undocumented key every release goes with them.
 
-<a id="proxy-attach-preflight"></a>**Attach refuses unless a local CA is already
+### Proxy-attach preflight
+
+**Attach refuses unless a local CA is already
 on disk.** This is the answer to the worst failure mode the change introduces.
 A base-URL attach pointing at a dead gateway breaks model calls; a proxy attach
 pointing at a dead gateway breaks *all* of Claude Code's HTTPS, authentication
@@ -49,7 +57,9 @@ The mode is therefore read from what the daemon is *doing*, never from what
 config *asks for*: attach uses proxy mode when a CA exists and base-URL mode
 otherwise. Attach cannot promise a transport the gateway is not serving.
 
-<a id="mode-migration"></a>**Attach releases keys the new mode no longer
+### Mode migration
+
+**Attach releases keys the new mode no longer
 manages.** Switching modes on an already-attached machine applies the detach
 rule mid-attach: a managed key whose live value is still the one we wrote is
 restored to its recorded prior (or removed); a key the user has since changed is
@@ -58,7 +68,9 @@ live `ANTHROPIC_BASE_URL` pointing at the gateway, which is precisely the
 non-first-party host the change exists to stop sending, and the attach would
 silently fail to deliver what it promised.
 
-<a id="detach-restores-any-managed-key"></a>**The undo record generalises from
+### Detach restores any managed key
+
+**The undo record generalises from
 one key to any key.** The marker gains `prev_env`, a per-key backup, and the core
 disk-driven undo restores from it before falling back to `prev_base_url`.
 

@@ -11,6 +11,7 @@ import {
   createLeafStore,
   defaultStateRoot,
   ensureLocalCa,
+  INTERCEPT_PROVIDER_HOSTS,
   readLocalCaInfo,
 } from '../../../../src/core/tls/ca.js'
 
@@ -44,7 +45,7 @@ export function createStartSource(state) {
    * @returns {Promise<StartedSource>}
    */
   return async function startAiGatewaySource(ctx) {
-    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} */
+    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} */
     const liveState = {
       rowsWritten: 0,
       exchangeBytes: 0,
@@ -139,6 +140,9 @@ export function createStartSource(state) {
                 ca_not_after: liveState.interception.notAfter,
                 ca_cert_path: liveState.interception.certPath,
                 intercept_hosts: liveState.interception.hosts,
+                // Wider than intercept_hosts by design: the full provider set
+                // the user's one trust grant covers (LLP 0238).
+                ca_permitted_hosts: liveState.interception.caHosts,
               }
               : {}),
             ...(liveState.interceptionError
@@ -198,7 +202,7 @@ export function createStartSource(state) {
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
- * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
+ * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
  * @returns {Promise<StartedProxy | undefined>}
  */
 async function launchListener(ctx, state, liveState) {
@@ -418,7 +422,7 @@ async function launchListener(ctx, state, liveState) {
  * @param {PluginActivationContext} ctx
  * @param {AiGatewayConfig} config
  * @param {UpstreamConfig[]} upstreams
- * @param {{ interception: { fingerprint: string, hosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined }} liveState
+ * @param {{ interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined }} liveState
  * @returns {Promise<{ hooks?: { secureContextFor: (host: string) => import('node:tls').SecureContext }, tunnelOnly: boolean } | undefined>}
  */
 async function prepareInterception(ctx, config, upstreams, liveState) {
@@ -445,8 +449,12 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
     return undefined
   }
 
-  // Exactly the hosts we will decrypt, and nothing else, so the CA's
-  // nameConstraints and the intercept set cannot drift apart.
+  // The hosts we will decrypt, for the idle check only. The CA below is
+  // deliberately minted against the full static provider list rather than
+  // this configured subset, so the user's one keychain trust grant covers a
+  // provider enabled later; what is actually intercepted per-connection stays
+  // decided by the routing table (`interceptsHost`).
+  // @ref LLP 0238#full-provider-constraints [implements]
   /** @type {string[]} */
   const hostList = []
   for (const u of upstreams) {
@@ -464,11 +472,22 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   }
 
   try {
-    const ca = await ensureLocalCa({ stateRoot: defaultStateRoot(ctx.env), hosts })
+    // Union, not replacement: an operator-configured upstream outside the
+    // static provider list still needs the CA to vouch for it, or every
+    // handshake to that host dies in the leaf store. Standard installs are a
+    // subset of the static list, so their CA never regenerates for config.
+    const ca = await ensureLocalCa({
+      stateRoot: defaultStateRoot(ctx.env),
+      hosts: [...new Set([...INTERCEPT_PROVIDER_HOSTS, ...hosts])],
+    })
     const leaves = createLeafStore(ca)
+    // `hosts` is what this config actually decrypts; `caHosts` is the wider
+    // set the CA may vouch for. Status reports both so the user's trust grant
+    // stays inspectable (LLP 0238's informed-grant consequence).
     liveState.interception = {
       fingerprint: ca.fingerprint,
-      hosts: ca.hosts,
+      hosts,
+      caHosts: ca.hosts,
       notAfter: ca.notAfter.toISOString(),
       certPath: ca.certPath,
     }
@@ -477,7 +496,8 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
       ca_fingerprint: ca.fingerprint,
       ca_created: ca.created,
       ca_not_after: ca.notAfter.toISOString(),
-      intercept_hosts: ca.hosts,
+      intercept_hosts: hosts,
+      ca_permitted_hosts: ca.hosts,
     })
     return { hooks: { secureContextFor: (host) => leaves.secureContextFor(host) }, tunnelOnly: false }
   } catch (err) {

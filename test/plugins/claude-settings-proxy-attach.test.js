@@ -184,21 +184,61 @@ test('detach removes both managed keys when there was nothing to restore', async
 
 // A trusted signing key must not outlive the attach that installed it.
 // @ref LLP 0235#detach-removes-the-ca [tests]
-test('detach deletes the machine-local CA', async (t) => {
+// Routine detach must NOT delete the CA: its keychain trust is a
+// once-per-machine grant, and deleting the CA strands it. What detach does
+// release is the launchd environment variable, which re-attach can restore
+// silently.
+// @ref LLP 0238#ca-survives-detach [tests]
+// @ref LLP 0239#launchctl-setenv [tests]
+test('detach keeps the CA and releases the launchd environment', async (t) => {
   const r = await rig({})
   t.after(() => r.cleanup())
 
   await proxyAttach(r)
   await fsp.stat(caPaths(r.stateRoot).keyPath)
 
+  /** @type {{ cmd: string, args: string[] }[]} */
+  const calls = []
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
     homeDir: r.root,
     env: r.env,
+    platform: 'darwin',
+    runCommand: async (cmd, args) => {
+      calls.push({ cmd, args })
+      return { exitCode: 0, stdout: '', stderr: '' }
+    },
   })
 
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).certPath), /ENOENT/)
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
+  await fsp.stat(caPaths(r.stateRoot).certPath)
+  assert.deepEqual(calls, [{ cmd: 'launchctl', args: ['unsetenv', 'NODE_USE_SYSTEM_CA'] }])
+})
+
+// The launchd release is Darwin-only machinery; any other platform's detach
+// must not shell out at all.
+// @ref LLP 0237#darwin-only [tests]
+test('a non-darwin detach never touches launchctl', async (t) => {
+  const r = await rig({})
+  t.after(() => r.cleanup())
+
+  await proxyAttach(r)
+
+  /** @type {{ cmd: string, args: string[] }[]} */
+  const calls = []
+  await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: r.env,
+    platform: 'linux',
+    runCommand: async (cmd, args) => {
+      calls.push({ cmd, args })
+      return { exitCode: 0, stdout: '', stderr: '' }
+    },
+  })
+
+  assert.deepEqual(calls, [])
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
 })
 
 test('a base-URL detach leaves the CA alone', async (t) => {
@@ -387,26 +427,30 @@ test('a hand-edited HTTPS_PROXY between attaches is backed up, not swallowed', a
 // The undo is routinely pointed at a sandbox home. Resolving the settings file
 // from homeDir but the CA from the ambient home deletes another install's key.
 // @ref LLP 0235#detach-removes-the-ca [tests]
-test('detach deletes the CA under homeDir, not the ambient one', async (t) => {
+// The launchd plist detach removes is resolved from `homeDir`, never the
+// ambient home: this undo is routinely pointed at a sandbox, and unlinking
+// another install's LaunchAgent would silently break its Remote Control.
+test('detach removes the launchd plist under homeDir, not the ambient one', async (t) => {
   const r = await rig({})
   t.after(() => r.cleanup())
   await proxyAttach(r)
 
-  // A decoy elsewhere, which a homeDir-scoped detach must not touch.
-  const decoyHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-decoy-'))
-  t.after(() => fsp.rm(decoyHome, { recursive: true, force: true }))
-  const decoyRoot = path.join(decoyHome, '.hyp', 'hypaware')
-  await ensureLocalCa({ stateRoot: decoyRoot, hosts: ['api.anthropic.com'] })
+  const plistRel = path.join('Library', 'LaunchAgents', 'com.hyperparam.hypaware.node-system-ca.plist')
+  const sandboxPlist = path.join(r.root, plistRel)
+  await fsp.mkdir(path.dirname(sandboxPlist), { recursive: true })
+  await fsp.writeFile(sandboxPlist, '<plist/>\n')
 
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
     homeDir: r.root,
-    // No HYP_HOME: the state root must then come from homeDir, not os.homedir().
     env: {},
+    platform: 'darwin',
+    runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
   })
 
-  await assert.rejects(fsp.stat(caPaths(r.stateRoot).keyPath), /ENOENT/)
-  await fsp.stat(caPaths(decoyRoot).keyPath)
+  await assert.rejects(fsp.stat(sandboxPlist), /ENOENT/)
+  // And the CA under that home survives regardless.
+  await fsp.stat(caPaths(r.stateRoot).keyPath)
 })
 
 // A marker whose undo record was damaged still has to reverse the proxy keys.

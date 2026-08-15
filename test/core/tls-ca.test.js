@@ -69,8 +69,9 @@ test('a CA near expiry is rolled', async (t) => {
   t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
 
   const first = await ensureLocalCa({ stateRoot, hosts: [HOST] })
-  // 350 days on: inside the 30-day renewal window of a 365-day CA.
-  const later = new Date(Date.now() + 350 * 86_400_000)
+  // 3610 days on: inside the 45-day renewal window of a ten-year CA
+  // (LLP 0238#ten-year-validity).
+  const later = new Date(Date.now() + 3610 * 86_400_000)
   const rolled = await ensureLocalCa({ stateRoot, hosts: [HOST], now: later })
 
   assert.equal(rolled.created, true)

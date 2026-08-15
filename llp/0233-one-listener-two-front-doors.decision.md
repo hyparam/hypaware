@@ -24,7 +24,9 @@ not in what happens to it afterwards.
 
 ## Decision
 
-<a id="one-listener-two-front-doors"></a>**Both front doors share one
+### One listener two front doors
+
+**Both front doors share one
 listener.** `CONNECT` is handled by a handler installed on the existing HTTP
 server; every other request path is unchanged. A terminated tunnel is handed
 back to the same server with `server.emit('connection', tlsSocket)`, after which
@@ -46,7 +48,9 @@ Two mechanical constraints make it work, and both are load-bearing:
   early bytes pushed back onto it, **before** it is wrapped in TLS. Replaying
   those bytes past the decryption layer corrupts the stream.
 
-<a id="proxy-mode-is-explicit"></a>**Proxy mode is off unless configured on.**
+### Proxy mode is explicit
+
+**Proxy mode is off unless configured on.**
 `proxy_mode = true` in the `ai-gateway` config section is the only thing that
 turns it on. Without it the listener behaves exactly as it always has and a
 `CONNECT` is refused.
@@ -72,7 +76,9 @@ same "config is explicit" invariant the kernel already holds (LLP 0010).
   one that refuses to boot, and LLP 0232's attach preflight is what stops a
   client being pointed at the degraded mode.
 
-<a id="degrade-to-blind-tunnels"></a>**A listener that might have a proxy-mode
+### Degrade to blind tunnels
+
+**A listener that might have a proxy-mode
 client pointed at it always serves CONNECT, even when it cannot intercept.** An
 attached client sends *all* its egress here, so a listener that refuses CONNECT
 kills its authentication and updates, not just its capture - and refusing is

@@ -3,10 +3,11 @@
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { Attr, getLogger } from '../observability/index.js'
-import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
@@ -15,6 +16,7 @@ import { isOwnedProviderEntry } from './provider_entry_ownership.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
+ * @import { TrustCommandRunner } from '../../../src/core/tls/types.js'
  */
 
 /**
@@ -112,6 +114,8 @@ export class ClientDetachError extends Error {
  *   homeDir?: string,
  *   env?: NodeJS.ProcessEnv,
  *   fs?: typeof fsp,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
@@ -120,6 +124,8 @@ export async function detachClientFromDisk({
   homeDir = os.homedir(),
   env,
   fs = fsp,
+  platform = process.platform,
+  runCommand,
 }) {
   const probe = descriptor.attachProbe
   if (!probe) return { changed: false }
@@ -127,7 +133,15 @@ export async function detachClientFromDisk({
   const settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
 
   if (probe.format === 'json' && probe.marker_key) {
-    return await detachJsonMarker({ settingsPath, markerKey: probe.marker_key, fs, env, homeDir })
+    return await detachJsonMarker({
+      settingsPath,
+      markerKey: probe.marker_key,
+      fs,
+      env,
+      homeDir,
+      platform,
+      runCommand,
+    })
   }
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
@@ -156,10 +170,18 @@ export async function detachClientFromDisk({
  * strip the recorded managed hook entries (leaving no orphaned `hyp …` hooks),
  * and delete the marker.
  *
- * @param {{ settingsPath: string, markerKey: string, fs: typeof fsp, env?: NodeJS.ProcessEnv, homeDir?: string }} args
+ * @param {{
+ *   settingsPath: string,
+ *   markerKey: string,
+ *   fs: typeof fsp,
+ *   env?: NodeJS.ProcessEnv,
+ *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
+ * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
+async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, platform, runCommand }) {
   const read = await readJson(settingsPath, fs)
   if (!read.existed) return { changed: false, settingsPath }
 
@@ -184,6 +206,8 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
       fs,
       env,
       homeDir,
+      platform,
+      runCommand,
     })
   }
 
@@ -291,14 +315,15 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir }) {
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
-  // A proxy-mode attach installed a machine-local signing key. Remove it here,
-  // in the same disk-driven undo that removed the trust pointer, so a detached
-  // machine is never left with a CA nothing uses and nothing will clean up.
-  // Done after the settings write: if this fails, the client is already
-  // un-attached and safe, and the leftover key is reported rather than
-  // silently retained.
-  // @ref LLP 0235#detach-removes-the-ca [implements]
-  await removeProxyModeCa({ marker, env, homeDir, warnings })
+  // A proxy-mode attach set `NODE_USE_SYSTEM_CA=1` in the launchd user
+  // environment; release it here, in the same disk-driven undo, because the
+  // variable follows the attach - it is re-appliable silently, unlike the CA
+  // and its keychain trust, which stay so the user's one password-dialog
+  // grant survives the cycle. Done after the settings write: if this fails,
+  // the client is already un-attached and safe.
+  // @ref LLP 0238#ca-survives-detach [implements]: the CA is deliberately NOT deleted here
+  // @ref LLP 0239#launchctl-setenv [implements]: detach reverses the launchd env
+  await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
 
   const warning = joinWarnings(warnings)
 
@@ -546,10 +571,12 @@ const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_env', 'prev
  *   fs: typeof fsp,
  *   env?: NodeJS.ProcessEnv,
  *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs, env, homeDir }) {
+async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs, env, homeDir, platform, runCommand }) {
   const markerPort = typeof marker.port === 'number' ? marker.port : undefined
 
   // Read every backup the marker carries BEFORE it is deleted. A genuine
@@ -637,9 +664,9 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
 
   // The record is damaged but `mode` survived it (that is one of the fields
-  // that routes a current-shape marker here at all), so the CA is still
-  // identifiable and must go with the trust pointer above.
-  await removeProxyModeCa({ marker, env, homeDir, warnings })
+  // that routes a current-shape marker here at all), so the launchd release
+  // still runs; the CA stays, exactly as on the record-driven branch.
+  await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
 
   const warning = joinWarnings(warnings)
 
@@ -653,40 +680,55 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
 }
 
 /**
- * Delete the machine-local CA a proxy-mode attach installed.
+ * Release the launchd user environment a proxy-mode attach set. The CA and
+ * its keychain trust deliberately stay: they carry the user's
+ * once-per-machine password-dialog grant, and only `hyp daemon uninstall` or
+ * `hyp detach --purge` may end that (LLP 0238#ca-survives-detach). The
+ * variable, by contrast, is re-appliable silently, so it follows the attach.
  *
  * Shared by both JSON branches on purpose. A marker whose `managed` record is
  * damaged still routes through {@link detachLegacyJsonMarker}, and that branch
- * already reverses `HTTPS_PROXY` by convention; leaving the signing key behind
- * there would keep the one piece of residue LLP 0235 calls the worst this
- * feature can leave, on exactly the path where the user has least evidence
- * that anything was missed.
+ * already reverses `HTTPS_PROXY` by convention; leaving the variable set there
+ * would keep claiming a trust configuration the attach no longer backs, on
+ * exactly the path where the user has least evidence anything was missed.
  *
- * Always called after the settings write: if removal fails the client is
- * already un-attached and safe, and the leftover key is reported rather than
+ * Always called after the settings write: if the release fails the client is
+ * already un-attached and safe, and the leftover is reported rather than
  * silently retained.
  *
  * `homeDir`, not the ambient home: this undo is routinely pointed at a sandbox
- * (every test) or another user's tree, and resolving the CA from `os.homedir()`
- * while resolving the settings file from `homeDir` deletes key material
- * belonging to a different install.
+ * (every test) or another user's tree, and unlinking the LaunchAgent from
+ * `os.homedir()` while resolving the settings file from `homeDir` breaks a
+ * different install's Remote Control.
  *
- * @ref LLP 0235#detach-removes-the-ca [implements]: every branch that reverses a proxy marker removes its CA
+ * @ref LLP 0239#launchctl-setenv [implements]: every branch that reverses a proxy marker releases the launchd env
  * @param {{
  *   marker: Record<string, unknown>,
- *   env: NodeJS.ProcessEnv | undefined,
  *   homeDir: string | undefined,
  *   warnings: string[],
+ *   platform: NodeJS.Platform | undefined,
+ *   runCommand: TrustCommandRunner | undefined,
  * }} args
  */
-async function removeProxyModeCa({ marker, env, homeDir, warnings }) {
+async function releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand }) {
   if (marker.mode !== 'proxy') return
+  if ((platform ?? process.platform) !== 'darwin') return
   try {
-    await deleteLocalCa({ stateRoot: defaultStateRoot(env, homeDir) })
+    const removal = await removeLaunchdEnv({
+      homeDir,
+      ...(runCommand ? { run: runCommand } : {}),
+    })
+    if (!removal.unset) {
+      warnings.push(
+        'NODE_USE_SYSTEM_CA could not be unset from the launchd environment' +
+        `${removal.detail ? ` (${removal.detail})` : ''}; ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
+      )
+    }
   } catch (err) {
     warnings.push(
-      `the local CA could not be removed (${err instanceof Error ? err.message : String(err)}); ` +
-      'delete it by hand'
+      `the launchd environment could not be released (${err instanceof Error ? err.message : String(err)}); ` +
+      'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
     )
   }
 }
