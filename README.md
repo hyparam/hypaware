@@ -276,6 +276,58 @@ client's own config file (for example `~/.claude/settings.json` for
 Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
 Codex); unrelated keys in every file are preserved.
 
+### Proxy mode (keeps Claude Code's Remote Control working)
+
+By default `hyp attach claude` points `ANTHROPIC_BASE_URL` at the local
+gateway. Claude Code disables **Remote Control** whenever that variable
+points anywhere other than `api.anthropic.com`, so an attached machine
+loses it.
+
+Proxy mode avoids that by leaving the base URL alone and routing Claude
+Code through the gateway as an HTTPS proxy instead. Turn it on in the
+`ai-gateway` section of `~/.hyp/hypaware-config.json` and restart the
+daemon:
+
+```json
+{ "name": "@hypaware/ai-gateway", "config": { "proxy_mode": true } }
+```
+
+```sh
+hyp daemon restart
+hyp attach claude
+```
+
+On the next attach, HypAware sets `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`
+instead of the base URL. What this changes:
+
+- **A machine-local certificate authority is generated** under
+  `~/.hyp/hypaware/tls`, readable only by you. It is trusted *only* by
+  Claude Code, through its own settings file; your system trust store is
+  never touched. `hyp status` shows its fingerprint and expiry, and
+  `hyp detach claude` deletes it.
+- **Only `api.anthropic.com` is decrypted**, because that is the only host
+  a registered upstream names. Every other host Claude Code talks to is
+  tunnelled through without being decrypted.
+- **What gets recorded does not change.** Only `/v1/messages` is recorded,
+  exactly as before; the other paths Claude Code calls on that host are
+  passed through without being stored.
+
+Two things to know before turning it on:
+
+- If the daemon is not running, Claude Code's HTTPS all fails, not just its
+  model calls. Attach refuses to write the settings unless proxy mode is
+  actually running, and `hyp detach claude` is the escape hatch.
+- If you already use a corporate proxy, set `upstream_proxy` to it so
+  traffic still chains through it. Attach warns and backs up your existing
+  `HTTPS_PROXY` (restored on detach) rather than silently replacing it:
+
+```json
+{ "name": "@hypaware/ai-gateway",
+  "config": { "proxy_mode": true, "upstream_proxy": "http://proxy.corp:8080" } }
+```
+
+Codex is unaffected and keeps using the base-URL mechanism.
+
 ### Desktop apps
 
 **Codex Desktop needs no separate setup.** `hyp attach codex` covers the
