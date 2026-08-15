@@ -222,6 +222,8 @@ export async function activate(ctx) {
             // than failing the attach - capture works without them.
             /** @type {'granted' | 'already' | 'refused' | undefined} */
             let trustState
+            /** @type {boolean | undefined} */
+            let launchdEnvSet
             if (ca && process.platform === 'darwin') {
               const darwin = await ensureDarwinProxyTrust({
                 certPath: ca.certPath,
@@ -229,6 +231,7 @@ export async function activate(ctx) {
                 stdout: attachCtx.stdout,
               })
               trustState = darwin.trustState
+              launchdEnvSet = darwin.launchdEnvSet
               warnings.push(...darwin.warnings)
               span.setAttribute('proxy_trust', darwin.trustState)
               span.setAttribute('launchd_env_set', darwin.launchdEnvSet)
@@ -270,6 +273,7 @@ export async function activate(ctx) {
               mode: ca ? MODE_PROXY : MODE_BASE_URL,
               caCertPath: ca?.certPath,
               trust: trustState,
+              launchdEnvSet,
               warnings,
             })
           } catch (err) {
@@ -556,12 +560,6 @@ async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
       `${env.detail ? ` (${env.detail})` : ''}; ` +
       'launch Claude Code with `NODE_USE_SYSTEM_CA=1` in the shell until this is fixed.'
     )
-  } else if (trustState !== 'refused') {
-    // @ref LLP 0239#terminals-predating-attach [implements]: already-open shells are told, not fixed
-    stdout.write(
-      '  NODE_USE_SYSTEM_CA=1 set for new terminal windows and GUI launches; ' +
-      'already-open terminals need a new window.\n'
-    )
   }
 
   return { trustState, launchdEnvSet: env.set, warnings }
@@ -584,6 +582,7 @@ async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
  *   mode?: 'proxy' | 'base_url',
  *   caCertPath?: string,
  *   trust?: 'granted' | 'already' | 'refused',
+ *   launchdEnvSet?: boolean,
  *   warnings?: string[],
  * }} fields
  */
@@ -602,6 +601,7 @@ function writeAttachOutput(attachCtx, fields) {
     if (fields.mode !== undefined) payload.mode = fields.mode
     if (fields.caCertPath !== undefined) payload.ca_cert_path = fields.caCertPath
     if (fields.trust !== undefined) payload.keychain_trust = fields.trust
+    if (fields.launchdEnvSet !== undefined) payload.launchd_env_set = fields.launchdEnvSet
     // Named, because `prev_value` alone does not say which key it belonged to
     // and the two modes manage different ones.
     if (fields.prevValue !== undefined) {
@@ -635,6 +635,19 @@ function writeAttachOutput(attachCtx, fields) {
   }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)
+  }
+  // Last, so it is the line the user acts on. `launchctl setenv` reaches only
+  // processes launchd starts afterwards; windows of an already-running
+  // terminal app inherit the app's stale environment, so "open a new window"
+  // is not enough (proven in the run G acceptance test).
+  // @ref LLP 0239#terminals-predating-attach [implements]: already-open terminal apps are told to relaunch, not fixed
+  if (fields.mode === MODE_PROXY && fields.launchdEnvSet === true && fields.trust !== 'refused') {
+    attachCtx.stdout.write(
+      '  One more step for Remote Control: quit your terminal app completely ' +
+      '(Cmd-Q) and reopen it.\n' +
+      '  A new window or tab is not enough; apps launched from now on pick up ' +
+      'the change automatically.\n'
+    )
   }
 }
 

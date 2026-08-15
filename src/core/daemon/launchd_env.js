@@ -81,9 +81,12 @@ export function buildEnvAgentPlist() {
  * Set the variable in the launchd user environment now and persist the
  * LaunchAgent that re-applies it at login.
  *
- * `launchctl setenv` reaches processes launched after this call - new
- * terminal windows and GUI apps - never shells that already exist. The
- * caller owns telling the user that (LLP 0239#terminals-predating-attach).
+ * `launchctl setenv` reaches only processes launchd starts after this call
+ * (GUI apps, and terminal apps relaunched from scratch). New windows of an
+ * already-running terminal app inherit the app's environment from before the
+ * call, so they do NOT see the variable; the app must be fully quit and
+ * reopened. The caller owns telling the user that
+ * (LLP 0239#terminals-predating-attach).
  *
  * @param {object} args
  * @param {string} [args.homeDir]

@@ -60,6 +60,19 @@ covered; existing windows need a new window (or an inline
 `NODE_USE_SYSTEM_CA=1` prefix). `hyp status` reports whether the variable is
 present in the launchd environment (`launchctl getenv`).
 
+**Correction (2026-08-14, run G acceptance test):** the "new window"
+half of the claim above is wrong. A new window of an already-running
+terminal app is spawned by that app's existing process and inherits the
+app's environment from before the `setenv`, so it never sees the variable;
+terminal apps are single-process (ghostty, iTerm2, Terminal.app alike).
+Only processes launchd starts after the `setenv` are covered: GUI apps, and
+a terminal app fully quit and reopened. Attach's message now says exactly
+that, printed as the final line of the attach output. The trap is
+invisible to `launchctl getenv`, which reads launchd's table rather than
+the shell's environment; the inline `NODE_USE_SYSTEM_CA=1` prefix remains
+the per-shell workaround. The decision itself (launchctl setenv + login
+LaunchAgent) is unchanged.
+
 ### Session-wide scope accepted
 
 **Session-wide scope is accepted
