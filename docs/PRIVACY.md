@@ -66,9 +66,11 @@ effect if `NODE_USE_SYSTEM_CA=1` is in the environment before Claude Code
 starts, so attach also runs `launchctl setenv NODE_USE_SYSTEM_CA 1` and
 installs a LaunchAgent at
 `~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist` that
-re-runs that one command at each login. It starts no process of its own and
-sends nothing anywhere, but it is a login item on your machine and a
-session-wide variable that other Node programs will also read. `hyp detach
+re-runs that one command at each login. What it runs is `/bin/launchctl`
+itself, once, which sets the variable and exits: there is no resident
+process, no HypAware code in it, and nothing is sent anywhere. It is still a
+login item on your machine, and a session-wide variable that other Node
+programs will also read. `hyp detach
 claude` unsets the variable and removes the agent, as do
 `hyp detach claude --purge` and `hyp daemon uninstall`.
 

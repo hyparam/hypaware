@@ -1199,10 +1199,9 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * The two probes shell out, so each is caught independently: a probe that
  * could not run reports `null` (unknown), never `false`, because "the
  * dialog was cancelled" and "`security` did not run" are different answers
- * and only the first is actionable. Nothing here carries text from another
- * process onto the terminal - the fingerprint is computed locally from the
- * DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
- * not surfaced - so no LLP 0225 sanitizing applies.
+ * and only the first is actionable. The fingerprint is computed locally from
+ * the DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
+ * not surfaced, so neither needs bounding.
  *
  * The permitted host set travels with the fingerprint because the grant is
  * wider than any one install uses: the CA is constrained to the whole static
@@ -1212,6 +1211,17 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * once, at the moment it is asked for. The strings come from the DER's own
  * permitted subtrees, so they are the grant itself rather than a
  * config-derived guess that could drift from it.
+ *
+ * That last property is also why the hosts are the one field here that does
+ * need sanitizing (LLP 0225): a `dNSName` is an IA5String read straight out
+ * of whatever certificate sits at the CA path and decoded as latin1, with no
+ * charset or length check anywhere on the way (`readNameConstraints`), so a
+ * foreign or damaged certificate there can carry an `ESC` run or a newline
+ * into a line `hyp status` prints. Our own mint never produces one, but the
+ * "not host-limited" arm of the renderer exists precisely because a foreign
+ * certificate at that path is reachable, and a status label is exactly the
+ * case `sanitizeLabel` is the policy for. Stripped at collection, like every
+ * other label in this file, so `--json` carries what was printed.
  *
  * @param {object} args
  * @param {NodeJS.Platform} args.platform
@@ -1250,7 +1260,13 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
     launchdEnvSet = null
   }
 
-  return { caFingerprint: ca.fingerprint, hosts: ca.hosts, trusted, launchdEnvSet }
+  // One entry in, one entry out: a host that sanitizes away is still a
+  // subtree the grant covers, so it is named as unprintable rather than
+  // dropped, which would understate the very thing this field exists to
+  // state.
+  const hosts = ca.hosts.map((host) => sanitizeLabel(host) ?? '(unprintable dNSName)')
+
+  return { caFingerprint: ca.fingerprint, hosts, trusted, launchdEnvSet }
 }
 
 /**

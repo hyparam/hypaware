@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,6 +11,7 @@ import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { ensureLocalCa } from '../../src/core/tls/ca.js'
+import { derToPem } from '../../src/core/tls/x509.js'
 
 /** @import { CollectStatusOptions, HypAwareStatusReport } from '../../src/core/daemon/types.js' */
 
@@ -134,6 +136,55 @@ test('every permitted host the trust grant covers is named on both surfaces', as
     // The hosts are read back off the certificate, not from config, so the
     // line can never drift from what the keychain actually vouches for.
     assert.deepEqual(json.proxy_trust?.ca_fingerprint, ca.fingerprint)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The permitted hosts are the one field of this report that is bytes off disk
+// rather than a string we wrote: a `dNSName` is an IA5String, read out of
+// whatever certificate sits at the CA path and decoded as latin1 with no
+// charset check anywhere on the way. Our own mint refuses a non-printable host
+// (`assertAsciiHost`), so the only way to one is a foreign or damaged
+// certificate at that path - which is exactly the case the "not host-limited"
+// arm of the renderer exists for. It must not be able to repaint the terminal
+// of the person reading `hyp status`.
+// @ref LLP 0225#decision [tests]: a status label carrying captured bytes is sanitized before it is rendered
+test('a permitted host carrying terminal control bytes cannot repaint hyp status', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    // Minted with a filler of the payload's exact width, then byte-patched in
+    // the DER: same length keeps every ASN.1 length valid, and nothing on the
+    // read path verifies the signature the patch invalidates. This is the only
+    // way to produce the certificate, since the mint refuses the host outright.
+    const hostile = 'evil\u001b[2K\nforged.example'
+    const filler = 'z'.repeat(hostile.length)
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com', filler] })
+
+    const certPath = path.join(stateRoot, 'tls', 'ca-cert.pem')
+    const der = Buffer.from(new crypto.X509Certificate(await fs.readFile(certPath, 'utf8')).raw)
+    const at = der.indexOf(Buffer.from(filler, 'latin1'))
+    assert.ok(at >= 0, 'the filler host is in the DER to patch')
+    Buffer.from(hostile, 'latin1').copy(der, at)
+    await fs.writeFile(certPath, derToPem(der))
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    // Stripped, not dropped: the subtree is still part of the grant, so it is
+    // still named, just without the bytes that drive a terminal.
+    assert.deepEqual(report.proxyTrust?.hosts, ['api.anthropic.com', 'evil[2Kforged.example'])
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.ok(!text.includes('\u001b'), 'no escape sequence reaches the text surface')
+    assert.match(text, /permitted: {6}api\.anthropic\.com, evil\[2Kforged\.example\n/)
+
+    const json = renderStatusJson({
+      report,
+      clientNames: [],
+      datasets: [],
+      cacheRoot: path.join(stateRoot, 'cache'),
+    })
+    // Sanitized at collection, so `--json` carries exactly what was printed.
+    assert.deepEqual(json.proxy_trust?.permitted_hosts, ['api.anthropic.com', 'evil[2Kforged.example'])
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

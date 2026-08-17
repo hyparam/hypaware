@@ -586,7 +586,9 @@ function describeCaTrust(trusted) {
  * all can vouch for anything, which is the one reading the user most needs,
  * so it is named rather than rendered as a blank line. HypAware's own mint
  * never produces one (LLP 0238#full-provider-constraints), so this arm only
- * fires for a foreign or damaged certificate at the CA path.
+ * fires for a foreign or damaged certificate at the CA path. That same
+ * certificate is why `collectProxyTrust` sanitizes the entries before they
+ * reach here: they are bytes off disk, not strings we wrote.
  *
  * @param {string[]} hosts
  * @returns {string}

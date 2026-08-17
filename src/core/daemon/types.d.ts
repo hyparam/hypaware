@@ -255,7 +255,9 @@ export interface ProxyTrustReport {
    * The CA's permitted `dNSName` subtrees: every host this grant lets the CA
    * vouch for, which is the full provider set and not the subset this install
    * captures (LLP 0238#full-provider-constraints). Empty only for a
-   * certificate carrying no dNSName constraints at all.
+   * certificate carrying no dNSName constraints at all. Each entry is
+   * `sanitizeLabel`d, because the bytes come from the certificate on disk
+   * rather than from us (LLP 0225).
    */
   hosts: string[]
   /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
