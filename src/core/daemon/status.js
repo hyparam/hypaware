@@ -30,6 +30,9 @@ import {
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { readLocalCaInfo } from '../tls/ca.js'
+import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
+import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -48,10 +51,11 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
+ * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
 
 /**
@@ -1104,6 +1108,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // @ref LLP 0100#requirements [implements]: R9 - hyp status shows the pending first-sync deadline while the hold is live
   const firstSyncHoldDeadline = await readFirstSyncDeadline({ stateDir: stateRoot })
 
+  // ----- proxy-mode trust (LLP 0237 / LLP 0239) -----
+  const proxyTrust = await collectProxyTrust({
+    platform,
+    stateRoot,
+    isCaTrustedFn: opts.isCaTrusted ?? probeCaTrusted,
+    isLaunchdEnvSetFn: opts.isLaunchdEnvSet ?? probeLaunchdEnvSet,
+  })
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -1152,7 +1164,68 @@ export async function collectHypAwareStatus(opts = {}) {
     usagePolicy,
     firstSyncHoldDeadline,
     recentEntrypoints,
+    proxyTrust,
   }
+}
+
+/**
+ * Proxy mode's two invisible preconditions, read once so `hyp status` can
+ * state them: does the login keychain still trust the CA on disk
+ * (LLP 0237), and is `NODE_USE_SYSTEM_CA` live in the launchd user
+ * environment (LLP 0239)? Neither is inferable from anything else the
+ * report carries, and a CA re-mint strands the first silently, so an attach
+ * that worked last month can stop working with every other line healthy.
+ *
+ * Null rather than a row of unknowns when the question does not apply: off
+ * darwin neither mechanism exists (LLP 0237#darwin-only, LLP 0239's
+ * "non-macOS platforms skip this entirely"), and with no CA on disk proxy
+ * mode was never on, so there is nothing to be trusted or untrusted.
+ *
+ * The two probes shell out, so each is caught independently: a probe that
+ * could not run reports `null` (unknown), never `false`, because "the
+ * dialog was cancelled" and "`security` did not run" are different answers
+ * and only the first is actionable. Nothing here carries text from another
+ * process onto the terminal - the fingerprint is computed locally from the
+ * DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
+ * not surfaced - so no LLP 0225 sanitizing applies.
+ *
+ * @param {object} args
+ * @param {NodeJS.Platform} args.platform
+ * @param {string} args.stateRoot
+ * @param {(args: { certPath: string }) => Promise<boolean>} args.isCaTrustedFn
+ * @param {() => Promise<boolean>} args.isLaunchdEnvSetFn
+ * @returns {Promise<ProxyTrustReport | null>}
+ * @ref LLP 0237#consequences [implements]: hyp status reports the trust state alongside the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+ * @ref LLP 0239#terminals-predating-attach [implements]: hyp status reports whether the variable is present in the launchd environment
+ */
+async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchdEnvSetFn }) {
+  if (platform !== 'darwin') return null
+  /** @type {LocalCaInfo | undefined} */
+  let ca
+  try {
+    ca = await readLocalCaInfo({ stateRoot })
+  } catch {
+    return null
+  }
+  if (!ca) return null
+
+  /** @type {boolean | null} */
+  let trusted = null
+  try {
+    trusted = await isCaTrustedFn({ certPath: ca.certPath })
+  } catch {
+    trusted = null
+  }
+
+  /** @type {boolean | null} */
+  let launchdEnvSet = null
+  try {
+    launchdEnvSet = await isLaunchdEnvSetFn()
+  } catch {
+    launchdEnvSet = null
+  }
+
+  return { caFingerprint: ca.fingerprint, trusted, launchdEnvSet }
 }
 
 /**

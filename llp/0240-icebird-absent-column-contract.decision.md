@@ -18,6 +18,15 @@ this extends from `scanColumn` to the row path), LLP 0055
 > at the SQL surface rather than derived from the code, and closes a
 > correctness hole the measurement exposed.
 
+> **Amended by [LLP 0241 §alignment](./0241-scan-rows-carry-advertised-columns.decision.md#alignment),
+> which landed first.** 0241 pads every scanned row out to the column list the
+> scan advertised, which moves exactly one cell of the table below: under
+> `SELECT *` the absent column's key now **exists** and holds `undefined`,
+> where it was previously not on the row at all. The rendering is unchanged
+> and no other row of the table moves; re-measured on the merged tree, and
+> pinned by the same test file. 0241 also fixes the star-expansion defect the
+> Consequences below deferred to issue #788.
+
 ## Context
 
 `ai_gateway_messages` declares more columns than any given partition
@@ -50,7 +59,7 @@ Over an icebird-backed partition that physically lacks a declared column,
 | `SELECT git_remote, 1 AS n FROM t` | `null` | `{"git_remote":null,"n":1}` |
 | `SELECT id, git_remote FROM t` | `undefined` | `{"id":1}` (key dropped) |
 | `SELECT git_remote FROM t WHERE date >= '...'` | `undefined` | `{}` |
-| `SELECT * FROM t` | key absent from the row | `{"id":1,"date":"..."}` |
+| `SELECT * FROM t` | `undefined`, under a key that exists (LLP 0241) | `{"id":1,"date":"..."}` |
 
 The discriminator is **the size of the scan's hint column set, not the shape
 of the SELECT list.** Squirreling routes a scan whose hints name exactly one
@@ -132,4 +141,14 @@ while the suite stayed green.
   mis-assign a value into a neighbouring declared column. That is a star
   expansion defect above this layer, is not part of this contract, and is left
   unaddressed here; the tests deliberately do not cover it. It is tracked as
-  [hyparam/hypaware#788](https://github.com/hyparam/hypaware/issues/788).
+  [hyparam/hypaware#788](https://github.com/hyparam/hypaware/issues/788), and
+  is **now fixed** by [LLP 0241](./0241-scan-rows-carry-advertised-columns.decision.md),
+  which landed on master first.
+- The #where-gate and 0241's padding are not independent at the star. A star
+  carries no `columns` hint, so its rows are only as wide as the partition
+  physically is; the gate then hands the predicate back to the engine, which
+  reads the absent column off `row.cells`. Measured with 0241's two alignment
+  call sites reverted, `SELECT * FROM t WHERE git_remote IS NULL` raises
+  `ColumnNotFoundError` from `filterRows` instead of answering. The padding is
+  what makes the handed-back filter evaluable, so the two must ship together;
+  the composition has its own pin in the test file.

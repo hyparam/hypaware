@@ -3,8 +3,84 @@
 import { normalizeScanColumn } from './scan-column.js'
 
 /**
- * @import { AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
+ * @import { AsyncCell, AsyncRow, AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
  */
+
+/**
+ * The cell a row gets for a column its partition does not physically carry.
+ * `undefined` is outside `SqlPrimitive`, hence the cast: it is nonetheless
+ * what the row path already reads for such a column (squirreling's `asyncRow`
+ * builds a cell per REQUESTED key and resolves it off an object that has no
+ * such key), so padding introduces no new value.
+ */
+const absentCell = /** @type {AsyncCell} */ (/** @type {unknown} */ (() => Promise.resolve(undefined)))
+
+/**
+ * Re-key one scanned row onto the exact column list the scan advertises,
+ * filling any column the row lacks with an absent cell.
+ *
+ * The SQL engine derives a query's output column names ONCE, from the scan's
+ * advertised list (`options.columns ?? source.columns`), then walks each row's
+ * own `columns` to fill them positionally. A row narrower than the advertised
+ * list therefore slides every later output name onto the wrong value, so
+ * `SELECT *, git_remote` can answer with `git_remote`'s value under the name
+ * of whichever column happens to sit at the star's short width. Aligning here
+ * costs nothing on the common path (a row that already matches is returned
+ * untouched) and makes the row shape match the schema the engine already told
+ * the caller it was returning.
+ *
+ * @ref LLP 0241#alignment [implements]: rows a scan yields carry the scan's advertised column list, not the partition's physical one
+ * @param {AsyncRow} row
+ * @param {string[]} columns
+ * @returns {AsyncRow}
+ */
+export function alignRowColumns(row, columns) {
+  if (row.columns === columns) return row
+  if (row.columns.length === columns.length) {
+    let same = true
+    for (let i = 0; i < columns.length; i++) {
+      if (row.columns[i] !== columns[i]) {
+        same = false
+        break
+      }
+    }
+    if (same) return row
+  }
+  /** @type {Record<string, AsyncCell>} */
+  const cells = {}
+  for (const name of columns) cells[name] = row.cells[name] ?? absentCell
+  // `resolved` is keyed by name and only ever read by name, so the original
+  // object stays correct: a padded column is simply missing from it, which is
+  // the same `undefined` the padded cell resolves to.
+  return row.resolved ? { columns, cells, resolved: row.resolved } : { columns, cells }
+}
+
+/**
+ * `alignRowColumns` over a whole row stream.
+ *
+ * A scan yields many rows sharing one `columns` array (icebird and
+ * `parquetDataSource` both build it once per batch), so the already-aligned
+ * verdict is memoized by array identity: the ordinary case, where every
+ * partition holds every advertised column, then costs one reference compare
+ * per row instead of a name-by-name walk.
+ *
+ * @param {AsyncIterable<AsyncRow>} rows
+ * @param {string[]} columns
+ * @returns {AsyncGenerator<AsyncRow>}
+ */
+export async function* alignRows(rows, columns) {
+  /** @type {string[] | undefined} */
+  let alignedColumns
+  for await (const row of rows) {
+    if (row.columns === alignedColumns) {
+      yield row
+      continue
+    }
+    const out = alignRowColumns(row, columns)
+    if (out === row) alignedColumns = row.columns
+    yield out
+  }
+}
 
 /**
  * Concatenate several `AsyncDataSource`s into one logical source. Columns
@@ -58,6 +134,11 @@ export function unionSources(sources) {
       // present but references a construct we can't safely push down (a
       // qualified identifier, subquery, or other non-local construct).
       const predicateColumns = base && base.where ? whereColumns(base.where) : undefined
+      // What the engine will name this scan's output columns. A partition
+      // that physically lacks some of them must still yield rows of this
+      // shape, or the star expansion slides values onto neighbouring names.
+      // @ref LLP 0241#alignment [implements]: the union's rows carry the union's column list, whatever each partition physically holds
+      const scanColumns = base?.columns ?? union.columns
       return {
         appliedWhere: false,
         appliedLimitOffset: false,
@@ -68,9 +149,7 @@ export function unionSources(sources) {
               subOptions = { ...base, where: undefined }
             }
             const scan = source.scan(subOptions)
-            for await (const row of scan.rows()) {
-              yield row
-            }
+            yield* alignRows(scan.rows(), scanColumns)
           }
         },
       }

@@ -3,17 +3,20 @@
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
-import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
+import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 /**
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
+ * @import { TrustCommandRunner } from '../../../src/core/tls/types.js'
  */
 
 /**
@@ -111,6 +114,8 @@ export class ClientDetachError extends Error {
  *   homeDir?: string,
  *   env?: NodeJS.ProcessEnv,
  *   fs?: typeof fsp,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
@@ -119,6 +124,8 @@ export async function detachClientFromDisk({
   homeDir = os.homedir(),
   env,
   fs = fsp,
+  platform = process.platform,
+  runCommand,
 }) {
   const probe = descriptor.attachProbe
   if (!probe) return { changed: false }
@@ -126,7 +133,15 @@ export async function detachClientFromDisk({
   const settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
 
   if (probe.format === 'json' && probe.marker_key) {
-    return await detachJsonMarker({ settingsPath, markerKey: probe.marker_key, fs })
+    return await detachJsonMarker({
+      settingsPath,
+      markerKey: probe.marker_key,
+      fs,
+      env,
+      homeDir,
+      platform,
+      runCommand,
+    })
   }
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
@@ -155,10 +170,18 @@ export async function detachClientFromDisk({
  * strip the recorded managed hook entries (leaving no orphaned `hyp …` hooks),
  * and delete the marker.
  *
- * @param {{ settingsPath: string, markerKey: string, fs: typeof fsp }} args
+ * @param {{
+ *   settingsPath: string,
+ *   markerKey: string,
+ *   fs: typeof fsp,
+ *   env?: NodeJS.ProcessEnv,
+ *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
+ * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachJsonMarker({ settingsPath, markerKey, fs }) {
+async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, platform, runCommand }) {
   const read = await readJson(settingsPath, fs)
   if (!read.existed) return { changed: false, settingsPath }
 
@@ -181,6 +204,10 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
       marker,
       mtimeMs: read.mtimeMs,
       fs,
+      env,
+      homeDir,
+      platform,
+      runCommand,
     })
   }
 
@@ -193,6 +220,15 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   // test threw away a backup the marker was holding and fell through to the
   // delete branch below - the one outcome the backup exists to prevent.
   const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
+  // The general form of the same backup, keyed by env name. Proxy-mode attach
+  // takes over `HTTPS_PROXY`, which - unlike the add-only keys - routinely
+  // already holds a corporate proxy the user needs back. `prev_base_url` stays
+  // the special case it always was so markers written before `prev_env` existed
+  // still restore.
+  // @ref LLP 0232#detach-restores-any-managed-key [implements]: any managed env key can carry a backup, not just the base URL
+  const prevEnv = isPlainObject(marker.prev_env)
+    ? /** @type {Record<string, unknown>} */ (marker.prev_env)
+    : undefined
 
   delete value[markerKey]
   stripManagedHooks(value, hookEntries)
@@ -212,17 +248,43 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
     for (const [key, ourVal] of Object.entries(managedEnv)) {
       const current = envObj[key]
       if (current === ourVal) {
-        // The value we wrote is still live. `prev_base_url` is the restore
-        // target for ANTHROPIC_BASE_URL only - it is the one managed key that
-        // backs up a pre-existing value. Every other managed key (e.g.
-        // ENABLE_TOOL_SEARCH) is one attach only ever added when it was absent,
-        // so it is removed, never restored. Applying prev_base_url to every key
-        // would wrongly stamp the base URL onto them.
-        if (key === 'ANTHROPIC_BASE_URL' && prevBaseUrl !== undefined) {
-          envObj[key] = prevBaseUrl
-          restoredValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
+        // The value we wrote is still live, so this key is ours to give back.
+        // A per-key backup in `prev_env` wins; `prev_base_url` remains the
+        // restore target for ANTHROPIC_BASE_URL when no per-key backup exists.
+        // Keys attach only ever *added* when absent (e.g. ENABLE_TOOL_SEARCH)
+        // have neither, and are removed rather than restored - stamping a
+        // backup onto them would invent a value the user never set.
+        //
+        // Presence, not type, again: `prev_env` records a hand-written `null`
+        // as a value to hand back.
+        /** @type {unknown} */
+        let restore
+        if (prevEnv && Object.hasOwn(prevEnv, key)) restore = prevEnv[key]
+        else if (key === 'ANTHROPIC_BASE_URL') restore = prevBaseUrl
+
+        if (restore !== undefined) {
+          envObj[key] = restore
+          // `restoredValue` is a single display field, so it reports the key a
+          // user would ask about: the one that decided where their client
+          // pointed.
+          //
+          // Redacted for the display copy only. The write above put the user's
+          // true value back on disk; this string is printed by `hyp detach` and
+          // `hyp daemon uninstall` and serialised as `restored_value`, and the
+          // key it most often describes is a corporate `HTTPS_PROXY` carrying
+          // `user:pass@`. Handing a credential back to its owner is the point
+          // of the restore; echoing it is not.
+          if (key === 'ANTHROPIC_BASE_URL' || key === 'HTTPS_PROXY') {
+            const shown = typeof restore === 'string' ? restore : String(restore)
+            restoredValue = redactUrlUserinfo(shown)
+          }
         } else {
-          if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
+          if (key === 'ANTHROPIC_BASE_URL' || key === 'HTTPS_PROXY') {
+            // Our own `http://127.0.0.1:<port>` in every real case, so there is
+            // nothing to hide; redacted anyway so no path out of this function
+            // is the one that has to be remembered.
+            removed = redactUrlUserinfo(typeof current === 'string' ? current : String(current))
+          }
           delete envObj[key]
         }
       } else if (Object.hasOwn(envObj, key)) {
@@ -252,6 +314,16 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   const restoredPaths = replayPrevMalformed(value, marker.prev_malformed, warnings)
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+
+  // A proxy-mode attach set `NODE_USE_SYSTEM_CA=1` in the launchd user
+  // environment; release it here, in the same disk-driven undo, because the
+  // variable follows the attach - it is re-appliable silently, unlike the CA
+  // and its keychain trust, which stay so the user's one password-dialog
+  // grant survives the cycle. Done after the settings write: if this fails,
+  // the client is already un-attached and safe.
+  // @ref LLP 0238#ca-survives-detach [implements]: the CA is deliberately NOT deleted here
+  // @ref LLP 0239#launchctl-setenv [implements]: detach reverses the launchd env
+  await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
 
   const warning = joinWarnings(warnings)
 
@@ -465,7 +537,7 @@ const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+(?:session-context|classify-
 // pre-upgrade shape this branch was written for. The reversal below is then
 // knowingly partial - the record that named the managed keys is unreadable - so
 // it says so instead of reporting a clean detach.
-const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_malformed']
+const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_env', 'prev_malformed', 'mode']
 
 /**
  * Reverse a pre-upgrade legacy `json` marker: the old Claude marker shape
@@ -497,10 +569,14 @@ const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_malformed']
  *   marker: Record<string, unknown>,
  *   mtimeMs: number | undefined,
  *   fs: typeof fsp,
+ *   env?: NodeJS.ProcessEnv,
+ *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   runCommand?: TrustCommandRunner,
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs }) {
+async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs, env, homeDir, platform, runCommand }) {
   const markerPort = typeof marker.port === 'number' ? marker.port : undefined
 
   // Read every backup the marker carries BEFORE it is deleted. A genuine
@@ -513,6 +589,9 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // attach only writes these when there was something to record.
   // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, on every branch that deletes it
   const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
+  const prevEnv = isPlainObject(marker.prev_env)
+    ? /** @type {Record<string, unknown>} */ (marker.prev_env)
+    : undefined
   const recordDamaged = POST_LEGACY_MARKER_FIELDS.some((field) => Object.hasOwn(marker, field))
 
   delete value[markerKey]
@@ -562,6 +641,18 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
       // was left in place to report.
       warnings.push('ANTHROPIC_BASE_URL was overridden externally; leaving in place')
     }
+
+    // A damaged *proxy* marker reaches this branch too, and the convention
+    // above only knows about the base URL. Left alone, `HTTPS_PROXY` stays
+    // pointing at a gateway that is no longer attached, which breaks every
+    // HTTPS request the client makes rather than merely its capture, and the
+    // `prev_env` backup would be deleted along with the marker. Reverse the
+    // proxy keys by the same still-ours-then-restore-or-remove rule.
+    // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
+    if (markerPort !== undefined) {
+      reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
+    }
+
     if (Object.keys(envObj).length === 0) delete value.env
   }
 
@@ -572,6 +663,11 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
 
   await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
 
+  // The record is damaged but `mode` survived it (that is one of the fields
+  // that routes a current-shape marker here at all), so the launchd release
+  // still runs; the CA stays, exactly as on the record-driven branch.
+  await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
+
   const warning = joinWarnings(warnings)
 
   /** @type {DetachFromDiskResult} */
@@ -581,6 +677,97 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   if (restoredPaths.length > 0) result.restoredPaths = restoredPaths
   if (warning !== undefined) result.warning = warning
   return result
+}
+
+/**
+ * Release the launchd user environment a proxy-mode attach set. The CA and
+ * its keychain trust deliberately stay: they carry the user's
+ * once-per-machine password-dialog grant, and only `hyp daemon uninstall` or
+ * `hyp detach --purge` may end that (LLP 0238#ca-survives-detach). The
+ * variable, by contrast, is re-appliable silently, so it follows the attach.
+ *
+ * Shared by both JSON branches on purpose. A marker whose `managed` record is
+ * damaged still routes through {@link detachLegacyJsonMarker}, and that branch
+ * already reverses `HTTPS_PROXY` by convention; leaving the variable set there
+ * would keep claiming a trust configuration the attach no longer backs, on
+ * exactly the path where the user has least evidence anything was missed.
+ *
+ * Always called after the settings write: if the release fails the client is
+ * already un-attached and safe, and the leftover is reported rather than
+ * silently retained.
+ *
+ * `homeDir`, not the ambient home: this undo is routinely pointed at a sandbox
+ * (every test) or another user's tree, and unlinking the LaunchAgent from
+ * `os.homedir()` while resolving the settings file from `homeDir` breaks a
+ * different install's Remote Control.
+ *
+ * @ref LLP 0239#launchctl-setenv [implements]: every branch that reverses a proxy marker releases the launchd env
+ * @param {{
+ *   marker: Record<string, unknown>,
+ *   homeDir: string | undefined,
+ *   warnings: string[],
+ *   platform: NodeJS.Platform | undefined,
+ *   runCommand: TrustCommandRunner | undefined,
+ * }} args
+ */
+async function releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand }) {
+  if (marker.mode !== 'proxy') return
+  if ((platform ?? process.platform) !== 'darwin') return
+  try {
+    const removal = await removeLaunchdEnv({
+      homeDir,
+      ...(runCommand ? { run: runCommand } : {}),
+    })
+    if (!removal.unset) {
+      warnings.push(
+        'NODE_USE_SYSTEM_CA could not be unset from the launchd environment' +
+        `${removal.detail ? ` (${removal.detail})` : ''}; ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
+      )
+    }
+  } catch (err) {
+    warnings.push(
+      `the launchd environment could not be released (${err instanceof Error ? err.message : String(err)}); ` +
+      'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
+    )
+  }
+}
+
+/**
+ * Reverse the proxy-mode env keys from a marker whose undo record is damaged.
+ *
+ * Only `HTTPS_PROXY` can be recognised by convention (it is the gateway URL the
+ * marker's `port` names). `NODE_EXTRA_CA_CERTS` cannot: nothing on disk
+ * distinguishes a path we wrote from one the user set, so it is restored only
+ * when the marker still carries a backup for it, and otherwise left in place
+ * and reported. Same never-clobber-a-user-edit rule as every other branch.
+ *
+ * @param {Record<string, unknown>} envObj mutated in place
+ * @param {number} markerPort
+ * @param {Record<string, unknown> | undefined} prevEnv
+ * @param {string[]} warnings
+ */
+function reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings) {
+  const ourProxy = `http://127.0.0.1:${markerPort}`
+  if (envObj.HTTPS_PROXY === ourProxy) {
+    if (prevEnv && Object.hasOwn(prevEnv, 'HTTPS_PROXY')) {
+      envObj.HTTPS_PROXY = prevEnv.HTTPS_PROXY
+    } else {
+      delete envObj.HTTPS_PROXY
+    }
+  } else if (Object.hasOwn(envObj, 'HTTPS_PROXY')) {
+    warnings.push('HTTPS_PROXY was overridden externally; leaving in place')
+  }
+
+  if (!Object.hasOwn(envObj, 'NODE_EXTRA_CA_CERTS')) return
+  if (prevEnv && Object.hasOwn(prevEnv, 'NODE_EXTRA_CA_CERTS')) {
+    envObj.NODE_EXTRA_CA_CERTS = prevEnv.NODE_EXTRA_CA_CERTS
+    return
+  }
+  warnings.push(
+    'NODE_EXTRA_CA_CERTS was left in place; the undo record that would say ' +
+    'whether hypaware set it is unreadable'
+  )
 }
 
 /**

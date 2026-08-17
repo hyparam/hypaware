@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
+import { alignRows, canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
@@ -190,16 +190,31 @@ function withSchemaColumns(source) {
     // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped on the row path too, not only on scanColumn
     // @ref LLP 0240#where-gate [implements]: an ungated row-path where made a single icebird partition answer predicates on an absent column wrongly
     scan(options) {
+      // The engine names this scan's output columns from the list advertised
+      // here, but fills them from each row's own `columns`. A partition that
+      // predates a declared column yields a SHORTER row, which slides every
+      // output name past the gap onto its neighbour's value: over a drifted
+      // union `SELECT *, git_remote` answered with git_remote's value under
+      // the name of the column that happened to follow the star's short
+      // width. Pad each row back out to the advertised list. Stripping the
+      // predicate below does not narrow it: the gate only drops `where`.
+      // @ref LLP 0241#alignment [implements]: a declared-but-absent column becomes a padded cell, not a missing slot the star can slide through
+      const scanColumns = options?.columns ?? columns
       const pushable = !options?.where || canPushWhere(source, whereColumns(options.where))
-      if (pushable) return source.scan(options)
       // Stripping the predicate also strips limit/offset: they are only
       // meaningful after the filter, and a source that ignored the predicate
       // but honored a slice would silently drop matching rows.
-      const inner = source.scan({ ...options, where: undefined, limit: undefined, offset: undefined })
+      const inner = pushable
+        ? source.scan(options)
+        : source.scan({ ...options, where: undefined, limit: undefined, offset: undefined })
       return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        rows: () => inner.rows(),
+        appliedWhere: pushable && inner.appliedWhere,
+        appliedLimitOffset: pushable && inner.appliedLimitOffset,
+        // The two duties compose in one direction: the gate hands an
+        // unfiltered stream back to the engine, and the padding is what lets
+        // the engine's own re-filter read the absent column as `undefined`
+        // instead of missing it on a short row (LLP 0241#alignment).
+        rows: () => alignRows(inner.rows(), scanColumns),
       }
     },
   }

@@ -83,6 +83,13 @@ partition can't satisfy the predicate the union drops `where` for it and lets
 the engine filter. `columns` is always forwarded: projecting an absent column
 reads as null, never throws.
 
+> **Extended-by: [LLP 0241 §alignment](./0241-scan-rows-carry-advertised-columns.decision.md#alignment).**
+> The hints above say what a union may forward; LLP 0241 adds what shape the
+> rows it yields must have. A partition narrower than the union's advertised
+> column list makes a star expansion slide a later output name onto its
+> neighbour's value, so the union pads each row back out to the list the scan
+> advertised.
+
 ## Collect: the ad-hoc on-ramp
 
 `hypaware collect` registers an external JSONL file (or glob) the user already

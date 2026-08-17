@@ -186,11 +186,23 @@ test('absent column: a WHERE on a present column pushes the projection onto the 
   })
 })
 
-test('absent column: SELECT * omits the key entirely for the partition that lacks it', async () => {
+test('absent column: SELECT * carries the key but renders nothing for the partition that lacks it', async () => {
+  // Measured before LLP 0241, the star left the narrow partition's own row
+  // shape alone and the key was simply not there. LLP 0241 pads every row out
+  // to the advertised list, so the key now EXISTS and holds `undefined`. Only
+  // key presence moved: the value is the same `undefined` the row path always
+  // read, and the JSON rendering is byte-identical either way. Reverting
+  // either alignment call site flips `in` back to false and nothing else.
+  // @ref LLP 0241#alignment [tests]: a star's rows carry the advertised column list, so an absent column is a present key holding undefined
   await withFixture('drifted', async (source) => {
     const rows = (await runSql(source, 'SELECT * FROM t')).sort((a, b) => Number(a.id) - Number(b.id))
     assert.equal(rows.length, 2)
-    assert.equal('git_remote' in rows[0], false, 'star keeps each partition\'s own row shape')
+    assert.equal('git_remote' in rows[0], true, 'star pads the narrow row out to the advertised list')
+    assert.strictEqual(rows[0].git_remote, undefined, 'the padded cell reads undefined, not null')
+    assert.equal(
+      JSON.stringify(rows[0]), '{"id":1,"date":"2026-05-26"}',
+      'the padded key is absent from the rendering, exactly as before LLP 0241'
+    )
     assert.equal(rows[1].git_remote, REMOTE)
   })
 })
@@ -263,6 +275,30 @@ test('absent column: the wrapper reports appliedWhere false for a predicate it h
       positionEnd: 0,
     }
     assert.equal(source.scan({ columns: ['id'], where: pushable }).appliedWhere, true)
+  })
+})
+
+test('absent column: a star filtered on the absent column needs BOTH the gate and the padding', async () => {
+  // The composition of LLP 0240#where-gate and LLP 0241#alignment, which
+  // neither pinned on its own: the gate's tests all project a named column
+  // (which puts it in the scan's `columns` hint, so icebird builds a cell for
+  // it either way), and the alignment's tests never strip a predicate.
+  //
+  // A star gets NO `columns` hint, so its rows are as wide as the partition
+  // physically is. The gate drops the predicate and hands filtering back to
+  // the engine, and the engine reads `git_remote` off `row.cells`. Measured
+  // with the two alignment call sites reverted, that lookup raises
+  // `ColumnNotFoundError: Column "git_remote" not found. Available columns:
+  // id, date` from `filterRows`. Padding is what gives it a cell to read.
+  // Revert the gate instead and the `= 'zzz'` case comes back with the row.
+  // @ref LLP 0241#alignment [tests]: padding is what lets the engine re-filter a predicate the wrapper's gate handed back
+  await withFixture('lone', async (source) => {
+    assert.deepEqual(await runSql(source, "SELECT * FROM t WHERE git_remote = 'zzz'"), [])
+    const kept = await runSql(source, 'SELECT * FROM t WHERE git_remote IS NULL')
+    assert.equal(kept.length, 1)
+    assert.equal(JSON.stringify(kept[0]), '{"id":1,"date":"2026-05-26"}')
+    assert.equal(JSON.stringify(await runSql(source, 'SELECT * FROM t ORDER BY git_remote')),
+      '[{"id":1,"date":"2026-05-26"}]')
   })
 })
 
