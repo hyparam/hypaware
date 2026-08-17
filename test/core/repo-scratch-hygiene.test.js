@@ -33,10 +33,14 @@ function trackedFiles() {
 }
 
 /**
- * Whether `.gitignore` (and friends) would keep `relPath` out of a commit.
+ * Which ignore rule, if any, would keep `relPath` out of a commit.
  *
  * `git check-ignore` exits 0 when a path is ignored and 1 when it is not, so
- * the status is the answer and a nonzero exit is not a failure to report.
+ * the status is the answer and exit 1 is not a failure to report. Anything else
+ * is a real git failure (a `safe.directory` refusal, a checkout with no `.git`)
+ * and is raised rather than collapsed into "not ignored", which would fail the
+ * rule test below with a message sending the reader to fix a `.gitignore` that
+ * is already correct.
  *
  * `--no-index` is passed so the answer is about the ignore *rules* alone. By
  * default `check-ignore` consults the index first and reports any tracked path
@@ -46,13 +50,31 @@ function trackedFiles() {
  * `.gitignore` rule that is already there. Tracked transcripts are the other
  * test's job, and its message names the fix (delete the file).
  *
+ * The matching rule's *source* is returned, not just a yes/no, because the whole
+ * ignore stack answers this question and only one layer of it is the repo's.
+ * `*.log` is common in a personal `core.excludesFile` (it ships in widely copied
+ * global templates), and `.git/info/exclude` is per-clone too. Either would
+ * stand in for the committed rule, so a `.gitignore` that had lost it would
+ * still read green on that machine while every fresh checkout was unguarded.
+ * The global file is pinned to `/dev/null` here and the source is asserted
+ * below, so only the committed `.gitignore` can satisfy the gate.
+ *
  * @param {string} relPath
- * @returns {boolean}
+ * @returns {{ ignored: boolean, source: string, pattern: string }}
  */
-function isIgnored(relPath) {
-  const result = spawnSync('git', ['check-ignore', '-q', '--no-index', '--', relPath], { cwd: REPO_ROOT })
+function ignoreRule(relPath) {
+  // `-z` output requires `--stdin`, and it is worth the stdin round trip: the
+  // default format is `source:line:pattern\tpath`, which is ambiguous for any
+  // source or pattern containing a colon.
+  const args = ['-c', 'core.excludesFile=/dev/null', 'check-ignore', '-v', '-z', '--no-index', '--stdin']
+  const result = spawnSync('git', args, { cwd: REPO_ROOT, input: `${relPath}\0`, encoding: 'utf8' })
   if (result.error) throw result.error
-  return result.status === 0
+  if (result.status !== 0 && result.status !== 1) {
+    throw new Error(`git check-ignore exited ${result.status}: ${(result.stderr || '').trim()}`)
+  }
+  if (result.status !== 0) return { ignored: false, source: '', pattern: '' }
+  const [source, , pattern] = result.stdout.split('\0')
+  return { ignored: true, source, pattern }
 }
 
 test('no tool transcript is tracked in the repo', () => {
@@ -72,7 +94,12 @@ test('.gitignore refuses a tool transcript', () => {
     'x/npm-test.log',
     'src/core/cli/debug.log',
   ]
-  const unguarded = probes.filter(p => !isIgnored(p))
+  const unguarded = []
+  for (const probe of probes) {
+    const rule = ignoreRule(probe)
+    if (!rule.ignored) unguarded.push(`${probe} (no rule matches)`)
+    else if (rule.source !== '.gitignore') unguarded.push(`${probe} (matched by ${rule.source}, which is not committed)`)
+  }
   assert.deepEqual(unguarded, [], 'these paths would be committable by a stray ' +
     `\`git add -A\`; \`.gitignore\` needs a rule covering them:\n  ${unguarded.join('\n  ')}`)
 })
@@ -80,10 +107,16 @@ test('.gitignore refuses a tool transcript', () => {
 test('the probe distinguishes ignored from unignored paths', () => {
   // A probe that answered "ignored" for everything would pass the rule above
   // forever, including on a repo with no `.gitignore` at all. Under
-  // `--no-index` both assertions read the rules and nothing else, so neither
+  // `--no-index` these read the rules and nothing else, so neither direction
   // can be satisfied by the path's tracked status.
-  assert.ok(!isIgnored('package.json'), 'expected a source file no rule matches to read as not ignored')
-  assert.ok(isIgnored('hypaware-9.9.9.tgz'), 'expected an existing ignore rule (`*.tgz`) to read as ignored')
+  assert.equal(ignoreRule('package.json').ignored, false,
+    'expected a source file no rule matches to read as not ignored')
+  // The other direction, deliberately not borrowed from an unrelated rule such
+  // as `*.tgz`: a probe stuck on "ignored" would have to name this file's own
+  // rule to get here, and a maintainer reorganizing pack output cannot redden a
+  // transcript-hygiene test.
+  assert.equal(ignoreRule('npm-install.log').pattern, '*.log',
+    'expected the transcript rule itself to be the one doing the work')
   const files = trackedFiles()
   assert.ok(files.length > 500, `expected the tracked tree, found ${files.length} files`)
 })
