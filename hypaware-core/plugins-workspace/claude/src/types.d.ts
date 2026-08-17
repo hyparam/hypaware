@@ -131,8 +131,12 @@ export interface ClaudeAttachOptions {
    * `ANTHROPIC_BASE_URL` at the local gateway. Defaults to `base_url` so a
    * caller that has not been taught about proxy mode cannot acquire it by
    * accident. See LLP 0231.
+   *
+   * `otel` writes neither routing key: it turns on Claude Code's own telemetry
+   * export, so the client talks to Anthropic directly and reports to the local
+   * listener. See LLP 0258.
    */
-  mode?: 'proxy' | 'base_url'
+  mode?: 'proxy' | 'base_url' | 'otel'
   /**
    * Absolute path to the machine-local CA certificate. Required in `proxy`
    * mode, and its existence is the preflight: the gateway writes it only once
@@ -140,11 +144,34 @@ export interface ClaudeAttachOptions {
    * Code's HTTPS rather than just its capture.
    */
   caCertPath?: string
+  /**
+   * Port of the Claude telemetry listener, written into
+   * `env.OTEL_EXPORTER_OTLP_ENDPOINT`. Required in `otel` mode, and distinct
+   * from `port`: that one stays the gateway's, because it is what the
+   * attach-drift check compares against.
+   */
+  telemetryPort?: number
+  /**
+   * Absolute path to the raw body spool, written into
+   * `env.OTEL_LOG_RAW_API_BODIES` and recorded on the marker so detach and
+   * purge can sweep it. Required in `otel` mode.
+   */
+  spoolDir?: string
+  /**
+   * The installed Claude Code version, when it could be read. `otel` mode
+   * refuses below the floor (LLP 0258 #version-floor); an undetectable
+   * version is not a refusal, so `undefined` proceeds.
+   */
+  claudeVersion?: string
 }
 
 export interface ClaudeAttachChanged {
   changed: true
-  /** The pre-existing `env.ANTHROPIC_BASE_URL` attach backed up, if any. */
+  /**
+   * The pre-existing value of the env key this mode took over
+   * (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY`, or `OTEL_EXPORTER_OTLP_ENDPOINT`),
+   * if any. A display copy: userinfo-redacted except in `base_url` mode.
+   */
   prevValue?: string
   /**
    * One notice per `env` / `hooks` block this run found present on disk with
