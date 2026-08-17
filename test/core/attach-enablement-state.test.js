@@ -279,6 +279,15 @@ test('a registered client still attaches unchanged', async () => {
     const { ctx, stderr } = makeCtx({ home, registered: ['claude'] })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 0, stderr.text())
-    assert.equal(stderr.text(), '')
+    // The only stderr a non-interactive attach may add is the LLP 0244
+    // pointer: this install's config lacks proxy_mode and claude attaches by
+    // proxy, so the one-line migration hint is part of the unchanged-attach
+    // contract now, and nothing else is.
+    // @ref LLP 0244#non-interactive [tests]: non-TTY attach never migrates and emits exactly the pointer
+    assert.equal(
+      stderr.text(),
+      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
+      'interactive terminal to switch it to proxy mode\n'
+    )
   })
 })

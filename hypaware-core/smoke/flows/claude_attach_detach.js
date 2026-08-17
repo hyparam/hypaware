@@ -143,10 +143,14 @@ export async function run({ harness, expect }) {
       }
     )
     expect.that('dispatch: hyp attach --client claude exited 0', attachCode, (v) => v === 0)
+    // A non-TTY attach on a config without proxy_mode carries exactly one
+    // stderr line: the LLP 0244 migration pointer. Anything else is an error.
+    // @ref LLP 0244#non-interactive [tests]: the pointer is the only stderr a scripted attach adds
     expect.that(
-      'stderr: hyp attach had no errors',
+      'stderr: hyp attach had no errors (only the proxy-mode pointer note)',
       attachStderr.text(),
-      (v) => typeof v === 'string' && v.length === 0
+      (v) => typeof v === 'string' &&
+        v === "note: this install attaches claude by base URL; run 'hyp attach claude' in an interactive terminal to switch it to proxy mode\n"
     )
     expect.that(
       'stdout: hyp attach printed the settings path',

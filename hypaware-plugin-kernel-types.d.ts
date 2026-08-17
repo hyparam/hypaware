@@ -374,6 +374,17 @@ export interface PluginPickerCompose {
    * gateway plugin's `upstreams`. Accepts a single upstream or an array.
    */
   gateway_upstream?: PluginPickerGatewayUpstream | PluginPickerGatewayUpstream[]
+  /**
+   * True when this row's client attaches through the gateway's CONNECT
+   * front door rather than a repointed base URL. The fold writes
+   * `proxy_mode: true` into the composed gateway config when any picked
+   * row sets this, so a fresh install boots interception and mints the
+   * local CA before the client's first attach. Attach reads the same
+   * declaration to decide whether to offer the proxy-mode migration on
+   * an existing install.
+   * @ref LLP 0243#composed-default: a proxy-attaching row declares it; composition writes the explicit key
+   */
+  gateway_proxy_mode?: boolean
 }
 
 /**

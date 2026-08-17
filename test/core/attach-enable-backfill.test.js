@@ -169,7 +169,18 @@ function makeCtx({ home, answers, backfillProvider }) {
       if (String(chunk).includes('[Y/n]: ')) stdin.feedNext()
     },
   })
-  const stderrBuf = makeBuf()
+  // The LLP 0244 proxy-migration question sits between the enable prompt and
+  // the backfill consent, on stderr. Decline it with a directly-written line
+  // (not the queue) the instant its own question prints, so the queued
+  // answers keep meaning [enable, backfill] and these tests stay about the
+  // backfill offer.
+  const stderrBuf = makeBuf({
+    onWrite: (chunk) => {
+      if (String(chunk).includes('Switch this install to proxy mode now? [y/N] ')) {
+        stdin.stream.write('n\n')
+      }
+    },
+  })
   const backfills = {
     /** @param {string} name */
     get: (name) => (backfillProvider && backfillProvider.name === name ? backfillProvider : undefined),

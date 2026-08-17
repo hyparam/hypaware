@@ -9,6 +9,7 @@ import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../c
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
+import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -32,7 +33,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
- * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
  */
 
@@ -953,6 +954,7 @@ export function composePickerConfig(args) {
   const picked = /** @type {Set<string>} */ (new Set(args.sources))
 
   let requiresGateway = false
+  let gatewayProxyMode = false
   /** @type {{ name: string, base_url: string, path_prefix: string, provider?: string }[]} */
   const upstreams = []
   // Gateway-independent adapter plugins (e.g. `@hypaware/otel`) land before
@@ -968,6 +970,7 @@ export function composePickerConfig(args) {
     const compose = descriptor.compose
     if (!compose) continue
     if (compose.requires_gateway) requiresGateway = true
+    if (compose.gateway_proxy_mode === true) gatewayProxyMode = true
     for (const up of requestedUpstreams(compose)) {
       if (!upstreams.some((existing) => existing.name === up.name)) upstreams.push({ ...up })
     }
@@ -995,7 +998,21 @@ export function composePickerConfig(args) {
     // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
       name: GATEWAY_PLUGIN,
-      config: { upstreams },
+      // `proxy_mode` stays an explicit key in the written file (LLP 0233);
+      // composition writes it when a picked row's client attaches by proxy.
+      // The carry-forward merge then lets the prior gateway entry own the
+      // key entirely: a hand-written `proxy_mode: false` outranks this, and
+      // an entry without the key stays without it (existing installs migrate
+      // only through `hyp attach`, LLP 0244). That protection rides
+      // `args.existing`, which only the interactive reconfigure lane
+      // supplies: a non-interactive `--force` re-init composes from scratch
+      // by design (the whole-file overwrite is its own consent) and
+      // re-applies this default.
+      // @ref LLP 0243#composed-default [implements]: a picked proxy-attaching row turns the composed gateway into a proxy-mode gateway
+      config: {
+        upstreams,
+        ...(gatewayProxyMode ? { proxy_mode: true } : {}),
+      },
     })
   }
 
@@ -1251,6 +1268,15 @@ function mergePlugin(composed, prior, isRider = false) {
   const config = { ...(composed.config ?? {}), ...(prior.config ?? {}) }
   const upstreams = composed.config?.upstreams
   if (composed.name === GATEWAY_PLUGIN && upstreams !== undefined) config.upstreams = upstreams
+  // An existing gateway entry gains `proxy_mode` only through the LLP 0244
+  // migration, so carry-forward preserves the key's *absence*, not just an
+  // explicit `false`: a reconfigure is a picker run, not the consented
+  // migration verb, and the composed default applies only where composition
+  // creates the gateway entry.
+  // @ref LLP 0243#user-key-wins [implements]: the prior entry owns the key entirely; absence carries forward like a value
+  if (composed.name === GATEWAY_PLUGIN && prior.config?.proxy_mode === undefined) {
+    delete config.proxy_mode
+  }
   const merged = { ...prior, ...composed }
   if (Object.keys(config).length > 0) merged.config = config
   // Composing a plugin is what picking its row means, so a prior
@@ -1454,6 +1480,75 @@ export function resolveSingleSourceEnablement(descriptor) {
 }
 
 /**
+ * Wait for the proxy CA before the finale attaches clients, when the config
+ * that will govern the freshly installed daemon runs the gateway in proxy
+ * mode. Adapters pick their mode by whether the CA file exists (LLP 0232
+ * #proxy-attach-preflight) and the daemon mints it asynchronously on gateway
+ * start, so attaching without waiting races the mint and silently lands
+ * every client back on base-URL mode. Bounded, and a timeout degrades to a
+ * warning: base-URL attach still captures, and a re-run of `hyp attach`
+ * repairs the mode.
+ *
+ * "Will govern" is the effective view, not the just-written local file: on a
+ * fleet-joined machine the central layer names the gateway and the LLP 0031
+ * merge drops the local entry, so a local `proxy_mode: true` is dead and
+ * waiting on it could only time out. When the central layer names the
+ * gateway, its own `proxy_mode` value decides the wait instead.
+ * @ref LLP 0243#composed-default [implements]: a fresh proxy-mode install must attach in proxy mode, not lose the race to the CA mint
+ * @ref LLP 0244#central-managed [constrained-by]: the central layer owning the gateway block decides the mode, locally written keys prove nothing
+ *
+ * @param {{
+ *   config: HypAwareV2Config,
+ *   env: NodeJS.ProcessEnv,
+ *   stderr: { write(chunk: string): unknown },
+ *   waitForCaFn?: (args: {
+ *     stateRoot: string,
+ *     timeoutMs?: number,
+ *     sleep?: (ms: number) => Promise<void>,
+ *     now?: () => number,
+ *   }) => Promise<{ ready: boolean, certPath?: string }>,
+ *   timeoutMs?: number,
+ * }} args
+ * @returns {Promise<{ waited: boolean, ready: boolean }>}
+ */
+export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForCaFn, timeoutMs }) {
+  const stateRoot = defaultStateRoot(env)
+
+  /** @type {PluginConfigInstance | undefined} */
+  let centralGateway
+  try {
+    const centralPath = resolveCentralLayerPath({ stateRoot })
+    if (centralPath) {
+      const loaded = await loadConfigFile(centralPath)
+      if (loaded.ok) {
+        centralGateway = (loaded.config.plugins ?? []).find(
+          (p) => p.name === GATEWAY_PLUGIN
+        )
+      }
+    }
+  } catch {
+    // An unreadable central layer proves nothing; the local config decides.
+  }
+
+  const governing = centralGateway
+    ?? (config.plugins ?? []).find((p) => p.name === GATEWAY_PLUGIN)
+  if (governing?.config?.proxy_mode !== true) return { waited: false, ready: false }
+
+  const waitFn = waitForCaFn ?? waitForLocalCa
+  const caWait = await waitFn({
+    stateRoot,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  })
+  if (!caWait.ready) {
+    stderr.write(
+      'warning: the daemon did not mint the proxy CA in time; clients may attach by ' +
+      "base URL. Re-run 'hyp attach <client>' once the daemon is up to switch them.\n"
+    )
+  }
+  return { waited: true, ready: caWait.ready }
+}
+
+/**
  * Run the picker finale: daemon install, attach, client-asset install
  * (skills and subagents together, LLP 0138), daemon restart. Each step
  * emits its own span (`daemon.install`, `client.attach` (via the
@@ -1485,6 +1580,13 @@ export function resolveSingleSourceEnablement(descriptor) {
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   skipAttachClients?: Set<string>,
  *   progress?: string,
+ *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
+ *   waitForCaFn?: (args: {
+ *     stateRoot: string,
+ *     timeoutMs?: number,
+ *     sleep?: (ms: number) => Promise<void>,
+ *     now?: () => number,
+ *   }) => Promise<{ ready: boolean, certPath?: string }>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
@@ -1557,7 +1659,11 @@ export async function runPickerFinale(args) {
             span.setAttribute('platform', plan.platform)
           }
         } else {
-          const plan = await installMod.installDaemon(options)
+          // Injectable so the open-gate finale path (install -> CA wait ->
+          // attach) is testable at all: the real installDaemon refuses to
+          // spawn a service manager under the test runner (LLP 0181).
+          const installFn = args.installDaemonFn ?? installMod.installDaemon
+          const plan = await installFn(options)
           summary.daemonInstall = {
             skipped: false,
             dryRun: false,
@@ -1588,6 +1694,17 @@ export async function runPickerFinale(args) {
   }
 
   if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
+    // Skipped when no daemon was installed (the join lane restarts only
+    // after attach, so no CA can appear before it) and on dry runs; the
+    // wait-or-skip decision itself lives in the helper.
+    if (!dryRun && !skipInstall) {
+      await waitForProxyCaBeforeAttach({
+        config,
+        env,
+        stderr,
+        ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
+      })
+    }
     /** @type {AiGatewayCapability} */
     const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {
