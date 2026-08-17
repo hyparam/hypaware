@@ -7,6 +7,8 @@
 **Date:** 2026-08-17
 **Related:** LLP 0231, LLP 0242, LLP 0243, LLP 0244, LLP 0027, LLP 0030, LLP 0032, LLP 0049, LLP 0085, LLP 0103, LLP 0012, LLP 0015
 **Tracker:** hyparam/hypaware#798 (implementation spec)
+**Spawns (on acceptance):** LLP 0251, LLP 0252, LLP 0253, LLP 0254, LLP 0255,
+LLP 0256 (decisions), LLP 0257 (spec). All Draft until this RFC is accepted.
 
 > Claude Code now ships a sanctioned, documented export path for everything the
 > proxy intercepts: OTEL telemetry events plus raw API body files
