@@ -96,6 +96,14 @@ Written acceptance procedures:
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
   attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+- `claude_proxy_capture`: opt-in/manual, needs a real Mac. Proves proxy-mode
+  attach against a real installed daemon and login keychain: attach writes
+  only `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`, the keychain trust dialog
+  names every intercepted provider host, `NODE_USE_SYSTEM_CA` reaches the
+  launchd environment, a Claude Code session lands rows in
+  `ai_gateway_messages` while Remote Control's inbound channel keeps
+  working, and detach, purge and uninstall each remove exactly their own
+  residue. See `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
