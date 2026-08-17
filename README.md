@@ -301,10 +301,18 @@ On the next attach, HypAware sets `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`
 instead of the base URL. What this changes:
 
 - **A machine-local certificate authority is generated** under
-  `~/.hyp/hypaware/tls`, readable only by you. It is trusted *only* by
-  Claude Code, through its own settings file; your system trust store is
-  never touched. `hyp status` shows its fingerprint and expiry, and
-  `hyp detach claude` deletes it.
+  `~/.hyp/hypaware/tls`, readable only by you, and name-constrained so it
+  cannot vouch for any host outside the provider set HypAware intercepts.
+  On macOS, attach also adds it to your **login keychain** as a user-domain
+  trusted root, because Claude Code's Remote Control transport trusts only
+  the keychain: macOS raises its own password dialog, and declining it
+  leaves capture working with Remote Control's inbound channel off. No admin
+  rights are needed and the machine-wide system keychain is not touched. On
+  other platforms trust stays file-scoped to Claude Code's own settings.
+  `hyp status` shows the fingerprint and whether the keychain still trusts
+  it. `hyp detach claude` keeps the CA and the trust, so re-attaching does
+  not ask again; `hyp detach claude --purge` and `hyp daemon uninstall`
+  remove both.
 - **Only `api.anthropic.com` is decrypted**, because that is the only host
   a registered upstream names. Every other host Claude Code talks to is
   tunnelled through without being decrypted.
