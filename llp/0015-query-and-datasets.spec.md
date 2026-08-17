@@ -72,8 +72,43 @@ union (partitions with additive schema drift) can otherwise push a filter on a
 column a given partition physically lacks, and a parquet-backed source throws
 `parquet filter columns not found` rather than reading it as null; when a
 partition can't satisfy the predicate the union drops `where` for it and lets
-the engine filter. `columns` is always forwarded: projecting an absent column
-reads as null, never throws.
+the engine filter. `columns` is always forwarded, which adds no failure the
+merged stream did not already have, but an absent column does **not** read as
+null. A bare identifier projection (`SELECT extra FROM t`, with or without an
+alias, a `LIMIT`, or a predicate on a column every partition has) leaves the
+drifted cell **unresolved**: `executeProject` finds no matching cell, so it emits
+a lazy `evaluateExpr` thunk that would throw, and writes no entry into the row's
+`resolved` map. `collect()` reads the pre-materialized `resolved` map for every
+advertised column and never invokes that thunk, so the key is present with the
+value `undefined`, is not `null`, and `JSON.stringify` drops it. This holds only
+under three conditions, all of them in `executeProject` and `collect()` rather
+than in the union: the consumer goes through `collect()` (as `executeQuerySql`
+does); every row reaching `collect()` carries a `resolved` map, which holds here
+because every in-repo partition's rows come from squirreling's `asyncRow`, the
+only thing that pre-materializes one; **and every output column of that
+projection is a star or a bare identifier**. `executeProject` gates on the last
+one up front (`resolveable`) and emits no `resolved` map at all when it fails, so
+a single non-identifier sibling column (an expression, a function, or even a
+literal) collapses the fast path for the whole result and the drifted column's
+thunk is invoked and throws: `SELECT extra, 1 AS n FROM t` throws even though
+nothing evaluates `extra`. A row that carries no `resolved` map at all does the
+same. Anything
+that *evaluates* the absent column throws squirreling's `ColumnNotFoundError` at
+the first row from a partition without it: a `WHERE` on it, an expression or
+function over it, `ORDER BY`, `GROUP BY`, `DISTINCT`, or an aggregate on it.
+`SELECT *` is unaffected: each partition's rows keep their own shape, so the key
+is simply absent. The column is addressable at all only because the union
+advertises the superset of partition columns; when no partition has it, planning
+fails with the same error unless a wrapper advertises the declared schema on top
+of the union (LLP 0032's `withSchemaColumns`), which keeps such a column
+addressable; the exact value a read of it then yields depends on the read path
+and is not settled here. Pinned by
+[`test/core/union-source.test.js`](../test/core/union-source.test.js).
+
+> **Corrected (#731, PR #740).** This section previously stated that projecting
+> an absent column "reads as null, never throws". That was never true of the
+> code; the paragraph above records the measured contract. No runtime behaviour
+> changed.
 
 > **Extended-by: [LLP 0241 §alignment](./0241-scan-rows-carry-advertised-columns.decision.md#alignment).**
 > The hints above say what a union may forward; LLP 0241 adds what shape the

@@ -164,8 +164,9 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
  * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
- * itself is unchanged: a row object that lacks the key simply reads as null,
- * which is the correct value for "this partition predates the column".
+ * itself is unchanged: a column an old partition physically lacks stays
+ * addressable, and the exact value a read of it yields depends on the read path
+ * (LLP 0015#multi-partition-union).
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
  * @param {AsyncDataSource} source
