@@ -102,29 +102,21 @@ export async function* alignRows(rows, columns) {
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded, which adds no failure the merged stream did not already have, but
- * an absent column does NOT read as null. A bare identifier projection leaves
- * the drifted cell unresolved: squirreling's `executeProject` finds no matching
- * cell, so it emits a lazy `evaluateExpr` thunk that would throw and writes no
- * entry into the row's `resolved` map. `collect()` reads the pre-materialized
- * `resolved` map for every advertised column and never invokes that thunk, so
- * the key is present with the value `undefined` (not `null`, dropped by
- * `JSON.stringify`). That holds only under three conditions, all of them in
- * `executeProject` and `collect()` rather than in the union: the consumer goes
- * through `collect()`; every row reaching `collect()` carries a `resolved` map,
- * which holds here because every in-repo partition's rows come from
- * squirreling's `asyncRow`, the only thing that pre-materializes one; and every
- * output column of that projection is a star or a bare identifier.
- * `executeProject` gates on the last one up front (`resolveable`) and emits no
- * `resolved` map at all when it fails, so a single non-identifier sibling column
- * (an expression, a function, or even a literal) collapses the fast path for the
- * whole result and the drifted column's thunk is invoked and throws:
- * `SELECT extra, 1 AS n FROM t` throws even though nothing evaluates `extra`. A
- * row that carries no `resolved` map at all does the same.
- * Anything that evaluates the column (a `WHERE` on it, an expression over it,
- * `ORDER BY`/`GROUP BY`/`DISTINCT`, an aggregate) throws `ColumnNotFoundError`
- * at the first such row. `SELECT *` keeps each partition's own row shape, so the
- * key is simply absent. `test/core/union-source.test.js` pins both halves.
+ * forwarded, which adds no failure the merged stream did not already have, and
+ * an absent column reads as `undefined` rather than `null` or a throw: every
+ * row is padded out to the scan's advertised column list by `alignRows` below,
+ * so a column a partition physically lacks is still a real cell that resolves
+ * to `undefined` (LLP 0241 §alignment). One consequence is worth stating,
+ * because it is the thing a maintainer gets wrong: `undefined` is outside
+ * `SqlPrimitive` and `JSON.stringify` drops it, so a padded column renders as
+ * an absent key even though the row object owns it. `Object.keys(row).length`
+ * over a star therefore counts the advertised columns, not the physical ones,
+ * and is not a way to discover what a partition holds. What no longer varies is
+ * which read path the caller took: reading `resolved`, invoking the cell, and
+ * evaluating the column in a `WHERE`, `ORDER BY`, `GROUP BY`, `DISTINCT` or an
+ * aggregate all agree, where a short row made the last group throw
+ * `ColumnNotFoundError` on the first partition lacking the column.
+ * `test/core/union-source.test.js` pins these.
  *
  * Because a sub-source now emits exactly the columns it is asked for (see
  * `parquet-source.js`), forwarding `columns` also determines what the engine
