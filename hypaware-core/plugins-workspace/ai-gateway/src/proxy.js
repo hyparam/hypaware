@@ -397,9 +397,14 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // Reverse-proxy traffic was routed here by a client we attached, so all of it
   // is in scope. Proxy-mode and absolute-form traffic is everything the client
   // sends to the host, so it is recorded only where an upstream's path anchor
-  // claims it.
-  const recording = (!proxyMode && !absoluteForm)
-    || shouldRecordProxyExchange(upstream, parsedUrl.pathname)
+  // claims it. On a degraded listener (tunnelOnly, no live interception) even
+  // the anchor is off for absolute-form: the CONNECT door beside it is blind,
+  // and the degrade contract is unrecorded-but-working, not
+  // captured-where-possible.
+  // @ref LLP 0247#degraded-listeners-forward-it-blind [implements]: no live interception means no capture, matching the blind tunnels beside it
+  const absoluteFormBlind = absoluteForm && !opts.interception
+  const recording = !absoluteFormBlind && ((!proxyMode && !absoluteForm)
+    || shouldRecordProxyExchange(upstream, parsedUrl.pathname))
 
   const isHttps = upstream.baseUrl.protocol === 'https:'
   const lib = isHttps ? https : http

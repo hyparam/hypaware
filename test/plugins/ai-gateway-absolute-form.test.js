@@ -19,12 +19,15 @@ const HOST = 'localhost'
  * A gateway in front of a fake upstream. Absolute-form arrives on a plain
  * socket, so no tunnel is ever terminated, but the door only opens on a
  * listener that serves the forward-proxy front door at all
- * (LLP 0247 #only-forward-proxy-listeners-serve-it), so the default rig
- * boots `tunnelOnly` - the shape of a proxy-pointed listener without a CA.
+ * (LLP 0247 #only-forward-proxy-listeners-serve-it). The default rig boots
+ * with interception hooks - the shape of a live proxy-mode listener - whose
+ * `secureContextFor` is never reached because nothing here handshakes TLS.
+ * `degraded` boots `tunnelOnly` (a proxy-pointed listener without a CA), and
+ * `reverse-proxy` boots neither flag.
  *
- * @param {{ forwardProxy?: boolean }} [options]
+ * @param {{ mode?: 'intercepting' | 'degraded' | 'reverse-proxy' }} [options]
  */
-async function bootGateway({ forwardProxy = true } = {}) {
+async function bootGateway({ mode = 'intercepting' } = {}) {
   /** @type {string[]} */
   const upstreamHits = []
   const upstream = http.createServer((req, res) => {
@@ -50,7 +53,15 @@ async function bootGateway({ forwardProxy = true } = {}) {
 
   const proxy = await startProxy({
     listen: '127.0.0.1:0',
-    ...(forwardProxy ? { tunnelOnly: true } : {}),
+    ...(mode === 'intercepting'
+      ? {
+        interception: {
+          /** @returns {never} */
+          secureContextFor: () => { throw new Error('no TLS on a plain socket') },
+        },
+      }
+      : {}),
+    ...(mode === 'degraded' ? { tunnelOnly: true } : {}),
     log: { warn: (message) => { warns.push(message) } },
     upstreams: [{
       name: 'fake-anthropic',
@@ -274,7 +285,7 @@ test('an absolute-form request from a non-loopback peer is refused', async (t) =
 // routing there.
 // @ref LLP 0247#only-forward-proxy-listeners-serve-it [tests]
 test('a reverse-proxy-only listener leaves absolute-form to path routing', async (t) => {
-  const rig = await bootGateway({ forwardProxy: false })
+  const rig = await bootGateway({ mode: 'reverse-proxy' })
   t.after(() => rig.cleanup())
 
   const authority = `${HOST}:${rig.upstreamPort}`
@@ -287,5 +298,27 @@ test('a reverse-proxy-only listener leaves absolute-form to path routing', async
   assert.match(body, /^HTTP\/1\.1 404 /)
   assert.match(body, /no upstream matches path/)
   assert.deepEqual(rig.upstreamHits, [])
+  assert.equal(rig.started.length, 0)
+})
+
+// The degrade contract is unrecorded-but-working: a tunnel-only listener (a
+// proxy-pointed port without a live CA) still forwards absolute-form to a
+// registered host so the stranded client's Remote Control keeps working, but
+// records nothing, even inside the path anchor, like the blind tunnels
+// beside it.
+// @ref LLP 0247#degraded-listeners-forward-it-blind [tests]
+test('a degraded tunnel-only listener forwards absolute-form unrecorded', async (t) => {
+  const rig = await bootGateway({ mode: 'degraded' })
+  t.after(() => rig.cleanup())
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: `https://${authority}/v1/messages?beta=true`,
+    host: authority,
+  })
+
+  assert.match(body, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages?beta=true'])
   assert.equal(rig.started.length, 0)
 })

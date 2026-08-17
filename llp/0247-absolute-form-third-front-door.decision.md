@@ -56,6 +56,20 @@ line keeps falling through to path routing as before. The Remote Control
 bridge is unaffected by the gate: it only sends absolute-form when
 `HTTPS_PROXY` is set, which is precisely a proxy-mode install.
 
+### Degraded listeners forward it blind
+
+**A tunnel-only listener serves absolute-form to registered hosts but never
+records it.** `tunnelOnly` marks the degraded states: a stale CA with proxy
+mode off, a CA that could not be prepared, or nothing to intercept. Two of
+those three keep a populated routing table, so absolute-form still matches
+and forwards there, and that is wanted: the stranded client's Remote Control
+must keep working for the same reason its blind tunnels do. But the degrade
+contract (LLP 0233 #degrade-to-blind-tunnels) is unrecorded-but-working, not
+captured-where-possible, and in the stale-CA state proxy mode is explicitly
+off, so capture through a proxy-shaped door would contradict LLP 0233
+#proxy-mode-is-explicit. Recording therefore requires live interception; a
+degraded listener forwards absolute-form as blindly as it tunnels.
+
 ### Refuse hosts nobody registered
 
 **A host and port no upstream names is refused with 403, never forwarded.**
@@ -90,10 +104,12 @@ client fetch a URL.
 - Remote Control registration (`POST /v1/environments/bridge` on
   `api.anthropic.com`) forwards and succeeds on proxy-mode installs, and is
   not recorded because it sits outside the Claude adapter's path anchor.
-- A tunnel-only listener (LLP 0233 #degrade-to-blind-tunnels) has an empty
-  routing table, so it refuses absolute-form even while it blind-tunnels
-  `CONNECT`. The degrade contract stays CONNECT-shaped; an absolute-form
-  client on a degraded listener surfaces through the same status repair path.
+- A degraded tunnel-only listener (LLP 0233 #degrade-to-blind-tunnels) with a
+  populated routing table forwards absolute-form to registered hosts blind:
+  served, never recorded, like the tunnels beside it. Only the tunnel-only
+  state with nothing to route (proxy mode on, no upstream naming a host)
+  refuses absolute-form by host miss, and that surfaces through the same
+  status repair path as the rest of the degrade.
 - The regression test replays the exact on-the-wire shape: absolute-form
   plaintext `POST` written raw to the listener port.
 - The upstream defect remains worth filing with Anthropic: the bridge client
