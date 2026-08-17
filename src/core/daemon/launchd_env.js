@@ -138,13 +138,17 @@ export async function removeLaunchdEnv({ homeDir, run = defaultRunner } = {}) {
 
 /**
  * Whether the variable is present in the launchd user environment, for
- * `hyp status` style reporting.
+ * `hyp status` style reporting. `timeoutMs` bounds the spawn, for the same
+ * reason `isCaTrusted` takes one: a status run has nobody waiting on it who
+ * could decide to give up.
  *
  * @param {object} args
  * @param {TrustCommandRunner} [args.run]
+ * @param {number} [args.timeoutMs]
  * @returns {Promise<boolean>}
  */
-export async function isLaunchdEnvSet({ run = defaultRunner } = {}) {
-  const result = await run('launchctl', ['getenv', ENV_VAR_NAME])
+export async function isLaunchdEnvSet({ run, timeoutMs } = {}) {
+  const runner = run ?? ((cmd, args) => runServiceCommand(cmd, args, { timeoutMs }))
+  const result = await runner('launchctl', ['getenv', ENV_VAR_NAME])
   return result.exitCode === 0 && result.stdout.trim() === ENV_VAR_VALUE
 }

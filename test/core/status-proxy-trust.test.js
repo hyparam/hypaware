@@ -75,6 +75,7 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
     const report = await collectHypAwareStatus(collectOpts(hypHome))
     assert.deepEqual(report.proxyTrust, {
       caFingerprint: ca.fingerprint,
+      hosts: ['api.anthropic.com'],
       trusted: true,
       launchdEnvSet: true,
     })
@@ -93,9 +94,46 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
     })
     assert.deepEqual(json.proxy_trust, {
       ca_fingerprint: ca.fingerprint,
+      permitted_hosts: ['api.anthropic.com'],
       ca_trusted: true,
       launchd_env_set: true,
     })
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The grant is wider than the install: the CA permits every provider host the
+// product can ever intercept, so a user capturing Claude alone still carries
+// one covering the OpenAI hosts. The attach dialog names them once; after that
+// this is the only surface that can, and LLP 0238 requires it to.
+test('every permitted host the trust grant covers is named on both surfaces', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    // The full static provider set of LLP 0238#full-provider-constraints, on
+    // an install that captures only the first of them.
+    const hosts = ['api.anthropic.com', 'api.openai.com', 'chatgpt.com']
+    const ca = await ensureLocalCa({ stateRoot, hosts })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.deepEqual(report.proxyTrust?.hosts, hosts)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    for (const host of hosts) {
+      assert.ok(text.includes(host), `${host} is named on the text surface`)
+    }
+    assert.match(text, /permitted: {6}api\.anthropic\.com, api\.openai\.com, chatgpt\.com\n/)
+
+    const json = renderStatusJson({
+      report,
+      clientNames: [],
+      datasets: [],
+      cacheRoot: path.join(stateRoot, 'cache'),
+    })
+    assert.deepEqual(json.proxy_trust?.permitted_hosts, hosts)
+    // The hosts are read back off the certificate, not from config, so the
+    // line can never drift from what the keychain actually vouches for.
+    assert.deepEqual(json.proxy_trust?.ca_fingerprint, ca.fingerprint)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

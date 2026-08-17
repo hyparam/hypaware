@@ -251,6 +251,13 @@ export interface ServiceState {
 export interface ProxyTrustReport {
   /** SHA-256 fingerprint of the CA on disk, colon-separated uppercase hex. */
   caFingerprint: string
+  /**
+   * The CA's permitted `dNSName` subtrees: every host this grant lets the CA
+   * vouch for, which is the full provider set and not the subset this install
+   * captures (LLP 0238#full-provider-constraints). Empty only for a
+   * certificate carrying no dNSName constraints at all.
+   */
+  hosts: string[]
   /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
   trusted: boolean | null
   /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */

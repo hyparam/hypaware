@@ -287,9 +287,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // `ca_trusted` / `launchd_env_set` are tri-state: `null` means the probe
     // could not run, which a consumer must not read as "not trusted".
     // @ref LLP 0237#consequences [implements]: --json carries the trust state next to the CA fingerprint
+    // @ref LLP 0238#consequences [implements]: and the full permitted host set the grant covers
     proxy_trust: report.proxyTrust
       ? {
         ca_fingerprint: report.proxyTrust.caFingerprint,
+        permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
       }
@@ -421,11 +423,18 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // dialog was cancelled last month" and "the CA was re-minted and the
   // keychain still trusts the old one", neither of which any other line here
   // can be read for.
+  //
+  // The permitted hosts are named here and not only in the attach dialog: the
+  // grant covers every provider host the product can intercept, so on an
+  // install that captures Claude alone it is wider than anything the config
+  // shows, and after attach this is the only place it can be re-read.
   // @ref LLP 0237#consequences [implements]: the trust state is reported next to the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+  // @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so the standing grant stays informed and not just the moment it was asked for
   // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
   if (report.proxyTrust) {
     stdout.write('  proxy trust:\n')
     stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
+    stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
   }
@@ -566,6 +575,25 @@ function describeCaTrust(trusted) {
     return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
   }
   return 'unknown - the keychain probe could not run'
+}
+
+/**
+ * The host set the trust grant covers. Printed as the certificate's own
+ * permitted subtrees, in the order the DER carries them, so the line is the
+ * grant rather than a restatement of the configured providers.
+ *
+ * An empty set is not "no hosts": a CA carrying no `dNSName` constraint at
+ * all can vouch for anything, which is the one reading the user most needs,
+ * so it is named rather than rendered as a blank line. HypAware's own mint
+ * never produces one (LLP 0238#full-provider-constraints), so this arm only
+ * fires for a foreign or damaged certificate at the CA path.
+ *
+ * @param {string[]} hosts
+ * @returns {string}
+ */
+function describePermittedHosts(hosts) {
+  if (hosts.length === 0) return 'no dNSName constraints found - this CA is not host-limited'
+  return hosts.join(', ')
 }
 
 /**

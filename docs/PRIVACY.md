@@ -61,9 +61,21 @@ rights, and the machine-wide system keychain and other user accounts are
 never modified. On other platforms the CA is trusted only by Claude Code,
 through that client's own settings.
 
-**Its lifetime.** `hyp status` shows the fingerprint and whether the
-keychain still trusts it. `hyp detach claude` deliberately keeps the CA and
-the trust in place, so re-attaching later does not ask for your password
+**What else macOS attach leaves behind.** The keychain root only takes
+effect if `NODE_USE_SYSTEM_CA=1` is in the environment before Claude Code
+starts, so attach also runs `launchctl setenv NODE_USE_SYSTEM_CA 1` and
+installs a LaunchAgent at
+`~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist` that
+re-runs that one command at each login. It starts no process of its own and
+sends nothing anywhere, but it is a login item on your machine and a
+session-wide variable that other Node programs will also read. `hyp detach
+claude` unsets the variable and removes the agent, as do
+`hyp detach claude --purge` and `hyp daemon uninstall`.
+
+**Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
+permitted to vouch for, whether the keychain still trusts it, and whether
+the launchd variable is live. `hyp detach claude` deliberately keeps the CA
+and the trust in place, so re-attaching later does not ask for your password
 again; `hyp detach claude --purge` and `hyp daemon uninstall` remove the CA
 and its keychain trust.
 

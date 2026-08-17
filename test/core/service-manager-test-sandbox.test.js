@@ -237,3 +237,75 @@ test('the explicit opt-in still spawns', () => {
     assert.deepEqual(JSON.parse(run.stdout), { exitCode: 0, stdout: 'spawned', stderr: '' })
   })
 })
+
+// `hyp status` shells out through this helper on darwin (`security
+// verify-cert`, `launchctl getenv`). A locked login keychain can put
+// `security` behind a GUI prompt, and an unbounded spawn then hangs a command
+// nobody is waiting on interactively. The bound has to live here, at the one
+// spawn seam, and it has to reject rather than return a non-zero result: a
+// probe that maps exit codes to a boolean would read a killed process as
+// "not trusted".
+//
+// Driven in a child for the same reason as the opt-in test above: the
+// guard's env opt-in is process-global, and the command spawned here is a
+// sleeping `node`, never a service manager.
+test('runServiceCommand kills a command that outlives its timeout', () => {
+  withTempDir((dir) => {
+    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}')
+    const script = path.join(dir, 'timeout.test.js')
+    writeFileSync(script, [
+      `import { runServiceCommand } from ${JSON.stringify(SERVICE_OPS_URL)}`,
+      'const started = Date.now()',
+      'let outcome',
+      'try {',
+      "  const res = await runServiceCommand(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { timeoutMs: 250 })",
+      "  outcome = { kind: 'resolved', res }",
+      '} catch (err) {',
+      "  outcome = { kind: 'rejected', name: err.name, message: err.message }",
+      '}',
+      'process.stdout.write(JSON.stringify({ ...outcome, elapsed: Date.now() - started }))',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync(process.execPath, [script], {
+      encoding: 'utf8',
+      env: { ...process.env, [ALLOW_REAL_SERVICE_MANAGER_ENV]: '1' },
+      // Well under the 120s the spawned child would otherwise sleep for, so
+      // an unbounded helper fails here as a timeout rather than passing late.
+      timeout: 20_000,
+    })
+
+    assert.equal(run.status, 0, `${run.stdout ?? ''}${run.stderr ?? ''}`)
+    const outcome = JSON.parse(run.stdout)
+    assert.equal(outcome.kind, 'rejected', `expected a rejection, got ${run.stdout}`)
+    assert.equal(outcome.name, 'ServiceCommandTimeoutError')
+    assert.match(outcome.message, /did not finish within 250ms and was killed/)
+    // And the child really was killed: the script exited long before the
+    // 120s its own child was told to sleep for.
+    assert.ok(outcome.elapsed < 15_000, `waited ${outcome.elapsed}ms`)
+  })
+})
+
+// Nothing sets a bound by accident: with no `timeoutMs` the helper waits, and
+// every mutation that raises a macOS password dialog depends on that.
+test('runServiceCommand leaves the wait unbounded when no timeout is given', () => {
+  withTempDir((dir) => {
+    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}')
+    const script = path.join(dir, 'unbounded.test.js')
+    writeFileSync(script, [
+      `import { runServiceCommand } from ${JSON.stringify(SERVICE_OPS_URL)}`,
+      "const res = await runServiceCommand(process.execPath, ['-e', 'setTimeout(() => {}, 800)'])",
+      'process.stdout.write(JSON.stringify(res))',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync(process.execPath, [script], {
+      encoding: 'utf8',
+      env: { ...process.env, [ALLOW_REAL_SERVICE_MANAGER_ENV]: '1' },
+      timeout: 20_000,
+    })
+
+    assert.equal(run.status, 0, `${run.stdout ?? ''}${run.stderr ?? ''}`)
+    assert.deepEqual(JSON.parse(run.stdout), { exitCode: 0, stdout: '', stderr: '' })
+  })
+})

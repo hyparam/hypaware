@@ -309,10 +309,22 @@ instead of the base URL. What this changes:
   leaves capture working with Remote Control's inbound channel off. No admin
   rights are needed and the machine-wide system keychain is not touched. On
   other platforms trust stays file-scoped to Claude Code's own settings.
-  `hyp status` shows the fingerprint and whether the keychain still trusts
-  it. `hyp detach claude` keeps the CA and the trust, so re-attaching does
-  not ask again; `hyp detach claude --purge` and `hyp daemon uninstall`
-  remove both.
+  `hyp status` shows the fingerprint, every host the CA is permitted to
+  vouch for, and whether the keychain still trusts it. `hyp detach claude`
+  keeps the CA and the trust, so re-attaching does not ask again;
+  `hyp detach claude --purge` and `hyp daemon uninstall` remove both.
+- **On macOS, attach also sets a login-session variable.** Claude Code runs
+  on Bun, which picks its trust store before any settings file is read, so
+  the keychain root only counts if `NODE_USE_SYSTEM_CA=1` is already in the
+  process environment. Attach runs `launchctl setenv NODE_USE_SYSTEM_CA 1`
+  and installs a small LaunchAgent,
+  `~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist`,
+  whose only job is to re-run that command at each login. It is a login item
+  on your machine until it is removed. `launchctl setenv` reaches processes
+  launched after it, so a terminal app that was already running must be
+  fully quit and reopened. `hyp detach claude` unsets the variable and
+  removes the agent, as do `--purge` and `hyp daemon uninstall`;
+  `hyp status` shows whether the variable is currently live.
 - **Only `api.anthropic.com` is decrypted**, because that is the only host
   a registered upstream names. Every other host Claude Code talks to is
   tunnelled through without being decrypted.
