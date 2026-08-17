@@ -370,8 +370,8 @@ export interface ActionMarker {
    * and copies nothing ever produces. Without this bit such a rewrite was
    * indistinguishable from a terminal marker whose attach never applied
    * anything, and the reconciler's reverse gap dropped it, stranding the
-   * settings write with nothing naming it (LLP 0247, extending LLP 0138
-   * §marker-undo and LLP 0186). Absent on pre-LLP-0247 markers, which read as
+   * settings write with nothing naming it (LLP 0250, extending LLP 0138
+   * §marker-undo and LLP 0186). Absent on pre-LLP-0250 markers, which read as
    * "no prior done" and keep master's behaviour.
    */
   prior_done?: boolean

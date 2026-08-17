@@ -232,7 +232,7 @@ export function createActionReconciler(opts) {
           // disk, and the settings write would be dropped along with it. Set
           // after the detail spread so a handler's `detail` cannot erase
           // reconciler bookkeeping about an effect that is really on disk.
-          // @ref LLP 0247#the-bit [implements]: a terminal rewrite records the
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
           //   effect it overwrites, not only the assets it copied
           if (markerRecordsPriorDone(existing)) marker.prior_done = true
           markers[action.requestKey] = marker
@@ -271,7 +271,7 @@ export function createActionReconciler(opts) {
           }
           // The settings half of that same record, for a client whose attach
           // copies no files: see the `refused` branch above.
-          // @ref LLP 0247#the-bit [implements]: a terminal rewrite records the
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
           //   effect it overwrites, not only the assets it copied
           if (markerRecordsPriorDone(existing)) marker.prior_done = true
           markers[action.requestKey] = marker
@@ -332,11 +332,11 @@ export function createActionReconciler(opts) {
           // and copied no files, then re-`perform()`ed into `failed`/`refused`,
           // has an assetless terminal marker over a settings write that is still
           // there. `prior_done` is what tells the two apart, so the drop needs
-          // both halves to be empty (LLP 0247).
+          // both halves to be empty (LLP 0250).
           // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
           //   over an effect it recorded, whichever status it carries
           // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: the reverse gap treats refused the way it treats failed
-          // @ref LLP 0247#the-drop-condition [implements]: the drop reads the
+          // @ref LLP 0250#the-drop-condition [implements]: the drop reads the
           //   settings half of the record too, not just the asset half
           if (
             !marker ||
@@ -539,14 +539,14 @@ export function readInstalledAssets(marker) {
  * rewritten to `failed`/`refused` used to be byte-indistinguishable from one
  * whose attach never applied anything. `prior_done` is the missing half of the
  * evidence, read defensively because the store is persisted JSON that a
- * pre-LLP-0247 daemon (or a hand edit) wrote without the field.
+ * pre-LLP-0250 daemon (or a hand edit) wrote without the field.
  *
  * Read off the *existing* marker when writing a terminal rewrite, and off the
  * stored marker when deciding whether the reverse gap may drop it.
  *
  * @param {ActionMarker} [marker]
  * @returns {boolean}
- * @ref LLP 0247#the-bit [implements]: one accessor for "an earlier pass applied
+ * @ref LLP 0250#the-bit [implements]: one accessor for "an earlier pass applied
  *   something here", beside the one that reads the asset half
  */
 export function markerRecordsPriorDone(marker) {

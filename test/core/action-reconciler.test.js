@@ -886,9 +886,9 @@ test('the reverse gap drops an assetless refused marker and reverses one that re
 // a client whose attach writes settings and copies no files (openclaw is the
 // routine case). These two tests pin the `prior_done` bit that carries that
 // evidence, and the reverse gap's drop condition that reads it.
-// @ref LLP 0247#the-bit [tests]: a done-to-terminal rewrite records the effect
+// @ref LLP 0250#the-bit [tests]: a done-to-terminal rewrite records the effect
 //   it overwrites, and the reverse gap stops dropping such a marker
-test('a settings-only attach rewritten from done to refused is reversed, not dropped (LLP 0247)', async () => {
+test('a settings-only attach rewritten from done to refused is reversed, not dropped (LLP 0250)', async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {
     let phase = 'attach'
@@ -961,7 +961,7 @@ test('a settings-only attach rewritten from done to refused is reversed, not dro
   }
 })
 
-test('the prior-done bit survives repeated failed rewrites, and a key that never applied anything is still dropped (LLP 0247)', async () => {
+test('the prior-done bit survives repeated failed rewrites, and a key that never applied anything is still dropped (LLP 0250)', async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {
     let phase = 'attach'

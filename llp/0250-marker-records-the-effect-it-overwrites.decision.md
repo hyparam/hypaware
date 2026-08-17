@@ -1,4 +1,4 @@
-# LLP 0247: A terminal marker rewrite records the effect it overwrites
+# LLP 0250: A terminal marker rewrite records the effect it overwrites
 
 **Type:** Decision
 **Status:** Accepted
