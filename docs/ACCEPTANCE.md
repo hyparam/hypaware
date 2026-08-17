@@ -612,7 +612,8 @@ procedure gates, sections 1, 4 and 6),
    mode migration, not merely left stale)
    ([LLP 0232](../llp/0232-claude-attaches-by-proxy.decision.md)
    #mode-migration). `NODE_EXTRA_CA_CERTS` must point at
-   `~/.hyp/hypaware/tls/ca.crt` (or `$HYP_HOME/hypaware/tls/ca.crt`).
+   `~/.hyp/hypaware/tls/ca-cert.pem` (or
+   `$HYP_HOME/hypaware/tls/ca-cert.pem`).
 
 3. Confirm the launchd environment, respecting the terminal caveat: only
    processes launchd starts **after** the `setenv` see the variable, and a
@@ -684,7 +685,8 @@ procedure gates, sections 1, 4 and 6),
    ```
 
    Pass condition: the text output has a `proxy trust:` block naming the CA
-   fingerprint, `login keychain: trusted`, and `launchd env: set`; the JSON
+   fingerprint, `login keychain: trusted`, and
+   `launchd env: NODE_USE_SYSTEM_CA=1 set`; the JSON
    carries the same three facts as `ca_fingerprint`, `ca_trusted: true`, and
    `launchd_env_set: true`
    ([LLP 0245#status](../llp/0245-proxy-mode-capture.design.md#status),
@@ -776,15 +778,26 @@ procedure gates, sections 1, 4 and 6),
   for `false` (an untrusted CA is exactly the state that leaves capture
   working and Remote Control inbound broken, per
   [LLP 0245#failure-modes](../llp/0245-proxy-mode-capture.design.md#failure-modes)).
-  If both are clean, this may be the LLP 0236 canary: an upstream Bun
+  If both are clean, and the refusal names the *account* rather than the base
+  URL ("Remote Control environments are not available for your account"), it
+  is the absolute-form regression, not the trust story: the bridge client
+  sends absolute-form requests straight at the proxy port and the gateway
+  must route them by the host the request line names
+  ([LLP 0246](../llp/0246-remote-control-absolute-form-requests.issue.md),
+  [LLP 0247](../llp/0247-absolute-form-third-front-door.decision.md)).
+  Otherwise this may be the LLP 0236 canary: an upstream Bun
   behaviour change silently breaking Remote Control's trust-store lookup is
   out of this design's control; file it against claude-code#75050 rather
   than against this procedure.
 - Step 4 shows no new rows at all: confirm `proxy_mode_error` is absent from
-  `hyp status --json | jq '.sources'` (a CA-preparation failure at boot
-  degrades the gateway to reverse-proxy-only, so an attached proxy-mode
-  client's traffic never gets terminated); confirm you fully quit and
-  reopened Claude Code so it re-read `settings.json`.
+  the gateway source's details in the daemon status file, which is where the
+  source publishes it (`hyp daemon status --json | jq '.sources[] |
+  select(.plugin == "@hypaware/ai-gateway") | .details'`; note `hyp status
+  --json`'s own `.sources` carries only name, plugin and state, not the
+  details block). A CA-preparation failure at boot degrades the gateway to
+  reverse-proxy-only, so an attached proxy-mode client's traffic never gets
+  terminated. Then confirm you fully quit and reopened Claude Code so it
+  re-read `settings.json`.
 - Step 6 finds the CA no longer trusted, or the `tls/` directory gone, right
   after a plain `hyp detach claude` (no `--purge`): this is the LLP 0238
   regression to watch for specifically, since keeping the CA and trust

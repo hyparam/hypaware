@@ -5,8 +5,8 @@
 **Systems:** Gateway, Sources, Config, Plugins, Privacy, Core, Daemon
 **Generated-by:** neutral
 **Related:** LLP 0231, LLP 0232, LLP 0233, LLP 0234, LLP 0235, LLP 0236,
-LLP 0237, LLP 0238, LLP 0239, LLP 0044, LLP 0045, LLP 0114, LLP 0192,
-LLP 0206
+LLP 0237, LLP 0238, LLP 0239, LLP 0246, LLP 0247, LLP 0044, LLP 0045,
+LLP 0114, LLP 0192, LLP 0206
 
 > Technical design for the proxy-mode capture stack the accepted RFC
 > LLP 0231 asked for: Claude Code routed through the gateway with
@@ -28,7 +28,7 @@ is the implementation design that binds those decisions to the tree.
 
 The design is realized on `master` by three commits: `fa701a7e` (#782, the
 transport, aperture, CA and attach), `d0f7c4ad` (#792, the status and trust
-reporting surface), and the rollout work covered separately by LLP 0246.
+reporting surface), and the rollout work covered separately by LLP 0251.
 File paths and function names below are verified against that tree; the
 tests named in section 7 exist and gate it. What this document adds to the
 corpus is the request-level design of record: the one place the whole
@@ -37,12 +37,12 @@ above.
 
 This change set deliberately excludes who *turns proxy mode on*. Fresh
 install composition and the existing-install migration are LLP 0242's
-problem and are designed in LLP 0246, which depends on this change set.
+problem and are designed in LLP 0251, which depends on this change set.
 
 ## 1. Data flow, end to end {#data-flow}
 
 1. Attach writes `env.HTTPS_PROXY = http://127.0.0.1:<port>` and
-   `env.NODE_EXTRA_CA_CERTS = <state root>/tls/ca.crt` into
+   `env.NODE_EXTRA_CA_CERTS = <state root>/tls/ca-cert.pem` into
    `~/.claude/settings.json`. The base URL is untouched, so Claude Code's
    first-party predicate stays true on its own terms (LLP 0232).
 2. Claude Code opens `CONNECT api.anthropic.com:443` against the gateway's
@@ -173,6 +173,17 @@ the gateway kept reverse-proxying.
 `hypaware-core/plugins-workspace/ai-gateway/src/config.js` reads the
 switch: `proxy_mode` is on only when the config field is literally `true`
 (LLP 0233 #proxy-mode-is-explicit), and compiles `upstream_proxy`.
+
+One front door post-dates this design's audit and is described here only so
+the map is complete: Claude Code's Remote Control bridge sends absolute-form
+plaintext requests straight at the proxy port rather than tunnelling them,
+and until LLP 0246/0247 (landed as #797) the gateway routed them by pathname
+alone and answered a local 404 that the client misread as an account
+limitation. Absolute-form is now a third front door, routed by the host the
+request line names through `matchUpstreamByHost` and recorded under the same
+per-path anchor. Nothing above changes; it is the reason the acceptance
+procedure's Remote Control step passes on current `master`, so a reader
+diagnosing that step needs LLP 0247 as well as LLP 0237 and LLP 0239.
 
 ## 4. Claude attach: `@hypaware/claude` {#claude-attach}
 

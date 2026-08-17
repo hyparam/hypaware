@@ -55,7 +55,8 @@ every file, symbol and test the design names against that tree:
   `test/plugins/ai-gateway-connect-front-door.test.js`,
   `ai-gateway-proxy-mode.test.js`, `ai-gateway-proxy-routing.test.js`,
   `claude-settings-proxy-attach.test.js`, plus the rollout-era
-  `attach-proxy-migration.test.js` and `gateway-proxy-enable.test.js`).
+  `test/core/attach-proxy-migration.test.js` and
+  `test/core/gateway-proxy-enable.test.js`).
   The `gateway_claude_capture` hermetic smoke runs green;
   `claude_attach_detach` and `client_attach_idempotent` flows exist.
 - **Annotations**: sixteen source files already carry `@ref LLP 0232`
@@ -89,7 +90,7 @@ Two, both documentation:
 ## Out of scope {#out-of-scope}
 
 Who turns proxy mode on (fresh-install composition, existing-install
-migration) is LLP 0242's problem, was designed in LLP 0246 per the design's
+migration) is LLP 0242's problem, was designed in LLP 0251 per the design's
 section 0, and in fact already landed on `master` as #794; it belongs to
 its own change set either way. Codex stays base-URL (RFC 0231). The
 `upstream_proxy` field-testing question and claude-code#75050 are recorded
