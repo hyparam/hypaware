@@ -819,9 +819,13 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * @returns {Promise<void>}
  */
 async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
-  // `hyp attach all` never prompts mid-run, and a dry run changes nothing,
-  // same posture as maybeInteractiveEnableAttach above.
-  if (parsed.client === 'all' || parsed.dryRun) return
+  // A dry run changes nothing and promises nothing, so it says nothing.
+  // `hyp attach all` never prompts mid-run either (same posture as
+  // maybeInteractiveEnableAttach above), but it does not return here: it
+  // falls through to the one-line pointer below, because LLP 0244
+  // #non-interactive owes every non-migrating attach shape the line naming
+  // what was skipped and the command that migrates.
+  if (parsed.dryRun) return
 
   const catalog = await buildAttachPluginCatalog(ctx)
   const descriptor = catalog.pickerDescriptors.get(name)
@@ -855,7 +859,16 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | undefined} */
   let layered
   try {
-    layered = await resolveLayeredConfigFromDisk({ stateRoot: obsEnv.stateDir, configPath })
+    // Same metadata the accept path hands `enableGatewayProxyMode`, so the
+    // two resolutions of the same layers can never disagree about validity.
+    // (Central *detection* reads the loaded central document, which needs no
+    // metadata; the metadata keeps the merged `effective` view honest.)
+    layered = await resolveLayeredConfigFromDisk({
+      stateRoot: obsEnv.stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
   } catch {
     // Unresolvable layers prove nothing; fall through to the local file view.
   }
@@ -870,7 +883,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     return
   }
 
-  if (parsed.json || !isTty(ctx.stdin)) {
+  if (parsed.client === 'all' || parsed.json || !isTty(ctx.stdin)) {
     ctx.stderr.write(
       `note: this install attaches ${name} by base URL; run 'hyp attach ${name}' in an ` +
       `interactive terminal to switch it to proxy mode\n`

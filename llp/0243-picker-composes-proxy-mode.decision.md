@@ -43,10 +43,13 @@ the fold, so it writes the key literally too.
 
 ### The user's key wins {#user-key-wins}
 
-Composition owns the gateway's `upstreams` outright, but `proxy_mode` merges
-like every other per-plugin key (LLP 0183 carry-forward): a hand-written
-`proxy_mode: false` in the existing config survives a reconfigure. Declining
-the default is one explicit key, and it stays declined.
+Composition owns the gateway's `upstreams` outright, but `proxy_mode` belongs
+to the prior entry entirely on a reconfigure (LLP 0183 carry-forward): a
+hand-written `proxy_mode: false` survives, and so does the key's *absence* -
+an existing gateway entry without the key stays without it, because a
+reconfigure is a picker run, not the LLP 0244 migration verb. Declining the
+default is one explicit key, and it stays declined; the composed default
+applies only where composition creates the gateway entry.
 
 ### Still explicit, still consented {#still-explicit}
 

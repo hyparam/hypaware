@@ -820,11 +820,13 @@ export interface ClientEnableResult {
 export interface GatewayProxyEnableResult {
   ok: boolean
   /**
-   * `enabled`: the key was written (and, with a daemon installed, the
-   * restart/bind/CA steps report below). `already`: the effective config has
-   * the key, nothing to do. `central_managed`: the gateway block comes from
-   * the central layer, so the local CLI declines to write. `no_gateway`: no
-   * layer has a gateway entry. `failed`: see `failedStep`/`message`.
+   * `enabled`: the key was written and every step that applied succeeded.
+   * `already`: the effective config has the key, nothing to do.
+   * `central_managed`: the gateway block comes from the central layer, so
+   * the local CLI declines to write. `no_gateway`: no layer has a gateway
+   * entry. `failed`: a step broke (see `failedStep`/`message`); when
+   * `steps.write` is `ok` the key nonetheless persisted on disk, with
+   * `backupPath` naming the pre-write copy.
    */
   outcome: 'enabled' | 'already' | 'central_managed' | 'no_gateway' | 'failed'
   /** The local config layer the write targeted. */

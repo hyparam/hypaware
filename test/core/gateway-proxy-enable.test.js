@@ -241,7 +241,9 @@ test('a bind timeout fails the wait step; the write persists', async () => {
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'failed', 'a post-write failure does not keep reporting enabled')
   assert.equal(result.failedStep, 'wait')
+  assert.equal(result.steps.write, 'ok', 'the persisted write stays visible through the steps')
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.equal(after.plugins[0].config.proxy_mode, true)
 })
@@ -265,6 +267,58 @@ test('a CA timeout fails the ca step even after a clean bind', async () => {
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'failed', 'a post-write failure does not keep reporting enabled')
   assert.equal(result.failedStep, 'ca')
   assert.deepEqual(result.steps, { write: 'ok', restart: 'ok', wait: 'ok', ca: 'failed' })
+})
+
+// LLP 0244's safety promise leans on failure being reported per step, so the
+// two remaining fallible steps get pins too: a restart that throws, and a
+// write the filesystem refuses.
+test('a restart that throws fails the restart step with the write persisted', async () => {
+  const { hypHome, configPath } = await stageHome()
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } }],
+  }, null, 2) + '\n')
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: true }),
+    restartDaemon: async () => {
+      throw new Error('launchctl kickstart exploded')
+    },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'failed')
+  assert.equal(result.failedStep, 'restart')
+  assert.match(result.message ?? '', /launchctl kickstart exploded/)
+  assert.deepEqual(result.steps, { write: 'ok', restart: 'failed', wait: 'n/a', ca: 'n/a' })
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.equal(after.plugins[0].config.proxy_mode, true, 'the write persisted and the steps say so')
+})
+
+test('a write the filesystem refuses fails the write step and changes nothing', async (t) => {
+  const { hypHome, configPath } = await stageHome()
+  const before = JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } }],
+  }, null, 2) + '\n'
+  await fs.writeFile(configPath, before)
+  const configDir = path.dirname(configPath)
+  await fs.chmod(configDir, 0o555)
+  t.after(() => fs.chmod(configDir, 0o755))
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: true }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'failed')
+  assert.equal(result.failedStep, 'write')
+  assert.deepEqual(result.steps, { write: 'failed', restart: 'n/a', wait: 'n/a', ca: 'n/a' })
+  await fs.chmod(configDir, 0o755)
+  assert.equal(await fs.readFile(configPath, 'utf8'), before, 'the config on disk is untouched')
 })

@@ -289,6 +289,10 @@ export async function enableGatewayProxyMode({
  * @returns {GatewayProxyEnableResult}
  */
 function fail(result, span, log, step, errorKind, message) {
+  // A post-write failure must not keep reporting `enabled`: `outcome` names
+  // how the call ended, and `steps.write === 'ok'` (plus `backupPath`) is
+  // what tells the caller the key nonetheless persisted on disk.
+  result.outcome = 'failed'
   result.steps[step] = 'failed'
   result.failedStep = step
   result.message = message

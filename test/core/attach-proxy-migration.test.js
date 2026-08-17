@@ -241,7 +241,11 @@ test('--dry-run: no question, no note, no write', async () => {
   })
 })
 
-test("'hyp attach all' never asks the migration question mid-run", async () => {
+// LLP 0244 #non-interactive: `hyp attach all` never prompts mid-run, but it
+// is not silent either - it owes the one-line pointer naming the command
+// that migrates, or the habit of attaching everything at once means an old
+// install never learns the migration exists.
+test("'hyp attach all' never asks the migration question mid-run, but points at it", async () => {
   await withTempHome(async (home) => {
     writeGatewayConfig(home)
     const before = readFileSync(localConfigPath(home), 'utf8')
@@ -249,6 +253,34 @@ test("'hyp attach all' never asks the migration question mid-run", async () => {
     const code = await runAttach(['all'], ctx)
     assert.equal(code, 0, stderr.text())
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
+    assert.match(stderr.text(), /attaches claude by base URL/)
+    assert.match(stderr.text(), /run 'hyp attach claude' in an interactive terminal/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+  })
+})
+
+// The catch that keeps LLP 0244's safety promise: a migration failure never
+// fails the attach. The write step is driven into a real filesystem refusal;
+// the attach must still land in base-URL mode with exit 0 and a warning that
+// names the backup state.
+test('a failed accepted migration warns and the attach still succeeds', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    const { ctx, stdout, stderr } = makeCtx({ home, answer: 'y' })
+    const hypDir = path.join(home, '.hyp')
+    const { chmodSync } = await import('node:fs')
+    chmodSync(hypDir, 0o555)
+    try {
+      const code = await runAttach(['claude'], ctx)
+      assert.equal(code, 0, 'the attach exit code is untouched by the migration failure')
+      assert.match(stderr.text(), /could not switch to proxy mode/)
+      assert.doesNotMatch(stdout.text(), /proxy mode enabled/)
+      const attached = JSON.parse(readFileSync(path.join(home, 'claude-attached.json'), 'utf8'))
+      assert.equal(attached.endpoint, 'http://127.0.0.1:60680', 'base-URL attach still ran')
+    } finally {
+      chmodSync(hypDir, 0o755)
+    }
+    assert.equal(readFileSync(localConfigPath(home), 'utf8'), before, 'the config on disk is untouched')
   })
 })

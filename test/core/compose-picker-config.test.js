@@ -507,6 +507,51 @@ test("a user's `enabled: false` on a rider survives a reconfigure", async () => 
   assert.equal(gateway.enabled, undefined, 'and is not switched off with it')
 })
 
+// LLP 0243 #user-key-wins: the prior gateway entry owns `proxy_mode`
+// entirely on a reconfigure. Declining the default is one explicit key,
+// and it stays declined; this must not depend on the generic prior-wins
+// spread staying generic, so it gets its own pin.
+// @ref LLP 0243#user-key-wins [tests]: a hand-written `proxy_mode: false` survives a reconfigure while upstreams recompose
+test('a hand-written `proxy_mode: false` survives a reconfigure', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) =>
+    p.name === '@hypaware/ai-gateway'
+      ? { ...p, config: { ...(p.config ?? {}), proxy_mode: false } }
+      : p
+  )
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway?.config)
+  assert.equal(gateway.config.proxy_mode, false, 'the decline stays declined')
+  assert.deepEqual(gateway.config.upstreams, [ANTHROPIC], 'while upstreams stay composer-owned')
+})
+
+// The other half of #user-key-wins: absence is a value too. An existing
+// gateway entry without the key gains it only through the LLP 0244
+// migration; a reconfigure is a picker run, not the migration verb.
+// @ref LLP 0243#user-key-wins [tests]: an existing gateway entry without `proxy_mode` stays without it on a reconfigure
+test('an existing gateway entry without `proxy_mode` does not gain it on a reconfigure', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) => {
+    if (p.name !== '@hypaware/ai-gateway') return p
+    const { proxy_mode: _dropped, ...rest } = p.config ?? {}
+    return { ...p, config: rest }
+  })
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway?.config)
+  assert.ok(!('proxy_mode' in gateway.config), 'absence carries forward like a value')
+
+  // A fresh compose (no existing gateway entry) still gets the default.
+  const fresh = composeWithRiders(catalog, ['claude'])
+  const freshGateway = (fresh.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.equal(freshGateway?.config?.proxy_mode, true, 'the composed default still applies to fresh entries')
+})
+
 // The exception above is scoped to riders. A *picked* plugin still loses a
 // stale `enabled: false`, because ticking its row is what asks for it: the
 // original reason `mergePlugin` deletes the flag at all.

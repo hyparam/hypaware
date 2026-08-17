@@ -47,8 +47,10 @@ dialog (LLP 0237) and can still be refused independently.
 The accepted switch reuses LLP 0174's enable steps: guarded local write (LLP
 0031 backup), daemon restart, bind wait, each reported per step. The write
 differs from adapter enablement in one way: it sets a key on the *existing*
-local `@hypaware/ai-gateway` entry (creating the entry only when no layer
-provides one) rather than appending a missing plugin. After the bind wait it
+local `@hypaware/ai-gateway` entry rather than appending a missing plugin,
+and it refuses (`no_gateway`) when no layer provides one - a config with no
+gateway anywhere has a bigger problem than proxy mode, and inventing an
+entry is not this verb's job. After the bind wait it
 also waits for the CA file, because proxy attach preflights on the CA's
 existence (LLP 0232 #proxy-attach-preflight), and attaching before the
 gateway has minted it would silently produce another base-URL attach.
@@ -64,8 +66,10 @@ in whatever mode the fleet config yields. Same shape as LLP 0174
 ### Non-interactive keeps today's behavior {#non-interactive}
 
 A non-TTY attach (scripts, the daemon reconciler, `--json` pipelines) never
-prompts and never migrates. It attaches exactly as today and emits one
-warning naming the interactive command that migrates. Migration is a
+prompts and never migrates, and neither does `hyp attach all`, which never
+asks questions mid-run. Each attaches exactly as today and emits one
+warning naming the interactive command that migrates. A dry run is the one
+silent shape: it changes nothing and promises nothing. Migration is a
 one-time, human decision; burying it in automation is how a machine ends up
 with a CA nobody remembers granting.
 
