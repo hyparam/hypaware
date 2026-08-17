@@ -70,9 +70,8 @@ re-runs that one command at each login. What it runs is `/bin/launchctl`
 itself, once, which sets the variable and exits: there is no resident
 process, no HypAware code in it, and nothing is sent anywhere. It is still a
 login item on your machine, and a session-wide variable that other Node
-programs will also read. `hyp detach
-claude` unsets the variable and removes the agent, as do
-`hyp detach claude --purge` and `hyp daemon uninstall`.
+programs will also read. `hyp detach claude` unsets the variable and removes
+the agent, as do `hyp detach claude --purge` and `hyp daemon uninstall`.
 
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
 permitted to vouch for, whether the keychain still trusts it, and whether

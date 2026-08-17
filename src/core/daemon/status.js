@@ -30,7 +30,7 @@ import {
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
-import { readLocalCaInfo } from '../tls/ca.js'
+import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1213,15 +1213,12 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * config-derived guess that could drift from it.
  *
  * That last property is also why the hosts are the one field here that does
- * need sanitizing (LLP 0225): a `dNSName` is an IA5String read straight out
- * of whatever certificate sits at the CA path and decoded as latin1, with no
- * charset or length check anywhere on the way (`readNameConstraints`), so a
- * foreign or damaged certificate there can carry an `ESC` run or a newline
- * into a line `hyp status` prints. Our own mint never produces one, but the
- * "not host-limited" arm of the renderer exists precisely because a foreign
- * certificate at that path is reachable, and a status label is exactly the
- * case `sanitizeLabel` is the policy for. Stripped at collection, like every
- * other label in this file, so `--json` carries what was printed.
+ * need sanitizing (LLP 0225): they are bytes off disk rather than strings we
+ * wrote, so a foreign or damaged certificate at the CA path can carry an
+ * `ESC` run, a newline, or ten thousand subtrees into a line `hyp status`
+ * prints. `displayableCaHosts` is that policy, shared with the attach dialog
+ * that names the same grant, and applied here at collection like every other
+ * label in this file so `--json` carries exactly what was printed.
  *
  * @param {object} args
  * @param {NodeJS.Platform} args.platform
@@ -1260,13 +1257,7 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
     launchdEnvSet = null
   }
 
-  // One entry in, one entry out: a host that sanitizes away is still a
-  // subtree the grant covers, so it is named as unprintable rather than
-  // dropped, which would understate the very thing this field exists to
-  // state.
-  const hosts = ca.hosts.map((host) => sanitizeLabel(host) ?? '(unprintable dNSName)')
-
-  return { caFingerprint: ca.fingerprint, hosts, trusted, launchdEnvSet }
+  return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
 }
 
 /**

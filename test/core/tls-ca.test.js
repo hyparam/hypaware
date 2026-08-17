@@ -12,6 +12,7 @@ import {
   caPaths,
   createLeafStore,
   deleteLocalCa,
+  displayableCaHosts,
   ensureLocalCa,
   readLocalCaInfo,
   waitForLocalCa,
@@ -230,4 +231,66 @@ test('waitForLocalCa reports not-ready at the deadline when no CA ever appears',
 
   assert.deepEqual(result, { ready: false })
   assert.equal(polls, 4, 'exactly the polls the deadline allows, then it stops')
+})
+
+// `LocalCaInfo.hosts` is the only part of a read-back CA that is bytes off
+// disk: `readNameConstraints` hands back whatever the DER's permitted subtrees
+// held, decoded as latin1, with no charset, length or count check. Two
+// surfaces put those bytes in front of a person (`hyp status`, and the line
+// the attach dialog writes just before macOS raises its password prompt), so
+// the policy that makes them safe is shared and lives here.
+// @ref LLP 0225#scope [tests]: the label-plane surfaces 0225 left to argue for themselves strip, and say what they stripped
+test('displayableCaHosts leaves an ordinary permitted set exactly as it is', () => {
+  const hosts = ['api.anthropic.com', 'api.openai.com', 'chatgpt.com']
+  assert.deepEqual(displayableCaHosts(hosts), hosts)
+  assert.deepEqual(displayableCaHosts([]), [])
+})
+
+test('displayableCaHosts strips bytes that would drive a terminal', () => {
+  assert.deepEqual(
+    displayableCaHosts(['api.anthropic.com', `evil[2K\nforged.example`]),
+    ['api.anthropic.com', 'evil[2Kforged.example']
+  )
+})
+
+// Stripped, never dropped: both callers exist to state how wide a trust grant
+// is, and an entry that vanished would understate it by exactly one subtree.
+test('displayableCaHosts names a host that sanitizes away rather than losing it', () => {
+  const shown = displayableCaHosts(['', 'api.anthropic.com'])
+  assert.equal(shown.length, 2)
+  assert.equal(shown[0], '(unprintable dNSName)')
+  assert.equal(shown[1], 'api.anthropic.com')
+})
+
+// The third way one of these values is hostile, after control bytes and
+// length: count. Nothing between the certificate file and the terminal bounds
+// how many subtrees it carries, and a list too long to read is a list that
+// hides what it says.
+test('displayableCaHosts bounds the list and says how much it left out', () => {
+  const many = Array.from({ length: 30 }, (_, i) => `h${i}.example`)
+  const shown = displayableCaHosts(many)
+
+  assert.equal(shown.length, 25, '24 named hosts plus the count of the rest')
+  assert.deepEqual(shown.slice(0, 24), many.slice(0, 24))
+  assert.equal(shown[24], '(+6 more dNSName constraints)')
+  // A list that exactly fills the bound is not truncated, so no reader is
+  // told something was withheld when nothing was.
+  assert.deepEqual(displayableCaHosts(many.slice(0, 24)), many.slice(0, 24))
+})
+
+// The bound has to survive a real certificate, not just an array: the same
+// hosts have to come back out of the DER for `hyp status` to be reading the
+// grant rather than a copy of the config.
+test('a CA carrying more subtrees than the bound reports them bounded', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  const hosts = Array.from({ length: 30 }, (_, i) => `h${i}.example`)
+  await ensureLocalCa({ stateRoot, hosts })
+
+  const info = await readLocalCaInfo({ stateRoot })
+  assert.equal(info?.hosts.length, 30, 'the certificate itself keeps every constraint')
+  const shown = displayableCaHosts(/** @type {string[]} */ (info?.hosts))
+  assert.equal(shown.length, 25)
+  assert.equal(shown[24], '(+6 more dNSName constraints)')
 })

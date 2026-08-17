@@ -10,7 +10,7 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
-import { defaultStateRoot, readLocalCaInfo } from '../../../../src/core/tls/ca.js'
+import { defaultStateRoot, displayableCaHosts, readLocalCaInfo } from '../../../../src/core/tls/ca.js'
 import { installCaTrust, isCaTrusted } from '../../../../src/core/tls/darwin_trust.js'
 import { installLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
@@ -539,8 +539,15 @@ async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
     // Name every host the trust will cover, so the grant is informed - the
     // constraint set is wider than the one provider being attached.
     // @ref LLP 0238#full-provider-constraints [constrained-by]: the dialog context must name all permitted hosts
+    //
+    // Through `displayableCaHosts`, because these are the certificate's own
+    // subtree bytes and this is the worst line on the product to let them
+    // drive: it is written immediately before a macOS password dialog, so an
+    // `ESC` run or a newline in a `dNSName` could repaint the sentence a user
+    // is about to grant trust on the strength of, and forge a narrower set
+    // than the one they would actually be granting.
     stdout.write(
-      `  Requesting keychain trust for the HypAware Local CA (limited to: ${hosts.join(', ')}).\n` +
+      `  Requesting keychain trust for the HypAware Local CA (limited to: ${displayableCaHosts(hosts).join(', ')}).\n` +
       '  macOS will ask for your login password.\n'
     )
     const install = await installCaTrust({ certPath })
