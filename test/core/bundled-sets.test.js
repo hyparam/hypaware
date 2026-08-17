@@ -12,6 +12,12 @@ import { V1_BUNDLED_PLUGIN_ALLOWLIST, V1_EXCLUDED_FROM_DEFAULT } from '../../src
 // `V1_EXCLUDED_FROM_DEFAULT`. Coverage (the union spanning the bundled
 // workspace) does no work here; only disjointness keeps those two reads in
 // agreement (issue #761, follow-up to PR #757's round-2 review).
+//
+// `composedRiders` in hypaware-core/smoke/flows/walkthrough_picker_to_first_query.js
+// rests on this: it reads only `loaded` and expects that set to agree with
+// what `loadPickerCatalog` writes. Break disjointness and that smoke goes red
+// on a plugin the install never receives, pointing at its golden rather than
+// at the two-list edit that caused it. This test names the cause instead.
 test('the default-activation allowlist and the excluded set are disjoint', () => {
   const overlap = [...V1_BUNDLED_PLUGIN_ALLOWLIST].filter((name) => V1_EXCLUDED_FROM_DEFAULT.has(name))
   assert.deepEqual(

@@ -580,8 +580,13 @@ export async function run({ harness, expect }) {
  *
  * Reading only `loaded` keeps the default-activation boundary without
  * restating it: it agrees with the cut `ridersInDefaultSet` makes, because
- * the allowlist and the excluded set together cover every bundled plugin and
- * `loadPickerCatalog` reads only those two buckets.
+ * the allowlist and the excluded set are disjoint, so nothing in `loaded` is
+ * something that filter drops. A plugin in neither list is invisible to both
+ * sides: it is not in `loaded`, and `loadPickerCatalog` reads only those two
+ * buckets. Disjointness is guarded by `test/core/bundled-sets.test.js`; it is
+ * the whole of what this agreement rests on, because `discoverBundledPlugins`
+ * checks the allowlist before the exclude set, so a name in both would stay in
+ * `loaded` while `ridersInDefaultSet` drops it.
  *
  * @param {string[]} picked  plugin names the picker composed from its rows
  * @returns {Promise<string[]>}
