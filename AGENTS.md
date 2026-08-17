@@ -171,6 +171,7 @@ src/
     cli/                # dispatch, walkthrough, core_commands
     config/             # v2 schema, validator
     daemon/             # platform installers (launchd / systemd) + lifecycle
+    otlp/               # shared OTLP http/json listener machinery
     plugin_install/     # resolver, fetch, lock, update_check
     sinks/              # cron driver + encoder utility
 hypaware-core/
