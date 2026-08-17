@@ -89,6 +89,13 @@ test('the finale names a still-attached client the new config no longer collects
   const out = stdout.text()
   assert.match(out, /codex/, out)
   assert.match(out, /hyp detach --client codex/, out)
+  // Exactly once. This entry point writes only its short run summary after the
+  // finale, so the warning is still on screen when the run ends and repeating
+  // it (the shape an echo from the shared `writeWalkthroughRunSummary` would
+  // take) would print the same paragraph twice within a few lines of itself.
+  // @ref LLP 0230#repeat-at-the-end [tests]: the repeat belongs to the caller that buried the first print, and this one does not
+  assert.equal(out.match(/hyp detach --client codex/g)?.length, 1, out)
+  assert.equal(out.match(/Still attached, no longer collected/g)?.length, 1, out)
 })
 
 test('a picked client that stays configured draws no stranded-attach warning', async () => {
