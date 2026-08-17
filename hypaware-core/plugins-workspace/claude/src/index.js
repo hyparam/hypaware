@@ -14,14 +14,20 @@ import { defaultStateRoot, readLocalCaInfo } from '../../../../src/core/tls/ca.j
 import { installCaTrust, isCaTrusted } from '../../../../src/core/tls/darwin_trust.js'
 import { installLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { MODE_BASE_URL, MODE_PROXY, attach, defaultSettingsPath } from './settings.js'
+import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath } from './settings.js'
+import { resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 import { runClaudeClassifyHook } from './classify_hook.js'
-import { CLAUDE_TELEMETRY_SOURCE, createStartClaudeTelemetrySource } from './telemetry/source.js'
+import {
+  CLAUDE_TELEMETRY_SOURCE,
+  createStartClaudeTelemetrySource,
+  resolveAttachTelemetryPort,
+} from './telemetry/source.js'
+import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -174,6 +180,7 @@ export async function activate(ctx) {
           dry_run: attachCtx.dryRun === true,
         },
         async (span) => {
+          const obsEnv = readObservabilityEnv(ctx.env)
           if (attachCtx.dryRun) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
@@ -187,8 +194,17 @@ export async function activate(ctx) {
               port,
               changed: false,
               prevValue: undefined,
-              mode: dryRunCa ? MODE_PROXY : MODE_BASE_URL,
+              mode: dryRunCa ? MODE_PROXY : MODE_OTEL,
               caCertPath: dryRunCa?.certPath,
+              ...(dryRunCa
+                ? {}
+                : {
+                    telemetryPort: resolveAttachTelemetryPort({
+                      stateRoot: obsEnv.stateDir,
+                      config: ctx.config,
+                    }),
+                    spoolDir: claudeBodySpoolDir(obsEnv.hypHome),
+                  }),
             })
             return
           }
@@ -198,16 +214,55 @@ export async function activate(ctx) {
             // is exactly when a machine-local CA exists. Reading it here rather
             // than from config keeps attach honest: the mode it writes is the
             // mode the gateway is serving, not the one someone asked for.
+            // (A proxy-mode install migrating to `otel` is LLP 0245's ticket
+            // #807, not this branch.)
             // @ref LLP 0232#proxy-attach-preflight [implements]
             const ca = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
+
+            // Everything the `otel` env block names, resolved before the
+            // settings write so the write is one atomic decision. The floor
+            // check itself lives in attach(): it refuses before any I/O, so a
+            // too-old Claude Code leaves the settings byte-identical.
+            // @ref LLP 0258#version-floor [implements]: the probed version is what attach refuses on; unknown proceeds
+            /** @type {string | undefined} */
+            let spoolDir
+            /** @type {number | undefined} */
+            let telemetryPort
+            /** @type {string | undefined} */
+            let claudeVersion
+            if (!ca) {
+              claudeVersion = await resolveClaudeCodeVersion(ctx.env)
+              telemetryPort = resolveAttachTelemetryPort({
+                stateRoot: obsEnv.stateDir,
+                config: ctx.config,
+              })
+              spoolDir = claudeBodySpoolDir(obsEnv.hypHome)
+            }
+
             const result = await attach({
               port,
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
               binPath: resolveHookBinPath(ctx.env),
-              ...(ca ? { mode: MODE_PROXY, caCertPath: ca.certPath } : {}),
+              // No CA means no proxy-mode gateway to route through, and that is
+              // the whole decision: `otel` needs no daemon at all at attach
+              // time, so it is the default rather than the fallback. The base
+              // URL is never written and no proxy keys appear, which is what
+              // keeps Remote Control's first-party predicate true with no
+              // override keys.
+              // @ref LLP 0258#settings-env [implements]: one settings write is the entire attach
+              // @ref LLP 0258#nothing-else [implements]: no keychain, no launchctl setenv, no LaunchAgent on this path
+              ...(ca
+                ? { mode: MODE_PROXY, caCertPath: ca.certPath }
+                : { mode: MODE_OTEL, telemetryPort, spoolDir, claudeVersion }),
             })
+            // After the settings write, not before: a floor refusal must leave
+            // nothing behind, and Claude Code only starts writing bodies once a
+            // session launches with the new settings. Created owner-only here
+            // so raw prompts never pass through a default-mode directory.
+            // @ref LLP 0253#spool-location [implements]
+            if (spoolDir !== undefined) await ensureClaudeBodySpool(spoolDir)
             // Malformed `env` / `hooks` blocks attach rebuilt after backing the
             // displaced value up into the marker (LLP 0163). Reported on the
             // span, in the log, and to the user - the whole point of the
@@ -271,8 +326,10 @@ export async function activate(ctx) {
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
                 : undefined,
-              mode: ca ? MODE_PROXY : MODE_BASE_URL,
+              mode: ca ? MODE_PROXY : MODE_OTEL,
               caCertPath: ca?.certPath,
+              telemetryPort,
+              spoolDir,
               trust: trustState,
               launchdEnvSet,
               warnings,
@@ -615,8 +672,10 @@ async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
  *   port: number | undefined,
  *   changed: boolean,
  *   prevValue?: string,
- *   mode?: 'proxy' | 'base_url',
+ *   mode?: 'proxy' | 'base_url' | 'otel',
  *   caCertPath?: string,
+ *   telemetryPort?: number,
+ *   spoolDir?: string,
  *   trust?: 'granted' | 'already' | 'refused',
  *   launchdEnvSet?: boolean,
  *   warnings?: string[],
@@ -636,13 +695,15 @@ function writeAttachOutput(attachCtx, fields) {
     if (fields.port !== undefined) payload.port = fields.port
     if (fields.mode !== undefined) payload.mode = fields.mode
     if (fields.caCertPath !== undefined) payload.ca_cert_path = fields.caCertPath
+    if (fields.telemetryPort !== undefined) payload.telemetry_port = fields.telemetryPort
+    if (fields.spoolDir !== undefined) payload.spool_dir = fields.spoolDir
     if (fields.trust !== undefined) payload.keychain_trust = fields.trust
     if (fields.launchdEnvSet !== undefined) payload.launchd_env_set = fields.launchdEnvSet
     // Named, because `prev_value` alone does not say which key it belonged to
-    // and the two modes manage different ones.
+    // and each mode manages different ones.
     if (fields.prevValue !== undefined) {
       payload.prev_value = fields.prevValue
-      payload.prev_value_key = fields.mode === MODE_PROXY ? 'HTTPS_PROXY' : 'ANTHROPIC_BASE_URL'
+      payload.prev_value_key = takenOverKey(fields.mode)
     }
     // Echoed as an array, not folded into a string: the field exists so a
     // scripted caller can see *which* blocks were moved aside.
@@ -650,17 +711,30 @@ function writeAttachOutput(attachCtx, fields) {
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
     return
   }
-  // Name the key actually written. Proxy mode does not set a base URL at all,
-  // and reporting one is both wrong and the first thing a user would check when
-  // debugging why their own base URL is still in place.
-  const managedKey = fields.mode === MODE_PROXY ? 'HTTPS_PROXY' : 'ANTHROPIC_BASE_URL'
+  // Name the key actually written. Proxy and otel modes do not set a base URL
+  // at all, and reporting one is both wrong and the first thing a user would
+  // check when debugging why their own base URL is still in place.
+  const managedKey = takenOverKey(fields.mode)
   if (fields.dryRun) {
     attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${fields.settingsPath}\n`)
-    attachCtx.stdout.write(`  Would set ${managedKey} to the local gateway endpoint\n`)
+    attachCtx.stdout.write(
+      fields.mode === MODE_OTEL
+        ? `  Would set ${managedKey} to the local telemetry listener\n`
+        : `  Would set ${managedKey} to the local gateway endpoint\n`
+    )
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
-  if (fields.port !== undefined) {
+  if (fields.mode === MODE_OTEL) {
+    // The two values a user would check: where the events go, and where raw
+    // bodies land until the listener projects and deletes them.
+    if (fields.telemetryPort !== undefined) {
+      attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.telemetryPort}\n`)
+    }
+    if (fields.spoolDir !== undefined) {
+      attachCtx.stdout.write(`  OTEL_LOG_RAW_API_BODIES = file:${fields.spoolDir}\n`)
+    }
+  } else if (fields.port !== undefined) {
     attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
   }
   if (fields.mode === MODE_PROXY && fields.caCertPath !== undefined) {
@@ -685,5 +759,18 @@ function writeAttachOutput(attachCtx, fields) {
       'the change automatically.\n'
     )
   }
+}
+
+/**
+ * The env key each attach mode takes over: the one a displaced `prev_value`
+ * belonged to, and the one the human output leads with.
+ *
+ * @param {'proxy' | 'base_url' | 'otel' | undefined} mode
+ * @returns {'HTTPS_PROXY' | 'OTEL_EXPORTER_OTLP_ENDPOINT' | 'ANTHROPIC_BASE_URL'}
+ */
+function takenOverKey(mode) {
+  if (mode === MODE_PROXY) return 'HTTPS_PROXY'
+  if (mode === MODE_OTEL) return 'OTEL_EXPORTER_OTLP_ENDPOINT'
+  return 'ANTHROPIC_BASE_URL'
 }
 

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { Attr, getActiveSpan, withSpan } from '../../../../../src/core/observability/index.js'
+import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
 import { flattenClaudeTelemetryEvents } from './events.js'
@@ -273,6 +274,46 @@ async function bindWithFallback({ server, listen, log, state }) {
     state.listenFallbackFrom = listen.port
     return listenAndResolve(server, listen.host, 0, LISTENER_NAME)
   }
+}
+
+/**
+ * The listener port `otel`-mode attach writes into
+ * `env.OTEL_EXPORTER_OTLP_ENDPOINT`.
+ *
+ * Three rungs, in trust order. The running daemon's bound port wins: it is the
+ * only place the truth lives once the default-port fallback in
+ * {@link bindWithFallback} has moved the listener, and the source status is
+ * where that promise was made. With no live daemon, a configured fixed port is
+ * the address the operator stated. Otherwise the well-known default: the same
+ * port the next daemon start will try first, so an attach that ran before the
+ * first daemon start still points where the listener will appear. A configured
+ * `0` (dynamic) has no knowable port until a daemon publishes one, so it reads
+ * as unconfigured here.
+ *
+ * @ref LLP 0258#env-keys [constrained-by]: the endpoint's port must be the
+ *   listener's real one, or the whole env block captures nothing
+ * @param {{ stateRoot: string, config: unknown }} args
+ * @returns {number}
+ */
+export function resolveAttachTelemetryPort({ stateRoot, config }) {
+  const live = resolveLiveSourceListenPortFromStatus({
+    stateRoot,
+    sourceName: CLAUDE_TELEMETRY_SOURCE,
+  })
+  if (live !== undefined) return live
+
+  const raw = /** @type {Record<string, unknown>} */ (
+    config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  )
+  const telemetry = raw.telemetry
+  const slice = telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)
+    ? /** @type {Record<string, unknown>} */ (telemetry)
+    : {}
+  const portRaw = slice.listen_port
+  if (typeof portRaw === 'number' && Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535) {
+    return portRaw
+  }
+  return DEFAULT_TELEMETRY_PORT
 }
 
 /**

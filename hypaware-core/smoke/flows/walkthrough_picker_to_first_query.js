@@ -104,6 +104,10 @@ export async function run({ harness, expect }) {
   await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true })
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
+  // Pin the version the LLP 0258 floor check sees, so the init-driven attach
+  // never depends on whatever `claude` binary the machine running it carries.
+  const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
+  process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -430,10 +434,20 @@ export async function run({ harness, expect }) {
       realClaudeSettings?._hypaware?.port,
       (v) => v === 18521
     )
+    // `otel` attach (LLP 0258): the telemetry block is written and the base
+    // URL is not; the marker's port above is what carries the gateway
+    // endpoint for the drift check.
     expect.that(
-      'real init attach: claude base URL uses the default gateway endpoint',
-      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
-      (v) => v === 'http://127.0.0.1:18521'
+      'real init attach: the telemetry endpoint points at the loopback listener',
+      realClaudeSettings?.env?.OTEL_EXPORTER_OTLP_ENDPOINT,
+      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(v)
+    )
+    expect.that(
+      'real init attach: no base URL was written (mode=otel)',
+      realClaudeSettings,
+      (v) =>
+        v?._hypaware?.mode === 'otel' &&
+        !Object.hasOwn(v?.env ?? {}, 'ANTHROPIC_BASE_URL')
     )
 
     // ----- 7. Span + log assertions -----
@@ -548,6 +562,8 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
+    else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
     await echo.close()
   }
 }

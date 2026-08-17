@@ -471,6 +471,50 @@ export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
   return endpointFromListen(`${details.host}:${details.port}`)
 }
 
+/**
+ * Resolve a named listener source's live bound `listen_port` from the on-disk
+ * daemon status snapshot, behind the same daemon-liveness gate as
+ * {@link resolveLiveGatewayEndpointFromStatus}: a stale snapshot from a dead
+ * daemon is never handed back, and no port is ever fabricated.
+ *
+ * The generic sibling of the gateway resolver above, for sources that publish
+ * `details.listen_port` (the OTLP receiver, the Claude telemetry listener).
+ * The first consumer is `hyp attach claude` in `otel` mode: only the running
+ * daemon knows which port the listener actually bound (its configured default,
+ * or the ephemeral fallback when that port was taken), so the endpoint attach
+ * writes must come from here whenever a daemon is up.
+ *
+ * @param {{ stateRoot: string, sourceName: string }} args
+ * @returns {number | undefined}
+ */
+export function resolveLiveSourceListenPortFromStatus({ stateRoot, sourceName }) {
+  let pidEntry
+  try {
+    pidEntry = readPidFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  if (!pidEntry || !processIsAlive(pidEntry.pid)) return undefined
+
+  /** @type {DaemonStatus | null} */
+  let status
+  try {
+    status = readStatusFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  const list = Array.isArray(status?.sources) ? status.sources : []
+  const source = list.find((s) => s && s.name === sourceName)
+  const details = source && typeof source.details === 'object' && source.details !== null
+    ? /** @type {Record<string, unknown>} */ (source.details)
+    : undefined
+  const port = details?.listen_port
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return undefined
+  }
+  return port
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
