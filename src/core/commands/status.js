@@ -181,6 +181,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_attach: report.clients.map((c) => ({
       name: c.name,
       configured: c.configured,
+      // `attached` stays a boolean for every row so a consumer can keep
+      // pinning it; `attachable: false` is what says the boolean carries no
+      // information for this client (#544).
+      attachable: c.attachable !== false,
       attached: c.attached,
       ...(report.layered
         ? { provenance: report.layered.centralPlugins.includes(c.plugin) ? 'central' : 'local' }
@@ -374,7 +378,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
-      state.push(c.attached ? 'attached' : 'not attached')
+      // A client with no attach probe has no attach state to report: printing
+      // `not attached` for it invites a `hyp attach` that is a documented
+      // no-op and can never change the line (#544).
+      // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
+      state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.error) stdout.write(`        error: ${c.error}\n`)
     }
