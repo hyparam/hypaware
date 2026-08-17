@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
+import { alignRows, canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
@@ -178,7 +178,21 @@ function withSchemaColumns(source) {
     columns,
     numRows: source.numRows,
     scan(options) {
-      return source.scan(options)
+      // The engine names this scan's output columns from the list advertised
+      // here, but fills them from each row's own `columns`. A partition that
+      // predates a declared column yields a SHORTER row, which slides every
+      // output name past the gap onto its neighbour's value: over a drifted
+      // union `SELECT *, git_remote` answered with git_remote's value under
+      // the name of the column that happened to follow the star's short
+      // width. Pad each row back out to the advertised list.
+      // @ref LLP 0241#alignment [implements]: a declared-but-absent column becomes a padded cell, not a missing slot the star can slide through
+      const scanColumns = options?.columns ?? columns
+      const result = source.scan(options)
+      return {
+        appliedWhere: result.appliedWhere,
+        appliedLimitOffset: result.appliedLimitOffset,
+        rows: () => alignRows(result.rows(), scanColumns),
+      }
     },
   }
   // Forward the column-stream hook so single-column aggregates stay on the

@@ -23,6 +23,50 @@ text, not just metadata. Rows age out of the local cache after the
 retention window init set (90 days on a team install, 120 on a
 local-only one; `hyp init --retention-days <N>` overrides).
 
+### If you turned on proxy mode
+
+Proxy mode (see the README) routes all of Claude Code's HTTPS through the
+local gateway rather than only its model calls, so it is worth being
+precise about what that does and does not change.
+
+**What it does not change: what is recorded.** Only `/v1/messages`
+traffic is recorded, exactly as in the table above. Claude Code also calls
+its own host for things like update checks, OAuth account settings and the
+MCP registry; those are forwarded untouched and nothing about them is
+stored. No request or response body is even read for them.
+
+**What it does change: what passes through.** Every host Claude Code
+connects to now goes through the gateway. Only `api.anthropic.com` is
+decrypted, because that is the only host a capture source names. Everything
+else, including package registries and any telemetry the client sends
+elsewhere, is tunnelled through without being decrypted: the gateway sees
+the hostname and the number of bytes, and nothing inside.
+
+**The certificate.** Decrypting one host requires a certificate authority,
+which is generated on your machine, stored in `~/.hyp/hypaware/tls`
+readable only by you, and name-constrained so it cannot vouch for any host
+outside the provider set HypAware's client adapters intercept (today
+`api.anthropic.com`, `api.openai.com`, `chatgpt.com`). All IP addresses are
+excluded.
+
+**Where it is trusted.** On macOS, attach installs the CA into your **login
+keychain** as a user-domain trusted root, because Claude Code's Remote
+Control transport trusts only the keychain and nothing else. This does
+change your account's certificate trust settings, which is why macOS itself
+raises the password dialog: an application running as you that consults the
+login keychain will accept certificates this CA signs, for those hosts.
+Declining the dialog is supported and capture keeps working without it, with
+only Remote Control's inbound channel lost. The change never needs admin
+rights, and the machine-wide system keychain and other user accounts are
+never modified. On other platforms the CA is trusted only by Claude Code,
+through that client's own settings.
+
+**Its lifetime.** `hyp status` shows the fingerprint and whether the
+keychain still trusts it. `hyp detach claude` deliberately keeps the CA and
+the trust in place, so re-attaching later does not ask for your password
+again; `hyp detach claude --purge` and `hyp daemon uninstall` remove the CA
+and its keychain trust.
+
 ## Where it goes
 
 - **Solo install**: nowhere. Everything stays in the local cache (plus

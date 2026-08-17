@@ -238,6 +238,25 @@ export interface ServiceState {
   error?: string
 }
 
+/**
+ * What proxy-mode capture depends on and nothing else reports: the local
+ * CA's identity, whether the login keychain still trusts it (LLP 0237), and
+ * whether `NODE_USE_SYSTEM_CA` is live in the launchd user environment
+ * (LLP 0239). Both are macOS mechanisms, so this is only ever built on
+ * darwin with a CA on disk; see `HypAwareStatusReport.proxyTrust`.
+ *
+ * `trusted` / `launchdEnvSet` are tri-state on purpose: `null` is "the probe
+ * could not run", which is not the same claim as "not trusted".
+ */
+export interface ProxyTrustReport {
+  /** SHA-256 fingerprint of the CA on disk, colon-separated uppercase hex. */
+  caFingerprint: string
+  /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
+  trusted: boolean | null
+  /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
+  launchdEnvSet: boolean | null
+}
+
 export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
@@ -326,6 +345,14 @@ export interface HypAwareStatusReport {
    * and reads no cache, so this is the only place the answer can come from.
    */
   recentEntrypoints: RecentEntrypoint[]
+  /**
+   * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
+   * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP
+   * 0237#darwin-only), or no local CA on disk (proxy mode was never on). An
+   * absent section is the honest answer there, and a quieter one than an
+   * "unknown" a user could not act on.
+   */
+  proxyTrust: ProxyTrustReport | null
 }
 
 export interface CollectStatusOptions {
@@ -348,6 +375,10 @@ export interface CollectStatusOptions {
   launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
   isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
   systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  /** Keychain trust probe (tests, and any caller that must not shell out). */
+  isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
+  /** Launchd user-environment probe (tests, and any caller that must not shell out). */
+  isLaunchdEnvSet?: () => Promise<boolean>
 }
 
 export interface SystemctlResult {
