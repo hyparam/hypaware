@@ -5,7 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { parseListen } from './config.js'
-import { attachConnectFrontDoor, connectHostOf, connectPortOf, openUpstream } from './connect.js'
+import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
 
 /**
@@ -287,6 +287,28 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const connectHost = connectHostOf(req.socket)
   const proxyMode = connectHost !== undefined
 
+  // The third front door: an absolute-form request-target on a plain socket
+  // (`POST https://api.anthropic.com/... HTTP/1.1`). Claude Code's Remote
+  // Control bridge sends this shape instead of opening a CONNECT tunnel, and
+  // RFC 9112 requires proxies to accept it. `new URL` above parsed the
+  // absolute URL as-is (the placeholder base loses), so `parsedUrl` already
+  // carries the authority the client named.
+  // @ref LLP 0247#route-by-the-named-host [implements]: the request line names the destination, so routing is by host, not path
+  const absoluteForm = !proxyMode && /^https?:\/\//i.test(requestUrl)
+  if (absoluteForm) {
+    // An absolute-form request is addressed to a third party, so serving it
+    // to non-loopback peers would relay for the network: the same rule, for
+    // the same reason, as the CONNECT front door.
+    // @ref LLP 0247#loopback-peers-only [implements]
+    const peer = req.socket.remoteAddress
+    if (!isLoopbackAddress(peer)) {
+      opts.log?.warn?.('aigw.absolute_form_refused_remote_peer', { peer: peer ?? 'unknown' })
+      req.resume()
+      sendJson(res, 403, { error: 'absolute-form is served to loopback peers only' })
+      return
+    }
+  }
+
   // @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`
   // prefix is a LOCAL control surface: handled in-process, never matched
   // against upstreams, never proxied, and it starts NO exchange (no
@@ -295,12 +317,14 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // provider. The handler owns the request lifecycle (body + response); an
   // unregistered handler drains the body and 404s locally.
   //
-  // Scoped to the direct origin. A tunnelled request is addressed to a third
-  // party, so answering `https://api.anthropic.com/_hypaware/...` locally would
-  // both swallow a path that is not ours and expose the unauthenticated control
-  // surface to anything that can make the client fetch a URL. `hyp session
-  // ignore` talks to `http://127.0.0.1:<port>` directly and is unaffected.
-  if (!proxyMode && isControlPath(parsedUrl.pathname)) {
+  // Scoped to the direct origin. A tunnelled or absolute-form request is
+  // addressed to a third party, so answering
+  // `https://api.anthropic.com/_hypaware/...` locally would both swallow a
+  // path that is not ours and expose the unauthenticated control surface to
+  // anything that can make the client fetch a URL. `hyp session ignore` talks
+  // to `http://127.0.0.1:<port>` directly and is unaffected.
+  // @ref LLP 0247#the-control-surface-never-answers-absolute-form [implements]
+  if (!proxyMode && !absoluteForm && isControlPath(parsedUrl.pathname)) {
     if (typeof opts.onControlRequest === 'function') {
       opts.onControlRequest(req, res, parsedUrl)
       return
@@ -310,9 +334,16 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     return
   }
 
+  // Absolute-form routes by the authority the request line names, like a
+  // terminated tunnel does, with the port defaulted by scheme.
+  const absoluteFormPort = parsedUrl.port
+    ? Number.parseInt(parsedUrl.port, 10)
+    : parsedUrl.protocol === 'https:' ? 443 : 80
   const upstream = proxyMode
     ? matchUpstreamByHost(upstreams, connectHost, connectPortOf(req.socket))
-    : matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
+    : absoluteForm
+      ? matchUpstreamByHost(upstreams, parsedUrl.hostname, absoluteFormPort)
+      : matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
     // Under a CONNECT the client named a host we agreed to decrypt, so failing
@@ -328,14 +359,32 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       })
       return
     }
+    // An absolute-form miss is a refusal, not a failure: forwarding only ever
+    // reaches hosts the routing table names, so the listener never becomes a
+    // general absolute-form relay.
+    // @ref LLP 0247#refuse-hosts-nobody-registered [implements]
+    if (absoluteForm) {
+      opts.log?.warn?.('aigw.absolute_form_refused_host', {
+        host: parsedUrl.hostname,
+        port: absoluteFormPort,
+      })
+      sendJson(res, 403, {
+        error: 'no upstream matches absolute-form host',
+        host: parsedUrl.hostname,
+        port: absoluteFormPort,
+      })
+      return
+    }
     sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
     return
   }
 
   // Reverse-proxy traffic was routed here by a client we attached, so all of it
-  // is in scope. Proxy-mode traffic is everything the client sends to the host,
-  // so it is recorded only where an upstream's path anchor claims it.
-  const recording = !proxyMode || shouldRecordProxyExchange(upstream, parsedUrl.pathname)
+  // is in scope. Proxy-mode and absolute-form traffic is everything the client
+  // sends to the host, so it is recorded only where an upstream's path anchor
+  // claims it.
+  const recording = (!proxyMode && !absoluteForm)
+    || shouldRecordProxyExchange(upstream, parsedUrl.pathname)
 
   const isHttps = upstream.baseUrl.protocol === 'https:'
   const lib = isHttps ? https : http
@@ -350,7 +399,9 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       upstream: upstream.name,
       provider: upstream.provider,
       method: req.method,
-      path: requestUrl,
+      // Origin-form for absolute-form requests, so projectors see the same
+      // path shape from all three front doors.
+      path: absoluteForm ? parsedUrl.pathname + parsedUrl.search : requestUrl,
       requestHeaders: req.headers,
     })
     : createNullExchange()
