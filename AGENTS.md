@@ -211,6 +211,7 @@ hyp smoke walkthrough_picker_to_first_query
 hyp smoke client_attach_idempotent
 hyp smoke gateway_claude_capture
 hyp smoke gateway_codex_capture
+hyp smoke claude_telemetry_capture
 hyp smoke hypignore_capture_drop
 hyp smoke local_only_export_withhold
 hyp smoke source_optout_export_withhold
