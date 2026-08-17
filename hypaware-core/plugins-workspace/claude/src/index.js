@@ -21,6 +21,7 @@ import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 import { runClaudeClassifyHook } from './classify_hook.js'
+import { CLAUDE_TELEMETRY_SOURCE, createStartClaudeTelemetrySource } from './telemetry/source.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -286,6 +287,37 @@ export async function activate(ctx) {
       )
     },
   })
+
+  // The telemetry listener: Claude Code's own OTLP export, received on
+  // loopback and projected into the same `ai_gateway_messages` rows the
+  // proxy and transcript backfill produce. Registered, not started:
+  // the daemon starts every registered source, so a CLI activation
+  // never binds a port.
+  //
+  // Feature-detected against the gateway capability so a mixed install
+  // (an older `@hypaware/ai-gateway` without the record seam) degrades
+  // to "no listener" rather than throwing at boot.
+  // @ref LLP 0257#registration [implements]: `@hypaware/claude` contributes the
+  // listener source through the kernel source registry, with its own config
+  // section and its own port
+  if (typeof gateway.recordProjectedExchange === 'function') {
+    ctx.sources.register({
+      name: CLAUDE_TELEMETRY_SOURCE,
+      plugin: PLUGIN_NAME,
+      summary: 'Claude Code OTLP telemetry receiver: projects its event stream into ai_gateway_messages',
+      configSection: CLAUDE_CONFIG_SECTION,
+      start: createStartClaudeTelemetrySource({
+        gateway,
+        clientName: CLIENT_NAME,
+        stateFile,
+      }),
+    })
+  } else {
+    logger.warn('claude.telemetry.capability_too_old', {
+      hyp_plugin: PLUGIN_NAME,
+      detail: 'the active @hypaware/ai-gateway has no recordProjectedExchange; the telemetry listener is not registered',
+    })
+  }
 
   ctx.commands.register({
     name: 'claude-hook session-context',

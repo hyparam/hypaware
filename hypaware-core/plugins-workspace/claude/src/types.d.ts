@@ -14,6 +14,39 @@ export interface SessionContextRecord {
   ts: string | undefined
 }
 
+/**
+ * One decoded Claude Code telemetry event: an OTLP log record with its
+ * `AnyValue` wrappers removed, keyed by the `event.name` attribute
+ * rather than by the record body.
+ */
+export interface ClaudeTelemetryEvent {
+  /** `event.name`, e.g. `user_prompt`, `assistant_response`, `api_request`. */
+  name: string
+  /** `event.timestamp` (ISO-8601), falling back to the record's `timeUnixNano`. */
+  timestamp?: string
+  /** `event.sequence`, Claude Code's per-session ordering counter. */
+  sequence?: number
+  /** Every attribute on the record, unwrapped. */
+  attributes: Record<string, unknown>
+}
+
+/**
+ * Session-level identity repeated on every Claude Code event. Collected
+ * once per batch so the projection carries it without each message
+ * restating it.
+ */
+export interface ClaudeTelemetrySessionFacts {
+  clientVersion?: string
+  entrypoint?: string
+  userId?: string
+  organizationId?: string
+  terminalType?: string
+  querySource?: string
+  agentName?: string
+  model?: string
+  startedAt?: string
+}
+
 export interface TranscriptEntry {
   sessionId: string
   role: string | undefined

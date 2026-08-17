@@ -8,6 +8,7 @@
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "permissions": [
+    "network",
     "read_home",
     "write_home",
     "read_state",
@@ -20,6 +21,7 @@
     }
   },
   "contributes": {
+    "sources": [{ "name": "claude-telemetry" }],
     "client": {
       "name": "claude",
       "skill_dir": ".claude/skills",
@@ -64,7 +66,7 @@
     "config_sections": [
       {
         "section": "claude",
-        "summary": "Claude adapter config, including the optional backfill-on-join policy { on_join, window_days }."
+        "summary": "Claude adapter config: the optional backfill-on-join policy { on_join, window_days }, the attach-on-join policy { on_join }, and the telemetry listener address { listen_host, listen_port }."
       }
     ]
   }

@@ -2,9 +2,11 @@
 
 /**
  * Config validation for the `@hypaware/claude` plugin's own `config`
- * block. v1 validates the optional `backfill` sub-object that drives
- * backfill-on-join (`{ on_join, window_days }`), and the optional
- * `attach` sub-object that drives attach-on-join, `{ on_join }`. Every
+ * block. It validates the optional `backfill` sub-object that drives
+ * backfill-on-join (`{ on_join, window_days }`), the optional `attach`
+ * sub-object that drives attach-on-join (`{ on_join }`), and the
+ * optional `telemetry` sub-object that places the Claude telemetry
+ * listener (`{ listen_host, listen_port }`). Every
  * other key (e.g. `proxy`) passes through untouched so existing configs
  * keep working; there is no top-level `backfill`/`attach` section and
  * nothing new for core to validate.
@@ -42,6 +44,7 @@ export function validateClaudeConfig(value) {
   const errors = [
     ...validateBackfillSection(raw.backfill, '/backfill'),
     ...validateAttachSection(raw.attach, '/attach'),
+    ...validateTelemetrySection(raw.telemetry, '/telemetry'),
   ]
   if (errors.length > 0) return { ok: false, errors }
   return { ok: true }
@@ -83,6 +86,53 @@ export function validateBackfillSection(value, pointer) {
   for (const key of Object.keys(raw)) {
     if (key !== 'on_join' && key !== 'window_days') {
       errors.push({ pointer: `${pointer}/${key}`, message: `unknown backfill key '${key}'` })
+    }
+  }
+  return errors
+}
+
+/**
+ * Validate the optional `telemetry` block: where the Claude telemetry
+ * listener binds. `listen_host` is a string, `listen_port` an integer in
+ * `0..65535` where `0` asks for a dynamic port. Both optional; unknown
+ * keys are rejected so a typo (`listen_ports`) surfaces instead of
+ * silently leaving the listener on its default port while attach writes
+ * the address the operator meant.
+ *
+ * @ref LLP 0257#registration [implements]: the listener's port is config with a
+ *   default, and `0` requests a dynamic port
+ *
+ * @param {unknown} value
+ * @param {string} pointer  JSON-pointer prefix for the `telemetry` object
+ * @returns {ValidationError[]}
+ */
+export function validateTelemetrySection(value, pointer) {
+  /** @type {ValidationError[]} */
+  const errors = []
+  if (value === undefined) return errors
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push({ pointer, message: 'telemetry must be an object' })
+    return errors
+  }
+  const raw = /** @type {Record<string, unknown>} */ (value)
+  if (raw.listen_host !== undefined && (typeof raw.listen_host !== 'string' || raw.listen_host.length === 0)) {
+    errors.push({
+      pointer: `${pointer}/listen_host`,
+      message: 'telemetry.listen_host must be a non-empty string',
+    })
+  }
+  if (raw.listen_port !== undefined) {
+    const port = raw.listen_port
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
+      errors.push({
+        pointer: `${pointer}/listen_port`,
+        message: 'telemetry.listen_port must be an integer between 0 and 65535',
+      })
+    }
+  }
+  for (const key of Object.keys(raw)) {
+    if (key !== 'listen_host' && key !== 'listen_port') {
+      errors.push({ pointer: `${pointer}/${key}`, message: `unknown telemetry key '${key}'` })
     }
   }
   return errors
