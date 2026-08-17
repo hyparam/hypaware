@@ -106,10 +106,10 @@ client fetch a URL.
   not recorded because it sits outside the Claude adapter's path anchor.
 - A degraded tunnel-only listener (LLP 0233 #degrade-to-blind-tunnels) with a
   populated routing table forwards absolute-form to registered hosts blind:
-  served, never recorded, like the tunnels beside it. Only the tunnel-only
-  state with nothing to route (proxy mode on, no upstream naming a host)
-  refuses absolute-form by host miss, and that surfaces through the same
-  status repair path as the rest of the degrade.
+  served, never recorded, like the tunnels beside it. Only a tunnel-only
+  listener with nothing compiled into the routing table, whichever degrade
+  branch produced it, refuses absolute-form by host miss, and that surfaces
+  through the same status repair path as the rest of the degrade.
 - The regression test replays the exact on-the-wire shape: absolute-form
   plaintext `POST` written raw to the listener port.
 - The upstream defect remains worth filing with Anthropic: the bridge client
