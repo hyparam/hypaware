@@ -61,7 +61,8 @@ test('claude alone composes the gateway + anthropic upstream + claude adapter', 
   assert.deepEqual(compose(d, ['claude']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      // @ref LLP 0243#composed-default [tests]: the claude row turns the composed gateway into a proxy-mode gateway
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -167,7 +168,7 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   assert.deepEqual(compose(d, ['claude', 'hermes']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -183,7 +184,7 @@ test('claude + codex union the anthropic/openai/chatgpt upstreams and both adapt
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -199,7 +200,7 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
@@ -229,7 +230,7 @@ test('keep-local export omits the sink plugins and sinks block', async () => {
   assert.deepEqual(compose(d, ['claude'], 'keep-local'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -241,7 +242,7 @@ test('configure-later export behaves like keep-local (no sinks block)', async ()
   assert.deepEqual(compose(d, ['claude'], 'configure-later'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,

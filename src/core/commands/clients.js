@@ -27,6 +27,7 @@ import {
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { enableClientAdapter } from '../config/client_enable.js'
+import { enableGatewayProxyMode } from '../config/gateway_proxy_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -294,6 +295,22 @@ async function runClientLifecycle(action, argv, ctx) {
           ctx.stderr.write(`error: unknown client '${name}'\n`)
           exitCode = 1
           continue
+        }
+      }
+      // Before the endpoint is resolved, because an accepted migration
+      // restarts the daemon and may move the bound port; the resolution
+      // below then discovers the fresh one. A migration failure never fails
+      // the attach: base-URL attach is exactly what this install already
+      // does, so it stays the fallback.
+      // @ref LLP 0244#attach-offers [implements]: attach is the migration verb for a base-URL install whose client attaches by proxy
+      if (action === 'attach') {
+        try {
+          await maybeOfferProxyModeMigration({ name, ctx, parsed })
+        } catch (migrationErr) {
+          ctx.stderr.write(
+            `warning: proxy-mode migration failed (${migrationErr instanceof Error ? migrationErr.message : String(migrationErr)}); ` +
+            `attaching by base URL instead\n`
+          )
         }
       }
       // In dry-run mode the gateway source may not be started yet,
@@ -774,6 +791,155 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
     added_plugins: result.addedPlugins.join(','),
   })
   return { activated: true }
+}
+
+/**
+ * The LLP 0244 migration offer: a base-URL install whose client attaches by
+ * proxy gets one yes/no question, and a yes switches the install before the
+ * attach proceeds (config write, daemon restart, bind wait, CA wait, via
+ * `enableGatewayProxyMode`). Everything that is not an interactive,
+ * single-client, wet-run attach gets today's behavior, with one stderr note
+ * naming the interactive command when the switch would have applied:
+ * migration is a one-time human decision, not something automation acquires
+ * (LLP 0233's "never by inference, by upgrade, or as a side effect").
+ *
+ * The offer is keyed on the *config*, not the CA: a stale CA with
+ * `proxy_mode` off means an earlier proxy install was half-unwound, and the
+ * config write is still the repair the gateway's own stale-CA warning asks
+ * for.
+ *
+ * Never throws into the attach: the caller downgrades any escape to a
+ * warning, because base-URL attach is what this install already does and
+ * remains the working fallback.
+ *
+ * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write, the restart, and the coming trust dialog
+ * @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports instead of prompting
+ * @ref LLP 0244#non-interactive [implements]: non-TTY and --json attaches never migrate; they emit the one-line pointer
+ * @param {{ name: string, ctx: CommandRunContext, parsed: { client: string, dryRun: boolean, json: boolean } }} args
+ * @returns {Promise<void>}
+ */
+async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
+  // `hyp attach all` never prompts mid-run, and a dry run changes nothing,
+  // same posture as maybeInteractiveEnableAttach above.
+  if (parsed.client === 'all' || parsed.dryRun) return
+
+  const catalog = await buildAttachPluginCatalog(ctx)
+  const descriptor = catalog.pickerDescriptors.get(name)
+  if (descriptor?.compose?.gateway_proxy_mode !== true) return
+
+  // The effective config this process booted with decides whether there is
+  // anything to offer. An entry the LLP 0174 enable path appended seconds ago
+  // is not in `ctx.config`, but it is also a bare entry with no `proxy_mode`,
+  // so the answer is the same either way and the enable function re-reads
+  // disk before writing.
+  const effectiveGateway = (ctx.config?.plugins ?? []).find(
+    (entry) => entry.name === '@hypaware/ai-gateway'
+  )
+  if (effectiveGateway?.config?.proxy_mode === true) return
+
+  const log = getLogger('cmd-attach')
+
+  // A fleet-owned gateway block has no local remedy, so report instead of
+  // asking a question whose yes cannot land (the same reason
+  // `disabled_central` never reaches the enable prompt). Ownership is
+  // decided by the central layer NAMING the gateway plugin: a local entry
+  // can exist beside it and still be dropped by the LLP 0031 merge, so its
+  // presence proves nothing. This note replaces the interactive-terminal
+  // pointer too - pointing a fleet host at a terminal would promise a
+  // migration the local CLI cannot deliver.
+  // @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports, never prompts, in every attach shape
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | undefined} */
+  let layered
+  try {
+    layered = await resolveLayeredConfigFromDisk({ stateRoot: obsEnv.stateDir, configPath })
+  } catch {
+    // Unresolvable layers prove nothing; fall through to the local file view.
+  }
+  const centralGateway = (layered?.centralConfig?.plugins ?? []).find(
+    (entry) => entry.name === '@hypaware/ai-gateway'
+  )
+  if (centralGateway) {
+    ctx.stderr.write(
+      `note: this install attaches ${name} by base URL, and its gateway config is ` +
+      `centrally managed; enable proxy_mode in the fleet config to switch it\n`
+    )
+    return
+  }
+
+  if (parsed.json || !isTty(ctx.stdin)) {
+    ctx.stderr.write(
+      `note: this install attaches ${name} by base URL; run 'hyp attach ${name}' in an ` +
+      `interactive terminal to switch it to proxy mode\n`
+    )
+    return
+  }
+
+  const localLoaded = await loadConfigFile(configPath)
+  const localGateway = localLoaded.ok
+    ? (localLoaded.config.plugins ?? []).find((entry) => entry.name === '@hypaware/ai-gateway')
+    : undefined
+  if (!localGateway) {
+    // No gateway in any layer: the attach ladder below owns that error.
+    return
+  }
+
+  const accepted = await askYesNo(
+    ctx,
+    `${capitalizeClientLabel(name)} can attach through HypAware's local HTTPS proxy instead of a ` +
+    `repointed base URL, which keeps Remote Control working. Switching writes proxy_mode ` +
+    `into the local config and restarts the daemon; macOS will then ask to trust the ` +
+    `HypAware Local CA. Switch this install to proxy mode now? [y/N] `
+  )
+  if (!accepted) {
+    ctx.stderr.write(
+      `keeping the base-URL attach; re-run 'hyp attach ${name}' to switch later\n`
+    )
+    log.info('client.attach.proxy_migration', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'ok',
+      accepted: false,
+    })
+    return
+  }
+
+  const result = await enableGatewayProxyMode({
+    ctx,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
+  log.info('client.attach.proxy_migration', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: result.ok ? 'ok' : 'failed',
+    accepted: true,
+    outcome: result.outcome,
+    ...(result.failedStep ? { failed_step: result.failedStep } : {}),
+  })
+  if (result.ok && result.outcome === 'enabled') {
+    if (result.daemonInstalled) {
+      ctx.stdout.write(`✓ proxy mode enabled (config updated, daemon restarted)\n`)
+    } else {
+      ctx.stdout.write(
+        `✓ proxy_mode written to ${result.configPath}; no daemon service is installed, so ` +
+        `start one (hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
+      )
+    }
+    return
+  }
+  if (result.outcome === 'already') return
+  ctx.stderr.write(
+    `warning: could not switch to proxy mode` +
+    `${result.message ? ` (${result.message})` : ''}` +
+    `${result.backupPath ? `; the previous config was backed up at ${result.backupPath}` : ''}; ` +
+    `attaching by base URL instead\n`
+  )
 }
 
 /**

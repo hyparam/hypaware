@@ -9,6 +9,7 @@ import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../c
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
+import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -953,6 +954,7 @@ export function composePickerConfig(args) {
   const picked = /** @type {Set<string>} */ (new Set(args.sources))
 
   let requiresGateway = false
+  let gatewayProxyMode = false
   /** @type {{ name: string, base_url: string, path_prefix: string, provider?: string }[]} */
   const upstreams = []
   // Gateway-independent adapter plugins (e.g. `@hypaware/otel`) land before
@@ -968,6 +970,7 @@ export function composePickerConfig(args) {
     const compose = descriptor.compose
     if (!compose) continue
     if (compose.requires_gateway) requiresGateway = true
+    if (compose.gateway_proxy_mode === true) gatewayProxyMode = true
     for (const up of requestedUpstreams(compose)) {
       if (!upstreams.some((existing) => existing.name === up.name)) upstreams.push({ ...up })
     }
@@ -995,7 +998,15 @@ export function composePickerConfig(args) {
     // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
       name: GATEWAY_PLUGIN,
-      config: { upstreams },
+      // `proxy_mode` stays an explicit key in the written file (LLP 0233);
+      // composition writes it when a picked row's client attaches by proxy,
+      // and the carry-forward merge lets a hand-written `proxy_mode: false`
+      // outrank it on a reconfigure.
+      // @ref LLP 0243#composed-default [implements]: a picked proxy-attaching row turns the composed gateway into a proxy-mode gateway
+      config: {
+        upstreams,
+        ...(gatewayProxyMode ? { proxy_mode: true } : {}),
+      },
     })
   }
 
@@ -1588,6 +1599,25 @@ export async function runPickerFinale(args) {
   }
 
   if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
+    // On a proxy-mode config the adapters below pick their mode by whether
+    // the CA file exists (LLP 0232 #proxy-attach-preflight), and the daemon
+    // installed above mints it asynchronously on gateway start. Attaching
+    // without waiting races the mint and silently lands every client back on
+    // base-URL mode. Bounded, and a timeout degrades to a warning: base-URL
+    // attach still captures, and a re-run of `hyp attach` repairs the mode.
+    // Skipped when no daemon was installed (the join lane restarts only
+    // after attach, so no CA can appear before it) and on dry runs.
+    // @ref LLP 0243#composed-default [implements]: a fresh proxy-mode install must attach in proxy mode, not lose the race to the CA mint
+    const gatewayEntry = (config.plugins ?? []).find((p) => p.name === GATEWAY_PLUGIN)
+    if (!dryRun && !skipInstall && gatewayEntry?.config?.proxy_mode === true) {
+      const caWait = await waitForLocalCa({ stateRoot: defaultStateRoot(env) })
+      if (!caWait.ready) {
+        stderr.write(
+          'warning: the daemon did not mint the proxy CA in time; clients may attach by ' +
+          "base URL. Re-run 'hyp attach <client>' once the daemon is up to switch them.\n"
+        )
+      }
+    }
     /** @type {AiGatewayCapability} */
     const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {

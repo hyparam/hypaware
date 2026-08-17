@@ -812,4 +812,45 @@ export interface ClientEnableResult {
   message?: string
 }
 
+/**
+ * Outcome of `enableGatewayProxyMode` (LLP 0244): the consented switch of an
+ * existing install's gateway to proxy mode. Same per-step reporting contract
+ * as `ClientEnableResult`, plus the CA wait that proxy attach preflights on.
+ */
+export interface GatewayProxyEnableResult {
+  ok: boolean
+  /**
+   * `enabled`: the key was written (and, with a daemon installed, the
+   * restart/bind/CA steps report below). `already`: the effective config has
+   * the key, nothing to do. `central_managed`: the gateway block comes from
+   * the central layer, so the local CLI declines to write. `no_gateway`: no
+   * layer has a gateway entry. `failed`: see `failedStep`/`message`.
+   */
+  outcome: 'enabled' | 'already' | 'central_managed' | 'no_gateway' | 'failed'
+  /** The local config layer the write targeted. */
+  configPath: string
+  /** Set when the guard copied the existing config aside before replacing it. */
+  backupPath?: string
+  /** Whether a daemon service exists to restart at all. */
+  daemonInstalled: boolean
+  /** Whether the gateway published a bound port within the wait budget. */
+  bound: boolean
+  /** Whether the restarted gateway minted the local CA within the wait budget. */
+  caReady: boolean
+  /** The CA certificate path, once minted. */
+  caCertPath?: string
+  /** The endpoint the bind wait observed, when it observed one. */
+  endpoint?: string
+  steps: {
+    write: ClientEnableStepStatus
+    restart: ClientEnableStepStatus
+    wait: ClientEnableStepStatus
+    ca: ClientEnableStepStatus
+  }
+  /** The step that broke, when one did. */
+  failedStep?: 'write' | 'restart' | 'wait' | 'ca'
+  /** Human-readable detail for the failed (or timed-out) step. */
+  message?: string
+}
+
 export type { ConfigStageResult, ConfigApplyErrorKind }

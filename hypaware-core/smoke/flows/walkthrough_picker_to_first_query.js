@@ -622,6 +622,8 @@ async function goldenPickerConfig(hypHome) {
           { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
           { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
         ],
+        // @ref LLP 0243#composed-default [tests]: the picked claude row makes the composed gateway a proxy-mode gateway
+        proxy_mode: true,
       },
     },
     {
