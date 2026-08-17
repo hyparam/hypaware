@@ -24,12 +24,16 @@ import { runAttach } from '../../src/core/commands/clients.js'
 // @ref LLP 0174#bootstrap-floor [tests]: no local config file skips the
 // prompt and falls through to the existing not_enabled refusal
 
-/** @returns {{ write(chunk: unknown): boolean, text(): string }} */
-function makeBuf() {
+/**
+ * @param {{ onWrite?: (chunk: unknown) => void }} [opts]
+ * @returns {{ write(chunk: unknown): boolean, text(): string }}
+ */
+function makeBuf(opts) {
   let value = ''
   return {
     write(chunk) {
       value += String(chunk)
+      opts?.onWrite?.(chunk)
       return true
     },
     text() {
@@ -39,17 +43,29 @@ function makeBuf() {
 }
 
 /**
- * A stdin fixture that reports as a TTY and already carries the answer line,
- * so `askYesNo`'s `readline.createInterface` resolves without the test
- * blocking on real input.
+ * A stdin fixture that reports as a TTY and already carries the first answer
+ * line, so `askYesNo`'s `readline.createInterface` resolves without the test
+ * blocking on real input. Later answers are fed on demand (see the makeCtx
+ * stderr hook), one per question actually printed, because each question
+ * opens its own readline interface and pre-written lines can be discarded
+ * with it (same mechanism as attach-enable-backfill.test.js documents).
  *
- * @param {string} answer
+ * @param {string[]} answers
+ * @returns {{ stream: PassThrough, feedNext(fallback?: string): void }}
  */
-function makeAnswerStdin(answer) {
+function makeAnswerStdin(answers) {
   const stream = new PassThrough()
   Object.defineProperty(stream, 'isTTY', { value: true })
-  stream.write(`${answer}\n`)
-  return stream
+  const queue = [...answers]
+  const first = queue.shift()
+  if (first !== undefined) stream.write(`${first}\n`)
+  return {
+    stream,
+    feedNext(fallback) {
+      const next = queue.shift() ?? fallback
+      if (next !== undefined) stream.write(`${next}\n`)
+    },
+  }
 }
 
 /** @param {string} home */
@@ -76,7 +92,7 @@ function backupsIn(dir) {
  * client into the fake gateway, exactly what T9's real seam does via the
  * adapter's own `activate()`.
  *
- * @param {{ home: string, answer?: string, stdin?: boolean }} opts
+ * @param {{ home: string, answer?: string | string[], stdin?: boolean }} opts
  */
 function makeCtx({ home, answer, stdin = true }) {
   /** @type {string[]} */
@@ -105,12 +121,25 @@ function makeCtx({ home, answer, stdin = true }) {
       return registered.map((name) => ({ name }))
     },
   }
+  const answers = Array.isArray(answer) ? answer : [answer ?? 'n']
+  const answerStdin = makeAnswerStdin(answers)
   const stdoutBuf = makeBuf()
-  const stderrBuf = makeBuf()
+  // A test that accepts the enable prompt continues into the LLP 0244
+  // proxy-migration question on the same stderr. Feed its answer only once
+  // its question has actually printed (see makeAnswerStdin), defaulting to a
+  // decline so this file stays about the enable prompt; the migration prompt
+  // has its own tests.
+  const stderrBuf = makeBuf({
+    onWrite: (chunk) => {
+      if (String(chunk).includes('Switch this install to proxy mode now? [y/N] ')) {
+        answerStdin.feedNext('n')
+      }
+    },
+  })
   const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
     stdout: stdoutBuf,
     stderr: stderrBuf,
-    ...(stdin ? { stdin: makeAnswerStdin(answer ?? 'n') } : {}),
+    ...(stdin ? { stdin: answerStdin.stream } : {}),
     cwd: home,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
     config: { version: 2 },

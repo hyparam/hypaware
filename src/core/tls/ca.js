@@ -376,6 +376,40 @@ export async function readLocalCaInfo({ stateRoot }) {
 }
 
 /**
+ * Wait, bounded, for the gateway to mint the local CA. Two callers, one
+ * reason: proxy attach preflights on the CA file's existence (LLP 0232), so
+ * a flow that just (re)started a proxy-mode daemon must not race the mint or
+ * the client silently lands back on base-URL mode. The wizard finale waits
+ * here after installing the daemon, and the LLP 0244 migration waits here
+ * after its restart.
+ *
+ * @param {object} args
+ * @param {string} args.stateRoot
+ * @param {number} [args.timeoutMs]
+ * @param {number} [args.intervalMs]
+ * @param {(ms: number) => Promise<void>} [args.sleep]
+ * @param {() => number} [args.now]
+ * @returns {Promise<{ ready: boolean, certPath?: string }>}
+ */
+export async function waitForLocalCa({ stateRoot, timeoutMs = 15_000, intervalMs = 250, sleep, now }) {
+  const sleepFn = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const nowFn = now ?? Date.now
+  const deadline = nowFn() + timeoutMs
+  for (;;) {
+    /** @type {LocalCaInfo | undefined} */
+    let ca
+    try {
+      ca = await readLocalCaInfo({ stateRoot })
+    } catch {
+      ca = undefined
+    }
+    if (ca) return { ready: true, certPath: ca.certPath }
+    if (nowFn() >= deadline) return { ready: false }
+    await sleepFn(intervalMs)
+  }
+}
+
+/**
  * Delete the CA key and certificate. Called by `hyp daemon uninstall` and
  * `hyp detach --purge`; plain detach keeps the CA so the keychain trust
  * granted for it stays valid across attach cycles.

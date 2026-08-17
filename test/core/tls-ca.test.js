@@ -14,6 +14,7 @@ import {
   deleteLocalCa,
   ensureLocalCa,
   readLocalCaInfo,
+  waitForLocalCa,
 } from '../../src/core/tls/ca.js'
 
 const HOST = 'api.anthropic.com'
@@ -182,4 +183,51 @@ test('deleteLocalCa removes the key and certificate, and is idempotent', async (
 
   const second = await deleteLocalCa({ stateRoot })
   assert.deepEqual(second.removed, [])
+})
+
+// The polling loop both proxy-attach flows ride (the wizard finale and the
+// LLP 0244 migration). Deterministic via the injectable sleep/now hooks: the
+// fake clock advances per poll, and the mint happens inside a fake sleep.
+// @ref LLP 0232#proxy-attach-preflight [tests]: the wait resolves with the certPath attach preflights on, or reports not-ready at the deadline
+test('waitForLocalCa returns ready with the certPath once the CA appears mid-wait', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  let clock = 0
+  let polls = 0
+  const result = await waitForLocalCa({
+    stateRoot,
+    timeoutMs: 10_000,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms
+      polls += 1
+      if (polls === 3) await ensureLocalCa({ stateRoot, hosts: [HOST] })
+    },
+  })
+
+  assert.equal(result.ready, true)
+  assert.equal(result.certPath, caPaths(stateRoot).certPath)
+  assert.equal(polls, 3, 'resolved on the poll after the mint, not the deadline')
+})
+
+test('waitForLocalCa reports not-ready at the deadline when no CA ever appears', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  let clock = 0
+  let polls = 0
+  const result = await waitForLocalCa({
+    stateRoot,
+    timeoutMs: 1_000,
+    intervalMs: 250,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms
+      polls += 1
+    },
+  })
+
+  assert.deepEqual(result, { ready: false })
+  assert.equal(polls, 4, 'exactly the polls the deadline allows, then it stops')
 })

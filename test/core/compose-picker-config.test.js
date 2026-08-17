@@ -61,7 +61,8 @@ test('claude alone composes the gateway + anthropic upstream + claude adapter', 
   assert.deepEqual(compose(d, ['claude']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      // @ref LLP 0243#composed-default [tests]: the claude row turns the composed gateway into a proxy-mode gateway
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -167,7 +168,7 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   assert.deepEqual(compose(d, ['claude', 'hermes']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -183,7 +184,7 @@ test('claude + codex union the anthropic/openai/chatgpt upstreams and both adapt
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -199,7 +200,7 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
@@ -229,7 +230,7 @@ test('keep-local export omits the sink plugins and sinks block', async () => {
   assert.deepEqual(compose(d, ['claude'], 'keep-local'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -241,7 +242,7 @@ test('configure-later export behaves like keep-local (no sinks block)', async ()
   assert.deepEqual(compose(d, ['claude'], 'configure-later'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -504,6 +505,51 @@ test("a user's `enabled: false` on a rider survives a reconfigure", async () => 
   const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway-graph')
   assert.ok(gateway, 'the un-declined rider is still composed')
   assert.equal(gateway.enabled, undefined, 'and is not switched off with it')
+})
+
+// LLP 0243 #user-key-wins: the prior gateway entry owns `proxy_mode`
+// entirely on a reconfigure. Declining the default is one explicit key,
+// and it stays declined; this must not depend on the generic prior-wins
+// spread staying generic, so it gets its own pin.
+// @ref LLP 0243#user-key-wins [tests]: a hand-written `proxy_mode: false` survives a reconfigure while upstreams recompose
+test('a hand-written `proxy_mode: false` survives a reconfigure', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) =>
+    p.name === '@hypaware/ai-gateway'
+      ? { ...p, config: { ...(p.config ?? {}), proxy_mode: false } }
+      : p
+  )
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway?.config)
+  assert.equal(gateway.config.proxy_mode, false, 'the decline stays declined')
+  assert.deepEqual(gateway.config.upstreams, [ANTHROPIC], 'while upstreams stay composer-owned')
+})
+
+// The other half of #user-key-wins: absence is a value too. An existing
+// gateway entry without the key gains it only through the LLP 0244
+// migration; a reconfigure is a picker run, not the migration verb.
+// @ref LLP 0243#user-key-wins [tests]: an existing gateway entry without `proxy_mode` stays without it on a reconfigure
+test('an existing gateway entry without `proxy_mode` does not gain it on a reconfigure', async () => {
+  const catalog = await realCatalog()
+  const existing = composeWithRiders(catalog, ['claude'])
+  existing.plugins = (existing.plugins ?? []).map((p) => {
+    if (p.name !== '@hypaware/ai-gateway') return p
+    const { proxy_mode: _dropped, ...rest } = p.config ?? {}
+    return { ...p, config: rest }
+  })
+
+  const after = composeWithRiders(catalog, ['claude'], existing)
+  const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway?.config)
+  assert.ok(!('proxy_mode' in gateway.config), 'absence carries forward like a value')
+
+  // A fresh compose (no existing gateway entry) still gets the default.
+  const fresh = composeWithRiders(catalog, ['claude'])
+  const freshGateway = (fresh.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
+  assert.equal(freshGateway?.config?.proxy_mode, true, 'the composed default still applies to fresh entries')
 })
 
 // The exception above is scoped to riders. A *picked* plugin still loses a
