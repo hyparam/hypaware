@@ -1,4 +1,4 @@
-# LLP 0246: Proxy mode by default and the attach migration, technical design
+# LLP 0251: Proxy mode by default and the attach migration, technical design
 
 **Type:** design
 **Status:** Active

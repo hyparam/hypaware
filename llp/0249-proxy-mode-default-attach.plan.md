@@ -2,10 +2,10 @@
 
 **Type:** plan
 **Status:** Active
-**Related:** LLP 0246, LLP 0242
+**Related:** LLP 0251, LLP 0242
 **Generated-by:** neutral
 
-> [LLP 0246](./0246-proxy-mode-default-attach.design.md) is the technical
+> [LLP 0251](./0251-proxy-mode-default-attach.design.md) is the technical
 > design closing LLP 0242. This plan's central finding, verified against the
 > tree rather than assumed from the design's prose: the design is already
 > realized on `master` by commit `04330abb` (#794), exactly as its section 0
@@ -117,7 +117,7 @@ nothing enforces against regression. T1 closes this.
   re-prompt, and a prompt inside a `--json` run would both hang scripted
   callers and corrupt the JSON contract.
 - **T2** lands the corpus cross-links: LLP 0242, 0243, and 0244 predate the
-  design of record and none of their `Related:` lines names LLP 0246.
+  design of record and none of their `Related:` lines names LLP 0251.
   Adding the forward link is a trivial editorial fix, which the repo's LLP
   conventions explicitly permit on Accepted docs. T2 also re-verifies the
   six anchors and runs `/ref-check` over the files this change set touches,
@@ -126,8 +126,8 @@ nothing enforces against regression. T1 closes this.
 The two tasks touch disjoint files (one test file; three llp docs) and run
 fully in parallel.
 
-Any further drift a task worker finds between LLP 0246's prose and the tree
-must become a new issue LLP, not an edit: LLP 0246 is Active and settled,
+Any further drift a task worker finds between LLP 0251's prose and the tree
+must become a new issue LLP, not an edit: LLP 0251 is Active and settled,
 and this plan's verification already establishes the tree matches it
 everywhere checked.
 
@@ -139,7 +139,7 @@ everywhere checked.
   absent from this branch. The *code* dependency is already satisfied
   (master carries the proxy-mode capture stack via #782 and #792), so
   neither task here is blocked; only the doc reference dangles until that
-  branch merges. Merging this branch first would leave LLP 0246 citing a
+  branch merges. Merging this branch first would leave LLP 0251 citing a
   document the tree does not yet have.
 - **Pre-existing unrelated failures.** The full `npm test` run on this
   branch shows a failing cluster confined to parquet/iceberg NULL semantics,
@@ -172,11 +172,11 @@ corpus cross-links otherwise never get written.
   touch any settled section body. Run `/ref-check llp/` (or the repo's
   ref-check skill against the touched files) before the PR.
 - Neither task flips any LLP status. LLP 0242/0243/0244 stay Accepted,
-  LLP 0246 stays Active.
+  LLP 0251 stays Active.
 
 ## References
 
-- [LLP 0246](./0246-proxy-mode-default-attach.design.md): the design this
+- [LLP 0251](./0251-proxy-mode-default-attach.design.md): the design this
   plan schedules, section by section
 - [LLP 0242](./0242-fresh-installs-attach-base-url.issue.md): the request;
   [LLP 0243](./0243-picker-composes-proxy-mode.decision.md) and
@@ -190,4 +190,4 @@ corpus cross-links otherwise never get written.
 ## Tasks
 
 - id: T1  branch: task/proxy-mode-default-attach/T1  deps: []  complexity: 2  -- test/core/attach-proxy-migration.test.js: add the missing LLP 0244 #non-interactive pin for the `--json` attach shape. Using the file's existing harness (its opts already plumb `json`, line 76, currently unused), add a test running `hyp attach --client claude --json` on a TTY against a proxy-capable descriptor and a key-less local gateway config, asserting: no prompt is issued (the askYesNo seam is never reached), stderr carries exactly the one pointer line `note: this install attaches claude by base URL; run 'hyp attach claude' in an interactive terminal to switch it to proxy mode`, no config write occurs (`proxy_mode` stays absent from the file on disk), and stdout remains the attach's valid JSON payload with nothing interleaved. Add a companion case proving `--json` combined with non-TTY still emits the pointer exactly once, not twice. Annotate with `// @ref LLP 0244#non-interactive [tests]: --json never prompts even on a TTY and emits exactly the pointer`. Gate: this file plus test/core/attach-enablement-state.test.js pass. No production code change is expected; if the assertion fails against `src/core/commands/clients.js` line 886's `parsed.json` gate, that is a bug to report, not a test to soften.
-- id: T2  branch: task/proxy-mode-default-attach/T2  deps: []  complexity: 1  -- Corpus cross-links for the design of record: append `LLP 0246` to the `Related:` metadata line of llp/0242-fresh-installs-attach-base-url.issue.md, llp/0243-picker-composes-proxy-mode.decision.md, and llp/0244-attach-migrates-to-proxy-mode.decision.md (trivial editorial forward-refs, permitted on Accepted docs; touch only the metadata line, never a settled section body). Re-verify that the six anchors LLP 0246 and the code cite resolve: #composed-default and #user-key-wins in 0243, #attach-offers, #enable-write, #central-managed, and #non-interactive in 0244. Run the repo's ref-check skill over llp/ and the files carrying `@ref LLP 0243` / `@ref LLP 0244` annotations (src/core/cli/walkthrough.js, src/core/commands/clients.js, src/core/config/gateway_proxy_enable.js, hypaware-core/plugins-workspace/claude/src/index.js, the test files) and confirm zero broken references. Gate: ref-check clean; no test changes.
+- id: T2  branch: task/proxy-mode-default-attach/T2  deps: []  complexity: 1  -- Corpus cross-links for the design of record: append `LLP 0251` to the `Related:` metadata line of llp/0242-fresh-installs-attach-base-url.issue.md, llp/0243-picker-composes-proxy-mode.decision.md, and llp/0244-attach-migrates-to-proxy-mode.decision.md (trivial editorial forward-refs, permitted on Accepted docs; touch only the metadata line, never a settled section body). Re-verify that the six anchors LLP 0251 and the code cite resolve: #composed-default and #user-key-wins in 0243, #attach-offers, #enable-write, #central-managed, and #non-interactive in 0244. Run the repo's ref-check skill over llp/ and the files carrying `@ref LLP 0243` / `@ref LLP 0244` annotations (src/core/cli/walkthrough.js, src/core/commands/clients.js, src/core/config/gateway_proxy_enable.js, hypaware-core/plugins-workspace/claude/src/index.js, the test files) and confirm zero broken references. Gate: ref-check clean; no test changes.

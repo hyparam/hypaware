@@ -5,7 +5,7 @@
 **Systems:** Config, Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0130, LLP 0135, LLP 0213, LLP 0232, LLP 0242, LLP 0246
+**Related:** LLP 0130, LLP 0135, LLP 0213, LLP 0232, LLP 0242, LLP 0251
 **Extends:** LLP 0233 (#proxy-mode-is-explicit: the key is still the only
 switch and is still explicit in the file; what changes is who writes it)
 
