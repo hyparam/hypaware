@@ -16,10 +16,15 @@ import { startProxy } from '../../hypaware-core/plugins-workspace/ai-gateway/src
 const HOST = 'localhost'
 
 /**
- * A gateway in front of a fake upstream, no interception: absolute-form
- * arrives on a plain socket, so the CONNECT machinery is not involved.
+ * A gateway in front of a fake upstream. Absolute-form arrives on a plain
+ * socket, so no tunnel is ever terminated, but the door only opens on a
+ * listener that serves the forward-proxy front door at all
+ * (LLP 0247 #only-forward-proxy-listeners-serve-it), so the default rig
+ * boots `tunnelOnly` - the shape of a proxy-pointed listener without a CA.
+ *
+ * @param {{ forwardProxy?: boolean }} [options]
  */
-async function bootGateway() {
+async function bootGateway({ forwardProxy = true } = {}) {
   /** @type {string[]} */
   const upstreamHits = []
   const upstream = http.createServer((req, res) => {
@@ -40,9 +45,13 @@ async function bootGateway() {
   const started = []
   /** @type {URL[]} */
   const controlCalls = []
+  /** @type {string[]} */
+  const warns = []
 
   const proxy = await startProxy({
     listen: '127.0.0.1:0',
+    ...(forwardProxy ? { tunnelOnly: true } : {}),
+    log: { warn: (message) => { warns.push(message) } },
     upstreams: [{
       name: 'fake-anthropic',
       base_url: `http://${HOST}:${upstreamPort}`,
@@ -75,6 +84,7 @@ async function bootGateway() {
     controlCalls,
     upstreamHits,
     upstreamPort,
+    warns,
     async cleanup() {
       await proxy.stop()
       await new Promise((resolve) => upstream.close(() => resolve(undefined)))
@@ -205,4 +215,77 @@ test('an origin-form request outside every prefix still 404s by path', async (t)
   assert.match(body, /^HTTP\/1\.1 404 /)
   assert.match(body, /no upstream matches path/)
   assert.deepEqual(rig.upstreamHits, [])
+})
+
+// The peer containment: an absolute-form request is addressed to a third
+// party, so serving one to a LAN peer would relay for the network. Tests can
+// only ever connect from loopback, so the peer address is overridden on a
+// real socket pair and the gateway-facing end is handed to the listener, the
+// same technique the CONNECT front door tests use.
+// @ref LLP 0247#loopback-peers-only [tests]
+test('an absolute-form request from a non-loopback peer is refused', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+
+  const pair = net.createServer()
+  await new Promise((resolve) => pair.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const pairAddress = pair.address()
+  const pairPort = pairAddress && typeof pairAddress === 'object' ? pairAddress.port : 0
+  const accepted = new Promise((resolve) => pair.once('connection', resolve))
+  const client = net.connect(pairPort, '127.0.0.1')
+  const gatewaySide = /** @type {net.Socket} */ (await accepted)
+  t.after(() => {
+    client.destroy()
+    gatewaySide.destroy()
+    pair.close()
+  })
+  Object.defineProperty(gatewaySide, 'remoteAddress', { value: '192.168.1.50' })
+  rig.proxy.server.emit('connection', gatewaySide)
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const requestBody = '{}'
+  client.write(
+    `POST https://${authority}/v1/messages HTTP/1.1\r\n` +
+    `Host: ${authority}\r\n` +
+    'Content-Type: application/json\r\n' +
+    `Content-Length: ${Buffer.byteLength(requestBody)}\r\n` +
+    'Connection: close\r\n' +
+    '\r\n' +
+    requestBody
+  )
+  const response = await new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
+    const chunks = []
+    client.on('data', (c) => chunks.push(Buffer.from(c)))
+    client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    client.on('error', reject)
+  })
+
+  assert.match(response, /^HTTP\/1\.1 403 /)
+  assert.match(response, /loopback peers only/)
+  assert.equal(rig.warns.includes('aigw.absolute_form_refused_remote_peer'), true)
+  assert.deepEqual(rig.upstreamHits, [])
+  assert.equal(rig.started.length, 0)
+})
+
+// The door only exists beside the CONNECT front door: a pure reverse-proxy
+// listener has no proxy-pointed clients, and LLP 0233 promises it behaves
+// exactly as it always has, so the same wire shape falls through to path
+// routing there.
+// @ref LLP 0247#only-forward-proxy-listeners-serve-it [tests]
+test('a reverse-proxy-only listener leaves absolute-form to path routing', async (t) => {
+  const rig = await bootGateway({ forwardProxy: false })
+  t.after(() => rig.cleanup())
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: `https://${authority}/v1/environments/bridge`,
+    host: authority,
+  })
+
+  assert.match(body, /^HTTP\/1\.1 404 /)
+  assert.match(body, /no upstream matches path/)
+  assert.deepEqual(rig.upstreamHits, [])
+  assert.equal(rig.started.length, 0)
 })

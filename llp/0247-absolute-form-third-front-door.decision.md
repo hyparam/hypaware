@@ -5,7 +5,7 @@
 **Systems:** Gateway
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0233, LLP 0234, LLP 0246
+**Related:** LLP 0232, LLP 0233, LLP 0234, LLP 0246
 
 > A request whose request-line carries an absolute URL is routed by the host
 > that URL names, through the same forwarding and per-path recording rules as
@@ -43,6 +43,18 @@ from all three front doors.
 Path matching is the wrong question here for the same reason it is under a
 `CONNECT`: the client already told us the destination, and honouring it is
 the only way to forward a request whose path no preset claims.
+
+### Only forward-proxy listeners serve it
+
+**The door exists only where the CONNECT front door does: a listener started
+with interception or `tunnelOnly`.** A client sends absolute-form because
+something proxy-pointed it at this port, and both flags mark exactly the
+listeners a client may be proxy-pointed at. A pure reverse-proxy listener has
+no proxy-pointed clients, and LLP 0233 #proxy-mode-is-explicit promises it
+behaves exactly as it always has, so there an absolute URL on the request
+line keeps falling through to path routing as before. The Remote Control
+bridge is unaffected by the gate: it only sends absolute-form when
+`HTTPS_PROXY` is set, which is precisely a proxy-mode install.
 
 ### Refuse hosts nobody registered
 

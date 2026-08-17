@@ -124,6 +124,10 @@ export async function startProxy(opts) {
   return {
     host,
     port: boundPort,
+    // The listener itself. Tests inject sockets here when they need a peer
+    // address a loopback connect cannot produce; nothing else should reach
+    // past `host`/`port`/`stop`.
+    server,
     stopped,
     async stop() {
       // Destroy hijacked tunnel sockets first: `server.close()` stops
@@ -191,9 +195,11 @@ function upstreamPortOf(upstream) {
  * ordinary `upstreams` config, even though no shipping preset does it), a
  * hostname-only resolve returns whichever sorts first, and the request is
  * forwarded to a port the client never asked for - the precise outcome the
- * comment in `interceptsHost` says its port check exists to prevent. A miss is
- * impossible in practice: this is only ever reached on a tunnel
- * `interceptsHost` already matched, so an exact host+port entry exists.
+ * comment in `interceptsHost` says its port check exists to prevent. On the
+ * tunnel path a miss is impossible in practice: it is only reached on a tunnel
+ * `interceptsHost` already matched, so an exact host+port entry exists. The
+ * absolute-form caller has no such guarantee: there a miss is expected, and it
+ * means the named host is refused (LLP 0247 #refuse-hosts-nobody-registered).
  *
  * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
  * @param {CompiledUpstream[]} upstreams
@@ -283,7 +289,9 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
 
   // Which front door this request came through. Proxy-mode requests arrive on
   // a socket the CONNECT handler terminated and stamped with the host the
-  // client asked for; reverse-proxy requests arrive on a plain socket.
+  // client asked for; a plain socket carries origin-form reverse-proxy
+  // traffic or, on a listener that also serves the forward-proxy front door,
+  // the absolute-form shape decided just below.
   const connectHost = connectHostOf(req.socket)
   const proxyMode = connectHost !== undefined
 
@@ -293,8 +301,15 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // RFC 9112 requires proxies to accept it. `new URL` above parsed the
   // absolute URL as-is (the placeholder base loses), so `parsedUrl` already
   // carries the authority the client named.
+  //
+  // The door exists only where the CONNECT front door does: a client sends
+  // absolute-form because something proxy-pointed it here, and gating on the
+  // same condition keeps a pure reverse-proxy listener behaving exactly as it
+  // always has (LLP 0233 #proxy-mode-is-explicit).
+  // @ref LLP 0247#only-forward-proxy-listeners-serve-it [implements]: absolute-form is served beside CONNECT or not at all
+  const forwardProxyDoor = Boolean(opts.interception) || Boolean(opts.tunnelOnly)
   // @ref LLP 0247#route-by-the-named-host [implements]: the request line names the destination, so routing is by host, not path
-  const absoluteForm = !proxyMode && /^https?:\/\//i.test(requestUrl)
+  const absoluteForm = !proxyMode && forwardProxyDoor && /^https?:\/\//i.test(requestUrl)
   if (absoluteForm) {
     // An absolute-form request is addressed to a third party, so serving it
     // to non-loopback peers would relay for the network: the same rule, for
