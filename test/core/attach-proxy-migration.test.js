@@ -73,9 +73,9 @@ function writeGatewayConfig(home, opts) {
  * enable prompt never fires and the migration offer is the only question in
  * play. `answer` (when stdin is a TTY) is pre-buffered for it.
  *
- * @param {{ home: string, answer?: string, tty?: boolean, json?: boolean }} opts
+ * @param {{ home: string, answer?: string, tty?: boolean }} opts
  */
-function makeCtx({ home, answer, tty = true, json = false }) {
+function makeCtx({ home, answer, tty = true }) {
   const registered = ['claude', 'codex']
   const gateway = {
     localEndpoint() {
@@ -86,7 +86,7 @@ function makeCtx({ home, answer, tty = true, json = false }) {
       if (!registered.includes(name)) return undefined
       return {
         name,
-        /** @param {{ endpoint: string, dryRun?: boolean, stdout: { write(chunk: unknown): boolean } }} args */
+        /** @param {{ endpoint: string, dryRun?: boolean, json?: boolean, stdout: { write(chunk: unknown): boolean } }} args */
         async attach(args) {
           writeFileSync(
             path.join(home, `${name}-attached.json`),
@@ -95,7 +95,11 @@ function makeCtx({ home, answer, tty = true, json = false }) {
           // Mirror a real adapter's --json contract: under json, stdout carries
           // exactly the one-line machine payload and nothing else, so the
           // --json pins below can assert it stays clean of any migration note.
-          if (json) {
+          // The flag is read off `args`, the way a real adapter reads it, so
+          // the pins also fail if the command stops propagating `--json` into
+          // `client.attach()` and every adapter starts printing prose into a
+          // machine-readable run.
+          if (args.json === true) {
             args.stdout.write(
               JSON.stringify({ status: 'ok', action: 'attach', client: name, dry_run: args.dryRun === true }) + '\n'
             )
@@ -242,11 +246,13 @@ test('--json on a TTY: no prompt, exactly one pointer note, no write, stdout sta
   await withTempHome(async (home) => {
     writeGatewayConfig(home)
     const before = readFileSync(localConfigPath(home), 'utf8')
-    // No `answer` is queued: if the askYesNo seam were somehow reached, the
-    // prompt would hang reading from an empty stdin, so this also guards
-    // against the seam being reached in a way a text assertion alone would
-    // miss.
-    const { ctx, stdout, stderr } = makeCtx({ home, tty: true, json: true })
+    // A `y` is queued even though nothing may consume it: were the askYesNo
+    // seam ever reached, an unanswerable prompt would park on an empty stdin
+    // and the run would never settle, cancelling the rest of this file
+    // instead of naming the regression. With the answer buffered, a reached
+    // seam instead accepts the migration and trips the question, stderr, and
+    // config-unchanged assertions below, loudly and in place.
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: true, answer: 'y' })
     const code = await runAttach(['--client', 'claude', '--json'], ctx)
     assert.equal(code, 0, stderr.text())
     // The askYesNo seam is never reached: its question never reaches stderr.
@@ -275,7 +281,7 @@ test('--json combined with non-TTY still emits the pointer exactly once, not twi
   await withTempHome(async (home) => {
     writeGatewayConfig(home)
     const before = readFileSync(localConfigPath(home), 'utf8')
-    const { ctx, stdout, stderr } = makeCtx({ home, tty: false, json: true })
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: false, answer: 'y' })
     const code = await runAttach(['--client', 'claude', '--json'], ctx)
     assert.equal(code, 0, stderr.text())
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
