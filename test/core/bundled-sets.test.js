@@ -21,7 +21,8 @@ import { V1_BUNDLED_PLUGIN_ALLOWLIST, V1_EXCLUDED_FROM_DEFAULT } from '../../src
 // that caused it. Break it on any other name and the smoke stays green,
 // because only riders reach `ridersInDefaultSet`, even though
 // `computeSelectedPlugins` (src/core/runtime/boot.js) still drops that name
-// from the `all-bundled` boot profile. This test names the cause in both
+// from both default boot profiles: `all-bundled` and the `all-available` one
+// bare `hyp` and `hyp init` actually run. This test names the cause in both
 // cases.
 test('the default-activation allowlist and the excluded set are disjoint', () => {
   const overlap = [...V1_BUNDLED_PLUGIN_ALLOWLIST].filter((name) => V1_EXCLUDED_FROM_DEFAULT.has(name))
