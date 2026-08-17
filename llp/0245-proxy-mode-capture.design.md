@@ -150,9 +150,12 @@ The CA lives in core, not in the gateway plugin, because `hyp detach` and
   `matchUpstreamByHost(upstreams, host, port)`: the intercept set is
   derived from the routing table and keyed on host **and** port; nothing
   configures it separately (LLP 0234).
-- `shouldRecordProxyExchange(upstream, pathname)`: the recording anchor. A
-  compiled `recordPrefix` of `/` or absent records nothing; failing closed
-  is the default. The routing matcher is deliberately not reused: the
+- `shouldRecordProxyExchange(upstream, pathname)`: the recording anchor is
+  `recordPrefix ?? prefix`, and an anchor of `/` or empty records nothing;
+  failing closed is the default. Note the fallback: an upstream with no
+  `record_prefix` records under its routing prefix, so section 3's
+  `source.js` merge is what keeps a routing `path_prefix` of `/` from
+  reading as record-everything. The routing matcher is deliberately not reused: the
   Anthropic route matcher accepts an `sk-ant-` bearer alone, which under a
   proxy is true of every request to the host and measurably reopened the
   aperture (LLP 0234 #recording-is-opt-in-per-path).
@@ -210,12 +213,20 @@ diagnosing that step needs LLP 0247 as well as LLP 0237 and LLP 0239.
 
 `hypaware-core/plugins-workspace/claude/src/index.js`:
 
-- The proxy-attach preflight refuses (`markActionRefused`) unless
-  `readLocalCaInfo()` finds a CA on disk: the CA's existence proves the
-  gateway is actually serving the mode, and a proxy attach against a dead
-  gateway would break all of Claude Code's HTTPS (LLP 0232
-  #proxy-attach-preflight). Mode is read from what the daemon is doing,
-  never from what config asks for.
+- The proxy-attach preflight is `readLocalCaInfo()`, and what it decides is
+  the *mode*: a CA on disk means `MODE_PROXY`, no CA means the attach falls
+  back to base-URL mode. The CA's existence proves the gateway is actually
+  serving the mode, and a proxy attach against a dead gateway would break
+  all of Claude Code's HTTPS (LLP 0232 #proxy-attach-preflight). Mode is
+  read from what the daemon is doing, never from what config asks for.
+  Recorded precisely because LLP 0232 states this twice and the two
+  statements do not say the same thing: "a missing CA is a refusal
+  (`markActionRefused`), not a warning" reads absolutely, while the next
+  paragraph settles "proxy mode when a CA exists and base-URL mode
+  otherwise". The tree implements the second. The only `markActionRefused`
+  on this path is `CA_MISSING` in `settings.js`, which fires when proxy
+  mode was already selected and the certificate has since become
+  unreadable, i.e. the race between the probe and the write.
 - On Darwin the attach then runs the trust and launchd steps: keychain
   probe/install (dialog names all permitted hosts, per LLP 0238), and
   `installLaunchdEnv()`. A refused dialog degrades politely: attach
@@ -252,7 +263,14 @@ readable without grepping a boot log (LLP 0233).
 ## 6. Failure modes {#failure-modes}
 
 - **Dead gateway behind a proxy attach**: the worst mode the feature can
-  have; prevented by the CA-existence preflight refusal (never a warning).
+  have. The CA-existence preflight covers the case it was designed for, a
+  machine that never ran proxy mode: no CA, so attach writes a base-URL
+  attach instead. It does not cover a machine that ran proxy mode and then
+  stopped the daemon: the CA outlives the process (LLP 0238), and when a
+  `listen` is configured `hyp attach` resolves the endpoint from config
+  rather than from a live bind, so `HTTPS_PROXY` can still be written at a
+  dead port. Residual, not closed; the acceptance procedure's step 1
+  therefore proves the daemon is up before attaching.
 - **CA preparation fails at boot**: gateway still starts and still reverse
   proxies; `proxy_mode_error` reported; degraded blind-tunnel CONNECT
   keeps an already-attached client's egress working.
@@ -282,8 +300,9 @@ idempotence, refusal path), `test/plugins/ai-gateway-connect-front-door.test.js`
 `test/plugins/ai-gateway-proxy-mode.test.js` and
 `ai-gateway-proxy-routing.test.js` (the negatives that define the
 aperture: a side-channel path is proxied faithfully and starts no
-exchange; an Anthropic bearer on an unmatched path cannot reopen it; a `/`
-or absent anchor records nothing; interception keyed on host and port),
+exchange; an Anthropic bearer on an unmatched path cannot reopen it; an
+anchor of `/` or empty records nothing; interception keyed on host and
+port),
 `test/plugins/claude-settings-proxy-attach.test.js` (two-key write, marker
 `mode`/`prev_env`, displaced-proxy backup and one-time redacted warning,
 mode-migration key release), and `test/core/status-proxy-trust.test.js`

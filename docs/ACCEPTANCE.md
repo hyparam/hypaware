@@ -573,14 +573,20 @@ procedure gates, sections 1, 4 and 6),
    hyp daemon install
    hyp daemon start
    hyp status
+   ls ~/.hyp/hypaware/tls/ca-cert.pem
    ```
 
    Pass condition: `hyp status` shows the daemon running and, under
-   `sources:`, the gateway source `[running]`. If the daemon is not running,
-   nothing below can work: the CA-existence preflight in step 2 refuses on
-   purpose rather than attaching against a dead gateway
+   `sources:`, the gateway source `[started]`, and the CA file exists. Check
+   all three: the `jq` edit is a silent no-op if the config has no
+   `@hypaware/ai-gateway` entry, and on a centrally managed host a local
+   `proxy_mode` write loses the LLP 0031 layer merge outright. The CA is the
+   only proof that proxy mode is actually being *served*, and step 2 reads
+   exactly that file to decide which mode to attach in
    ([LLP 0245#claude-attach](../llp/0245-proxy-mode-capture.design.md#claude-attach)
-   #proxy-attach-preflight).
+   #proxy-attach-preflight). With no CA, `hyp attach claude` does not refuse,
+   it quietly attaches in base-URL mode instead, and every step below would
+   then be measuring the wrong feature.
 
 2. Attach Claude Code and watch for the keychain dialog:
 
@@ -752,11 +758,17 @@ procedure gates, sections 1, 4 and 6),
 
 ### If it fails
 
-- `hyp attach claude` refuses outright before any dialog appears: check that
-  step 1's `proxy_mode: true` edit actually landed and that `hyp daemon
-  restart` (or a fresh `hyp daemon start`) ran after it; the CA-existence
-  preflight refuses on purpose when the gateway is not actually running in
-  proxy mode, and this is correct behaviour, not a bug to route around.
+- `hyp attach claude` reports a base-URL attach, or writes
+  `ANTHROPIC_BASE_URL` instead of the two proxy keys, and no dialog appears:
+  the gateway is not serving proxy mode, so there is no CA and attach fell
+  back to base-URL rather than refusing. Check that step 1's
+  `proxy_mode: true` edit actually landed and that `hyp daemon restart` (or a
+  fresh `hyp daemon start`) ran after it, then re-check
+  `~/.hyp/hypaware/tls/ca-cert.pem`. Do not treat the silent fallback as a
+  pass: it is the whole reason step 1 checks for the CA file. The one hard
+  refusal on this path (`CA_MISSING`) fires only when proxy mode was already
+  selected and the certificate became unreadable between the probe and the
+  write.
 - No dialog in step 2 on a machine that has never run this procedure:
   confirm no earlier HypAware install already trusted a CA under this same
   login keychain (`security find-certificate -c "HypAware Local CA" ...`);
