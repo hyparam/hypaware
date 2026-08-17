@@ -167,6 +167,8 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * the icebird-backed cache the value such a read yields is `null` on the
  * single-column `scanColumn` path and `undefined` on the row path, never a
  * throw; LLP 0240 records the measured contract and the tests that pin it.
+ * LLP 0015#multi-partition-union states the parquet-backed contract, which is
+ * a different one (undefined-or-throws) and does not govern this dataset.
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
  * @ref LLP 0240#contract [implements]: the wrapper is what makes an absent column addressable; its read values are pinned at the SQL surface

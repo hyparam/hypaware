@@ -76,9 +76,9 @@ test('renderConfigSummary: a fleet-managed install marks each client synced vs l
   const report = makeReport({
     layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true },
-      { name: 'codex', plugin: '@hypaware/codex', configured: true, attached: true },
-      { name: 'openclaw', plugin: '@hypaware/openclaw', configured: true, attached: false },
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, attachable: true, attached: true },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, attachable: true, attached: true },
+      { name: 'openclaw', plugin: '@hypaware/openclaw', configured: true, attachable: true, attached: false },
     ],
     clientSync: { syncing: ['claude', 'codex'], localOnly: ['openclaw'] },
     sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],

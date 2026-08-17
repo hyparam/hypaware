@@ -23,7 +23,8 @@ const DATASET_NAME = 'ai_gateway_messages'
  * fields map onto these named columns directly). `schema_version` 7 added
  * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
  * the additions are nullable and no partition-label bump is needed, so old
- * partitions carry no such column at all. A read of one over the
+ * partitions carry no such column at all. `withSchemaColumns` in `dataset.js`
+ * is the only reason they stay addressable. A read of one over the
  * icebird-backed cache never throws, but it is `null` on the single-column
  * scan path and `undefined` on the row path: LLP 0240 has the measured table.
  * Treat both as absent; do not branch on which one you got.

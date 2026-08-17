@@ -6,6 +6,12 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-14
 **Related:** LLP 0016, LLP 0114, LLP 0195, LLP 0231
+**Extended-by:** LLP 0243, LLP 0244 (#proxy-mode-is-explicit: the key stays
+the only switch; 0243 has fresh-install composition write it by default, 0244
+has attach write it into an existing config behind an explicit consent
+prompt); LLP 0247 (#one-listener-two-front-doors: absolute-form
+request-targets become a third front door, host-routed and restricted to
+intercepted hosts)
 
 > `CONNECT` tunnels and ordinary origin-form requests are served by the same
 > listener on the same port. Proxy mode is off unless a config explicitly turns

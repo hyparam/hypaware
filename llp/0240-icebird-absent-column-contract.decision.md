@@ -131,9 +131,9 @@ while the suite stayed green.
 ## Consequences
 
 - Documentation of this contract belongs here, not in LLP 0015. LLP 0015 is
-  Active and its union section is being corrected separately for the parquet
-  backing (#731 / PR #740); this doc carries the icebird half and 0015 gains
-  only a forward-ref.
+  Active and its union section was corrected separately for the parquet
+  backing (#731 / PR #740, now on master); this doc carries the icebird half
+  and 0015 gains only a forward-ref.
 - The `null`-versus-`undefined` split is a property of the engine's fast-path
   gate, not of the cache. If squirreling ever widens or narrows that gate, the
   values in the table above move, and the pinning tests are what will say so.

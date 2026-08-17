@@ -407,6 +407,10 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       {
         name: '@hypaware/ai-gateway',
         config: {
+          // Literal because this preset writes its config literally: the
+          // picker fold writes the same key from `gateway_proxy_mode`.
+          // @ref LLP 0243#composed-default [implements]: the preset install defaults to proxy attach too
+          proxy_mode: true,
           upstreams: [
             {
               name: 'anthropic',
