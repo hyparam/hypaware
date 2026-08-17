@@ -6,6 +6,9 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-15
 **Related:** LLP 0234, LLP 0235, LLP 0236, LLP 0237
+**Extended-by:** LLP 0245 (on acceptance of 0245 the long-lived CA is not
+part of capturing the `claude` client; it remains the credential for any
+client still routed through the proxy)
 
 > The interception CA becomes a per-machine, ten-year credential whose name
 > constraints permit every provider host HypAware can ever intercept, so the
