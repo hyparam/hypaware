@@ -3,6 +3,7 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { sanitizeLabel } from '../util/json_util.js'
+import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
@@ -280,6 +281,20 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         ...(a.attempts !== undefined ? { attempts: a.attempts } : {}),
       }))
       : null,
+    // Proxy-mode trust (LLP 0237 / LLP 0239). Additive: the key is emitted on
+    // every platform, and is `null` wherever the question does not apply (not
+    // darwin, or no CA), following this renderer's null-not-omitted contract
+    // rather than leaving an ordinary install's payload byte-identical to V1.
+    // `ca_trusted` / `launchd_env_set` are tri-state: `null` means the probe
+    // could not run, which a consumer must not read as "not trusted".
+    // @ref LLP 0237#consequences [implements]: --json carries the trust state next to the CA fingerprint
+    proxy_trust: report.proxyTrust
+      ? {
+        ca_fingerprint: report.proxyTrust.caFingerprint,
+        ca_trusted: report.proxyTrust.trusted,
+        launchd_env_set: report.proxyTrust.launchdEnvSet,
+      }
+      : null,
     diagnostics: report.diagnostics.map((d) => ({
       severity: d.severity,
       kind: d.kind,
@@ -439,6 +454,22 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
+  // Proxy mode's two invisible preconditions (LLP 0237, LLP 0239). Rendered
+  // only where the question applies - macOS with a CA on disk - so an ordinary
+  // install's text output is unchanged and a Linux host is never told about a
+  // keychain it does not have. This is the line that answers "the password
+  // dialog was cancelled last month" and "the CA was re-minted and the
+  // keychain still trusts the old one", neither of which any other line here
+  // can be read for.
+  // @ref LLP 0237#consequences [implements]: the trust state is reported next to the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+  // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
+  if (report.proxyTrust) {
+    stdout.write('  proxy trust:\n')
+    stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
+    stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
+    stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
+  }
+
   stdout.write(`  cache:           ${cacheRoot}\n`)
   stdout.write(
     `  cache retention: ${report.retention.days} days${
@@ -562,6 +593,36 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       }
     }
   }
+}
+
+/**
+ * The keychain half of the `proxy trust` block. An untrusted CA carries the
+ * repair with it because the repair is one command and the state is otherwise
+ * silent: capture keeps working, so nothing else in the report will ever
+ * mention it (LLP 0237#attach-anyway-on-refusal). `null` is a probe that could
+ * not run, which is a different answer from "not trusted" and says so.
+ *
+ * @param {boolean | null} trusted
+ * @returns {string}
+ */
+function describeCaTrust(trusted) {
+  if (trusted === true) return 'trusted'
+  if (trusted === false) {
+    return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
+  }
+  return 'unknown - the keychain probe could not run'
+}
+
+/**
+ * The launchd half of the `proxy trust` block. Same tri-state, same reason.
+ *
+ * @param {boolean | null} set
+ * @returns {string}
+ */
+function describeLaunchdEnv(set) {
+  if (set === true) return `${ENV_VAR_NAME}=1 set`
+  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp attach claude\` to set it`
+  return 'unknown - the launchctl probe could not run'
 }
 
 /**

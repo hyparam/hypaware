@@ -292,3 +292,32 @@ export function stripVolatileBlockFields(content) {
     return rest
   })
 }
+
+/**
+ * A URL with any `user:pass@` userinfo replaced by `***@`, for anything that
+ * displays, logs or serialises the value rather than using it.
+ *
+ * Proxy URLs are the case this exists for. A `HTTPS_PROXY` a user already had
+ * routinely carries corporate credentials, and attach reports what it displaced
+ * while detach reports what it gave back - to stdout, into `--json` output, and
+ * into a log record that an operator's own sink may ship off the machine. The
+ * value still has to be *stored* verbatim, because the marker is the only copy
+ * and detach restores from it; it is only the copies a human or a sink reads
+ * that must not carry the secret.
+ *
+ * `***@` rather than a bare strip, so the reader can still tell that the value
+ * they are being asked to recognise had credentials on it at all. The scheme,
+ * host, port and path survive untouched, which is what makes the notice usable.
+ *
+ * The pattern spans exactly the userinfo: RFC 3986 forbids `@`, `/`, `?` and
+ * `#` inside it, so requiring their absence stops the match running past the
+ * authority into a path or query that happens to contain an `@`. A value that
+ * is not a URL, or a URL with no userinfo, is returned unchanged.
+ *
+ * @param {string} value
+ * @returns {string} the input unchanged when it is not a non-empty string
+ */
+export function redactUrlUserinfo(value) {
+  if (typeof value !== 'string' || value.length === 0) return value
+  return value.replace(/^([a-z][a-z0-9+.\-]*:\/\/)[^@/?#\s]*@/i, '$1***@')
+}

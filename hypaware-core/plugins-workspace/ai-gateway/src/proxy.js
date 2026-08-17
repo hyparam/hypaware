@@ -2,13 +2,17 @@
 
 import http from 'node:http'
 import https from 'node:https'
+import tls from 'node:tls'
 
 import { parseListen } from './config.js'
+import { attachConnectFrontDoor, connectHostOf, connectPortOf, openUpstream } from './connect.js'
+import { createNullExchange } from './recorder.js'
 
 /**
  * @import { AiGatewayRouteInput } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig } from './types.js'
+ * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig, UpstreamProxy } from './types.js'
  * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+ * @import { Exchange } from './recorder.js'
  */
 
 /**
@@ -49,7 +53,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 export async function startProxy(opts) {
   const { host, port: requestedPort } = parseListen(opts.listen)
   const upstreams = compileUpstreams(opts.upstreams)
-  if (upstreams.length === 0) {
+  // An empty routing table is a caller mistake everywhere except one: a
+  // blind-tunnel-only listener has no routing to do. It exists because a client
+  // attached in proxy mode sends ALL of its egress here, so the port has to go
+  // on answering CONNECT even when there is nothing left to record.
+  // @ref LLP 0233#degrade-to-blind-tunnels [constrained-by]: tunnel-only is the one start with nothing to route
+  if (upstreams.length === 0 && !opts.tunnelOnly) {
     throw new Error('ai-gateway: at least one upstream must be configured before start')
   }
   /** @type {Set<Promise<void>>} */
@@ -58,6 +67,34 @@ export async function startProxy(opts) {
   const server = http.createServer((req, res) => {
     handleRequest(upstreams, opts, pendingFinalizers, req, res)
   })
+
+  // The second front door. Installed when proxy mode is serving, and also when
+  // it merely *might* have a client pointed at it (`tunnelOnly`).
+  //
+  // That second case is the difference between a bad day and a broken machine.
+  // A client attached in proxy mode has `HTTPS_PROXY` pointing here for ALL its
+  // egress, so if the CA later goes missing or the operator turns `proxy_mode`
+  // off, a listener that refuses CONNECT kills that client's authentication and
+  // updates, not just its capture. Blind-tunnelling everything instead degrades
+  // to unrecorded-but-working, which is the failure this feature is allowed to
+  // have.
+  // @ref LLP 0233#one-listener-two-front-doors [implements]: CONNECT and origin-form traffic share one port
+  const interception = opts.interception
+  const frontDoor = interception || opts.tunnelOnly
+    ? attachConnectFrontDoor({
+      server,
+      // Without a CA there is nothing to terminate with, so every tunnel is
+      // blind. `interceptsHost` is never consulted in that state.
+      shouldIntercept: (host, port) =>
+        Boolean(interception) && interceptsHost(upstreams, host, port),
+      secureContextFor: (host) => {
+        if (!interception) throw new Error('TLS interception is not available')
+        return interception.secureContextFor(host)
+      },
+      upstreamProxy: opts.upstreamProxy,
+      log: opts.log,
+    })
+    : undefined
 
   /** @type {(value: void) => void} */
   let resolveStopped = () => {}
@@ -89,12 +126,148 @@ export async function startProxy(opts) {
     port: boundPort,
     stopped,
     async stop() {
+      // Destroy hijacked tunnel sockets first: `server.close()` stops
+      // accepting but waits on connections it knows about, and a CONNECT
+      // socket is no longer one of them. Without this, stop() blocks until
+      // every peer gives up.
+      frontDoor?.close()
       await new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve(undefined)))
       })
       await Promise.allSettled(Array.from(pendingFinalizers))
     },
   }
+}
+
+/**
+ * Whether a CONNECT to `host` should be decrypted.
+ *
+ * The intercept set is derived from the routing table rather than configured
+ * separately: a host is decrypted only when a registered upstream actually
+ * names it. That keeps one fact in one place - adding an adapter widens
+ * capture, and nothing else does - and makes the blind-tunnel default true by
+ * construction for every other host the client talks to.
+ *
+ * @ref LLP 0234#intercept-set-is-the-routing-table [implements]
+ * @param {CompiledUpstream[]} upstreams
+ * @param {string} host
+ * @returns {boolean}
+ */
+export function interceptsHost(upstreams, host, port = 443) {
+  // Host AND port. The upstream names a specific endpoint, and terminating
+  // `CONNECT api.anthropic.com:8443` would decrypt a tunnel and then forward it
+  // to 443, silently sending the request somewhere the client did not ask for.
+  // The hostname is lower-cased because a client may send any case and
+  // `baseUrl.hostname` is already normalised.
+  const wanted = host.toLowerCase()
+  return upstreams.some((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
+}
+
+/**
+ * The port an upstream's `base_url` addresses, defaulted by scheme.
+ *
+ * @param {CompiledUpstream} upstream
+ * @returns {number}
+ */
+function upstreamPortOf(upstream) {
+  if (upstream.baseUrl.port) return Number.parseInt(upstream.baseUrl.port, 10)
+  return upstream.baseUrl.protocol === 'https:' ? 443 : 80
+}
+
+/**
+ * Resolve the upstream for a proxy-mode request by the host the client asked
+ * for in its CONNECT.
+ *
+ * Path matching is the wrong question here. In reverse-proxy mode the path is
+ * all we have, because every client points at the same base URL. Under a
+ * CONNECT the client already told us the destination, and honouring that is
+ * both more accurate and the only way to forward a request whose path no
+ * preset claims.
+ *
+ * Host AND port, matching {@link interceptsHost} exactly. The two have to agree
+ * or the port check there is defeated: `interceptsHost` decides *whether* to
+ * decrypt on the full authority, and this decides *where the decrypted request
+ * then goes*. With two upstreams naming the same host on different ports (an
+ * ordinary `upstreams` config, even though no shipping preset does it), a
+ * hostname-only resolve returns whichever sorts first, and the request is
+ * forwarded to a port the client never asked for - the precise outcome the
+ * comment in `interceptsHost` says its port check exists to prevent. A miss is
+ * impossible in practice: this is only ever reached on a tunnel
+ * `interceptsHost` already matched, so an exact host+port entry exists.
+ *
+ * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
+ * @param {CompiledUpstream[]} upstreams
+ * @param {string} host
+ * @param {number} [port]
+ * @returns {CompiledUpstream | undefined}
+ */
+export function matchUpstreamByHost(upstreams, host, port = 443) {
+  const wanted = host.toLowerCase()
+  return upstreams.find((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
+}
+
+/**
+ * Whether a proxy-mode exchange should be recorded.
+ *
+ * Recording is opt-in per path, and the opt-in is the upstream's declared
+ * `path_prefix`. Reusing the routing matcher here would be wrong: the Anthropic
+ * matcher deliberately accepts a request on an Anthropic bearer token alone so
+ * reverse-proxy traffic routes even on an unfamiliar path, and under a CONNECT
+ * that predicate is true of *every* request the client makes to the host,
+ * including OAuth settings reads, MCP registry fetches and update checks. A
+ * synthetic POST carrying a `messages` array to an unrelated path was observed
+ * projecting stored rows through exactly that hole.
+ *
+ * A catch-all (`/`) or absent prefix records nothing. Failing closed is the
+ * only safe default when the question is "should this be persisted", and a
+ * silent widening is precisely the outcome the path anchor exists to prevent.
+ *
+ * @ref LLP 0234#recording-is-opt-in-per-path [implements]: the path anchor, not the routing matcher, decides persistence
+ * @param {CompiledUpstream} upstream
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function shouldRecordProxyExchange(upstream, pathname) {
+  // The adapter's own anchor when it registered one, else the routing prefix.
+  const anchor = upstream.recordPrefix ?? upstream.prefix
+  if (!anchor || anchor === '/') return false
+  return pathMatchesPrefix(pathname, anchor)
+}
+
+/**
+ * An agent that reaches the upstream through a corporate proxy.
+ *
+ * Built only when `upstream_proxy` is configured. The intercepted leg has to
+ * take the same route as a blind tunnel: pointing `HTTPS_PROXY` at us removes
+ * the customer's own proxy from the client's path, so if we did not chain we
+ * would have cut egress that used to work.
+ *
+ * @param {UpstreamProxy} upstreamProxy
+ * @returns {https.Agent}
+ */
+export function createChainedAgent(upstreamProxy) {
+  const agent = new https.Agent({ keepAlive: true })
+  // Node's Agent supports a callback form of `createConnection` that its
+  // published types do not describe, so the assignment is made through an
+  // untyped view of the agent rather than suppressed at each call.
+  const untyped = /** @type {{ createConnection: Function }} */ (/** @type {unknown} */ (agent))
+  /**
+   * @param {{ host?: string, port?: number | string }} options
+   * @param {(err: Error | null, socket?: import('node:net').Socket) => void} cb
+   */
+  untyped.createConnection = (options, cb) => {
+    const host = String(options.host)
+    const port = Number(options.port) || 443
+    openUpstream({ host, port }, upstreamProxy, (err, socket) => {
+      if (err || !socket) {
+        cb(err ?? new Error('upstream proxy did not return a socket'))
+        return
+      }
+      const secure = tls.connect({ socket, servername: host }, () => cb(null, secure))
+      secure.on('error', (tlsErr) => cb(tlsErr))
+    })
+  }
+  return agent
 }
 
 /**
@@ -108,6 +281,12 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
 
+  // Which front door this request came through. Proxy-mode requests arrive on
+  // a socket the CONNECT handler terminated and stamped with the host the
+  // client asked for; reverse-proxy requests arrive on a plain socket.
+  const connectHost = connectHostOf(req.socket)
+  const proxyMode = connectHost !== undefined
+
   // @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`
   // prefix is a LOCAL control surface: handled in-process, never matched
   // against upstreams, never proxied, and it starts NO exchange (no
@@ -115,7 +294,13 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // upstream (`path_prefix: "/"`) cannot leak a control request to a
   // provider. The handler owns the request lifecycle (body + response); an
   // unregistered handler drains the body and 404s locally.
-  if (isControlPath(parsedUrl.pathname)) {
+  //
+  // Scoped to the direct origin. A tunnelled request is addressed to a third
+  // party, so answering `https://api.anthropic.com/_hypaware/...` locally would
+  // both swallow a path that is not ours and expose the unauthenticated control
+  // surface to anything that can make the client fetch a URL. `hyp session
+  // ignore` talks to `http://127.0.0.1:<port>` directly and is unaffected.
+  if (!proxyMode && isControlPath(parsedUrl.pathname)) {
     if (typeof opts.onControlRequest === 'function') {
       opts.onControlRequest(req, res, parsedUrl)
       return
@@ -125,12 +310,32 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     return
   }
 
-  const upstream = matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
+  const upstream = proxyMode
+    ? matchUpstreamByHost(upstreams, connectHost, connectPortOf(req.socket))
+    : matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
+    // Under a CONNECT the client named a host we agreed to decrypt, so failing
+    // to resolve it is our bug, not a routing miss: say so rather than
+    // reporting a path that was never the question.
+    if (proxyMode) {
+      // The port is named too: it is half of both the trust decision and the
+      // routing key, so a report that omits it cannot describe this miss.
+      sendJson(res, 502, {
+        error: 'no upstream matches connect host',
+        host: connectHost,
+        port: connectPortOf(req.socket) ?? 443,
+      })
+      return
+    }
     sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
     return
   }
+
+  // Reverse-proxy traffic was routed here by a client we attached, so all of it
+  // is in scope. Proxy-mode traffic is everything the client sends to the host,
+  // so it is recorded only where an upstream's path anchor claims it.
+  const recording = !proxyMode || shouldRecordProxyExchange(upstream, parsedUrl.pathname)
 
   const isHttps = upstream.baseUrl.protocol === 'https:'
   const lib = isHttps ? https : http
@@ -140,13 +345,15 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     : isHttps ? 443 : 80
 
   const forwardedHeaders = forwardHeaders(req.headers, upstreamHost)
-  const exchange = opts.startExchange({
-    upstream: upstream.name,
-    provider: upstream.provider,
-    method: req.method,
-    path: requestUrl,
-    requestHeaders: req.headers,
-  })
+  const exchange = recording
+    ? opts.startExchange({
+      upstream: upstream.name,
+      provider: upstream.provider,
+      method: req.method,
+      path: requestUrl,
+      requestHeaders: req.headers,
+    })
+    : createNullExchange()
 
   let upstreamEnded = false
   let failed = false
@@ -154,7 +361,13 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   function finalizeOnce() {
     if (finalized) return
     finalized = true
-    const pending = Promise.resolve(opts.onExchangeFinished(exchange))
+    // A pass-through exchange produced no row and was never handed to the
+    // recorder, so there is nothing to settle.
+    if (!recording) return
+    // The guard above is the narrowing: only a real recorder exchange reaches
+    // here, so the null stand-in is never handed to the settle path.
+    const recorded = /** @type {Exchange} */ (exchange)
+    const pending = Promise.resolve(opts.onExchangeFinished(recorded))
       .catch(() => undefined)
       .finally(() => {
         pendingFinalizers.delete(pending)
@@ -170,6 +383,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     path: parsedUrl.pathname + parsedUrl.search,
     headers: forwardedHeaders,
     family: 4,
+    ...(isHttps && opts.chainedAgent ? { agent: opts.chainedAgent } : {}),
   }, (upstreamRes) => {
     const responseHeaders = sanitizeResponseHeaders(upstreamRes.headers)
     res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, responseHeaders)
@@ -331,6 +545,7 @@ export function compileUpstreams(upstreams) {
       match: typeof u.match === 'function' ? u.match : undefined,
     }
     if (u.provider) compiled.provider = u.provider
+    if (u.record_prefix) compiled.recordPrefix = u.record_prefix
     out.push(compiled)
   }
   return out.sort((a, b) => {
