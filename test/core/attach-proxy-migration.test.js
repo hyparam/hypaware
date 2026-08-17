@@ -75,7 +75,7 @@ function writeGatewayConfig(home, opts) {
  *
  * @param {{ home: string, answer?: string, tty?: boolean, json?: boolean }} opts
  */
-function makeCtx({ home, answer, tty = true }) {
+function makeCtx({ home, answer, tty = true, json = false }) {
   const registered = ['claude', 'codex']
   const gateway = {
     localEndpoint() {
@@ -86,12 +86,20 @@ function makeCtx({ home, answer, tty = true }) {
       if (!registered.includes(name)) return undefined
       return {
         name,
-        /** @param {{ endpoint: string, dryRun?: boolean }} args */
+        /** @param {{ endpoint: string, dryRun?: boolean, stdout: { write(chunk: unknown): boolean } }} args */
         async attach(args) {
           writeFileSync(
             path.join(home, `${name}-attached.json`),
             JSON.stringify({ endpoint: args.endpoint, dryRun: args.dryRun === true })
           )
+          // Mirror a real adapter's --json contract: under json, stdout carries
+          // exactly the one-line machine payload and nothing else, so the
+          // --json pins below can assert it stays clean of any migration note.
+          if (json) {
+            args.stdout.write(
+              JSON.stringify({ status: 'ok', action: 'attach', client: name, dry_run: args.dryRun === true }) + '\n'
+            )
+          }
         },
       }
     },
@@ -226,6 +234,66 @@ test('non-TTY: no question, one pointer note, attach unchanged', async () => {
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
     assert.match(stderr.text(), /run 'hyp attach claude' in an interactive terminal/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+  })
+})
+
+// @ref LLP 0244#non-interactive [tests]: --json never prompts even on a TTY and emits exactly the pointer
+test('--json on a TTY: no prompt, exactly one pointer note, no write, stdout stays the attach JSON payload', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    // No `answer` is queued: if the askYesNo seam were somehow reached, the
+    // prompt would hang reading from an empty stdin, so this also guards
+    // against the seam being reached in a way a text assertion alone would
+    // miss.
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: true, json: true })
+    const code = await runAttach(['--client', 'claude', '--json'], ctx)
+    assert.equal(code, 0, stderr.text())
+    // The askYesNo seam is never reached: its question never reaches stderr.
+    assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
+    // Exactly the one pointer line, nothing else on stderr.
+    assert.equal(
+      stderr.text(),
+      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
+      'interactive terminal to switch it to proxy mode\n'
+    )
+    // No config write: proxy_mode stays absent from the file on disk.
+    const after = readFileSync(localConfigPath(home), 'utf8')
+    assert.equal(after, before)
+    assert.doesNotMatch(after, /proxy_mode/)
+    // stdout stays the attach's valid JSON payload, nothing interleaved.
+    const stdoutText = stdout.text()
+    assert.equal(stdoutText.split('\n').filter((line) => line.length > 0).length, 1)
+    const payload = JSON.parse(stdoutText)
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.client, 'claude')
+  })
+})
+
+// @ref LLP 0244#non-interactive [tests]: --json never prompts even on a TTY and emits exactly the pointer
+test('--json combined with non-TTY still emits the pointer exactly once, not twice', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: false, json: true })
+    const code = await runAttach(['--client', 'claude', '--json'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
+    // Both conditions (json and non-TTY) independently qualify for the
+    // pointer; it must still land exactly once, never doubled.
+    assert.equal(
+      stderr.text(),
+      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
+      'interactive terminal to switch it to proxy mode\n'
+    )
+    const after = readFileSync(localConfigPath(home), 'utf8')
+    assert.equal(after, before)
+    assert.doesNotMatch(after, /proxy_mode/)
+    const stdoutText = stdout.text()
+    assert.equal(stdoutText.split('\n').filter((line) => line.length > 0).length, 1)
+    const payload = JSON.parse(stdoutText)
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.client, 'claude')
   })
 })
 
