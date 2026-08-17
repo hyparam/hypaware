@@ -112,11 +112,16 @@ export async function* alignRows(rows, columns) {
  * an absent key even though the row object owns it. `Object.keys(row).length`
  * over a star therefore counts the advertised columns, not the physical ones,
  * and is not a way to discover what a partition holds. What no longer varies is
- * which read path the caller took: reading `resolved`, invoking the cell, and
+ * which ROW path the caller took: reading `resolved`, invoking the cell, and
  * evaluating the column in a `WHERE`, `ORDER BY`, `GROUP BY`, `DISTINCT` or an
  * aggregate all agree, where a short row made the last group throw
- * `ColumnNotFoundError` on the first partition lacking the column.
- * `test/core/union-source.test.js` pins these.
+ * `ColumnNotFoundError` on the first partition lacking the column. The
+ * `scanColumn` hook below is a DIFFERENT path and padding does not touch it: it
+ * forwards each partition's chunks unchanged, so an absent column's value there
+ * is whatever the partition streams, and a wrapper above the union normalizes
+ * those holes if it wants them uniform (ai-gateway's `withSchemaColumns` maps
+ * them to `null`). LLP 0241 left that `null`/`undefined` split between the two
+ * paths unsettled on purpose. `test/core/union-source.test.js` pins these.
  *
  * Because a sub-source now emits exactly the columns it is asked for (see
  * `parquet-source.js`), forwarding `columns` also determines what the engine

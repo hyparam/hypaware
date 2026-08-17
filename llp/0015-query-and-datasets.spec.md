@@ -81,12 +81,17 @@ so a column a partition physically lacks is still a real cell on the row, and
 that cell resolves to `undefined`. The value is outside `SqlPrimitive` and
 `JSON.stringify` drops it, so a padded column renders as an absent key even
 though the row object owns it, and `Object.keys(row).length` over a star counts
-the **advertised** columns rather than the physical ones. Every read path agrees
-on that value: reading the row's pre-materialized `resolved` map (`collect()`'s
-fast path), invoking the cell directly, and evaluating the column above the scan
-in a `WHERE`, an expression or function over it, `ORDER BY`, `GROUP BY`,
-`DISTINCT`, or an aggregate. `SELECT *` renders identically to the unpadded
-star, because the key it now owns is one `JSON.stringify` drops. The column is
+the **advertised** columns rather than the physical ones. Every **row**-path
+read agrees on that value: reading the row's pre-materialized `resolved` map
+(`collect()`'s fast path), invoking the cell directly, and evaluating the column
+above the scan in a `WHERE`, an expression or function over it, `ORDER BY`,
+`GROUP BY`, `DISTINCT`, or an aggregate. The `scanColumn` column-stream path is
+**not** part of that agreement and is not what padding changed: the union
+forwards each partition's chunks unchanged, and a wrapper above it normalizes
+the holes if it wants them uniform (LLP 0032's `withSchemaColumns` maps them to
+`null`). LLP 0241 deliberately left that `null`/`undefined` split between the
+two paths unsettled. `SELECT *` renders identically to the unpadded star,
+because the key it now owns is one `JSON.stringify` drops. The column is
 addressable at all only because the union advertises the superset of partition
 columns; when no partition has it, planning fails unless a wrapper advertises
 the declared schema on top of the union (LLP 0032's `withSchemaColumns`), which
