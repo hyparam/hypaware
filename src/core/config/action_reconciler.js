@@ -626,11 +626,21 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
  * Two shapes, because "re-arm" and "retract" are only the same operation when
  * the marker records no effect:
  *
- *  - **No `installed_assets`.** The marker records nothing that outlives it
- *    (an attach refuses *before* touching the client's settings), so it is
- *    dropped outright. The next reconcile pass's `existing` lookup returns
- *    `undefined`, the request key is a fresh forward gap, and `perform()`
- *    writes a correct `done` marker itself.
+ *  - **No `installed_assets`.** Dropped outright. The next reconcile pass's
+ *    `existing` lookup returns `undefined`, the request key is a fresh forward
+ *    gap, and `perform()` writes a correct `done` marker itself.
+ *
+ *    What makes that safe is the *call site*, not the marker: this runs only
+ *    after an explicit `hyp attach` that already succeeded and rewrote the
+ *    client's settings, and a hand-attached client is undone by `hyp detach`
+ *    reading the client's own file, with no marker needed. So do not read the
+ *    drop as "this marker recorded nothing". Such a marker may carry
+ *    `prior_done: true` (a settings-only attach that reached `done` and was
+ *    later rewritten to `refused`), and that bit is exactly the evidence the
+ *    reconciler's reverse gap must not drop over. Here it may be dropped, and
+ *    the asset half below may not, because the settings name themselves on
+ *    disk and org-installed asset paths are named by nothing but this marker.
+ *    Only the *asset* half of the record outlives an explicit re-attach.
  *  - **With `installed_assets`.** Those name files an *earlier* successful
  *    org-driven attach copied, carried onto the marker across its rewrite to
  *    `refused`; the marker is the only thing on disk naming them, and
@@ -648,6 +658,7 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
  * @returns {boolean} whether a `refused` marker was found and the store rewritten
  * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only a refused one
  * @ref LLP 0138#marker-undo [implements]: the re-arm keeps the record of an applied effect, so a later reversal can still remove what an org-driven attach installed
+ * @ref LLP 0250 [constrained-by]: the re-arm is deliberately left reading only the asset half, so an assetless marker carrying `prior_done` is still dropped here
  */
 export function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
