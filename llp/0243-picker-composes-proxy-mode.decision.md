@@ -51,6 +51,13 @@ reconfigure is a picker run, not the LLP 0244 migration verb. Declining the
 default is one explicit key, and it stays declined; the composed default
 applies only where composition creates the gateway entry.
 
+"Reconfigure" here means the interactive lane, the only one that folds the
+existing config in. A non-interactive re-init (`--yes`, presets,
+`--from-file`) composes from scratch by design - its output stays
+byte-identical for the same inputs, and it only ever overwrites an existing
+file behind an explicit `--force`, which is the whole-file consent - so it
+re-applies the composed default like a fresh install.
+
 ### Still explicit, still consented {#still-explicit}
 
 LLP 0233's invariant survives narrowed, not discarded. The key is still the

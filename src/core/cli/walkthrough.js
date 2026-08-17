@@ -33,7 +33,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { Interface } from 'node:readline/promises'
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
- * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
  */
 
@@ -1003,7 +1003,11 @@ export function composePickerConfig(args) {
       // The carry-forward merge then lets the prior gateway entry own the
       // key entirely: a hand-written `proxy_mode: false` outranks this, and
       // an entry without the key stays without it (existing installs migrate
-      // only through `hyp attach`, LLP 0244).
+      // only through `hyp attach`, LLP 0244). That protection rides
+      // `args.existing`, which only the interactive reconfigure lane
+      // supplies: a non-interactive `--force` re-init composes from scratch
+      // by design (the whole-file overwrite is its own consent) and
+      // re-applies this default.
       // @ref LLP 0243#composed-default [implements]: a picked proxy-attaching row turns the composed gateway into a proxy-mode gateway
       config: {
         upstreams,
@@ -1576,6 +1580,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   skipAttachClients?: Set<string>,
  *   progress?: string,
+ *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   waitForCaFn?: (args: {
  *     stateRoot: string,
  *     timeoutMs?: number,
@@ -1654,7 +1659,11 @@ export async function runPickerFinale(args) {
             span.setAttribute('platform', plan.platform)
           }
         } else {
-          const plan = await installMod.installDaemon(options)
+          // Injectable so the open-gate finale path (install -> CA wait ->
+          // attach) is testable at all: the real installDaemon refuses to
+          // spawn a service manager under the test runner (LLP 0181).
+          const installFn = args.installDaemonFn ?? installMod.installDaemon
+          const plan = await installFn(options)
           summary.daemonInstall = {
             skipped: false,
             dryRun: false,

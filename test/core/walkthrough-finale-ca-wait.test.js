@@ -197,6 +197,55 @@ test('an unreadable central layer falls back to the local config key', async () 
   })
 })
 
+// The open-gate wiring pin: with a (stubbed) daemon install actually
+// running, the finale must call the CA wait after the install and before
+// the first adapter attach - deleting the wait call would break only this
+// ordering, which no logic-level helper test can see.
+test('the open-gate finale waits for the CA after install and before the first attach', async () => {
+  await withTempHome(async (home) => {
+    const stderr = makeBuf()
+    const stdout = makeBuf()
+    /** @type {string[]} */
+    const events = []
+    const summary = await runPickerFinale({
+      finale: { dryRun: false, skipDaemonRestart: true },
+      retentionDays: 30,
+      interactive: false,
+      clientsPicked: ['claude'],
+      capabilities: /** @type {any} */ ({
+        has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
+        require: () => ({
+          getClient: (/** @type {string} */ name) =>
+            name === 'claude'
+              ? { attach: async () => { events.push('attach') } }
+              : undefined,
+          localEndpoint: () => 'http://127.0.0.1:4317',
+        }),
+      }),
+      config: localConfig({ proxyMode: true }),
+      configPath: path.join(home, '.hyp', 'hypaware-config.json'),
+      env: env(home),
+      stdout,
+      stderr,
+      installDaemonFn: async () => {
+        events.push('install')
+        return /** @type {any} */ ({
+          targetPath: path.join(home, 'launchd.plist'),
+          binPath: '/usr/local/bin/hyp',
+          platform: 'darwin',
+        })
+      },
+      waitForCaFn: async () => {
+        events.push('ca-wait')
+        return { ready: true, certPath: path.join(home, 'ca-cert.pem') }
+      },
+    })
+    assert.deepEqual(events, ['install', 'ca-wait', 'attach'])
+    assert.equal(summary.daemonInstall.skipped, false)
+    assert.equal(stderr.text(), '', 'a ready CA prints no warning')
+  })
+})
+
 // The wiring pin: the finale forwards `waitForCaFn` and gates it on a real
 // daemon install, so the skip-daemon shape every hermetic finale test and
 // smoke uses must reach the attach lane without ever touching the seam (no
