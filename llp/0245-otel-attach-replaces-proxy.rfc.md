@@ -7,8 +7,8 @@
 **Date:** 2026-08-17
 **Related:** LLP 0231, LLP 0242, LLP 0243, LLP 0244, LLP 0027, LLP 0030, LLP 0032, LLP 0049, LLP 0085, LLP 0103, LLP 0012, LLP 0015
 **Tracker:** hyparam/hypaware#798 (implementation spec)
-**Spawns (on acceptance):** LLP 0251, LLP 0252, LLP 0253, LLP 0254, LLP 0255,
-LLP 0256 (decisions), LLP 0257 (spec). All Draft until this RFC is accepted.
+**Spawns (on acceptance):** LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256,
+LLP 0258 (decisions), LLP 0257 (spec). All Draft until this RFC is accepted.
 
 > Claude Code now ships a sanctioned, documented export path for everything the
 > proxy intercepts: OTEL telemetry events plus raw API body files
@@ -262,7 +262,7 @@ Net-new (R2): everything listed in R2, none of it visible on the wire.
 ## On acceptance
 
 This RFC stays the deliberation record and spawns six narrow decisions, one per
-settled choice: injection mechanism (LLP 0251), events-plus-bodies split
+settled choice: injection mechanism (LLP 0258), events-plus-bodies split
 (LLP 0252), spool cap policy (LLP 0253), settlement retirement scope
 (LLP 0254), behavioral dataset shape (LLP 0255), and session-ignore transport
 (LLP 0256, the choice open question 4 above resolves). It also spawns a spec

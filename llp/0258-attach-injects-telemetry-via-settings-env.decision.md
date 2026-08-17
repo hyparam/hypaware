@@ -1,4 +1,4 @@
-# LLP 0251: Attach turns on Claude Code telemetry by writing the settings `env` block
+# LLP 0258: Attach turns on Claude Code telemetry by writing the settings `env` block
 
 **Type:** Decision
 **Status:** Draft

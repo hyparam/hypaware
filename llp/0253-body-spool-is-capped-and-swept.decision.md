@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0245 (the RFC this
-decision realizes; Draft until 0245 is accepted), LLP 0251, LLP 0252, LLP 0257
+decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257, LLP 0258
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB
@@ -16,7 +16,7 @@ decision realizes; Draft until 0245 is accepted), LLP 0251, LLP 0252, LLP 0257
 
 ## Context
 
-Claude Code writes bodies to a directory we name at attach (LLP 0251
+Claude Code writes bodies to a directory we name at attach (LLP 0258
 #env-keys) and it keeps writing whether or not the daemon is reading. Measured
 volume is about 145 KB per request, so a heavy day passes gigabytes through the
 directory. LLP 0245 settles that transient spool presence is acceptable, given
@@ -62,7 +62,7 @@ it says.
 ### Purge and detach sweep the spool {#purge-and-detach-sweep}
 
 **`hyp purge` and `hyp detach claude` both remove the spool directory's
-contents.** The attach marker records the path (LLP 0251 #marker-and-spool) so
+contents.** The attach marker records the path (LLP 0258 #marker-and-spool) so
 neither verb has to recompute it, and so a detach after a config change still
 sweeps the directory that was actually used.
 

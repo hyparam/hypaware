@@ -7,15 +7,15 @@
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
 LLP 0049, LLP 0066, LLP 0103, LLP 0245 (the RFC this spec realizes; Draft until
-0245 is accepted), LLP 0251, LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256
+0245 is accepted), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
 **Tracker:** hyparam/hypaware#798
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json
 > listener plus a body-file reader, registered by `@hypaware/claude`, producing
 > `ai_gateway_messages` rows and `claude_telemetry_events` rows. This is the
 > requirements document the listener implementation and its tests answer to.
-> The decisions it composes are LLP 0251 through LLP 0256; the rationale lives
-> there and in LLP 0245, not here.
+> The decisions it composes are LLP 0252 through LLP 0256 plus LLP 0258; the
+> rationale lives there and in LLP 0245, not here.
 
 ## Summary
 
@@ -37,7 +37,7 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
 - **S3** The listener binds loopback-only, on its own port, separate from the
   `@hypaware/otel` receiver and from the gateway. The port is config with a
   default; `0` requests a dynamic port and the bound port is what attach
-  writes into the settings `env` block (LLP 0251 #env-keys).
+  writes into the settings `env` block (LLP 0258 #env-keys).
 - **S4** The self-telemetry loop guard of LLP 0021 applies: the daemon's own
   exports must never be ingested by this listener.
 
