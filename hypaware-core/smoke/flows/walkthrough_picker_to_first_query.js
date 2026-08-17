@@ -583,10 +583,10 @@ export async function run({ harness, expect }) {
  * the allowlist and the excluded set are disjoint, so nothing in `loaded` is
  * something that filter drops. A plugin in neither list is invisible to both
  * sides: it is not in `loaded`, and `loadPickerCatalog` reads only those two
- * buckets. Disjointness, not coverage, is what carries this: the union can
- * span the whole bundled workspace while a name sits in both sets, and
- * `discoverBundledPlugins` checks the allowlist before the exclude set, so
- * that name would stay in `loaded` while `ridersInDefaultSet` drops it.
+ * buckets. It is disjointness, not coverage, that does the work here: the
+ * union can span the whole bundled workspace while a name sits in both sets,
+ * and `discoverBundledPlugins` checks the allowlist before the exclude set,
+ * so that name would stay in `loaded` while `ridersInDefaultSet` drops it.
  * `test/core/bundled-sets.test.js` guards the disjointness.
  *
  * @param {string[]} picked  plugin names the picker composed from its rows

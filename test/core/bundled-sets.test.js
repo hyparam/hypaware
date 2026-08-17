@@ -15,9 +15,14 @@ import { V1_BUNDLED_PLUGIN_ALLOWLIST, V1_EXCLUDED_FROM_DEFAULT } from '../../src
 //
 // `composedRiders` in hypaware-core/smoke/flows/walkthrough_picker_to_first_query.js
 // rests on this: it reads only `loaded` and expects that set to agree with
-// what `loadPickerCatalog` writes. Break disjointness and that smoke goes red
-// on a plugin the install never receives, pointing at its golden rather than
-// at the two-list edit that caused it. This test names the cause instead.
+// what `loadPickerCatalog` writes. Break disjointness on a plugin that
+// declares `compose_with` and that smoke goes red on a rider the install
+// never receives, pointing at its golden rather than at the two-list edit
+// that caused it. Break it on any other name and the smoke stays green,
+// because only riders reach `ridersInDefaultSet`, even though
+// `computeSelectedPlugins` (src/core/runtime/boot.js) still drops that name
+// from the `all-bundled` boot profile. This test names the cause in both
+// cases.
 test('the default-activation allowlist and the excluded set are disjoint', () => {
   const overlap = [...V1_BUNDLED_PLUGIN_ALLOWLIST].filter((name) => V1_EXCLUDED_FROM_DEFAULT.has(name))
   assert.deepEqual(
