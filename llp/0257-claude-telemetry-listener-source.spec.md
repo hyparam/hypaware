@@ -6,9 +6,8 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
-LLP 0049, LLP 0066, LLP 0103, LLP 0245, LLP 0251, LLP 0252, LLP 0253,
-LLP 0254, LLP 0255, LLP 0256
-**Spawned-by:** LLP 0245 (on acceptance)
+LLP 0049, LLP 0066, LLP 0103, LLP 0245 (the RFC this spec realizes; Draft until
+0245 is accepted), LLP 0251, LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256
 **Tracker:** hyparam/hypaware#798
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json

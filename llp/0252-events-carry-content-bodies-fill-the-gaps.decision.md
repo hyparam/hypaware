@@ -5,9 +5,8 @@
 **Systems:** Sources, Plugins, Privacy
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0245, LLP 0251,
-LLP 0253, LLP 0257
-**Spawned-by:** LLP 0245 (on acceptance)
+**Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0245 (the RFC this
+decision realizes; Draft until 0245 is accepted), LLP 0251, LLP 0253, LLP 0257
 
 > The OTEL event stream is the primary producer: it arrives pre-deduplicated
 > and supplies identity, content, usage, and behavioral data. Raw body files

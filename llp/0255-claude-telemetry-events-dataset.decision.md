@@ -5,9 +5,8 @@
 **Systems:** Plugins, Query, Sources
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0245,
-LLP 0252, LLP 0257
-**Spawned-by:** LLP 0245 (on acceptance)
+**Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0245 (the
+RFC this decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257
 
 > The events that describe behavior rather than conversation (tool accept and
 > reject decisions, permission mode changes, hook executions, MCP server

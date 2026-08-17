@@ -5,9 +5,8 @@
 **Systems:** Privacy, Config, Sources, Daemon
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0245, LLP 0251,
-LLP 0252, LLP 0257
-**Spawned-by:** LLP 0245 (on acceptance)
+**Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0245 (the RFC this
+decision realizes; Draft until 0245 is accepted), LLP 0251, LLP 0252, LLP 0257
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB

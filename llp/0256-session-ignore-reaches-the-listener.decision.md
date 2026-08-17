@@ -5,8 +5,9 @@
 **Systems:** Privacy, Plugins, Sources, CLI
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0049, LLP 0066, LLP 0245, LLP 0253, LLP 0257
-**Spawned-by:** LLP 0245 (on acceptance), settled in hyparam/hypaware#798
+**Related:** LLP 0049, LLP 0066, LLP 0245 (the RFC this decision realizes, at
+its open question 4; Draft until 0245 is accepted), LLP 0253, LLP 0257
+**Tracker:** hyparam/hypaware#798 (the implementation spec that settled this)
 
 > The claude telemetry listener hosts the same
 > `/_hypaware/ignore/session` control route the gateway proxy hosts, over its

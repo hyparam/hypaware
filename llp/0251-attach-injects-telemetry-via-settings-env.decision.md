@@ -6,8 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0044, LLP 0045, LLP 0163, LLP 0232, LLP 0237, LLP 0239,
-LLP 0245
-**Spawned-by:** LLP 0245 (on acceptance)
+LLP 0245 (the RFC this decision realizes; Draft until 0245 is accepted)
 
 > `hyp attach claude` gains a third mode, `otel`, that merges a fixed set of
 > telemetry keys into the `env` block of `~/.claude/settings.json` and writes
