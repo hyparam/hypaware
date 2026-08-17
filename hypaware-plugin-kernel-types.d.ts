@@ -1729,6 +1729,22 @@ export interface AiGatewayCapability {
    * LLP 0024.
    */
   registerSettlementEnricher(enricher: AiGatewaySettlementEnricher): void
+  /**
+   * Record one already-projected exchange into `ai_gateway_messages`.
+   *
+   * For a LIVE producer that does not sit on the wire: it holds a
+   * finished `AiGatewayProjectedExchange` and hands it to the dataset's
+   * owner rather than learning the table path, the column list, and the
+   * `part_id` dedupe rules. The proxy recorder does not use this (it
+   * already owns the projector chain); the Claude OTEL telemetry
+   * listener does. Rows whose `part_id` another producer already stored
+   * are skipped, which is what makes producer overlap harmless. See
+   * LLP 0252 #projection-unchanged.
+   */
+  recordProjectedExchange(
+    exchange: AiGatewayProjectedExchange,
+    opts?: AiGatewayRecordOptions,
+  ): Promise<AiGatewayRecordResult>
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -1742,6 +1758,24 @@ export interface AiGatewayCapability {
    * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
+}
+
+/** Options for `AiGatewayCapability.recordProjectedExchange`. */
+export interface AiGatewayRecordOptions {
+  /**
+   * Producer provenance merged under every emitted row's `attributes`,
+   * the same slot the backfill materializer fills with
+   * `{ gateway: { source: 'backfill' } }`.
+   */
+  gatewayAttributes?: JsonObject
+}
+
+/** Outcome of one `recordProjectedExchange` call. */
+export interface AiGatewayRecordResult {
+  /** Rows appended to the dataset. */
+  rowsWritten: number
+  /** Rows dropped because another producer already stored that `part_id`. */
+  rowsSkipped: number
 }
 
 /**

@@ -1,7 +1,9 @@
 // @ts-check
 
+import { createProjectedExchangeWriter } from './exchange_writer.js'
+
 /**
- * @import { AiGatewayCapability, AiGatewayEndpointOptions } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayEndpointOptions, AiGatewayProjectedExchange, AiGatewayRecordOptions, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { GatewayState } from './types.js'
  */
 
@@ -32,11 +34,19 @@ export function createGatewayState() {
  * adapter should hand to the client tool so its traffic flows through
  * this gateway.
  *
+ * `storage` is the activation context's storage service. It is what
+ * lets `recordProjectedExchange` exist: a producer plugin holding a
+ * finished projection can hand it back to the dataset's owner instead
+ * of learning the table path, the column list, and the dedupe rules.
+ *
  * @param {GatewayState} state
+ * @param {{ storage?: QueryStorageService }} [deps]
  * @returns {AiGatewayCapability}
  */
-export function createAiGatewayApi(state) {
+export function createAiGatewayApi(state, deps = {}) {
   let projectorSeq = 0
+  /** @type {ReturnType<typeof createProjectedExchangeWriter> | undefined} */
+  let writer
   return {
     registerUpstreamPreset(preset) {
       if (!preset || typeof preset.name !== 'string' || preset.name.length === 0) {
@@ -94,6 +104,28 @@ export function createAiGatewayApi(state) {
         throw new TypeError(`registerSettlementEnricher '${enricher.name}': settle() is required`)
       }
       state.enrichers.set(enricher.clientName, enricher)
+    },
+
+    /**
+     * Record one already-projected exchange into `ai_gateway_messages`.
+     *
+     * The caller supplies the projection; everything downstream of it
+     * (row expansion, `part_id` identity, the `part_id` dedupe against
+     * committed and spooled rows, the table path, the column list) stays
+     * here, so a second live producer cannot drift from the proxy's rows
+     * for the same content.
+     *
+     * @ref LLP 0252#projection-unchanged [implements]: the OTEL listener is a
+     *   third producer of this dataset, not the owner of a new one
+     * @param {AiGatewayProjectedExchange} projection
+     * @param {AiGatewayRecordOptions} [opts]
+     */
+    async recordProjectedExchange(projection, opts) {
+      if (!deps.storage) {
+        throw new Error('ai-gateway: recordProjectedExchange() needs a storage service')
+      }
+      if (!writer) writer = createProjectedExchangeWriter({ storage: deps.storage })
+      return writer.record(projection, opts ?? {})
     },
 
     /**

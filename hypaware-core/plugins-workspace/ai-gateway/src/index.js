@@ -41,7 +41,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  */
 export async function activate(ctx) {
   const state = createGatewayState()
-  const api = createAiGatewayApi(state)
+  const api = createAiGatewayApi(state, { storage: ctx.storage })
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
   ctx.query.registerDataset(aiGatewayDatasetRegistration(state))
