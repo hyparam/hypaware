@@ -12,7 +12,11 @@ environment, because the two-key attach alone breaks Remote Control inbound;
 see LLP 0236); LLP 0247 (#attach-writes-https_proxy-not-a-base-url: the
 gateway now serves absolute-form request-targets to registered hosts on
 forward-proxy listeners, so the case against `HTTP_PROXY` rests on the
-no-plaintext-traffic-worth-capturing rationale alone)
+no-plaintext-traffic-worth-capturing rationale alone); LLP 0259
+(#proxy-attach-preflight: this section says both "a missing CA is a refusal"
+and "base-URL mode otherwise"; 0259 settles it in favour of the fallback,
+which is what was built, and requires the CLI caller to name the downgrade
+whenever config asked for a proxy)
 
 > Attach stops writing `env.ANTHROPIC_BASE_URL` and writes `env.HTTPS_PROXY`
 > plus `env.NODE_EXTRA_CA_CERTS` instead. The endpoint stays

@@ -15,7 +15,7 @@ import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
-import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
+import { defaultStateRoot, deleteLocalCa, readLocalCaInfo } from '../tls/ca.js'
 import { removeCaTrust } from '../tls/darwin_trust.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
 import {
@@ -803,10 +803,13 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * migration is a one-time human decision, not something automation acquires
  * (LLP 0233's "never by inference, by upgrade, or as a side effect").
  *
- * The offer is keyed on the *config*, not the CA: a stale CA with
+ * The *migration* offer is keyed on the config, not the CA: a stale CA with
  * `proxy_mode` off means an earlier proxy install was half-unwound, and the
  * config write is still the repair the gateway's own stale-CA warning asks
- * for.
+ * for. The inverse disagreement - `proxy_mode` on with no CA on disk - is not
+ * a migration at all (intent is already recorded) but it is the state that
+ * makes attach write a base-URL marker against the user's stated intent, so
+ * this function owns it too and never lets it pass silently (LLP 0259).
  *
  * Never throws into the attach: the caller downgrades any escape to a
  * warning, because base-URL attach is what this install already does and
@@ -815,6 +818,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write, the restart, and the coming trust dialog
  * @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports instead of prompting
  * @ref LLP 0244#non-interactive [implements]: non-TTY and --json attaches never migrate; they emit the one-line pointer
+ * @ref LLP 0259#gate-reads-both [implements]: the gate reads config AND the CA, so proxy_mode with no CA reaches the repair instead of returning
  * @param {{ name: string, ctx: CommandRunContext, parsed: { client: string, dryRun: boolean, json: boolean } }} args
  * @returns {Promise<void>}
  */
@@ -839,9 +843,22 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   const effectiveGateway = (ctx.config?.plugins ?? []).find(
     (entry) => entry.name === '@hypaware/ai-gateway'
   )
-  if (effectiveGateway?.config?.proxy_mode === true) return
 
   const log = getLogger('cmd-attach')
+
+  // `proxy_mode: true` used to mean "nothing to do here". It covers two
+  // states, and only one of them is settled: with a CA on disk the install is
+  // genuinely in proxy mode, and with none the config and the machine
+  // disagree - `hyp detach --purge` deletes the CA and leaves the key on, and
+  // the running daemon has no reason to re-mint. Attaching from there writes
+  // a base-URL marker for an install that asked for a proxy, which is the
+  // downgrade this branch exists to stop being silent.
+  // @ref LLP 0259#gate-reads-both [implements]: proxy_mode plus a CA returns; proxy_mode without one is the stranded state
+  if (effectiveGateway?.config?.proxy_mode === true) {
+    if (await hasLocalCa(ctx)) return
+    await repairStrandedProxyMode({ name, ctx, parsed, catalog, log })
+    return
+  }
 
   // A fleet-owned gateway block has no local remedy, so report instead of
   // asking a question whose yes cannot land (the same reason
@@ -947,10 +964,155 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     return
   }
   if (result.outcome === 'already') return
+  if (result.ok && result.outcome === 'remint') {
+    // The layers moved between this offer and the write: the key was already
+    // there, so only the CA was missing and only the restart ran.
+    ctx.stdout.write(`✓ proxy mode restored (daemon restarted, local CA re-minted)\n`)
+    return
+  }
   ctx.stderr.write(
     `warning: could not switch to proxy mode` +
     `${result.message ? ` (${result.message})` : ''}` +
     `${result.backupPath ? `; the previous config was backed up at ${result.backupPath}` : ''}; ` +
+    `attaching by base URL instead\n`
+  )
+}
+
+/**
+ * Does this machine hold a local interception CA? The one fact that decides
+ * which mode the client adapters actually write (LLP 0232
+ * #proxy-attach-preflight), read here so the CLI can compare it against what
+ * the config asks for - the adapter itself never sees config and cannot make
+ * that comparison.
+ *
+ * An unreadable or malformed CA counts as absent, the same reading
+ * `readLocalCaInfo` hands the adapters, so both surfaces agree about what the
+ * attach is about to do.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<boolean>}
+ */
+async function hasLocalCa(ctx) {
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  try {
+    return (await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env, homeDir) })) !== undefined
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The stranded proxy install: `proxy_mode: true` in the effective config and
+ * no CA on disk. `hyp detach claude --purge` produces it (it deletes the CA
+ * by design, LLP 0238 #ca-survives-detach, and never touches config), and the
+ * running daemon holds its loaded CA in memory so nothing re-mints.
+ *
+ * Two obligations, in this order.
+ *
+ * 1. Say so, on every attach shape. The downgrade to base URL is the defect;
+ *    doing it quietly is what made it undiagnosable, so the warning is
+ *    unconditional and precedes any question (LLP 0259 #never-silent).
+ * 2. Offer the repair, on the shapes allowed to take consequential action.
+ *    The repair is a daemon restart, which re-mints the CA and needs no
+ *    config write - so it is equally available on a fleet-managed host, where
+ *    LLP 0244's migration deliberately declines. Interactive, single-client,
+ *    wet-run only: a restart mid-script is exactly the side effect LLP 0244
+ *    #non-interactive keeps out of automation, and on macOS the attach that
+ *    follows raises a trust dialog that wants a human anyway.
+ *
+ * Never throws into the attach, for the same reason the migration does not:
+ * a base-URL attach is worse than a proxy one but better than no attach.
+ *
+ * @ref LLP 0259#never-silent [implements]: the downgrade is named on every attach shape before anything else happens
+ * @ref LLP 0259#repair-is-a-restart [implements]: the consented repair is a restart, config untouched, fleet hosts included
+ * @param {{
+ *   name: string,
+ *   ctx: CommandRunContext,
+ *   parsed: { client: string, dryRun: boolean, json: boolean },
+ *   catalog: Awaited<ReturnType<typeof buildAttachPluginCatalog>>,
+ *   log: ReturnType<typeof getLogger>,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
+  ctx.stderr.write(
+    `warning: this install is configured for proxy mode but has no local interception CA, ` +
+    `so attaching ${name} now writes a base-URL attach instead (which breaks Remote Control ` +
+    `inbound); the gateway re-mints the CA when the daemon restarts\n`
+  )
+  log.warn('client.attach.proxy_mode_ca_missing', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    [Attr.ERROR_KIND]: 'proxy_mode_ca_missing',
+    hyp_client: name,
+  })
+
+  if (parsed.client === 'all' || parsed.json || !isTty(ctx.stdin)) {
+    ctx.stderr.write(
+      `note: run 'hyp daemon restart', then 'hyp attach ${name}' in an interactive terminal, ` +
+      `to restore the proxy attach\n`
+    )
+    return
+  }
+
+  const accepted = await askYesNo(
+    ctx,
+    `${capitalizeClientLabel(name)} can be put back on HypAware's local HTTPS proxy by ` +
+    `restarting the daemon, which re-mints the CA; nothing in your config changes, and macOS ` +
+    `will then ask to trust the HypAware Local CA. Restart the daemon and restore proxy mode ` +
+    `now? [y/N] `
+  )
+  if (!accepted) {
+    ctx.stderr.write(
+      `keeping the base-URL attach; run 'hyp daemon restart' then 'hyp attach ${name}' to ` +
+      `restore proxy mode later\n`
+    )
+    log.info('client.attach.proxy_remint', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      status: 'ok',
+      accepted: false,
+    })
+    return
+  }
+
+  const result = await enableGatewayProxyMode({
+    ctx,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
+  log.info('client.attach.proxy_remint', {
+    [Attr.COMPONENT]: 'cmd-attach',
+    [Attr.OPERATION]: 'client.attach',
+    hyp_client: name,
+    status: result.ok ? 'ok' : 'failed',
+    accepted: true,
+    outcome: result.outcome,
+    ...(result.failedStep ? { failed_step: result.failedStep } : {}),
+  })
+  if (result.ok && result.outcome === 'already') {
+    // The CA appeared between the gate above and this call (a daemon reload
+    // landed mid-run). Nothing to restart; the attach below sees it.
+    ctx.stdout.write(`✓ the local CA is present again; attaching in proxy mode\n`)
+    return
+  }
+  if (result.ok && result.outcome === 'remint') {
+    if (result.daemonInstalled) {
+      ctx.stdout.write(`✓ proxy mode restored (daemon restarted, local CA re-minted)\n`)
+    } else {
+      // A restart cannot help where there is no service to restart. Same
+      // ladder the migration names in the same situation.
+      ctx.stderr.write(
+        `warning: no daemon service is installed, so nothing can re-mint the CA; start one ` +
+        `(hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
+      )
+    }
+    return
+  }
+  ctx.stderr.write(
+    `warning: could not restore proxy mode` +
+    `${result.message ? ` (${result.message})` : ''}; ` +
     `attaching by base URL instead\n`
   )
 }

@@ -106,6 +106,7 @@ export type StatusDiagnosticKind =
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
+  | 'proxy_mode_ca_missing'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the

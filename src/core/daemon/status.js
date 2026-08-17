@@ -1216,6 +1216,32 @@ export async function collectHypAwareStatus(opts = {}) {
     isLaunchdEnvSetFn: opts.isLaunchdEnvSet ?? probeLaunchdEnvSet,
   })
 
+  // ----- proxy mode configured with no CA on disk (LLP 0259) -----
+  // The missing half of a pair. Proxy mode off with a CA present is already
+  // warned about by the gateway itself (`aigw.proxy_mode_stale_ca`); the
+  // inverse rendered as nothing at all, because `collectProxyTrust` returns
+  // null with no CA to describe and the whole `proxy trust` block vanishes.
+  // A machine in this state reports healthy while every attach it accepts
+  // quietly lands in base-URL mode, so status has to name it. Warning, not
+  // error: a freshly-configured install whose daemon has not started yet is
+  // legitimately here for a few seconds, and the repair is the same either
+  // way.
+  // @ref LLP 0259#status-names-it [implements]: proxy_mode with no CA is a named warning on both the text and --json surfaces
+  const gatewayEntry = (config?.plugins ?? []).find((entry) => entry.name === '@hypaware/ai-gateway')
+  if (gatewayEntry?.config?.proxy_mode === true && !(await hasLocalCaOnDisk(stateRoot))) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'proxy_mode_ca_missing',
+      message:
+        'proxy_mode is on but no local interception CA exists - clients attached from here ' +
+        'land in base-URL mode, which breaks Remote Control inbound',
+      repair: [
+        'hyp daemon restart (the gateway re-mints the CA on boot)',
+        'then re-run hyp attach for each proxy-mode client',
+      ],
+    })
+  }
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -1326,6 +1352,27 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
   }
 
   return { caFingerprint: ca.fingerprint, trusted, launchdEnvSet }
+}
+
+/**
+ * Is a local interception CA installed? Read on its own rather than off
+ * `collectProxyTrust`, which is darwin-only by design (it describes
+ * mechanisms that exist only there) while the config-versus-disk
+ * disagreement above it is platform-independent.
+ *
+ * An unreadable or malformed CA counts as absent: that is exactly the reading
+ * the attach preflight gives it (LLP 0232 #proxy-attach-preflight), so status
+ * describes the mode the next attach would actually pick.
+ *
+ * @param {string} stateRoot
+ * @returns {Promise<boolean>}
+ */
+async function hasLocalCaOnDisk(stateRoot) {
+  try {
+    return (await readLocalCaInfo({ stateRoot })) !== undefined
+  } catch {
+    return false
+  }
 }
 
 /**
