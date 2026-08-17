@@ -261,9 +261,11 @@ Net-new (R2): everything listed in R2, none of it visible on the wire.
 
 ## On acceptance
 
-This RFC stays the deliberation record and spawns narrow decisions (injection
-mechanism, events-plus-bodies split, spool cap policy, settlement retirement
-scope, behavioral dataset shape) plus a spec for the listener source. The
-proxy-attach docs it displaces for the `claude` client (parts of LLP 0231 to
-0244) get `Extended-by:` / `Superseded-by:` forward refs at that point, not
-before.
+This RFC stays the deliberation record and spawns six narrow decisions, one per
+settled choice: injection mechanism (LLP 0251), events-plus-bodies split
+(LLP 0252), spool cap policy (LLP 0253), settlement retirement scope
+(LLP 0254), behavioral dataset shape (LLP 0255), and session-ignore transport
+(LLP 0256, the choice open question 4 above resolves). It also spawns a spec
+for the listener source (LLP 0257). The proxy-attach docs it displaces for the
+`claude` client (parts of LLP 0231 to 0244) get `Extended-by:` /
+`Superseded-by:` forward refs at that point, not before.
