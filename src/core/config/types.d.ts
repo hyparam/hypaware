@@ -359,6 +359,22 @@ export interface ActionMarker {
    * markers (treated as stale → re-attach once, which records one).
    */
   assets_key?: string
+  /**
+   * `true` when an earlier pass at this request key reached `done`, i.e. the
+   * handler applied an effect that is still on disk. Recorded only on a
+   * `failed`/`refused` marker rewritten over such a pass; a `done` marker says
+   * the same thing with its `status`.
+   *
+   * `installed_assets` is the same evidence for the half of an attach that
+   * copies files, and it is the only half a client whose attach writes settings
+   * and copies nothing ever produces. Without this bit such a rewrite was
+   * indistinguishable from a terminal marker whose attach never applied
+   * anything, and the reconciler's reverse gap dropped it, stranding the
+   * settings write with nothing naming it (LLP 0247, extending LLP 0138
+   * §marker-undo and LLP 0186). Absent on pre-LLP-0247 markers, which read as
+   * "no prior done" and keep master's behaviour.
+   */
+  prior_done?: boolean
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }
