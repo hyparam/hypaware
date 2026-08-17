@@ -37,15 +37,21 @@ function trackedFiles() {
  *
  * `git check-ignore` exits 0 when a path is ignored and 1 when it is not, so
  * the status is the answer and a nonzero exit is not a failure to report.
- * `--no-index` is deliberately not passed: the probe paths below do not exist
- * and are not tracked, so the plain query answers the question a contributor
- * actually faces, which is what `git add` will do with a fresh file.
+ *
+ * `--no-index` is passed so the answer is about the ignore *rules* alone. By
+ * default `check-ignore` consults the index first and reports any tracked path
+ * as not ignored, whatever `.gitignore` says. That is the wrong question here,
+ * and it fails in the one case this file exists for: once a `.log` is tracked,
+ * the rule probe would flip to "unguarded" and send the reader off to add a
+ * `.gitignore` rule that is already there. Tracked transcripts are the other
+ * test's job, and its message names the fix (delete the file).
  *
  * @param {string} relPath
  * @returns {boolean}
  */
 function isIgnored(relPath) {
-  const result = spawnSync('git', ['check-ignore', '-q', '--', relPath], { cwd: REPO_ROOT })
+  const result = spawnSync('git', ['check-ignore', '-q', '--no-index', '--', relPath], { cwd: REPO_ROOT })
+  if (result.error) throw result.error
   return result.status === 0
 }
 
@@ -71,10 +77,12 @@ test('.gitignore refuses a tool transcript', () => {
     `\`git add -A\`; \`.gitignore\` needs a rule covering them:\n  ${unguarded.join('\n  ')}`)
 })
 
-test('the probe distinguishes ignored from tracked paths', () => {
+test('the probe distinguishes ignored from unignored paths', () => {
   // A probe that answered "ignored" for everything would pass the rule above
-  // forever, including on a repo with no `.gitignore` at all.
-  assert.ok(!isIgnored('package.json'), 'expected a tracked source file to read as not ignored')
+  // forever, including on a repo with no `.gitignore` at all. Under
+  // `--no-index` both assertions read the rules and nothing else, so neither
+  // can be satisfied by the path's tracked status.
+  assert.ok(!isIgnored('package.json'), 'expected a source file no rule matches to read as not ignored')
   assert.ok(isIgnored('hypaware-9.9.9.tgz'), 'expected an existing ignore rule (`*.tgz`) to read as ignored')
   const files = trackedFiles()
   assert.ok(files.length > 500, `expected the tracked tree, found ${files.length} files`)
