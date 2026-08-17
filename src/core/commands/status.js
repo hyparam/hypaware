@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
@@ -181,6 +182,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_attach: report.clients.map((c) => ({
       name: c.name,
       configured: c.configured,
+      // `attached` stays a boolean for every row so a consumer can keep
+      // pinning it; `attachable: false` is what says the boolean carries no
+      // information for this client (#544).
+      attachable: c.attachable !== false,
       attached: c.attached,
       ...(report.layered
         ? { provenance: report.layered.centralPlugins.includes(c.plugin) ? 'central' : 'local' }
@@ -323,6 +328,42 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
+ * How much of the daemon line's `error=` a hostile status file may spend.
+ * Wider than a label's 120, because unlike a name this carries a real error
+ * message - typically an fs error naming a full path - and the clamp exists
+ * to stop the line being bloated, not to bound an identifier. Cutting a path
+ * short is the one way this cleaning could cost a reader an answer.
+ */
+const MAX_DAEMON_ERROR_CHARS = 400
+
+/**
+ * A string on its way into the text surface, made safe to print.
+ *
+ * `renderStatusText` is the last point before a terminal, and several of the
+ * strings it interpolates were read back out of `status.json`
+ * (`daemon.state`, `daemon.mode`, and - with no runtime attached - every
+ * `sources[]` / `sinks[]` entry). That file is a *file*: core cannot assume
+ * the daemon that wrote it was this version, this build, or well behaved, so
+ * a raw value from it can carry an escape sequence that repaints the
+ * operator's screen or a newline that forges a plausible extra status line.
+ *
+ * Cleaning happens *here* rather than in the collector because these values
+ * are not display-only: `sources[].name` and `sinks[].instance` are identity
+ * keys and part of the `--json` contract, which a consumer escapes for
+ * itself. Cleaning at the interpolation closes the terminal path and leaves
+ * both intact - including the raw values the provenance lookups below match
+ * on.
+ *
+ * @param {string | undefined} value
+ * @param {number} [max]
+ * @returns {string}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: what core reads back out of status.json is cleaned at the last point before render, whichever field it came from
+ */
+function printable(value, max) {
+  return sanitizeLabel(value, max) ?? ''
+}
+
+/**
  * Render the V1 status report as human-friendly text. Mirrors the
  * JSON shape but groups sections and surfaces diagnostics + repair
  * suggestions at the bottom.
@@ -360,7 +401,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write('    (none)\n')
   } else {
     for (const s of report.sources) {
-      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
+      stdout.write(`    - ${printable(s.name)}  (${printable(s.plugin)})  [${printable(s.state)}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
     }
   }
 
@@ -369,7 +410,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write('    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
-      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
+      stdout.write(`    - ${printable(s.instance)}  (${printable(s.plugin)}, ${printable(s.kind)})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
     }
   }
 
@@ -392,7 +433,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
-      state.push(c.attached ? 'attached' : 'not attached')
+      // A client with no attach probe has no attach state to report: printing
+      // `not attached` for it invites a `hyp attach` that is a documented
+      // no-op and can never change the line (#544).
+      // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
+      state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.error) stdout.write(`        error: ${c.error}\n`)
     }
@@ -690,6 +735,14 @@ function isCentralSink(layered, instance) {
 }
 
 /**
+ * The `daemon:` line. `state` and `mode` are read straight out of
+ * `status.json` (`collectHypAwareStatus` takes them from the snapshot when
+ * the pid file did not already supply them), and `error` can quote the file's
+ * own bytes back: a `status.json` that is not valid JSON surfaces here as
+ * `JSON.parse`'s message, which echoes an excerpt of the input verbatim. All
+ * three are cleaned on the way into the line. `pid` needs no cleaning -
+ * `readPidFile` rejects a non-number.
+ *
  * @param {ServiceState} daemon
  */
 function describeDaemon(daemon) {
@@ -697,10 +750,10 @@ function describeDaemon(daemon) {
   parts.push(daemon.installed ? 'installed' : 'not installed')
   if (daemon.installed) parts.push(daemon.loaded ? 'loaded' : 'not loaded')
   parts.push(daemon.running ? 'running' : 'not running')
-  if (daemon.state) parts.push(`state=${daemon.state}`)
+  if (daemon.state) parts.push(`state=${printable(daemon.state)}`)
   if (daemon.pid) parts.push(`pid=${daemon.pid}`)
-  if (daemon.mode) parts.push(`mode=${daemon.mode}`)
-  if (daemon.error) parts.push(`error=${daemon.error}`)
+  if (daemon.mode) parts.push(`mode=${printable(daemon.mode)}`)
+  if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_DAEMON_ERROR_CHARS)}`)
   return parts.join(', ')
 }
 

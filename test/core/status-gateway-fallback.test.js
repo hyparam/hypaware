@@ -94,3 +94,68 @@ test('a default-port boot emits no gateway_port_fallback diagnostic', async () =
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.diagnostics.find((d) => d.kind === 'gateway_port_fallback'), undefined)
 })
+
+// `listen_fallback_from` is read back out of `status.json` and printed
+// verbatim, into this diagnostic's message and into its repair line. That is
+// the same last point before render that `recent_entrypoints` and the idle
+// gateway's upstream names are cleaned at (LLP 0164), and the value has the
+// same provenance as an upstream `name`: config-authored, but reaching core
+// through a file this build did not necessarily write.
+// @ref LLP 0164#status-reads-it-from-the-status-file [tests]: a display string read out of status.json is cleaned before it reaches the terminal
+test('a hostile fallback address cannot drive the terminal from the warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 54321,
+    listen_fallback: true,
+    // An erase-line sequence and a newline, which together forge a plausible
+    // extra status line out of a value the operator never chose to trust.
+    listen_fallback_from: '127.0.0.1:18521\u001b[2K\nhyp: all good',
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_port_fallback')
+  assert.ok(diag)
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(diag.message), 'no control byte reaches the message')
+  assert.ok(
+    !diag.repair.some((r) => /[\u0000-\u001f\u007f-\u009f]/.test(r)),
+    'and none reaches the repair line, which is printed too',
+  )
+  assert.match(diag.message, /127\.0\.0\.1:18521/, 'the printable part still names the address')
+})
+
+test('an unbounded fallback address is clamped in the warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const long = 'a'.repeat(5000)
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 54321,
+    listen_fallback: true,
+    listen_fallback_from: long,
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_port_fallback')
+  assert.ok(diag)
+  assert.ok(!diag.message.includes(long), 'the raw value is not printed whole')
+  assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped, and marked truncated')
+})
+
+// A `listen_fallback_from` that sanitizes away entirely falls back to the
+// generic phrasing, exactly as an absent one does: the warning is about the
+// bind, and it stays readable with no address to name.
+test('a fallback address that sanitizes away leaves the generic phrasing', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  writeRunningDaemon(stateRoot, {
+    host: '127.0.0.1',
+    port: 54321,
+    listen_fallback: true,
+    listen_fallback_from: '\u200b\u200b',
+  })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_port_fallback')
+  assert.ok(diag)
+  assert.match(diag.message, /its default listen address/, 'the generic antecedent stands in')
+  assert.ok(!diag.message.includes('\u200b'), 'and the empty run does not ride along')
+})
