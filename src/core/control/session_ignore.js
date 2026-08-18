@@ -2,7 +2,7 @@
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
- * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

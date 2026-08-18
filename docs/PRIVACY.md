@@ -150,13 +150,17 @@ Two caveats apply to both surfaces:
 To keep one conversation out of the record without marking any directory,
 run `hyp session ignore` from inside that Claude Code or Codex session. It
 resolves the session id itself and refuses rather than guessing when it
-cannot. Reverse it with `hyp session unignore`; `hyp session status` reports
-which state the session is in right now.
+cannot, and it posts the opt-out to every local recorder hosting the control
+route: the gateway, and the Claude telemetry listener when one is running.
+On the listener, a dropped session's spooled raw bodies are deleted, not
+merely skipped. Reverse it with `hyp session unignore`; `hyp session status`
+reports which state the session is in right now.
 
 The opt-out is in-memory and lasts for that session only. Two things drop it
-while you may still believe it holds: a gateway restart, and a fork
-(`claude --fork-session`, `codex fork`), which mints a new session id the
-opt-out no longer covers. A plain resume reuses the id.
+while you may still believe it holds: a daemon restart (which drops both
+recorders' sets), and a fork (`claude --fork-session`, `codex fork`), which
+mints a new session id the opt-out no longer covers. A plain resume reuses
+the id.
 
 ## Deleting what was already recorded
 
