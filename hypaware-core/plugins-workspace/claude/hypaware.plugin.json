@@ -21,6 +21,10 @@
     }
   },
   "contributes": {
+    "commands": [
+      { "name": "claude-hook session-context", "summary": "Internal Claude Code hook: appends session context to the state file", "hidden": true },
+      { "name": "claude-hook classify-cwd", "summary": "Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine", "hidden": true }
+    ],
     "sources": [{ "name": "claude-telemetry" }],
     "datasets": [
       {

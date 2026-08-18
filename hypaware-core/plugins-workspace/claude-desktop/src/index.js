@@ -121,7 +121,8 @@ export async function activate(ctx) {
       + "admin box. It carries no secret: for sign-in state run 'hyp client claude-account status', "
       + "and for whether the install actually took, run 'hyp client claude-desktop verify' - this command answers "
       + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
-      + 'credential wrapper is missing.',
+      + 'credential wrapper is missing, and when the inputs do not resolve at all - an ephemeral '
+      + "gateway listen (':0') has no stable port for a profile to point at.",
     run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
   })
 

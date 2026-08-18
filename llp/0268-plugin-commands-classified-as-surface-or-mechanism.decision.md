@@ -64,15 +64,25 @@ Applied to the current first-party set:
 | `vector status` | public diagnostic |
 | `gascity attach` / `gascity detach` | public workflow |
 | `gascity list` | public diagnostic |
+| `claude-hook session-context` / `claude-hook classify-cwd` | **internal mechanism** |
+| `codex-hook classify-cwd` | **internal mechanism** |
 
-<a id="internal"></a>**Exactly one command is an internal mechanism:
-`claude-account credential`.** Its caller is the no-arg wrapper Claude
-Desktop `exec`s, and its contract is that stdout is a live credential and
+<a id="internal"></a>**Four commands are internal mechanisms. Only
+`claude-account credential` was advertised.** Its caller is the no-arg
+wrapper Claude Desktop `exec`s, and its contract is that stdout is a live credential and
 nothing else ([LLP 0116 #helper-contract](./0116-desktop-credential-client-presented.decision.md)).
 Both halves argue against advertising it. A machine-to-machine contract
 listed beside `login` and `status` reads as a third thing a person might
 try, and the thing they get for trying is a token on their terminal, in
 their scrollback, and plausibly in a bug report.
+
+The other three are the hooks the client adapters write into Claude Code
+`settings.json` and Codex's config: `claude-hook session-context`,
+`claude-hook classify-cwd`, and `codex-hook classify-cwd`. They already
+set `hidden: true` on their registrations, so they were never in help;
+what they had instead was no manifest entry at all, which is the omission
+this decision rejects (#not-deletion). They gain declarations marked
+`hidden: true`. Nothing about how they run changes.
 
 <a id="staging-is-surface"></a>**The three Desktop staging commands are
 surface, not plumbing, and this decision says so rather than hiding them.**
@@ -117,6 +127,17 @@ tests that catch summary drift. An internal command is the *most* likely to
 be typed by someone who does not know which plugin owns it, so it is the
 worst one to make unattributable. It stays declared, and it is marked.
 
+The client hooks are the live instance, and they show which reader pays.
+The miss path matches head tokens, so it is only blinded when the whole
+head token goes undeclared: `hyp claude-hook session-context` stays in
+Claude Code's `settings.json` and keeps firing after `@hypaware/claude`
+leaves the config, and with no declaration anywhere `claude-hook` matches
+nothing, so the reader gets "unknown command" instead of the plugin to
+enable. `claude-account credential` shares its head token with `login`,
+`logout`, and `status`, so there omission costs the other reader: the
+parity tests, which compare declarations against registrations and would
+read a registered-but-undeclared command as drift.
+
 ## Consequences {#consequences}
 
 - `PluginCommandManifest` gains `hidden?: boolean`.
@@ -127,7 +148,9 @@ worst one to make unattributable. It stays declared, and it is marked.
 - `collectPluginHelpCommands` (`src/core/cli/dispatch.js`) skips hidden
   entries. The registry-side filters (`renderHelp`, `listGroupChildren`)
   already existed and are unchanged.
-- `claude-account credential` is hidden on both sides. Nothing else is.
+- `claude-account credential` is hidden on both sides, and so are the three
+  client hooks, which gain the manifest declarations they lacked. Nothing
+  else is hidden.
 - `claude-desktop status` and `claude-account status` gain long help, and
   both state in it that they print no secret and where sign-in state
   actually lives.
@@ -144,5 +167,7 @@ worst one to make unattributable. It stays declared, and it is marked.
   (`listGroupChildren`),
   `hypaware-core/plugins-workspace/claude-account/`,
   `hypaware-core/plugins-workspace/claude-desktop/`,
+  `hypaware-core/plugins-workspace/claude/`,
+  `hypaware-core/plugins-workspace/codex/`,
   `test/core/plugin-command-visibility.test.js`
 - [issue #838](https://github.com/hyparam/hypaware/issues/838)

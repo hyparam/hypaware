@@ -177,6 +177,32 @@ test('every claude-desktop and claude-account command declares the same visibili
         `${declared.name}: manifest and registry disagree on visibility`
       )
     }
+    assert.equal(
+      registered.size,
+      manifest.contributes.commands.length,
+      `${dirName}: a registered command is declared in no manifest, so a dispatch miss cannot name its plugin`
+    )
+  }
+})
+
+// The direction the manifest -> registry walk above cannot see. These
+// three registered `hidden: true` while appearing in no manifest at all,
+// which is exactly the hide-by-omission LLP 0268#not-deletion rejects:
+// the hook line stays in the client's settings after the plugin leaves
+// the config, and an undeclared head token cannot be attributed.
+// @ref LLP 0268#internal [tests]: every internal mechanism is declared and marked, never omitted
+test('the client hook commands are declared internal mechanisms, not omitted ones', () => {
+  for (const [dirName, names] of /** @type {[string, string[]][]} */ ([
+    ['claude', ['claude-hook session-context', 'claude-hook classify-cwd']],
+    ['codex', ['codex-hook classify-cwd']],
+  ])) {
+    const commands = readPluginManifest(dirName).contributes.commands
+    assert.ok(Array.isArray(commands), `${dirName}: declares no commands at all`)
+    for (const name of names) {
+      const declared = commands.find((/** @type {any} */ c) => c.name === name)
+      assert.ok(declared, `${name}: registered hidden but declared in no manifest`)
+      assert.equal(declared.hidden, true, `${name}: an internal mechanism must be marked hidden`)
+    }
   }
 })
 
