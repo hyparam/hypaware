@@ -1143,6 +1143,18 @@ export async function collectHypAwareStatus(opts = {}) {
     } else if (
       configured &&
       probe.attached &&
+      // Gateway-routed modes only. An `otel` marker records the gateway port
+      // like every other marker does, but nothing that client sends goes
+      // there: it talks to Anthropic directly and exports telemetry to the
+      // listener instead. Comparing that recorded port against the live
+      // gateway made a routine rebind print "attached at port X, the gateway
+      // is now bound to Y - re-attach", a rebind that changes nothing about
+      // whether this client is captured, over a repair whose only real effect
+      // is to rewrite the telemetry env block. `client_telemetry_stale` below
+      // watches the port this mode actually depends on.
+      // @ref LLP 0257#status-and-health [constrained-by]: S17b - on the otel
+      //   path the endpoint that matters is the listener's, not the gateway's
+      probe.mode !== 'otel' &&
       liveGatewayPort !== undefined &&
       probe.port !== undefined &&
       probe.port !== liveGatewayPort
