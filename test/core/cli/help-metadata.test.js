@@ -7,9 +7,9 @@
  * presence of a flag token, because presence is what let the four
  * registrations below drift away from their handlers in the first place.
  *
- * @ref LLP 0265#registration-is-the-contract [tests]: each claim is checked against the behaviour its handler implements
- * @ref LLP 0265#help-verb [tests]: `hyp help <command>` renders that command's help
- * @ref LLP 0265#global-options [tests]: top-level help names the global options and the command aliases
+ * @ref LLP 0270#registration-is-the-contract [tests]: each claim is checked against the behaviour its handler implements
+ * @ref LLP 0270#help-verb [tests]: `hyp help <command>` renders that command's help
+ * @ref LLP 0270#global-options [tests]: top-level help names the global options and the command aliases
  */
 
 import test from 'node:test'

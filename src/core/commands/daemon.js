@@ -372,7 +372,7 @@ function parseDaemonInstallArgs(argv) {
   // that host's service manager, so a cross-platform install is never anything
   // but a broken one. The flag stays public for rendering the other platform's
   // unit, and is refused everywhere else.
-  // @ref LLP 0265#platform-is-a-render-override [implements]: --platform is accepted only alongside --dry-run
+  // @ref LLP 0270#platform-is-a-render-override [implements]: --platform is accepted only alongside --dry-run
   if (p.platform !== undefined && !p['dry-run']) return { error: '--platform requires --dry-run' }
   return { dryRun: p['dry-run'], json: p.json, configPath: p.config, binPath: p.bin, platform: p.platform }
 }

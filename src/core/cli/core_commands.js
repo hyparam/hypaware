@@ -491,7 +491,7 @@ function buildCoreCommands(registry) {
       name: 'daemon install',
       summary: 'Install the persistent user service (launchd / systemd)',
       usage: 'hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json] [--platform darwin|linux]]',
-      // @ref LLP 0265#platform-is-a-render-override [implements]: --platform is public but dry-run only, so it can never install the wrong platform's unit
+      // @ref LLP 0270#platform-is-a-render-override [implements]: --platform is public but dry-run only, so it can never install the wrong platform's unit
       help: [
         '  --config <path>    config the unit should load (default: the resolved one)',
         '  --bin <path>       hyp binary to record in the unit',

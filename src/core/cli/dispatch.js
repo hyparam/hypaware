@@ -243,7 +243,7 @@ export async function dispatch(argv, opts = {}) {
   // ours, so a diagnostic echoing the rewritten argv would report `hyp help
   // bogus` as `unknown command 'bogus --help'`, naming a flag nobody typed.
   //
-  // @ref LLP 0265#help-verb [implements]: `help <command>` is rewritten to that command's `--help`, never silently answered with the top-level table
+  // @ref LLP 0270#help-verb [implements]: `help <command>` is rewritten to that command's `--help`, never silently answered with the top-level table
   const typedArgv = argv
   let helpVerb = false
   if (argv.length > 1 && argv[0] === 'help' && !argv[1].startsWith('-')) {
@@ -505,7 +505,7 @@ export async function dispatch(argv, opts = {}) {
           // command* with a stray flag, which a lenient parser accepts: `hyp
           // help purge <path>` must never reach `runPurge`.
           // @ref LLP 0009#central-help-interception [implements]: help renders inside command.run so it stays in command analytics
-          // @ref LLP 0265#help-verb [implements]: the rewritten `hyp help <command...>` lands here, whatever else the user wrote after the command name
+          // @ref LLP 0270#help-verb [implements]: the rewritten `hyp help <command...>` lands here, whatever else the user wrote after the command name
           if (helpVerb || isHelpFlag(matched.rest[0])) {
             const children = listGroupChildren(registry, matched.command.name)
             if (children.length > 0) {
@@ -829,7 +829,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   // The rows above are commands; these two are neither, and both work. A user
   // who cannot find `--version` in the command table concludes it is absent.
-  // @ref LLP 0265#global-options [implements]: top-level help names the global options and aliases that route but own no command row
+  // @ref LLP 0270#global-options [implements]: top-level help names the global options and aliases that route but own no command row
   stdout.write('\n')
   stdout.write('Global options:\n')
   // Spellings come off the same sets dispatch matches on, so a flag added

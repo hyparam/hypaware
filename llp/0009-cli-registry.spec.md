@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0003, LLP 0015
-**Extended-by:** [LLP 0265](./0265-help-metadata-is-part-of-the-contract.decision.md) - `#layered-help` and `#central-help-interception`: a registration's help strings are tested claims about its handler, `hyp help <command>` renders that command's help, and top-level help names the global options and aliases that own no command row.
+**Extended-by:** [LLP 0270](./0270-help-metadata-is-part-of-the-contract.decision.md) - `#layered-help` and `#central-help-interception`: a registration's help strings are tested claims about its handler, `hyp help <command>` renders that command's help, and top-level help names the global options and aliases that own no command row.
 
 > Command registration, dispatch, and help. Decomposed from
 > `hypaware-design.md` (CLI Registry).

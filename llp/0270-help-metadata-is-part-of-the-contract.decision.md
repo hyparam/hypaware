@@ -1,4 +1,4 @@
-# LLP 0265: Help metadata is part of the command contract
+# LLP 0270: Help metadata is part of the command contract
 
 **Type:** Decision
 **Status:** Accepted
