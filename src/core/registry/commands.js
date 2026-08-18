@@ -25,6 +25,7 @@
  *   has: (name: string) => boolean,
  *   size: () => number,
  *   unregister: (name: string) => void,
+ *   listGroups: () => CommandGroupRegistration[],
  * }}
  * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */
@@ -155,6 +156,17 @@ export function createCommandRegistry() {
     return groups.get(name)
   }
 
+  /**
+   * Every registered group description, sorted. Group metadata is not in
+   * `list()` (a description is not a command), so without this the only way
+   * to see what a plugin described is to already know the name. The agreement
+   * check between a manifest and what `activate()` registers needs the set,
+   * not a lookup.
+   */
+  function listGroups() {
+    return Array.from(groups.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  }
+
   function list() {
     return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
@@ -198,5 +210,5 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, registerGroup, unregister, get, getGroup, list, has, size, match }
+  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
 }

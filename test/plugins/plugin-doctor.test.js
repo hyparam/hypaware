@@ -240,3 +240,111 @@ test('registered-but-undeclared contribution is a warning, not an error', async 
   assert.ok(warn)
   assert.equal(warn.severity, 'warn')
 })
+
+test('a summary that differs between the manifest and the registration is an error', async () => {
+  const root = await fixture({
+    manifest: baseManifest({
+      contributes: { commands: [{ name: 'demo run', summary: 'Run the demo end to end' }] },
+    }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(finding)
+  assert.equal(finding.severity, 'error')
+  assert.match(finding.message, /Run the demo end to end/)
+  assert.match(finding.message, /Run the demo'/)
+})
+
+test('a verb-projected command is compared like any other command', async () => {
+  // A verb registers one declaration that the kernel projects into a CLI
+  // command, so the manifest still has to match the verb's summary.
+  const root = await fixture({
+    manifest: baseManifest({
+      contributes: { commands: [{ name: 'demo count', summary: 'Count the demo rows' }] },
+    }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.verbs.register({\n` +
+      `    name: 'demo count', tool: 'demo_count', plugin: '@test/example',\n` +
+      `    summary: 'Counts rows', inputSchema: { type: 'object', properties: {} },\n` +
+      `    operation: async () => ({}), render: () => '',\n` +
+      `  })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(finding, JSON.stringify(report.diagnostics))
+  assert.match(finding.message, /Counts rows/)
+})
+
+test('a hidden command is not reported as undeclared', async () => {
+  // Omitting an internal command from the manifest is how it stays out of
+  // pre-boot help (LLP 0009); the doctor must not push authors to declare it.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.register({ name: 'demo-hook fire', plugin: '@test/example', summary: 'Internal', usage: 'u', hidden: true, run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  assert.equal(report.diagnostics.length, 0)
+})
+
+test('a declared command registered as hidden is an error', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', hidden: true, run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(finding)
+  assert.match(finding.message, /registers it as hidden/)
+})
+
+test('a group description with no declared subcommand is a warning', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.registerGroup({ name: 'ghost', plugin: '@test/example', summary: 'A group nothing lists' })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  const warn = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(warn)
+  assert.equal(warn.severity, 'warn')
+  assert.match(warn.message, /ghost/)
+})
+
+test('a dry run does not start a source the plugin starts from activate()', async () => {
+  // `@hypaware/otel` starts its OTLP source from `activate()`, which binds a
+  // real port. A diagnostic pass must not take one, or the doctor fails on any
+  // host where the daemon already holds it.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.sources.register({\n` +
+      `    name: 'demo', plugin: '@test/example',\n` +
+      `    async start() { throw new Error('start() must not run during a dry run') },\n` +
+      `  })\n` +
+      `  await ctx.sources.start('demo', ctx)\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})

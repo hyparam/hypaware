@@ -9,10 +9,11 @@ import { createActivationContext, createKernelRuntime } from '../runtime/activat
 import { createCommandRegistry } from '../registry/commands.js'
 import { createVerbRegistry } from '../registry/verbs.js'
 import { createPluginPaths } from '../runtime/paths.js'
+import { createSourceRegistry } from '../registry/sources.js'
 
 /**
  * @import { ActivePlugin, PluginManifest } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { DryRunResult, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
@@ -32,6 +33,10 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  *   live kernel;
  * - roots all plugin paths in a fresh `mkdtemp` directory that is
  *   removed before returning, so no state leaks into `<HYP_HOME>`;
+ * - hands the plugin a source registry whose `start()` never runs the
+ *   contribution. `@hypaware/otel` starts its own OTLP source from
+ *   `activate()`, which binds a real port; a diagnostic pass must not
+ *   take one, and it has no bearing on what the plugin registers;
  * - passes an empty config. A well-behaved plugin registers its
  *   contributions during `activate()` and defers config reads to
  *   `start()`/`create()`. A plugin that throws on missing config at
@@ -78,6 +83,7 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
       cacheRoot: path.join(tmpRoot, 'cache'),
       commandRegistry,
       verbRegistry: createVerbRegistry({ commandRegistry }),
+      sourceRegistry: inertSourceRegistry(),
     })
     for (const [name, versions] of knownCapabilities) {
       for (const version of versions) {
@@ -122,11 +128,11 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
       return {
         ok: false,
         error: { kind: 'activate_threw', message: describe(err) },
-        registered: snapshotRegistry(runtime),
+        registered: snapshotRegistry(runtime, commandRegistry),
       }
     }
 
-    return { ok: true, registered: snapshotRegistry(runtime) }
+    return { ok: true, registered: snapshotRegistry(runtime, commandRegistry) }
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   }
@@ -140,15 +146,23 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * shows up.
  *
  * @param {ReturnType<typeof createKernelRuntime>} runtime
+ * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
+ *   The same registry `runtime` was built over. Passed separately because
+ *   group descriptions are not commands, so `KernelRuntime.commands` (the
+ *   plugin-facing `CommandRegistry`) does not expose `listGroups`.
  * @returns {RegisteredSnapshot}
  */
-function snapshotRegistry(runtime) {
+function snapshotRegistry(runtime, commandRegistry) {
   const sinks = /** @type {ExtendedSinkRegistry} */ (runtime.sinks)
+  const commands = commandRegistry.list()
+  const groups = commandRegistry.listGroups()
   return {
     sources: runtime.sources.list().map((c) => c.name),
     sinks: sinks.listContributions().map((e) => e.contribution.name),
     datasets: runtime.query.listDatasets().map((d) => d.name),
-    commands: runtime.commands.list().map((c) => c.name),
+    commands: commands.map((c) => c.name),
+    commandDetails: commands.map((c) => ({ name: c.name, summary: c.summary, hidden: c.hidden === true })),
+    commandGroups: groups.map((g) => ({ name: g.name, ...(g.summary !== undefined ? { summary: g.summary } : {}) })),
     skills: runtime.skills.list().map((s) => s.name),
     agents: runtime.agents.list().map((a) => a.name),
     init_presets: runtime.initPresets.list().map((p) => p.name),
@@ -156,6 +170,30 @@ function snapshotRegistry(runtime) {
       .list()
       .filter((c) => c.provider !== STUB_PROVIDER)
       .map((c) => c.name),
+  }
+}
+
+
+/**
+ * A source registry that records registrations but refuses to run them.
+ * A plugin may start one of its own sources from `activate()` (see
+ * `@hypaware/otel`, which binds the OTLP listener there), and the doctor
+ * only ever reads back `list()`. Running the real `start()` would bind
+ * ports and open files on behalf of a plugin the caller is merely
+ * inspecting, and would fail outright on a host where the daemon already
+ * holds the port.
+ *
+ * @ref LLP 0267#d4 [implements]: diagnosing a plugin must not take a port on its behalf
+ * @returns {ExtendedSourceRegistry}
+ */
+function inertSourceRegistry() {
+  const registry = createSourceRegistry()
+  return {
+    ...registry,
+    async start(name) {
+      if (!registry.get(name)) throw new Error(`SourceRegistry.start: unknown source '${name}'`)
+      return { async stop() {} }
+    },
   }
 }
 
@@ -181,6 +219,13 @@ function capabilityStub() {
     get(_t, prop) {
       // Don't masquerade as a thenable, or `await handle` would hang.
       if (prop === 'then') return undefined
+      // Nor as something unprintable. A plugin that puts a value read off
+      // the handle into a log attribute (`embed_model: embedder.model`)
+      // reaches `String()`, and a proxy answering `Symbol.toPrimitive`,
+      // `valueOf`, and `toString` with itself never yields a primitive, so
+      // the conversion throws. The doctor would then report `activate_threw`
+      // against a plugin whose only fault was logging what the stub returned.
+      if (prop === Symbol.toPrimitive || prop === 'toString' || prop === 'valueOf') return describeStub
       return proxy
     },
     apply() { return proxy },
@@ -190,6 +235,11 @@ function capabilityStub() {
   return proxy
 }
 
+/** @returns {string} */
+function describeStub() {
+  return '[doctor capability stub]'
+}
+
 /** @returns {RegisteredSnapshot} */
 function emptySnapshot() {
   return {
@@ -197,6 +247,8 @@ function emptySnapshot() {
     sinks: [],
     datasets: [],
     commands: [],
+    commandDetails: [],
+    commandGroups: [],
     skills: [],
     agents: [],
     init_presets: [],

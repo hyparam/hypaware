@@ -305,3 +305,48 @@ test('a core group whose subcommands all come from an inactive plugin reports un
     assert.equal(stderr.text().includes('expected one of: \n'), false)
   }
 })
+
+test('dispatch miss on a selected plugin whose activate() threw reports unavailable, not unknown', async () => {
+  // The config already names the plugin, so LLP 0153's "add it to plugins[]"
+  // repair is wrong and LLP 0154's "flip enabled" repair is wrong too. Before
+  // this case existed the command fell all the way through to "unknown
+  // command", telling the user a feature they configured does not exist.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-activate-threw-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
+    activateBody: `  throw new Error('activation is broken on purpose')`,
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] }))
+
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['gascity'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 2)
+  assert.match(
+    stderr.text(),
+    /^hyp: 'gascity' is provided by @hypaware\/gascity, which your config selects but this run could not activate$/m
+  )
+  const repairLine = stderr
+    .text()
+    .split('\n')
+    .find((line) => line.startsWith('  repair:'))
+  assert.equal(
+    repairLine,
+    `  repair: the plugin is configured but unavailable this run; run 'hyp status' for why, then re-run this command`
+  )
+  assert.equal(stderr.text().includes('unknown command'), false)
+  // Neither config repair applies: the entry is already there and enabled.
+  assert.equal(stderr.text().includes('add {"name"'), false)
+  assert.equal(stderr.text().includes('"enabled": true'), false)
+})
