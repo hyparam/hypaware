@@ -38,7 +38,23 @@ if (!configPath) {
   process.exit(64)
 }
 
-const counts = { bootstrap: 0, refresh: 0, config200: 0, config304: 0, ingest: 0, rows: 0 }
+const counts = {
+  bootstrap: 0,
+  refresh: 0,
+  config200: 0,
+  config304: 0,
+  ingest: 0,
+  rows: 0,
+  login: 0,
+  sessionRefresh: 0,
+}
+
+/** The org every sign-in resolves to. */
+const ORG = 'sandbox-org'
+
+/** Live authorization codes, minted at /login/start and spent at /token. */
+const codes = new Map()
+let codeSeq = 0
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
@@ -114,6 +130,63 @@ function route(req, res, url, body) {
     res.writeHead(202, { 'content-type': 'application/json' })
     res.end('{}')
     return `202 rows=${rows} total=${counts.rows}`
+  }
+
+  // The attended `hyp remote login` flow (LLP 0058/0059). The browser is
+  // whatever fetches the start URL: it is answered with a 302 straight to the
+  // client's loopback receiver, so `curl -L <start-url>` completes a sign-in.
+  if (req.method === 'GET' && url.pathname === '/v1/identity/login/start') {
+    const redirectUri = url.searchParams.get('redirect_uri')
+    const state = url.searchParams.get('state')
+    if (!redirectUri || !state) {
+      return json(res, 400, { error: 'invalid_request' }, 'missing redirect_uri or state')
+    }
+    const code = `code_${codeSeq += 1}`
+    codes.set(code, { challenge: url.searchParams.get('code_challenge') ?? '' })
+    const location = `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`
+    res.writeHead(302, { location })
+    res.end()
+    return `302 → ${redirectUri}`
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/identity/token') {
+    /** @type {any} */
+    let parsed = {}
+    try { parsed = JSON.parse(body || '{}') } catch { /* reported below */ }
+
+    if (parsed.grant_type === 'refresh_token') {
+      counts.sessionRefresh += 1
+      const access = mintIdentity()
+      return json(res, 200, {
+        access_jwt: access.jwt,
+        expires_at: access.expires_at,
+        org: ORG,
+      }, 'session refreshed')
+    }
+
+    if (parsed.grant_type === 'authorization_code') {
+      if (!codes.delete(parsed.code)) {
+        return json(res, 401, { error: 'invalid_grant', detail: 'unknown or spent code' }, 'bad code')
+      }
+      counts.login += 1
+      const access = mintIdentity()
+      const gateway = mintIdentity()
+      // The gateway_* triple is what makes a login enroll the machine without a
+      // bootstrap token; a partial set is a contract violation the client
+      // rejects loudly, so send all three or none.
+      return json(res, 200, {
+        session_id: `sid_sandbox_${counts.login}`,
+        refresh_token: `refresh_sandbox_${counts.login}`,
+        access_jwt: access.jwt,
+        expires_at: access.expires_at,
+        org: ORG,
+        gateway_jwt: gateway.jwt,
+        gateway_expires_at: gateway.expires_at,
+        gateway_id: 'gw_sandbox_0001',
+      }, `login ok, org ${ORG}`)
+    }
+
+    return json(res, 400, { error: 'unsupported_grant_type' }, `grant ${parsed.grant_type}`)
   }
 
   if (req.method === 'GET' && url.pathname === '/_sandbox/counts') {

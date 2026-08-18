@@ -149,6 +149,27 @@ Two things the mocks had to grow for this to work, both worth knowing:
   fails to materialize, which takes the config-pull loop down with it. The
   machine then recovers only when probation expires and rolls the config back.
 
+### Testing `hyp remote login`
+
+The fake server also speaks the attended sign-in flow (`/v1/identity/login/start`
+and `/v1/identity/token`), so an enrolling login is testable without a real
+identity provider. The "browser" is anything that fetches the start URL - the
+server answers with a 302 straight to the client's loopback receiver, so `curl`
+completes a sign-in:
+
+```sh
+hyp-sandbox --root ~/.hyp-sandbox-upgrade --spawn run hyp remote login sandbox --no-browser > login.log 2>&1 &
+sleep 4
+curl -sL "$(grep -o 'http://127.0.0.1:18700/v1/identity/login/start[^ ]*' login.log | head -1)"
+```
+
+What that surfaced: **login recovers a machine that ran `hyp leave`, and does
+not recover one that only ran `hyp detach`.** The enrollment work (including the
+daemon install that makes a freshly upgraded binary actually run) sits behind
+`if (seeded.length === 0)` in `remoteLogin` - an already-enrolled machine
+re-seeds its identity and stops. `hyp daemon install` is the idempotent step
+that covers both.
+
 The `security add-trusted-cert` in this flow is issued by the **daemon**, not
 by a command the user ran. The sandbox mock accepts it silently; a real Mac
 raises its password dialog. That step is the one thing this sandbox cannot
