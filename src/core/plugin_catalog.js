@@ -89,6 +89,19 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
               (v) => typeof v === 'string' && v.length > 0
             )
           }
+          // A probe with no readable `dir` is dropped here rather than
+          // downstream: an accepted-but-empty probe would report "no
+          // activity" for a client that is active, which reads as
+          // capture health it never measured.
+          const activity = client.activity_probe
+          if (activity && typeof activity.dir === 'string' && activity.dir.length > 0) {
+            descriptor.activityProbe = {
+              dir: activity.dir,
+              ...(typeof activity.file_suffix === 'string' && activity.file_suffix.length > 0
+                ? { file_suffix: activity.file_suffix }
+                : {}),
+            }
+          }
           // A launch spec that cannot carry the question is dropped here
           // rather than downstream: an accepted-but-mute spec starts the
           // client with no prompt, which reads as the feature working.

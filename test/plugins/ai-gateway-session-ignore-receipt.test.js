@@ -8,7 +8,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
@@ -21,7 +21,7 @@ import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hy
  * Regression suite for issue #460: the `POST` receipt claimed a drop it could
  * not have verified.
  *
- * `control.js` adds an opaque token to a `Set` and answers `ignored: true` for
+ * The shared control handler adds an opaque token to a `Set` and answers `ignored: true` for
  * whatever it was handed; the drop happens later, in the client adapter, keyed
  * on the `session_id` that adapter stamps on the row. Nothing compares the two,
  * so the receipt is evidence of a write and of nothing else - yet

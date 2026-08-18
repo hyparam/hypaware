@@ -880,3 +880,134 @@ test('the reverse gap drops an assetless refused marker and reverses one that re
     await fsp.rm(tmp, { recursive: true, force: true })
   }
 })
+
+// The settings-only half of the undo record. `installed_assets` was the marker's
+// only evidence that an effect had been applied, which is no evidence at all for
+// a client whose attach writes settings and copies no files (openclaw is the
+// routine case). These two tests pin the `prior_done` bit that carries that
+// evidence, and the reverse gap's drop condition that reads it.
+// @ref LLP 0250#the-bit [tests]: a done-to-terminal rewrite records the effect
+//   it overwrites, and the reverse gap stops dropping such a marker
+test('a settings-only attach rewritten from done to refused is reversed, not dropped (LLP 0250)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let phase = 'attach'
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() {
+        return phase === 'dropped' ? [] : [{ requestKey: 'openclaw' }]
+      },
+      // The LLP 0086 freshness hook: the recorded input drifted, so the `done`
+      // marker re-`perform()`s instead of short-circuiting.
+      isCurrent() {
+        return false
+      },
+      async perform() {
+        return phase === 'attach'
+          ? { status: 'done' }
+          : { status: 'refused', reason: 'models.providers.anthropic is not ours' }
+      },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({
+      stateRoot,
+      handlers: [handler],
+      now: () => Date.parse('2026-08-17T00:00:00.000Z'),
+      log: NOOP_LOG,
+    })
+
+    // 1. The attach applies: the client's settings are written, no assets copied.
+    await reconciler.reconcile(INPUT)
+    const applied = readMarkerFile(stateRoot).attach.openclaw
+    assert.equal(applied.status, 'done')
+    assert.equal('installed_assets' in applied, false, 'a settings-only attach records no assets')
+    assert.equal('prior_done' in applied, false, 'a done marker says so with its status')
+
+    // 2. The input drifts and the re-`perform()` refuses. The refusal itself
+    //    wrote nothing, but the settings the earlier `done` wrote are still on
+    //    disk, so the rewrite has to record the effect it overwrites.
+    phase = 'refuse'
+    await reconciler.reconcile(INPUT)
+    const rewritten = readMarkerFile(stateRoot).attach.openclaw
+    assert.equal(rewritten.status, 'refused')
+    assert.equal('installed_assets' in rewritten, false)
+    assert.equal(
+      rewritten.prior_done,
+      true,
+      'the rewrite records that an earlier pass reached done, so the settings write stays named'
+    )
+
+    // 3. The config stops naming the key. The marker records no assets, so the
+    //    reverse gap used to drop it and strand the settings; it must reverse.
+    phase = 'dropped'
+    const report = await reconciler.reconcile(INPUT)
+    assert.deepEqual(
+      handler.reverseCalls,
+      ['openclaw'],
+      'a marker over a settings write that is still on disk is reversed, never dropped'
+    )
+    assert.deepEqual(
+      report.results.map((r) => [r.requestKey, r.outcome]),
+      [['openclaw', 'reversed']]
+    )
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('the prior-done bit survives repeated failed rewrites, and a key that never applied anything is still dropped (LLP 0250)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let phase = 'attach'
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() {
+        return phase === 'dropped' ? [] : [{ requestKey: 'applied' }, { requestKey: 'never-applied' }]
+      },
+      isCurrent() {
+        return false
+      },
+      async perform(action) {
+        if (action.requestKey === 'never-applied') return { status: 'failed', reason: 'transient' }
+        return phase === 'attach' ? { status: 'done' } : { status: 'failed', reason: 'transient' }
+      },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    await reconciler.reconcile(INPUT)
+    phase = 'fail'
+    // Two failing passes: the bit is set by the first rewrite and has to survive
+    // the second, which reads it off a marker that is already `failed`.
+    await reconciler.reconcile(INPUT)
+    await reconciler.reconcile(INPUT)
+
+    const store = readMarkerFile(stateRoot).attach
+    assert.equal(store.applied.status, 'failed')
+    assert.equal(store.applied.attempts, 2, 'a failed marker still counts its retries')
+    assert.equal(store.applied.prior_done, true, 'the bit outlives every later rewrite')
+    assert.equal('prior_done' in store['never-applied'], false, 'a key that never reached done records nothing')
+
+    phase = 'dropped'
+    await reconciler.reconcile(INPUT)
+    assert.deepEqual(
+      handler.reverseCalls,
+      ['applied'],
+      'only the key whose attach really applied something is reversed; the other is dropped'
+    )
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})

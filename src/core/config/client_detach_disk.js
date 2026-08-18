@@ -5,9 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { captureSpoolRoot, isCaptureSpoolDir, sweepCaptureSpool } from '../capture_spool.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { Attr, getLogger } from '../observability/index.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
@@ -324,6 +326,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   // @ref LLP 0238#ca-survives-detach [implements]: the CA is deliberately NOT deleted here
   // @ref LLP 0239#launchctl-setenv [implements]: detach reverses the launchd env
   await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
+
+  // And the body spool an `otel`-mode attach pointed the client at. Same
+  // ordering rule: the settings write has landed, so the client is no longer
+  // producing bodies, and a sweep that fails leaves a warning rather than an
+  // un-detached client.
+  await sweepMarkerSpool({ marker, env, fs, warnings })
 
   const warning = joinWarnings(warnings)
 
@@ -668,6 +676,11 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // still runs; the CA stays, exactly as on the record-driven branch.
   await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
 
+  // `spool_dir` is a top-level marker field, so it survives a damaged undo
+  // record the same way `mode` does. Sweeping it here is what keeps the one
+  // branch that reverses by convention from leaving raw prompt bodies behind.
+  await sweepMarkerSpool({ marker, env, fs, warnings })
+
   const warning = joinWarnings(warnings)
 
   /** @type {DetachFromDiskResult} */
@@ -731,6 +744,67 @@ async function releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform,
       'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
     )
   }
+}
+
+/**
+ * Empty the raw-body spool an `otel`-mode attach recorded on its marker.
+ *
+ * The path comes off the marker rather than being recomputed, because the
+ * config that produced it is gone by the time detach runs and a machine whose
+ * HypAware home moved would otherwise sweep the wrong directory (or none).
+ * That makes the path *settings-file input*, which a hand edit can reach, so it
+ * is honored only when it is a direct child of this install's
+ * `<hyp-home>/spool`: without that gate, "empty the directory the marker names"
+ * would be a recursive delete pointed anywhere. A path that fails the gate is
+ * left alone and reported, never guessed at.
+ *
+ * Best effort and never fatal, like the launchd release above: the settings
+ * undo has already landed, and a spool we could not empty is a leftover the
+ * user can be told about, not a reason to fail a detach that succeeded.
+ *
+ * @ref LLP 0253#purge-and-detach-sweep [implements]: detach removes the spool
+ *   directory's contents, using the path the marker recorded
+ * @ref LLP 0258#marker-and-spool [constrained-by]: the marker records the spool
+ *   directory precisely so this undo does not have to compute it
+ * @param {{
+ *   marker: Record<string, unknown>,
+ *   env: NodeJS.ProcessEnv | undefined,
+ *   fs: typeof fsp,
+ *   warnings: string[],
+ * }} args
+ */
+async function sweepMarkerSpool({ marker, env, fs, warnings }) {
+  const recorded = marker.spool_dir
+  if (recorded === undefined) return
+
+  const { hypHome } = readObservabilityEnv(env)
+  if (!isCaptureSpoolDir(recorded, hypHome)) {
+    warnings.push(
+      `the attach marker names a body spool outside ${captureSpoolRoot(hypHome)}; ` +
+      'it was left in place, so delete it by hand if it holds captured bodies'
+    )
+    return
+  }
+
+  const dir = /** @type {string} */ (recorded)
+  const swept = await sweepCaptureSpool(dir, { fs })
+  if (swept.failed > 0) {
+    warnings.push(
+      `${swept.failed} item${swept.failed === 1 ? '' : 's'} in the body spool could not be removed; ` +
+      `empty ${dir} by hand`
+    )
+  }
+  if (swept.filesRemoved === 0 && swept.failed === 0) return
+  // Counts, never filenames: a spooled body's name is the client's and its
+  // content is a raw prompt.
+  getLogger('client-detach').info('client.detach.spool_swept', {
+    [Attr.COMPONENT]: 'client-detach',
+    [Attr.OPERATION]: 'client.detach.spool_sweep',
+    [Attr.STATUS]: swept.failed > 0 ? 'partial' : 'ok',
+    files_removed: swept.filesRemoved,
+    bytes_removed: swept.bytesRemoved,
+    failed: swept.failed,
+  })
 }
 
 /**

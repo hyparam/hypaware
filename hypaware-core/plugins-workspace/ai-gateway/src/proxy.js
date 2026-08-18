@@ -4,9 +4,12 @@ import http from 'node:http'
 import https from 'node:https'
 import tls from 'node:tls'
 
+import { isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { parseListen } from './config.js'
 import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
+
+export { isControlPath }
 
 /**
  * @import { AiGatewayRouteInput } from '../../../../hypaware-plugin-kernel-types.js'
@@ -555,19 +558,6 @@ function buildRouteInput(method, pathname, headers) {
     }
   }
   return { method, path: pathname, headers: flatHeaders }
-}
-
-/**
- * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
- * segment-boundary discipline as `pathMatchesPrefix`: `/_hypaware` itself
- * and any `/_hypaware/...` sub-path match, but `/_hypawarefoo` does not, so
- * a look-alike upstream path is never mistaken for a control request.
- *
- * @ref LLP 0066#control-path [implements]
- * @param {string} pathname
- */
-export function isControlPath(pathname) {
-  return pathname === '/_hypaware' || pathname.startsWith('/_hypaware/')
 }
 
 /**

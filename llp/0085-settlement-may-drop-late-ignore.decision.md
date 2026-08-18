@@ -7,6 +7,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-07
 **Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0070, LLP 0083
+**Extended-by:** LLP 0254 (#scope: accepted 2026-08-17; the Claude OTEL
+listener resolves the policy at ingest with cwd already in hand, so the race
+this backstop exists for does not arise there and the late drop does not run on
+that path; it stands unchanged for the live proxy and for transcript backfill)
 
 > When a Claude exchange raced past the capture seam with `cwd = null` (the
 > session-start hook record had not landed yet), the flush-time settlement

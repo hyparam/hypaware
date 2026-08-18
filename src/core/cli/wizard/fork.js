@@ -11,6 +11,7 @@ import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
+import { queuedLineAsker } from '../line_asker.js'
 import { select } from '../tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { shouldUseTui } from '../tui-router.js'
@@ -366,6 +367,22 @@ const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
  * `allowBack`, a `b` answer resolves to `back` (the readline form of the
  * TUI's escape, LLP 0191); any other stray answer still quits.
  *
+ * A stdin that ends without a line is read through `queuedLineAsker`
+ * rather than `rl.question`, whose promise is left permanently unsettled
+ * at EOF - which on the wizard's first screen is the whole wizard
+ * hanging, or dying on an unsettled top-level await, before it has asked
+ * anything else. The EOF `null` is coalesced into the empty line rather
+ * than branched on, so a spent stdin takes exactly the default the
+ * prompt just printed (`default 3`, Quit) and the EOF answer cannot
+ * drift from the advertised one. Quit here means exit 0 with nothing
+ * written, which is also what the TUI path returns for a real ctrl+c at
+ * this screen (`isPromptCancelledError` -> `quit` above), so the
+ * fallback does not judge a dropped terminal more harshly than the TUI
+ * judges a deliberate cancel.
+ *
+ * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default; 130 is for prompts whose enter has no default, and this one prints its own
+ * @ref LLP 0129#fork [constrained-by]: quit is the safe default at the fork, so the EOF answer is quit and the wizard reconfigures nothing by accident
+ *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: RunWizardForkOptions['stdout'] }} opts
  * @param {ConfiguredMenuOption[]} options
  * @param {string} title
@@ -377,16 +394,17 @@ async function legacyMenuPrompt(opts, options, title, allowBack = false) {
   const output = /** @type {NodeJS.WritableStream} */ (/** @type {any} */ (opts.stdout))
   const defaultIdx = Math.max(0, options.findIndex((o) => o.value === 'quit'))
   const rl = readline.createInterface({ input, output, terminal: false })
+  const askLine = queuedLineAsker(rl, input, output)
   try {
     output.write(`${title}\n`)
     options.forEach((opt, i) => {
       output.write(`  ${i + 1}) ${opt.label}\n`)
       if (opt.summary) output.write(`     ${opt.summary}\n`)
     })
-    const answer = await rl.question(
+    const answer = await askLine(
       `Choose [1-${options.length}, default ${defaultIdx + 1}${allowBack ? ', b back' : ''}]: `
     )
-    const trimmed = answer.trim()
+    const trimmed = (answer ?? '').trim()
     if (allowBack && trimmed.toLowerCase() === 'b') return 'back'
     if (trimmed === '') return options[defaultIdx]?.value ?? 'quit'
     const n = Number.parseInt(trimmed, 10)

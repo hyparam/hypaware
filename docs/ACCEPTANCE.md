@@ -515,6 +515,308 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 
 ---
 
+## `claude_otel_shape_check`
+
+**What it proves:** that the **installed** Claude Code still emits the
+telemetry HypAware's `otel` attach depends on: the nine-key `env` block is
+honored, the expected event names arrive with the attributes the listener
+reads, the raw body files still carry the fields the projector fills its
+column gaps from, and the whole path lands `ai_gateway_messages` and
+`claude_telemetry_events` rows with nothing null that should not be.
+
+This is the release-gate half of LLP 0262's flag-stability duty (open
+question 5). The other half runs in production: the `hyp status` capture-health
+line. Neither can be replaced by a hermetic smoke, because a smoke POSTs a
+fixture we wrote and therefore agrees with itself forever. Only a real Claude
+Code can tell you it renamed an event or dropped a flag.
+
+**What it does not prove:** anything about the gateway proxy path (still the
+capture route for `codex`, `claude-desktop`, `openclaw`, `hermes`, and raw SDK
+traffic), anything about fleet managed-settings delivery, anything about
+central forwarding, or anything on a machine other than the one you ran it on.
+
+**Requires:**
+
+- A real Claude Code install, **2.1.214 or newer**. Attach's own floor is
+  2.1.193 (the event set) and it refuses the mode switch below it
+  ([LLP 0258#version-floor](../llp/0258-attach-injects-telemetry-via-settings-env.decision.md#version-floor)),
+  so there is nothing to shape-check there. This procedure asks for the higher
+  number because step 8 asserts the tool-decision `source`, which arrives at
+  2.1.214: between the two versions attach succeeds and that one field reads
+  null, which is correct behavior and would read here as a false failure.
+- HypAware installed from the package under test, `@hypaware/claude` enabled,
+  daemon running, and `jq` on `PATH`.
+- A scratch git repository to hold the two conversations in. Do not run this in
+  a directory covered by `.hypignore` or the machine-local list: the usage
+  policy drops those sessions at ingest by design, and every row assertion
+  below would then fail for the right reason at the wrong time.
+- Willingness to have two short real conversations recorded on this machine.
+
+**Related:**
+[LLP 0262](../llp/0262-otel-attach-replaces-proxy.rfc.md) (the design record and
+open question 5),
+[LLP 0257](../llp/0257-claude-telemetry-listener-source.spec.md) (S21, the
+two-layer drift detection this discharges),
+[LLP 0258](../llp/0258-attach-injects-telemetry-via-settings-env.decision.md)
+(the env keys step 1 asserts),
+[LLP 0252](../llp/0252-events-carry-content-bodies-fill-the-gaps.decision.md)
+(which fields come from events and which from bodies),
+[LLP 0253](../llp/0253-body-spool-is-capped-and-swept.decision.md) (the spool),
+[LLP 0255](../llp/0255-claude-telemetry-events-dataset.decision.md) (the
+`claude_telemetry_events` row shape).
+
+### Steps
+
+1. Attach, and confirm the env block on disk is exactly the managed key set:
+
+   ```sh
+   SETTINGS="${CLAUDE_HOME:-$HOME/.claude}/settings.json"
+   claude --version
+   hyp attach claude
+   jq '.env, ._hypaware' "$SETTINGS"
+   hyp status
+   ```
+
+   Pass condition: `claude --version` is 2.1.214 or newer; `env` carries all
+   nine managed keys (`CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_LOGS_EXPORTER`,
+   `OTEL_METRICS_EXPORTER`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
+   `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_LOG_USER_PROMPTS`,
+   `OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_DETAILS`,
+   `OTEL_LOG_RAW_API_BODIES`) and **no** `ANTHROPIC_BASE_URL`, `HTTPS_PROXY`,
+   or `NODE_EXTRA_CA_CERTS`; the `_hypaware` marker records `mode: "otel"` and
+   the spool directory; `hyp status` shows
+   `claude  [configured, attached (otel)]` and a running daemon.
+
+2. Pin the window, so every later query measures only this run:
+
+   ```sh
+   SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   SINCE_SQL=${SINCE%Z}
+   SPOOL="${HYP_HOME:-$HOME/.hyp}/spool/claude-bodies"
+   ls -ld "$SPOOL"
+   ```
+
+   Pass condition: the spool directory exists and reads `drwx------`
+   ([LLP 0253#spool-location](../llp/0253-body-spool-is-capped-and-swept.decision.md#spool-location)).
+   `$SINCE` is the ISO instant; `$SINCE_SQL` is the same instant without the
+   zone suffix, which is what compares cleanly against a TIMESTAMP column.
+
+3. Take a raw body sample with the daemon **stopped**. Stopping it is what
+   makes this step deterministic: nothing consumes the spool, so the files sit
+   still long enough to read, which the live path never allows (a projected
+   body is deleted immediately).
+
+   ```sh
+   hyp daemon stop
+   ```
+
+   Now, in the scratch repo, hold one short Claude Code conversation in a
+   **fresh** session (the settings `env` applies at launch, so a session that
+   was already open is not attached). Ask it to read one file, so the request
+   carries a tool definition and the response a tool-use block. Then:
+
+   ```sh
+   mkdir -p /tmp/hyp-shape-check && cp "$SPOOL"/* /tmp/hyp-shape-check/
+   for f in /tmp/hyp-shape-check/*; do echo "== $f"; jq -r 'keys | join(",")' "$f"; done
+   ```
+
+   Pass condition: at least two files, and their top-level key lists identify a
+   request body and a response body. If the directory is empty, stop here:
+   `OTEL_LOG_RAW_API_BODIES` is no longer writing files, which is the single
+   biggest drift this procedure exists to catch.
+
+4. Assert the body shape. These are exactly the fields the projector reads a
+   body **for**
+   ([LLP 0252#bodies-for-gaps](../llp/0252-events-carry-content-bodies-fill-the-gaps.decision.md#bodies-for-gaps)):
+   everything else in the file the events already delivered.
+
+   ```sh
+   REQ=$(grep -l '"messages"' /tmp/hyp-shape-check/* | head -1)
+   RES=$(grep -l '"stop_reason"' /tmp/hyp-shape-check/* | head -1)
+   jq '{model, system: (.system|type), messages: (.messages|type),
+        tools: (.tools|type), tool0: (.tools[0]|keys?)}' "$REQ"
+   jq '{id, role, model, stop_reason,
+        content: [.content[].type], usage: (.usage|keys)}' "$RES"
+   ```
+
+   Pass condition: the request body is a JSON object carrying `model`, a
+   `system` that is a string or an array of text blocks, a `messages` array,
+   and a `tools` array whose entries carry `name` and `input_schema`. The
+   response body carries `id`, `role`, `model`, `stop_reason`, a `content`
+   array of typed blocks, and a `usage` object. A missing field here is silent
+   column loss downstream (`system_text`, `tools`, untruncated `tool_args`),
+   not a crash, which is why it is asserted on the file rather than inferred
+   from a null column.
+
+   Then clear the sample. Those bodies are orphans: their events were lost
+   with the daemon down, so nothing will ever project them and they would sit
+   in the spool until the byte cap evicted them.
+
+   ```sh
+   rm -f "$SPOOL"/*
+   hyp daemon start
+   ```
+
+5. Hold the real conversation, daemon up, in a **fresh** session in the same
+   scratch repo. Drive three things on purpose, because each one is a separate
+   event this procedure asserts:
+
+   - let it run one tool call to completion (`tool_result`),
+   - **reject** one tool call when it asks (`tool_decision` with
+     `decision = reject`),
+   - change permission mode once, e.g. accept-edits (`permission_mode_changed`).
+
+   Then wait out one export interval and confirm the spool drained. Claude
+   Code batches its exports, so an immediate check reads "not yet" as
+   "broken":
+
+   ```sh
+   sleep 60
+   ls -1 "$SPOOL" | wc -l
+   ```
+
+   Pass condition: `0`, or only the files of a turn still in flight. Bodies are
+   projected and then deleted
+   ([LLP 0252#project-then-delete](../llp/0252-events-carry-content-bodies-fill-the-gaps.decision.md#project-then-delete)),
+   so a spool that keeps growing means the listener is not consuming what
+   Claude Code writes.
+
+6. Assert the message rows, and that the body join actually filled its columns:
+
+   ```sh
+   hyp query sql "
+     select role,
+            count(*) n,
+            max(message_created_at) last_seen,
+            sum(case when system_text is not null then 1 else 0 end) with_system,
+            sum(case when tools is not null then 1 else 0 end) with_tools,
+            sum(case when cwd is not null then 1 else 0 end) with_cwd,
+            sum(case when git_branch is not null then 1 else 0 end) with_branch,
+            sum(case when client_version is not null then 1 else 0 end) with_version
+     from ai_gateway_messages
+     where conversation_source = 'claude_code'
+       and message_created_at >= '$SINCE_SQL'
+     group by 1
+     order by 1"
+   ```
+
+   Pass condition: rows for both `user` and `assistant`; `with_system` and
+   `with_tools` above zero (that is the body join, step 4's fields arriving in
+   columns); `with_cwd` and `with_branch` above zero (that is the SessionStart
+   hook, which is where cwd and git identity come from on this path, not the
+   events); `with_version` above zero (`app.version` off the events).
+   `with_cwd = 0` with everything else healthy means the hook is not installed
+   and the usage policy is running blind, which is a release blocker on its own.
+
+7. Assert the event names. This query is both the presence check and the drift
+   detector, because an event name the listener does not model is still
+   recorded rather than dropped
+   ([LLP 0257#failure-modes](../llp/0257-claude-telemetry-listener-source.spec.md#failure-modes)):
+
+   ```sh
+   hyp query sql "
+     select event_name, count(*) n, max(event_timestamp) last_seen
+     from claude_telemetry_events
+     where event_timestamp >= '$SINCE_SQL'
+     group by 1
+     order by 1"
+   ```
+
+   Pass condition: the list contains at least `api_request`, `tool_decision`,
+   `tool_result`, `permission_mode_changed`, and the metric rows
+   `claude_code.cost.usage`, `claude_code.lines_of_code.count`, and
+   `claude_code.active_time.total`. The metric rows ride the metrics exporter,
+   whose interval is longer than the logs one: if the `claude_code.*` names are
+   the only ones missing, wait another minute and re-run this query before
+   concluding anything. Write the **whole** list into the release
+   notes, not just the verdict: a name this document does not mention is an
+   upstream addition worth a follow-up, and a name that has stopped appearing
+   is upstream drift to file before the release ships. Note that `user_prompt`,
+   `assistant_response`, `api_request_body`, and `api_response_body` are
+   *expected to be absent here*: the first two are projected into
+   `ai_gateway_messages` and the last two are body pointers, so their absence
+   from this table is correct and their presence would be the bug.
+
+8. Assert the event attributes, which is where a flag going quiet shows up as a
+   null rather than an error:
+
+   ```sh
+   hyp query sql --max-bytes 0 "
+     select event_name, tool_name, decision, source, cost_usd, attributes
+     from claude_telemetry_events
+     where event_timestamp >= '$SINCE_SQL'
+       and event_name in ('tool_decision', 'api_request', 'permission_mode_changed')
+     order by event_timestamp
+     limit 12"
+   ```
+
+   Pass condition: the `tool_decision` row for the call you rejected has
+   `decision = reject` and a non-null `source` (the 2.1.214 detail); the
+   `api_request` row has a non-null `cost_usd` and its `attributes` carry
+   `model`, `input_tokens`, `output_tokens`, and the cache-token pair; the
+   `permission_mode_changed` row's `attributes` carry `from_mode` and
+   `to_mode`. Every row's `attributes` should carry the identity block
+   (`app.version`, `app.entrypoint`, `user.account_uuid`, `organization.id`,
+   `terminal.type`). Pass `--max-bytes 0` or the display truncates the JSON and
+   you will read a short value as a missing one.
+
+9. Confirm the capture-health line agrees, which is the production half of the
+   same duty:
+
+   ```sh
+   hyp status
+   ```
+
+   Pass condition: a `capture health:` block with a `- claude  last event
+   <minutes> ago, last transcript activity <minutes> ago` line, the two ages
+   within a few minutes of each other, and **no** `[capture gap]` tag or
+   `capture_gap` diagnostic.
+
+10. Record in the release notes: the `claude --version` you ran against, the
+    full event-name list from step 7, the body top-level keys from step 3, and
+    any field from steps 4, 6, or 8 that came back null. Those four items are
+    the release-to-release diff that makes upstream drift visible; a bare
+    "passed" makes the next run start from nothing.
+
+### If it fails
+
+- Step 1 refuses the attach with an upgrade hint: the installed Claude Code is
+  below 2.1.193. Run `claude update` and start again. The refusal is correct
+  behavior, not a bug: any existing attach was left byte-for-byte alone
+  ([LLP 0258#version-floor](../llp/0258-attach-injects-telemetry-via-settings-env.decision.md#version-floor)).
+- Step 8 finds `decision` set but `source` null on a Claude Code between
+  2.1.193 and 2.1.214: that is the documented gap, not drift. Upgrade and
+  re-run rather than filing it.
+- Step 3 finds an empty spool: check that the conversation ran in a session
+  started **after** the attach (the settings `env` applies at launch), then
+  check `jq '.env.OTEL_LOG_RAW_API_BODIES' "$SETTINGS"` names the
+  spool with the `file:` prefix. If both hold, `OTEL_LOG_RAW_API_BODIES` is no
+  longer honored upstream. That is the flag-stability failure LLP 0262 open
+  question 5 predicts. File it and hold the release: events alone lose
+  `system_text`, the `tools` list, and untruncated tool args.
+- Step 4 finds a body whose keys have changed shape: file it with the observed
+  key list before release and do not paper over it in the projector. The rows
+  will keep landing with the affected columns null, which is exactly the silent
+  loss this step exists to make loud.
+- Step 5 finds the spool growing rather than draining: the listener is not
+  consuming. Check `hyp status` for a `@hypaware/claude` source error, confirm
+  the daemon restarted after step 4, and confirm the port in
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is the one the listener actually bound (a
+  dynamic port moves across daemon restarts; `hyp attach claude` rewrites it).
+- Step 6 finds rows with `with_system = 0` and `with_tools = 0` while step 4
+  passed: the bodies are being written but not joined. Check whether the body
+  files are landing somewhere other than the attach-written spool, since a
+  `body_ref` outside the spool is refused by containment and counted, not read.
+- Step 7 finds no rows at all while step 6 found messages: the logs exporter is
+  arriving and the metrics exporter is not, or vice versa. Check
+  `OTEL_METRICS_EXPORTER` in the env block before suspecting the dataset.
+- Step 9 shows `[capture gap]` right after a healthy step 6: the transcript
+  probe sees session files newer than the last event, usually because the
+  daemon was down for part of the run. Re-run steps 5 and 9 against a daemon
+  that stayed up before filing anything.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written
