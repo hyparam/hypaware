@@ -174,6 +174,43 @@ test('security mock: HYP_SANDBOX_TRUST_REFUSE simulates a cancelled password dia
   )
 })
 
+test('security mock: a daemon-issued trust is refused by default, a user-issued one is not', (t) => {
+  const { root } = sandboxRoot(t)
+  const certPath = path.join(root, 'ca-cert.pem')
+  fs.writeFileSync(certPath, 'stand-in certificate bytes\n')
+  const trustArgs = ['add-trusted-cert', '-r', 'trustRoot', '-k', path.join(root, 'kc.db'), certPath]
+
+  // HYP_SANDBOX_SERVICE marks the subtree the mock launchd started. Trusting a
+  // CA in the login keychain needs the macOS password dialog answered, and a
+  // background agent has nobody watching - so the sandbox refuses it rather
+  // than letting an unattended fleet setup look like it establishes trust.
+  const fromDaemon = shim(root, 'security', trustArgs, { HYP_SANDBOX_SERVICE: '1' })
+  assert.equal(fromDaemon.code, 1)
+  assert.match(fromDaemon.stderr, /User interaction is not allowed/)
+  assert.equal(shim(root, 'security', ['verify-cert', '-c', certPath, '-p', 'ssl']).code, 1)
+
+  // Whether real macOS actually refuses is unproven, so the other branch is
+  // one flag away.
+  const granted = shim(root, 'security', trustArgs, {
+    HYP_SANDBOX_SERVICE: '1',
+    HYP_SANDBOX_TRUST_FROM_DAEMON: 'grant',
+  })
+  assert.equal(granted.code, 0)
+  assert.equal(shim(root, 'security', ['verify-cert', '-c', certPath, '-p', 'ssl']).code, 0)
+})
+
+test('security mock: a user-issued trust succeeds with no service marker', (t) => {
+  const { root } = sandboxRoot(t)
+  const certPath = path.join(root, 'ca-cert.pem')
+  fs.writeFileSync(certPath, 'stand-in certificate bytes\n')
+
+  const result = shim(root, 'security', [
+    'add-trusted-cert', '-r', 'trustRoot', '-k', path.join(root, 'kc.db'), certPath,
+  ])
+  assert.equal(result.code, 0, 'a CLI attach has a human at the dialog')
+  assert.equal(shim(root, 'security', ['verify-cert', '-c', certPath, '-p', 'ssl']).code, 0)
+})
+
 test('shim records every intercepted call', (t) => {
   const { root, plist, target } = sandboxRoot(t)
   shim(root, 'launchctl', ['bootstrap', 'gui/501', plist])

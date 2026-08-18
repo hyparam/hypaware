@@ -16,6 +16,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROOT="${HYP_SANDBOX_ROOT:-$HOME/.hyp-sandbox}"
 SPAWN=0
 TRUST_REFUSE=0
+TRUST_FROM_DAEMON=refuse
 VERBOSE=0
 
 usage() {
@@ -29,6 +30,7 @@ commands:
   info                  print the sandbox env and what is installed in it
   calls [n]             show the last n intercepted launchctl/security calls
   state                 dump the mock launchd + keychain state
+  central <sub>         run the stand-in central server (start|stop|status|log|config)
   seed-config [port]    write a minimal config (gateway + claude + codex)
   port <n>              rewrite the sandbox config's gateway listen port
   reset                 delete the sandbox root (asks first)
@@ -38,6 +40,12 @@ options:
   --root <dir>          sandbox root (default: $HYP_SANDBOX_ROOT or ~/.hyp-sandbox)
   --spawn               mock launchctl really starts the plist's program
   --refuse-trust        `security add-trusted-cert` acts like a cancelled dialog
+  --trust-from-daemon <grant|refuse>
+                        whether a daemon-issued `add-trusted-cert` succeeds.
+                        Default refuse: the login keychain is gated by a
+                        password dialog and the daemon is a background agent
+                        with nobody watching. This is an ASSUMPTION the
+                        sandbox cannot verify - see README.md.
   --verbose             echo every intercepted call to stderr
 
 examples:
@@ -54,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     --root=*) ROOT="${1#*=}"; shift ;;
     --spawn) SPAWN=1; shift ;;
     --refuse-trust) TRUST_REFUSE=1; shift ;;
+    --trust-from-daemon) TRUST_FROM_DAEMON="$2"; shift 2 ;;
+    --trust-from-daemon=*) TRUST_FROM_DAEMON="${1#*=}"; shift ;;
     --verbose) VERBOSE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) break ;;
@@ -114,6 +124,7 @@ sandbox_env() {
     HYP_SANDBOX_ROOT="$ROOT" \
     HYP_SANDBOX_SPAWN="$SPAWN" \
     HYP_SANDBOX_TRUST_REFUSE="$TRUST_REFUSE" \
+    HYP_SANDBOX_TRUST_FROM_DAEMON="$TRUST_FROM_DAEMON" \
     HYP_SANDBOX_VERBOSE="$VERBOSE" \
     PATH="$SANDBOX_BIN:$NPM_PREFIX/bin:$PATH" \
     "$@"
@@ -145,6 +156,7 @@ case "$CMD" in
     echo "npm prefix   : $NPM_PREFIX"
     echo "shims        : $SANDBOX_BIN (launchctl, security, systemctl)"
     echo "spawn mode   : $SPAWN (1 = mock launchctl really starts the daemon)"
+    echo "daemon trust : $TRUST_FROM_DAEMON (assumption: whether a background LaunchAgent can raise the macOS password dialog)"
     echo
     # Non-login, non-rc bash: a login shell would re-run /etc/profile and
     # path_helper, which rebuilds PATH and drops the shims out of first place.

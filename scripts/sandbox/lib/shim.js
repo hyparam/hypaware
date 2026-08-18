@@ -21,6 +21,16 @@
  * - `HYP_SANDBOX_SPAWN=1`     launchctl really starts the plist's program
  * - `HYP_SANDBOX_TRUST_REFUSE=1` `security add-trusted-cert` acts like the
  *                             user cancelling the macOS password dialog
+ * - `HYP_SANDBOX_TRUST_FROM_DAEMON=grant`
+ *                             let a daemon-issued `add-trusted-cert` succeed.
+ *                             The default refuses it: the login keychain is
+ *                             gated by a password dialog and the daemon is a
+ *                             background agent with nobody watching. This is
+ *                             an assumption the sandbox cannot verify, not a
+ *                             measured fact - see README.md.
+ * - `HYP_SANDBOX_SERVICE=1`   set by the supervisor in the daemon it starts,
+ *                             so the shim can tell a daemon-issued call from
+ *                             one the user typed. Inherited by its children.
  * - `HYP_SANDBOX_VERBOSE=1`   echo each intercepted call to stderr
  *
  * @import {
@@ -365,7 +375,14 @@ function supervise(label, plist) {
   const argv = parsePlistArray(xml, 'ProgramArguments')
   if (argv.length === 0) process.exit(0)
   const keepAlive = /<key>KeepAlive<\/key>\s*<true\/>/.test(xml)
-  const env = { ...process.env, ...parsePlistDict(xml, 'EnvironmentVariables') }
+  // `HYP_SANDBOX_SERVICE` marks everything launchd starts, and is inherited by
+  // whatever the daemon spawns, so the shim can tell "the background agent did
+  // this" from "the user typed this" without walking the process tree.
+  const env = {
+    ...process.env,
+    ...parsePlistDict(xml, 'EnvironmentVariables'),
+    HYP_SANDBOX_SERVICE: '1',
+  }
   const outPath = parsePlistString(xml, 'StandardOutPath')
   const errPath = parsePlistString(xml, 'StandardErrorPath')
   const pidFile = path.join(stateDir, `service-${label}.json`)
@@ -532,6 +549,24 @@ function security(argv) {
         code: 1,
         err: 'SecTrustSettingsSetTrustSettings: User canceled the operation.\n',
         note: 'simulated dialog cancel',
+      }
+    }
+    // Trusting a CA in the login keychain is gated by the macOS password
+    // dialog, so it needs a human at the session. The attach action runs the
+    // same code in the CLI and in the daemon's reconciler, and the daemon is a
+    // background LaunchAgent with nobody watching - so a mock that always
+    // succeeds makes an unattended fleet setup look like it establishes trust,
+    // which is precisely the wrong answer to take away from a test run.
+    //
+    // Whether real macOS lets a LaunchAgent raise that dialog is NOT settled
+    // (only a second user account or a VM can settle it). The sandbox takes
+    // the pessimistic reading by default and says so; flip it with
+    // `--trust-from-daemon grant` to test the other branch.
+    if (process.env.HYP_SANDBOX_SERVICE === '1' && process.env.HYP_SANDBOX_TRUST_FROM_DAEMON !== 'grant') {
+      return {
+        code: 1,
+        err: 'SecTrustSettingsSetTrustSettings: User interaction is not allowed.\n',
+        note: 'daemon-issued trust refused (sandbox ASSUMPTION: a background LaunchAgent cannot raise the password dialog; --trust-from-daemon grant to assume it can)',
       }
     }
     const certPath = argv[argv.length - 1]

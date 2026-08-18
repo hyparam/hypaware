@@ -60,6 +60,50 @@ the shims intercept.
   interception work. To prove real trust you still need a real keychain, i.e. a
   second macOS user account or a VM.
 
+## What the sandbox *assumes* (and cannot prove)
+
+One assumption is load-bearing enough to state on its own, because getting it
+wrong produced a confidently wrong answer once already.
+
+**A daemon-issued `security add-trusted-cert` is refused.** Attach runs the same
+code in the CLI and in the daemon's reconciler
+(`ensureDarwinProxyTrust`, `hypaware-core/plugins-workspace/claude/src/index.js`),
+and trusting a CA in the login keychain is gated by the macOS password dialog.
+Nobody is watching a background LaunchAgent, so the sandbox answers a
+daemon-issued trust with the error macOS gives when it cannot prompt:
+
+```
+SecTrustSettingsSetTrustSettings: User interaction is not allowed.
+```
+
+The result is that an unattended fleet setup ends with:
+
+```
+proxy trust:
+  login keychain: not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry
+  launchd env:    NODE_USE_SYSTEM_CA=1 set
+```
+
+which matches what people report from real machines: the settings and the
+launchd env land by themselves, the keychain trust waits for a human.
+
+**This is an assumption, not a measurement.** Whether real macOS lets a
+LaunchAgent raise that dialog can only be settled on a real keychain - a second
+macOS user account or a VM. The sandbox takes the pessimistic reading so a test
+run cannot claim an unattended setup established trust when it may not have.
+Flip it with `--trust-from-daemon grant` to exercise the other branch.
+
+A mock that always succeeds is worse than no mock: it turns an open question
+into a false answer. If you add mocks here, prefer failing the uncertain case
+and naming the assumption in the `note` the call log records.
+
+Related, and *not* modellable here: Remote Control also needs
+`NODE_USE_SYSTEM_CA=1` in the environment when Claude Code boots.
+`launchctl setenv` only reaches processes launched afterwards, so the terminal
+app must be fully quit (Cmd-Q) and reopened. Nothing inside a sandbox can
+reproduce your terminal's inherited environment - check `echo
+$NODE_USE_SYSTEM_CA` in the real one.
+
 ## Commands
 
 | Command | What it does |
@@ -80,6 +124,7 @@ the shims intercept.
 | `--root <dir>` | Sandbox root (default `~/.hyp-sandbox`) |
 | `--spawn` | Mock `launchctl bootstrap` really starts the plist's program, so you get a live sandboxed daemon with a real pid, status file, and bound port |
 | `--refuse-trust` | `security add-trusted-cert` behaves like the user cancelling the macOS password dialog, for testing the degraded attach path |
+| `--trust-from-daemon <grant\|refuse>` | Whether a *daemon-issued* trust succeeds. Default `refuse` - see "What the sandbox assumes" |
 | `--verbose` | Echo every intercepted call to stderr as it happens |
 
 ## Worked examples
