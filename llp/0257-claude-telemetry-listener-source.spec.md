@@ -1,12 +1,12 @@
 # LLP 0257: The Claude telemetry listener source
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins, Privacy, Observability
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
-LLP 0049, LLP 0066, LLP 0103, LLP 0262 (the RFC this spec realizes; Draft until 0262 is accepted), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
+LLP 0049, LLP 0066, LLP 0103, LLP 0262 (the RFC this spec realizes, accepted 2026-08-17), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
 **Tracker:** hyparam/hypaware#798
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json

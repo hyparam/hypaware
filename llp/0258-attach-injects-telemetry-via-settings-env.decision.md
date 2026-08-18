@@ -1,12 +1,12 @@
 # LLP 0258: Attach turns on Claude Code telemetry by writing the settings `env` block
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Config, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0044, LLP 0045, LLP 0163, LLP 0232, LLP 0237, LLP 0239,
-LLP 0262 (the RFC this decision realizes; Draft until 0262 is accepted)
+LLP 0262 (the RFC this decision realizes, accepted 2026-08-17)
 
 > `hyp attach claude` gains a third mode, `otel`, that merges a fixed set of
 > telemetry keys into the `env` block of `~/.claude/settings.json` and writes

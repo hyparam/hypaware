@@ -1,12 +1,12 @@
 # LLP 0254: The OTEL path settles at ingest, so flush-time settlement and its late drop are not used
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Gateway, Cache, Plugins, Privacy
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0085, LLP 0103, LLP 0262 (the
-RFC this decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257
+RFC this decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257
 
 > Events carry `message.uuid`, so a row's identity is known when it is written
 > and there is no provisional row to settle later. The usage-policy check runs

@@ -1,12 +1,12 @@
 # LLP 0256: Session ignore reaches the claude listener over the same control route
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Privacy, Plugins, Sources, CLI
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0049, LLP 0066, LLP 0262 (the RFC this decision realizes, at
-its open question 4; Draft until 0262 is accepted), LLP 0253, LLP 0257
+its open question 4, accepted 2026-08-17), LLP 0253, LLP 0257
 **Tracker:** hyparam/hypaware#798 (the implementation spec that settled this)
 
 > The claude telemetry listener hosts the same

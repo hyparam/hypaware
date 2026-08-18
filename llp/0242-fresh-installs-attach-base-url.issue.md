@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0231, LLP 0232, LLP 0233, LLP 0174
-**Extended-by:** LLP 0262 (on acceptance of 0262 the resolution below is
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the resolution below is
 itself migrated: the `claude` client's attach target becomes the OTEL mode,
 so proxy mode stops being what fresh installs compose for it)
 

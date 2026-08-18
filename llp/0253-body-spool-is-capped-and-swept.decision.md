@@ -1,12 +1,12 @@
 # LLP 0253: The body spool is owner-only, byte-capped, evicted oldest-first, and swept on removal
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Privacy, Config, Sources, Daemon
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0262 (the RFC this
-decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257, LLP 0258
+decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257, LLP 0258
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB

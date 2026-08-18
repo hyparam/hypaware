@@ -1,12 +1,12 @@
 # LLP 0255: Behavioral telemetry lands in its own `claude_telemetry_events` dataset
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Query, Sources
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0262 (the
-RFC this decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257
+RFC this decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257
 
 > The events that describe behavior rather than conversation (tool accept and
 > reject decisions, permission mode changes, hook executions, MCP server

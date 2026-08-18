@@ -7,7 +7,7 @@
 **Date:** 2026-08-14
 **Related:** LLP 0016, LLP 0044, LLP 0045, LLP 0049, LLP 0066, LLP 0086, LLP 0114, LLP 0116, LLP 0176, LLP 0192, LLP 0206
 **Spawns:** LLP 0232, LLP 0233, LLP 0234, LLP 0235
-**Extended-by:** LLP 0262 (on acceptance of 0262 the `claude` client stops
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the `claude` client stops
 being captured by proxy at all and rides Claude Code's own telemetry export
 instead; the aperture reasoning and the proxy itself stay in force for every
 other client)

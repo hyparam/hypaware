@@ -1,12 +1,12 @@
 # LLP 0252: Events carry the content, body files fill the gaps, and the body is deleted
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins, Privacy
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0262 (the RFC this
-decision realizes; Draft until 0262 is accepted), LLP 0253, LLP 0257, LLP 0258
+decision realizes, accepted 2026-08-17), LLP 0253, LLP 0257, LLP 0258
 
 > The OTEL event stream is the primary producer: it arrives pre-deduplicated
 > and supplies identity, content, usage, and behavioral data. Raw body files
