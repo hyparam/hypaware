@@ -202,6 +202,28 @@ test('accept: proxy_mode lands in the local config; with no daemon service the n
   })
 })
 
+// The migration offer decides from `ctx.config`, the effective config this
+// process booted with, while `enableGatewayProxyMode` re-reads disk before it
+// writes. So an accepted migration can come back `remint` when the key landed
+// in between, and that outcome has to be reported the way every other
+// no-daemon outcome is: nothing was written and nothing was restarted, so the
+// install ladder is named instead of a repair claimed.
+test('an accepted migration that turns out to be a re-mint never claims a restart that could not run', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const { ctx, stdout, stderr } = makeCtx({ home, answer: 'y' })
+    // The layers move between the offer and the write.
+    writeGatewayConfig(home, { proxyMode: true })
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.doesNotMatch(stdout.text(), /proxy mode restored/, 'no restart ran, so none is claimed')
+    assert.match(stderr.text(), /no daemon service is installed, so nothing can re-mint the CA/)
+    assert.match(stderr.text(), /hyp daemon install/)
+    assert.equal(readFileSync(localConfigPath(home), 'utf8'), before, 'a re-mint writes no config')
+  })
+})
+
 test('proxy_mode already in the config, with the CA on disk: no question, no note', async () => {
   await withTempHome(async (home) => {
     writeGatewayConfig(home, { proxyMode: true })
@@ -274,6 +296,27 @@ test('accepting the repair writes no config, and with no daemon service names th
   })
 })
 
+// The mirror of the re-mint-in-the-migration case: this function's gate reads
+// `ctx.config`, `enableGatewayProxyMode` re-reads disk, and the two can
+// disagree, so an accepted repair can come back as a write. A write that
+// worked is not a failure and must not be reported as one.
+test('a repair that comes back as a config write reports success, not a failure', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home, { proxyMode: true })
+    await purgeTheCa(home)
+    const { ctx, stdout, stderr } = makeCtx({ home, answer: 'y' })
+    // The layers move between the gate and the write.
+    writeGatewayConfig(home)
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.doesNotMatch(stderr.text(), /could not restore proxy mode/)
+    assert.match(stdout.text(), /proxy_mode written/)
+    assert.match(stdout.text(), /hyp daemon install/)
+    const after = JSON.parse(readFileSync(localConfigPath(home), 'utf8'))
+    assert.equal(after.plugins[0].config.proxy_mode, true)
+  })
+})
+
 // @ref LLP 0259#never-silent [tests]: every attach shape says it, including the ones that may not act
 test('non-TTY: the downgrade is still named, with the manual repair as the pointer', async () => {
   await withTempHome(async (home) => {
@@ -285,6 +328,26 @@ test('non-TTY: the downgrade is still named, with the manual repair as the point
     assert.match(stderr.text(), /no local interception CA/)
     assert.match(stderr.text(), /run 'hyp daemon restart', then 'hyp attach claude'/)
     assert.ok(!stderr.text().includes(REMINT_QUESTION), 'automation is never asked and never restarted')
+  })
+})
+
+// The one shape that keeps stdout machine-readable: the warning is on
+// stderr, so naming the downgrade costs the JSON payload nothing.
+// @ref LLP 0259#never-silent [tests]: --json is warned like every other non-acting shape
+test('--json: the downgrade is named on stderr and stdout stays the machine payload', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home, { proxyMode: true })
+    await purgeTheCa(home)
+    const { ctx, stdout, stderr } = makeCtx({ home, answer: 'y' })
+    const code = await runAttach(['claude', '--json'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.match(stderr.text(), /no local interception CA/)
+    assert.match(stderr.text(), /run 'hyp daemon restart', then 'hyp attach claude'/)
+    assert.ok(!stderr.text().includes(REMINT_QUESTION), '--json is never asked and never restarted')
+    for (const line of stdout.text().split('\n')) {
+      if (line.trim() === '') continue
+      JSON.parse(line)
+    }
   })
 })
 

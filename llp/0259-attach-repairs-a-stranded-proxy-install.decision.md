@@ -129,6 +129,11 @@ Warning, not error, and not degrading: a freshly-configured install whose
 daemon has not started yet is legitimately in this state for a few seconds,
 and the repair is the same either way.
 
+A gateway entry switched off (`enabled: false`) is read as not asking at all,
+the same reading every other plugin lookup in `hyp status` gives that key. A
+disabled source never launches and so never mints, which would make the named
+repair unable to clear its own warning however often it ran.
+
 ## Consequences
 
 - `enableGatewayProxyMode` gains one outcome, `remint`: the config was already

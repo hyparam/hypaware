@@ -966,8 +966,19 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   if (result.outcome === 'already') return
   if (result.ok && result.outcome === 'remint') {
     // The layers moved between this offer and the write: the key was already
-    // there, so only the CA was missing and only the restart ran.
-    ctx.stdout.write(`✓ proxy mode restored (daemon restarted, local CA re-minted)\n`)
+    // there, so only the CA was missing and only the restart ran. With no
+    // service to restart nothing ran at all, so the ladder gets named rather
+    // than a repair claimed - the same reading the `enabled` branch above and
+    // the stranded-install repair below both give `daemonInstalled: false`.
+    if (result.daemonInstalled) {
+      ctx.stdout.write(`✓ proxy mode restored (daemon restarted, local CA re-minted)\n`)
+    } else {
+      ctx.stderr.write(
+        `warning: proxy_mode is already set, so nothing was written, and no daemon service is ` +
+        `installed, so nothing can re-mint the CA; start one (hyp daemon install, ` +
+        `hyp daemon start) and re-run 'hyp attach ${name}'\n`
+      )
+    }
     return
   }
   ctx.stderr.write(
@@ -1106,6 +1117,22 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
       ctx.stderr.write(
         `warning: no daemon service is installed, so nothing can re-mint the CA; start one ` +
         `(hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
+      )
+    }
+    return
+  }
+  if (result.ok && result.outcome === 'enabled') {
+    // The two layered reads can disagree: this function's gate read
+    // `ctx.config`, while `enableGatewayProxyMode` treats a layer it cannot
+    // resolve as proving nothing and falls back to the local file, so a
+    // repair can come back as a write. It still succeeded, and reporting it
+    // as a failure would send the user chasing a machine that is now right.
+    if (result.daemonInstalled) {
+      ctx.stdout.write(`✓ proxy mode restored (config updated, daemon restarted)\n`)
+    } else {
+      ctx.stdout.write(
+        `✓ proxy_mode written to ${result.configPath}; no daemon service is installed, so ` +
+        `start one (hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
       )
     }
     return

@@ -1227,8 +1227,17 @@ export async function collectHypAwareStatus(opts = {}) {
   // legitimately here for a few seconds, and the repair is the same either
   // way.
   // @ref LLP 0259#status-names-it [implements]: proxy_mode with no CA is a named warning on both the text and --json surfaces
+  // `enabled: false` is read the same way every other plugin lookup in this
+  // file reads it (see `activePlugins` above): a switched-off gateway never
+  // launches its source, so it never mints, and the repair below could not
+  // clear the warning however often it ran. A stale `proxy_mode` inside a
+  // disabled block is not a fault, because nothing is asking for a transport.
   const gatewayEntry = (config?.plugins ?? []).find((entry) => entry.name === '@hypaware/ai-gateway')
-  if (gatewayEntry?.config?.proxy_mode === true && !(await hasLocalCaOnDisk(stateRoot))) {
+  if (
+    gatewayEntry?.enabled !== false &&
+    gatewayEntry?.config?.proxy_mode === true &&
+    !(await hasLocalCaOnDisk(stateRoot))
+  ) {
     diagnostics.push({
       severity: 'warning',
       kind: 'proxy_mode_ca_missing',

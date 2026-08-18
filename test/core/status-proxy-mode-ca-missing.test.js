@@ -24,7 +24,7 @@ import { ensureLocalCa } from '../../src/core/tls/ca.js'
  */
 
 /**
- * @param {{ proxyMode?: boolean }} [opts]
+ * @param {{ proxyMode?: boolean, enabled?: boolean }} [opts]
  * @returns {Promise<{ hypHome: string, stateRoot: string }>}
  */
 async function makeHome(opts) {
@@ -36,6 +36,7 @@ async function makeHome(opts) {
     plugins: [
       {
         name: '@hypaware/ai-gateway',
+        ...(opts?.enabled === false ? { enabled: false } : {}),
         config: {
           upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages' }],
           ...(opts?.proxyMode === false ? {} : { proxy_mode: true }),
@@ -130,6 +131,19 @@ test('with the CA on disk there is nothing to report', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
     await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+    const report = await collectHypAwareStatus(collectOpts(hypHome, 'darwin'))
+    assert.ok(!report.diagnostics.some((d) => d.kind === 'proxy_mode_ca_missing'))
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A switched-off gateway never launches its source, so it never mints: the
+// warning could not be cleared by the repair it names, and nothing is asking
+// for a transport the machine cannot serve.
+test('a disabled gateway carrying a stale proxy_mode is not a fault', async () => {
+  const { hypHome } = await makeHome({ enabled: false })
+  try {
     const report = await collectHypAwareStatus(collectOpts(hypHome, 'darwin'))
     assert.ok(!report.diagnostics.some((d) => d.kind === 'proxy_mode_ca_missing'))
   } finally {
