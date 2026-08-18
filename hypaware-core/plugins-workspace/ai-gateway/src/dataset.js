@@ -224,8 +224,12 @@ function withSchemaColumns(source) {
   // engine's streaming fast path. A partition that physically lacks the
   // requested column (the additive schema-drift case this wrapper exists
   // for) surfaces its values as `undefined` holes in the chunk; normalize
-  // them to null, the same "this partition predates the column" value the
-  // row path reads, so accumulators see one representation either way.
+  // them to null so every partition's chunk reads the same way and an
+  // accumulator sees one representation across the merged stream. This is
+  // NOT the value the row path reads: `scan` above pads an absent cell with
+  // `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
+  // null/undefined split between the two paths unsettled, so nothing may
+  // branch on which one it got.
   //
   // A `where` naming a DECLARED-but-physically-absent column can't be
   // handed to the source: this wrapper is the only layer that knows the
