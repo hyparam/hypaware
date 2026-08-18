@@ -676,7 +676,7 @@ export function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Da
       ...marker,
       status: 'failed',
       installed_assets: installedAssets,
-      reason: `re-armed by an explicit 'hyp attach ${requestKey}', awaiting the next reconcile pass (previous refusal: ${previous})`,
+      reason: `re-armed by an explicit 'hyp client attach ${requestKey}', awaiting the next reconcile pass (previous refusal: ${previous})`,
       last_attempt: new Date(now()).toISOString(),
     }
   }

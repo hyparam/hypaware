@@ -68,7 +68,7 @@ export async function activate(ctx) {
   // (derived, on demand, never live) has nowhere to be stated.
   // @ref LLP 0214#d2 [implements]: a plugin namespace describes itself instead of rendering a bare table
   ctx.commands.registerGroup({
-    name: 'graph',
+    name: 'query graph',
     plugin: PLUGIN_NAME,
     summary: 'Build and walk the activity graph projected from recorded sessions',
     help: [
@@ -83,7 +83,7 @@ export async function activate(ctx) {
       '',
       'Two ways to read it, and they answer different questions:',
       '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
-      '  hyp graph neighbors <node>               what connects to X, N hops',
+      '  hyp query graph neighbors <node>         what connects to X, N hops',
       '',
       '`node` and `edge` are ordinary query datasets, so everything in',
       "`hyp query --help` applies to them, including --format and --output.",
@@ -93,6 +93,8 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'graph project',
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Project every registered source contract into the node/edge activity graph',
     usage: 'hyp graph project [--source <dataset>] [--dry-run]',
     help: [
@@ -113,6 +115,8 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'graph compact',
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Merge duplicate graph rows and rewrite affected partitions sorted',
     usage: 'hyp graph compact [--dry-run]',
     help: [

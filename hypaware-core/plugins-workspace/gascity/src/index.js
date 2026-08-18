@@ -45,6 +45,7 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'gascity attach',
     plugin: '@hypaware/gascity',
+    hidden: true,
     summary: 'Subscribe to a gascity supervisor',
     usage: 'hyp gascity attach <city> [--api-url <url>]',
     run: runAttach,
@@ -52,6 +53,7 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'gascity detach',
     plugin: '@hypaware/gascity',
+    hidden: true,
     summary: 'Unsubscribe from a gascity supervisor',
     usage: 'hyp gascity detach <city>',
     run: runDetach,
@@ -59,6 +61,7 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'gascity list',
     plugin: '@hypaware/gascity',
+    hidden: true,
     summary: 'List attached gascity supervisors',
     usage: 'hyp gascity list',
     run: runList,

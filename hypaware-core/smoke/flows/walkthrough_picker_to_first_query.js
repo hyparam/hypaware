@@ -26,7 +26,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  */
 
 /**
- * Phase 5 V1-milestone smoke. Drives `hyp init --yes --client claude
+ * Phase 5 V1-milestone smoke. Drives `hyp setup --yes --client claude
  * --client codex --source otel --export local-parquet --retention-days
  * 30 --dry-run --bin <stable-bin>` end-to-end against a tmp HYP_HOME
  * with all six first-party plugins active (ai-gateway, otel, local-fs,
@@ -50,7 +50,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *   under the same `dev_run_id`.
  * - The wizard pick-phase span contract (`wizard.pick.start`,
  *   `wizard.pick.write_config`, `daemon.install`, `client.attach`,
- *   `skills.install`, `wizard.pick.finish`) is honored (`hyp init` routes
+ *   `skills.install`, `wizard.pick.finish`) is honored (`hyp setup` routes
  *   through `runInitWizard` -> `runWizardPick` now, LLP 0135).
  *
  * @param {{ harness: any, expect: any }} args
@@ -183,12 +183,12 @@ export async function run({ harness, expect }) {
   try {
     await activateInjectedPlugins(kernel, 'picker_activate')
 
-    // ----- 1. hyp init via Phase 5 flags -----
+    // ----- 1. hyp setup via Phase 5 flags -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
     const initCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--client', 'claude',
         '--client', 'codex',
@@ -208,9 +208,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp init Phase 5 flags exited 0', initCode, (v) => v === 0)
+    expect.that('dispatch: hyp setup Phase 5 flags exited 0', initCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp init had no errors',
+      'stderr: hyp setup had no errors',
       initStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -402,7 +402,7 @@ export async function run({ harness, expect }) {
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--force',
         '--source', 'claude',
@@ -419,9 +419,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
+    expect.that('dispatch: real hyp setup attach exited 0', realInitCode, (v) => v === 0)
     expect.that(
-      'stderr: real hyp init attach had no errors',
+      'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -645,12 +645,9 @@ async function goldenPickerConfig(hypHome) {
       name: '@hypaware/ai-gateway',
       config: {
         upstreams: [
-          { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
           { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
           { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
         ],
-        // @ref LLP 0243#composed-default [tests]: the picked claude row makes the composed gateway a proxy-mode gateway
-        proxy_mode: true,
       },
     },
     {
@@ -659,10 +656,7 @@ async function goldenPickerConfig(hypHome) {
     },
     { name: '@hypaware/local-fs' },
     { name: '@hypaware/format-parquet' },
-    {
-      name: '@hypaware/claude',
-      config: { proxy: '@hypaware/ai-gateway' },
-    },
+    { name: '@hypaware/claude' },
     {
       name: '@hypaware/codex',
       config: { proxy: '@hypaware/ai-gateway' },

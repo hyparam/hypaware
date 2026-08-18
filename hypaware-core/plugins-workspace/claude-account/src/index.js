@@ -78,6 +78,8 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'claude-account credential',
     plugin: PLUGIN_NAME,
+    audience: 'machine',
+    hidden: true,
     summary: 'Print the resolved Anthropic credential (Desktop helper contract)',
     usage: 'hyp claude-account credential',
     help: 'Prints a single JSON object { token, headers, ttlSec } to stdout and nothing else. '
@@ -86,26 +88,35 @@ export async function activate(ctx) {
   })
 
   ctx.commands.register({
-    name: 'claude-account login',
+    name: 'client claude-account login',
+    aliases: ['claude-account login'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Sign in with your Claude account (subscription mode)',
-    usage: 'hyp claude-account login',
+    usage: 'hyp client claude-account login',
     run: async (argv, cmdCtx) => runLogin(cmdCtx, mode, stateDir),
   })
 
   ctx.commands.register({
-    name: 'claude-account logout',
+    name: 'client claude-account logout',
+    aliases: ['claude-account logout'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Forget the stored subscription credential',
-    usage: 'hyp claude-account logout',
+    usage: 'hyp client claude-account logout',
     run: async (argv, cmdCtx) => runLogout(cmdCtx, stateDir),
   })
 
   ctx.commands.register({
-    name: 'claude-account status',
+    name: 'client claude-account status',
+    aliases: ['claude-account status'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Show credential mode and sign-in state',
-    usage: 'hyp claude-account status',
+    usage: 'hyp client claude-account status',
     run: async (argv, cmdCtx) => runStatus(cmdCtx, config, mode, stateDir),
   })
 

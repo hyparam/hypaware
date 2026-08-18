@@ -385,7 +385,7 @@ test('runWizardPick: a cancelled gate returns the deterministic cancel result', 
   }))
   assert.equal(result.cancelled, true)
   assert.equal(result.exitCode, 130)
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
 })
 
 // --- retention defaults (LLP 0137): never asked, pathway-supplied ---
@@ -604,7 +604,7 @@ test('runWizardPick: refuses to clobber an existing config without --force (exit
   }))
   assert.equal(result.exitCode, 1)
   assert.notEqual(result.cancelled, true)
-  assert.match(stderr.text(), /hyp init:/)
+  assert.match(stderr.text(), /hyp setup:/)
   // The existing config is untouched.
   assert.equal(await fs.readFile(first.configPath, 'utf8'), before)
 })
@@ -694,7 +694,7 @@ test('commitWizardPickedConfig: a declined overwrite refuses without touching th
   })
 
   assert.equal(committed.ok, false)
-  assert.match(stderr.text(), /hyp init: /)
+  assert.match(stderr.text(), /hyp setup: /)
   assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
@@ -713,7 +713,7 @@ test('runWizardPick: a cancelled prompt returns the deterministic cancel result'
   assert.equal(result.cancelled, true)
   assert.equal(result.exitCode, 130)
   assert.equal(result.configPath, '')
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
 })
 
 // --- clientsPicked derivation (LLP 0180) ---
@@ -950,7 +950,7 @@ test('runWizardPick: unchecking a row still removes its plugin and its gateway u
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.ok(!written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/codex'))
   const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
-  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), [])
 })
 
 test('runWizardPick: a disabled plugin reads as an off row, and re-picking it turns it back on', async () => {
@@ -1258,7 +1258,7 @@ test('runWizardPick: a hidden row seeded only derivatively does not resurrect an
   assert.deepEqual(result.sourcesPicked, ['claude'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
-  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), ['anthropic'])
+  assert.deepEqual(gateway.config.upstreams.map((/** @type {any} */ u) => u.name), [])
 })
 
 test('runWizardPick: --source still composes a hidden row (no prompt involved)', async () => {
@@ -1346,6 +1346,6 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
   const gateway = written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway')
   assert.deepEqual(
     gateway.config.upstreams.map((/** @type {any} */ u) => u.name).sort(),
-    ['anthropic', 'openai']
+    ['openai']
   )
 })

@@ -185,18 +185,69 @@ test('top-level help lists commands declared by config-active plugins', async ()
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  // context-graph is in the default surface; vector-search is excluded
-  // from default but config-enabled here: both must appear as collapsed
-  // group rows. vector-search declares a bare `vector` command, so its
-  // manifest summary speaks for the group; context-graph has no bare
-  // `graph`, so the row synthesizes its subcommand listing.
-  assert.match(out, /graph\s+Subcommands: compact, neighbors, project/)
-  assert.match(out, /vector\s+Vector similarity search/)
+  // Plugin-owned operational groups appear in the compact Additional
+  // commands list only when config-active.
+  assert.match(out, /Additional commands:\n  .*\bgraph\b.*\bvector\b/)
   // Leaf subcommands are collapsed out of top-level help.
   assert.equal(out.includes('graph project'), false)
   assert.equal(out.includes('vector search'), false)
   // A plugin whose name is not in the config must stay out of help.
   assert.equal(out.includes('enrich'), false)
+})
+
+test('plugin compatibility aliases are dispatchable only while their owner is config-active', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-plugin-alias-scope-'))
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath }
+
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+  const inactiveOut = makeBuf()
+  const inactiveErr = makeBuf()
+  const inactiveCode = await dispatch(['graph', 'neighbors', 'node-1', '--help'], {
+    stdout: inactiveOut,
+    stderr: inactiveErr,
+    env,
+  })
+  assert.equal(inactiveCode, 2)
+  assert.match(inactiveErr.text(), /not in the active config/)
+  assert.match(inactiveErr.text(), /@hypaware\/context-graph/)
+
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph' }] }))
+  const activeOut = makeBuf()
+  const activeErr = makeBuf()
+  const activeCode = await dispatch(['graph', 'neighbors', '--help'], {
+    stdout: activeOut,
+    stderr: activeErr,
+    env,
+  })
+  assert.equal(activeCode, 0)
+  assert.equal(activeErr.text(), '')
+  assert.match(activeOut.text(), /^hyp query graph neighbors - /)
+})
+
+test('the Claude credential machine contract is callable but absent from help', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hidden-credential-'))
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/claude-account' }],
+  }))
+  const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath }
+
+  const topOut = makeBuf()
+  assert.equal(await dispatch(['--help'], { stdout: topOut, stderr: makeBuf(), env }), 0)
+  assert.equal(topOut.text().includes('claude-account credential'), false)
+
+  const commandOut = makeBuf()
+  const commandErr = makeBuf()
+  assert.equal(await dispatch(['claude-account', 'credential', '--help'], {
+    stdout: commandOut,
+    stderr: commandErr,
+    env,
+  }), 0)
+  assert.equal(commandErr.text(), '')
+  assert.match(commandOut.text(), /^hyp claude-account credential - /)
+  assert.match(commandOut.text(), /usage: hyp claude-account credential/)
 })
 
 test('top-level help lists a local plugin addition on a fleet-joined host', async () => {
@@ -225,7 +276,7 @@ test('top-level help lists a local plugin addition on a fleet-joined host', asyn
   const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
 
   assert.equal(code, 0)
-  assert.match(stdout.text(), /graph\s+Subcommands: compact, neighbors, project/)
+  assert.match(stdout.text(), /Additional commands:\n  .*\bgraph\b/)
 })
 
 test('top-level help omits plugin commands when the plugin is disabled', async () => {
@@ -351,10 +402,9 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  // The installed plugin is the boot winner: the collapsed `gascity`
-  // group row lists ITS subcommands (attach, real), which is what
-  // dispatch would run.
-  assert.match(out, /gascity\s+Subcommands: attach, real/)
+  // The installed plugin is the boot winner, so its top-level namespace
+  // appears in Additional commands.
+  assert.match(out, /Additional commands:\n  .*\bgascity\b/)
   // The replaced skeleton's commands never dispatch: they must not appear.
   assert.equal(out.includes('phantom'), false)
   assert.equal(out.includes('bundled skeleton'), false)
@@ -473,7 +523,7 @@ test('group with an unknown subcommand reports it and exits 2', async () => {
   assert.match(stderr.text(), /expected one of: compact, neighbors, project/)
 })
 
-test('top-level help collapses subcommands into one row per group', async () => {
+test('top-level help renders journey sections and a compact operations list', async () => {
   const stdout = makeBuf()
   const stderr = makeBuf()
 
@@ -481,19 +531,22 @@ test('top-level help collapses subcommands into one row per group', async () => 
 
   assert.equal(code, 0)
   const out = stdout.text()
-  // Group rows carry the bare command's summary.
-  assert.match(out, /^ {2}query\s+Query the local cache/m)
-  assert.match(out, /^ {2}daemon\s+Manage the HypAware daemon/m)
-  assert.match(out, /^ {2}plugin\s+Manage plugins/m)
-  assert.match(out, /^ {2}skills\s+Manage skills and subagents for AI clients/m)
-  // Subagents install through `skills`, so there is no `agents` group
-  // (LLP 0138 #one-command).
-  assert.equal(/^ {2}agents\s/m.test(out), false)
+  const gettingStarted = out.indexOf('Getting started:')
+  const explore = out.indexOf('Explore and share:')
+  const control = out.indexOf('Control capture and movement:')
+  const additional = out.indexOf('Additional commands:')
+  assert.ok(gettingStarted < explore && explore < control && control < additional)
+  assert.match(out, /Getting started:\n  setup\s+.*\n  status\s+/)
+  assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+/)
+  assert.match(out, /Control capture and movement:\n  client\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
+  assert.match(out, /Additional commands:\n  daemon, config, cache, sink, plugin, remote, mcp, graph, version, dev/)
+  assert.equal(out.includes('admin'), false)
+  assert.equal(out.includes('fleet'), false)
   // Subcommands live in group help, not at the top level.
   assert.equal(out.includes('query sql'), false)
   assert.equal(out.includes('daemon install'), false)
   assert.equal(out.includes('plugin install'), false)
-  assert.equal(out.includes('backfill plan'), false)
+  assert.equal(out.includes('client history plan'), false)
 })
 
 function coreKernelAndRegistry() {
@@ -512,14 +565,14 @@ test('group --help lists subcommands with their registry summaries', async () =>
 
   assert.equal(code, 0)
   const out = stdout.text()
-  assert.match(out, /^hyp query - Query the local cache/)
+  assert.match(out, /^hyp query - Explore recorded datasets/)
   assert.match(out, /usage: hyp query <subcommand> \[args\.\.\.\]/)
   assert.match(out, /^ {2}schema\s+Print the schema for a dataset/m)
   assert.match(out, /^ {2}sql\s+Run a SQL query against registered datasets/m)
-  assert.match(out, /^ {2}maintain\s+Run cache maintenance/m)
+  assert.doesNotMatch(out, /^ {2}(maintain|refresh|status)\s/m)
 })
 
-test('an action command with subcommands gets group help on --help', async () => {
+test('a legacy action alias renders canonical leaf help', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -528,11 +581,9 @@ test('an action command with subcommands gets group help on --help', async () =>
 
   assert.equal(code, 0)
   const out = stdout.text()
-  // The bare command's own usage (it runs the import itself)...
-  assert.match(out, /usage: hyp backfill \[provider\.\.\.\]/)
-  // ...plus its subcommands.
-  assert.match(out, /^ {2}list\s+List registered backfill providers/m)
-  assert.match(out, /^ {2}plan\s+Show what each backfill provider would scan/m)
+  assert.match(out, /^hyp client history import - Import client history/)
+  assert.match(out, /usage: hyp client history import \[provider\.\.\.\]/)
+  assert.doesNotMatch(out, /^Subcommands:/m)
 })
 
 test('leaf command --help renders summary, usage, and long help', async () => {
@@ -544,8 +595,8 @@ test('leaf command --help renders summary, usage, and long help', async () => {
 
   assert.equal(code, 0)
   const out = stdout.text()
-  assert.match(out, /^hyp ignore - Exclude a folder subtree/)
-  assert.match(out, /usage: hyp ignore \[path\] \[--check\] \[--json\] \[--local-only \| --private \| --sync\]/)
+  assert.match(out, /^hyp privacy ignore - Exclude a folder subtree/)
+  assert.match(out, /usage: hyp privacy ignore \[path\] \[--check\] \[--json\] \[--local-only \| --private \| --sync\]/)
   assert.match(out, /Writes a \.hypignore/)
 })
 
@@ -573,7 +624,7 @@ test('bare group command with an unknown subcommand reports the registry childre
 
   assert.equal(code, 2)
   assert.match(stderr.text(), /hyp query: unknown subcommand 'bogus'/)
-  assert.match(stderr.text(), /expected one of: maintain, overview, refresh, schema, sql, status/)
+  assert.match(stderr.text(), /expected one of: overview, schema, sql/)
 })
 
 test('a token that is neither a command nor a group prefix still errors', async () => {
@@ -1071,7 +1122,7 @@ test('ctx.commands.run activates a config-enabled plugin the boot profile skippe
   // dispatched and every step printed instead of exit 2 on a registry miss.
   assert.equal(code, 0)
   const out = stdout.text()
-  assert.match(out, /hyp claude-desktop install-helper/)
+  assert.match(out, /hyp client claude-desktop install-helper/)
   assert.match(out, /claude-desktop install: done\./)
   assert.equal(stderr.text().includes('not in the active config'), false)
 })

@@ -202,7 +202,7 @@ test('unchecking a source writes its opt-out and names the follow-up command', a
     { source: 'openclaw', class: 'local-only' },
   ])
   assert.match(stdout.text(), /Keeping local-only: openclaw/)
-  assert.match(stdout.text(), /hyp policy client/)
+  assert.match(stdout.text(), /hyp privacy client/)
 })
 
 test('a re-entry states the split on the gate and accepting keeps it', async () => {

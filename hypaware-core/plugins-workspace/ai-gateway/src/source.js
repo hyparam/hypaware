@@ -442,7 +442,7 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         ca_cert_path: stale.certPath,
         reason: 'serving blind tunnels so an already-attached client keeps working; ' +
-          'run `hyp attach claude` to move it back to base-URL mode, or `hyp detach claude`',
+          'run `hyp client attach claude` to reconcile it, or `hyp client detach claude`',
       })
       return { tunnelOnly: true }
     }

@@ -166,7 +166,7 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   assert.match(text, /FIRST SYNC - nothing has left this machine yet/)
   assert.match(text, /Your review window runs until /)
   assert.match(text, /cannot be un-sent/)
-  assert.match(text, /hyp policy set <path> local-only/)
+  assert.match(text, /hyp privacy set <path> local-only/)
 })
 
 test('--dry-run prints the plan, exports nothing, and keeps the window open', async () => {

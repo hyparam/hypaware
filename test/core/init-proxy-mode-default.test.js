@@ -18,10 +18,8 @@ import { compileConfig } from '../../hypaware-core/plugins-workspace/ai-gateway/
 import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
 
 /**
- * @ref LLP 0243#composed-default [tests]: every config-writing install path
- * defaults a claude pick to a proxy-mode gateway, and the gateway's own
- * compiler reads the written key as proxy mode on. A codex-only pick stays
- * off: no CA is minted for a client that attaches by base URL.
+ * @ref LLP 0262#injection [tests]: Claude's sanctioned OTEL attach does not
+ * require gateway proxy mode, so no picker combination silently mints a CA.
  */
 
 /** @returns {Promise<Map<string, PickerDescriptor>>} */
@@ -41,7 +39,7 @@ function gatewaySlice(config) {
   return /** @type {Record<string, unknown>} */ (entry.config ?? {})
 }
 
-test('the picker fold turns a claude pick into a proxy-mode gateway; a codex-only pick stays off', async () => {
+test('the picker fold leaves gateway proxy mode off for every client combination', async () => {
   const descriptors = await realPickerDescriptors()
   const compose = (/** @type {PickerSource[]} */ sources) => composePickerConfig({
     sources,
@@ -51,17 +49,20 @@ test('the picker fold turns a claude pick into a proxy-mode gateway; a codex-onl
     hypHome: '/home/tester/.hyp',
   })
 
-  for (const sources of [['claude'], ['claude', 'codex'], ['claude', 'otel']]) {
-    const slice = gatewaySlice(compose(/** @type {PickerSource[]} */ (sources)))
-    assert.equal(compileConfig(slice).proxyMode, true, `picker(${sources.join('+')})`)
-  }
-  for (const sources of [['codex'], ['raw-anthropic'], ['hermes']]) {
+  for (const sources of [
+    ['claude'],
+    ['claude', 'codex'],
+    ['claude', 'otel'],
+    ['codex'],
+    ['raw-anthropic'],
+    ['hermes'],
+  ]) {
     const slice = gatewaySlice(compose(/** @type {PickerSource[]} */ (sources)))
     assert.equal(compileConfig(slice).proxyMode, false, `picker(${sources.join('+')})`)
   }
 })
 
-test('the claude-and-otel-local preset writes proxy_mode: true', async () => {
+test('the claude-and-otel-local preset omits proxy_mode', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-init-proxy-default-'))
   try {
     /** @type {any} */
@@ -98,8 +99,8 @@ test('the claude-and-otel-local preset writes proxy_mode: true', async () => {
       await fs.readFile(path.join(hypHome, 'hypaware-config.json'), 'utf8')
     )
     const slice = gatewaySlice(written)
-    assert.equal(slice.proxy_mode, true)
-    assert.equal(compileConfig(slice).proxyMode, true)
+    assert.equal(slice.proxy_mode, undefined)
+    assert.equal(compileConfig(slice).proxyMode, false)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

@@ -56,16 +56,16 @@ const LOCAL_SINK = {
 
 const QUERY = { cache: { retention: { default_days: RETENTION } } }
 
-test('claude alone composes the gateway + anthropic upstream + claude adapter', async () => {
+test('claude alone composes the gateway writer with no proxy upstream plus the claude adapter', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude']), {
     version: 2,
     plugins: [
-      // @ref LLP 0243#composed-default [tests]: the claude row turns the composed gateway into a proxy-mode gateway
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
+      // @ref LLP 0262#capture [tests]: Claude OTEL still uses the gateway projection capability, not its proxy route
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
@@ -168,10 +168,10 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   assert.deepEqual(compose(d, ['claude', 'hermes']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
       { name: '@hypaware/hermes' },
     ],
     query: QUERY,
@@ -179,15 +179,15 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   })
 })
 
-test('claude + codex union the anthropic/openai/chatgpt upstreams and both adapters', async () => {
+test('claude + codex compose only the upstreams codex still routes through the gateway', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -200,11 +200,11 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT], proxy_mode: true } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -230,8 +230,8 @@ test('keep-local export omits the sink plugins and sinks block', async () => {
   assert.deepEqual(compose(d, ['claude'], 'keep-local'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/claude' },
     ],
     query: QUERY,
   })
@@ -242,8 +242,8 @@ test('configure-later export behaves like keep-local (no sinks block)', async ()
   assert.deepEqual(compose(d, ['claude'], 'configure-later'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC], proxy_mode: true } },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/claude' },
     ],
     query: QUERY,
   })
@@ -507,11 +507,9 @@ test("a user's `enabled: false` on a rider survives a reconfigure", async () => 
   assert.equal(gateway.enabled, undefined, 'and is not switched off with it')
 })
 
-// LLP 0243 #user-key-wins: the prior gateway entry owns `proxy_mode`
-// entirely on a reconfigure. Declining the default is one explicit key,
-// and it stays declined; this must not depend on the generic prior-wins
-// spread staying generic, so it gets its own pin.
-// @ref LLP 0243#user-key-wins [tests]: a hand-written `proxy_mode: false` survives a reconfigure while upstreams recompose
+// Legacy proxy_mode remains a user-owned key during reconfigure even though
+// Claude no longer composes it. This prevents the OTEL migration from turning
+// a picker pass into an unrequested cleanup of an existing gateway setting.
 test('a hand-written `proxy_mode: false` survives a reconfigure', async () => {
   const catalog = await realCatalog()
   const existing = composeWithRiders(catalog, ['claude'])
@@ -525,14 +523,10 @@ test('a hand-written `proxy_mode: false` survives a reconfigure', async () => {
   const gateway = (after.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
   assert.ok(gateway?.config)
   assert.equal(gateway.config.proxy_mode, false, 'the decline stays declined')
-  assert.deepEqual(gateway.config.upstreams, [ANTHROPIC], 'while upstreams stay composer-owned')
+  assert.deepEqual(gateway.config.upstreams, [], 'while Claude contributes no proxy upstream')
 })
 
-// The other half of #user-key-wins: absence is a value too. An existing
-// gateway entry without the key gains it only through the LLP 0244
-// migration; a reconfigure is a picker run, not the migration verb.
-// @ref LLP 0243#user-key-wins [tests]: an existing gateway entry without `proxy_mode` stays without it on a reconfigure
-test('an existing gateway entry without `proxy_mode` does not gain it on a reconfigure', async () => {
+test('Claude OTEL composition never adds proxy_mode to fresh or existing gateway entries', async () => {
   const catalog = await realCatalog()
   const existing = composeWithRiders(catalog, ['claude'])
   existing.plugins = (existing.plugins ?? []).map((p) => {
@@ -546,10 +540,10 @@ test('an existing gateway entry without `proxy_mode` does not gain it on a recon
   assert.ok(gateway?.config)
   assert.ok(!('proxy_mode' in gateway.config), 'absence carries forward like a value')
 
-  // A fresh compose (no existing gateway entry) still gets the default.
+  // A fresh compose has the same OTEL-only answer.
   const fresh = composeWithRiders(catalog, ['claude'])
   const freshGateway = (fresh.plugins ?? []).find((p) => p.name === '@hypaware/ai-gateway')
-  assert.equal(freshGateway?.config?.proxy_mode, true, 'the composed default still applies to fresh entries')
+  assert.equal(freshGateway?.config?.proxy_mode, undefined)
 })
 
 // The exception above is scoped to riders. A *picked* plugin still loses a

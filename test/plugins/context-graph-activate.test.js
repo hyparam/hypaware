@@ -33,11 +33,11 @@ test('activate provides the context-graph capability and registers node/edge dat
   assert.equal(typeof caps[0].value.kit.edgeId, 'function')
 
   assert.deepEqual(datasets.map((d) => d.name).sort(), ['edge', 'node'])
-  // `graph neighbors` is now a verb (projects a CLI command + the
+  // `query graph neighbors` is a verb (projects a CLI command + the
   // graph_neighbors MCP tool); the two imperative graph ops stay commands.
   assert.deepEqual(commands.map((c) => c.name).sort(), ['graph compact', 'graph project'])
   assert.equal(verbs.length, 1)
-  assert.equal(verbs[0].name, 'graph neighbors')
+  assert.equal(verbs[0].name, 'query graph neighbors')
   assert.equal(verbs[0].tool, 'graph_neighbors')
   assert.equal(verbs[0].authClass, 'read')
 
@@ -45,7 +45,7 @@ test('activate provides the context-graph capability and registers node/edge dat
   // graph is and that projection runs on demand, rather than a bare table.
   // @ref LLP 0214#d2 [tests]: a plugin namespace registers a group description
   assert.equal(groups.length, 1)
-  assert.equal(groups[0].name, 'graph')
+  assert.equal(groups[0].name, 'query graph')
   assert.match(groups[0].help, /hyp graph project/)
 
   // Mechanics belong in help, not in a skill narrating the command from

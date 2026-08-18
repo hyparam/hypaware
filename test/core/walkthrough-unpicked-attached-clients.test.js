@@ -88,13 +88,13 @@ test('the finale names a still-attached client the new config no longer collects
   assert.deepEqual(result.finale?.attachedNotConfigured, ['codex'])
   const out = stdout.text()
   assert.match(out, /codex/, out)
-  assert.match(out, /hyp detach --client codex/, out)
+  assert.match(out, /hyp client detach codex/, out)
   // Exactly once. This entry point writes only its short run summary after the
   // finale, so the warning is still on screen when the run ends and repeating
   // it (the shape an echo from the shared `writeWalkthroughRunSummary` would
   // take) would print the same paragraph twice within a few lines of itself.
   // @ref LLP 0230#repeat-at-the-end [tests]: the repeat belongs to the caller that buried the first print, and this one does not
-  assert.equal(out.match(/hyp detach --client codex/g)?.length, 1, out)
+  assert.equal(out.match(/hyp client detach codex/g)?.length, 1, out)
   assert.equal(out.match(/Still attached, no longer collected/g)?.length, 1, out)
 })
 
@@ -115,8 +115,8 @@ test('a picked client that stays configured draws no stranded-attach warning', a
 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.finale?.attachedNotConfigured, [])
-  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
-  assert.doesNotMatch(stderr.text(), /hyp detach --client/, stderr.text())
+  assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
+  assert.doesNotMatch(stderr.text(), /hyp client detach/, stderr.text())
 })
 
 test('an unattached client the picker skipped is not warned about', async () => {
@@ -135,7 +135,7 @@ test('an unattached client the picker skipped is not warned about', async () => 
 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.finale?.attachedNotConfigured, [])
-  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+  assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 
 // The org lane is the reconciler's, forward and reverse: an adapter the central
@@ -166,7 +166,7 @@ test('a client the central layer names is not stranded by an unpicking run', asy
 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.finale?.attachedNotConfigured, [])
-  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+  assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 
 // `hyp status` reads `enabled: false` as inactive when it builds the same set,

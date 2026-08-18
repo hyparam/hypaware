@@ -74,7 +74,7 @@ export async function runInit(argv, ctx) {
     const preset = ctx.initPresets.get(presetName)
     if (!preset) {
       const available = ctx.initPresets.list()
-      ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
+      ctx.stderr.write(`hyp setup: unknown preset '${presetName}'\n`)
       if (available.length === 0) {
         ctx.stderr.write('  no presets registered - install a plugin that contributes one\n')
       } else {
@@ -94,7 +94,7 @@ export async function runInit(argv, ctx) {
   if (hasInitFlags(argv)) {
     const parsed = parseInitFlags(argv)
     if (parsed.error) {
-      ctx.stderr.write(`hyp init: ${parsed.error}\n`)
+      ctx.stderr.write(`hyp setup: ${parsed.error}\n`)
       return 2
     }
     return runPickerInit(parsed.flags, ctx)
@@ -126,8 +126,8 @@ export async function runInit(argv, ctx) {
       return result.exitCode
     }
     const available = ctx.initPresets.list()
-    ctx.stderr.write('hyp init: stdin is not a TTY - pass a preset name or non-interactive flags.\n')
-    ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] [--force] ...\n')
+    ctx.stderr.write('hyp setup: stdin is not a TTY - pass a preset name or non-interactive flags.\n')
+    ctx.stderr.write('  non-interactive: hyp setup --yes [--client claude] [--source otel] [--force] ...\n')
     if (available.length === 0) {
       ctx.stderr.write('  no presets registered\n')
     } else {
@@ -142,8 +142,8 @@ export async function runInit(argv, ctx) {
   // Reached only when argv[0] looks like a flag but is not a recognized
   // init flag: preset names are dispatched above, and empty argv is the
   // interactive path.
-  ctx.stderr.write(`hyp init: unknown flag '${argv[0]}'\n`)
-  ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] [--force] ...\n')
+  ctx.stderr.write(`hyp setup: unknown flag '${argv[0]}'\n`)
+  ctx.stderr.write('  non-interactive: hyp setup --yes [--client claude] [--source otel] [--force] ...\n')
   return 2
 }
 
@@ -192,7 +192,7 @@ function parseInitFlags(argv) {
     },
   }, { aliases: { '-y': '--yes' } })
   if ('help' in parsed) {
-    return { flags, error: 'usage: hyp init [--yes] [--client <name>] [--source <name>] [--export <choice>] [--retention-days <n>] [--from-file <path>] [--no-daemon] [--dry-run] [--force] [--bin <path>]' }
+    return { flags, error: 'usage: hyp setup [--yes] [--client <name>] [--source <name>] [--export <choice>] [--retention-days <n>] [--from-file <path>] [--no-daemon] [--dry-run] [--force] [--bin <path>]' }
   }
   if (!parsed.ok) return { flags, error: parsed.error }
   const p = /** @type {{ yes: boolean, 'no-daemon': boolean, 'dry-run': boolean, force: boolean, client?: string[], source?: string[], export?: InitFlags['exportChoice'], 'retention-days': number, 'from-file'?: string, bin?: string }} */ (parsed.params)
@@ -256,7 +256,7 @@ async function runPickerInit(flags, ctx) {
     if (flags.yes) {
       sources.push('claude', 'otel')
     } else {
-      ctx.stderr.write('hyp init: no sources selected - pass --source <kind> or --yes\n')
+      ctx.stderr.write('hyp setup: no sources selected - pass --source <kind> or --yes\n')
       return 2
     }
   }
@@ -315,7 +315,7 @@ async function runInitFromFile(flags, ctx) {
     raw = await fs.readFile(/** @type {string} */ (flags.fromFile), 'utf8')
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`hyp init: --from-file: ${message}\n`)
+    ctx.stderr.write(`hyp setup: --from-file: ${message}\n`)
     return 1
   }
   /** @type {unknown} */
@@ -324,7 +324,7 @@ async function runInitFromFile(flags, ctx) {
     parsed = JSON.parse(raw)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`hyp init: --from-file: invalid JSON: ${message}\n`)
+    ctx.stderr.write(`hyp setup: --from-file: invalid JSON: ${message}\n`)
     return 1
   }
   const catalogCtx = await buildKnownPluginsForCtx(ctx)
@@ -332,7 +332,7 @@ async function runInitFromFile(flags, ctx) {
   if (!validation.ok) {
     for (const err of validation.errors) {
       ctx.stderr.write(
-        `hyp init: --from-file: [${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}\n`
+        `hyp setup: --from-file: [${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}\n`
       )
     }
     return 1
@@ -362,7 +362,7 @@ async function runInitFromFile(flags, ctx) {
   // up before replacing.
   const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force })
   if (!guard.proceed) {
-    ctx.stderr.write(`hyp init: ${guard.message}\n`)
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
     return 1
   }
   if (guard.backupPath) {

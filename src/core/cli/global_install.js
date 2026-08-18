@@ -49,7 +49,7 @@ export async function ensureDurableBinForNpx(opts) {
     const detail = compactCommandError(install)
     throw new Error(
       `npx detected, but npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}. ` +
-      `Run 'npm install -g ${packageSpec}' manually, then rerun 'hyp init', or pass ` +
+      `Run 'npm install -g ${packageSpec}' manually, then rerun 'hyp setup', or pass ` +
       `'--bin <stable-hypaware.js>' to use an explicit daemon binary.`
     )
   }

@@ -262,8 +262,10 @@ const VALID_UPSTREAM = { name: 'anthropic', base_url: 'http://127.0.0.1:1', path
  * @returns {Promise<Record<string, unknown>>}
  */
 async function realGatewayDetails(upstreams, state = createGatewayState()) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-gateway-fixture-'))
   const ctx = /** @type {any} */ ({
     config: { listen: '127.0.0.1:0', upstreams },
+    env: { HOME: hypHome, HYP_HOME: hypHome },
     storage: {
       cacheTablePath: (/** @type {string} */ dataset) => dataset,
       async appendRows() {},
@@ -278,6 +280,7 @@ async function realGatewayDetails(upstreams, state = createGatewayState()) {
     return /** @type {Record<string, unknown>} */ (status.details)
   } finally {
     await source.stop()
+    await fs.rm(hypHome, { recursive: true, force: true })
   }
 }
 

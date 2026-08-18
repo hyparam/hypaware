@@ -34,7 +34,7 @@ installed from the package under test, and a working `~/.codex`.
 1. Attach Codex and confirm the marker landed in the file Desktop reads:
 
    ```sh
-   hyp attach codex
+   hyp client attach codex
    grep -n 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml"
    hyp status
    ```
@@ -99,7 +99,7 @@ installed from the package under test, and a working `~/.codex`.
    NEWEST=$(find "${CODEX_HOME:-$HOME/.codex}/sessions" -name '*.jsonl' -print0 \
      | xargs -0 ls -t | head -1)
    grep -m1 session_meta "$NEWEST"
-   hyp backfill codex --since "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" --json
+   hyp client history import codex --since "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" --json
    ```
 
    Pass condition: the newest rollout file's `session_meta.originator`
@@ -119,7 +119,7 @@ installed from the package under test, and a working `~/.codex`.
    so turn dev telemetry on for this one run and read the JSONL it writes:
 
    ```sh
-   HYP_DEV_TELEMETRY=1 hyp backfill codex --dry-run --json >/dev/null
+   HYP_DEV_TELEMETRY=1 hyp client history import codex --dry-run --json >/dev/null
    grep -h unsupported_location "${HYP_HOME:-$HOME/.hyp}"/hypaware/dev-telemetry/logs-*.jsonl | tail -3
    ```
 
@@ -136,7 +136,7 @@ installed from the package under test, and a working `~/.codex`.
 7. Detach and confirm the file is left clean:
 
    ```sh
-   hyp detach codex
+   hyp client detach codex
    grep -n 'hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" || echo 'clean'
    ```
 
@@ -144,7 +144,7 @@ installed from the package under test, and a working `~/.codex`.
    leave Codex capture off:
 
    ```sh
-   hyp attach codex
+   hyp client attach codex
    ```
 
 ### If it fails
@@ -180,7 +180,7 @@ itself, no separate package to install or link), and a periodic sweep of
 local session transcripts that backfills every OpenClaw provider within the
 sweep interval. It proves the rows name the real upstream, that a turn both
 lanes observe settles to exactly one row rather than two, and that live
-capture is reversible via `hyp detach`.
+capture is reversible via `hyp client detach`.
 
 **What it does not prove:** anything about OpenClaw's CLI backends (a
 Claude Code or Codex turn run through OpenClaw belongs to the sibling
@@ -247,18 +247,18 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 
    ```sh
    hyp query sql "select count(*) from ai_gateway_messages where conversation_source = 'openclaw'"
-   hyp attach --client openclaw
+   hyp client attach openclaw
    openclaw agent --agent <agent-id> --model anthropic/<a-claude-model> \
      --message "pre-restart probe, should not route through the gateway"
    hyp query sql "select count(*) from ai_gateway_messages where conversation_source = 'openclaw'"
    ```
 
-   Pass condition for item 4: the two counts are equal. `hyp attach` wrote
+   Pass condition for item 4: the two counts are equal. `hyp client attach` wrote
    the config, but a running OpenClaw gateway does not pick up
    `models.providers` changes until restarted, so the probe turn above
    still went out at OpenClaw's original `baseUrl`, not the gateway's.
 
-   Now run the restart instruction `hyp attach` printed:
+   Now run the restart instruction `hyp client attach` printed:
 
    ```sh
    openclaw gateway restart
@@ -296,7 +296,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
      where conversation_source = 'openclaw'"
    ```
 
-   `$SINCE` is the ISO instant `hyp backfill --since` takes; `$SINCE_SQL`
+   `$SINCE` is the ISO instant `hyp client history import --since` takes; `$SINCE_SQL`
    is the same instant without the zone suffix, which is what compares
    cleanly against the `message_created_at` TIMESTAMP column.
 
@@ -371,7 +371,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    session file's native identity and wrote nothing new), and the second
    query returns zero rows (no `part_id` in the window appears more than
    once). This is R11 proven against the daemon's own automatic scheduler
-   rather than a manually-invoked `hyp backfill`, which is the whole point
+   rather than a manually-invoked `hyp client history import`, which is the whole point
    of Lane B being *scheduled*, not just present.
 
 6. Sweep step: prove a turn Lane A never saw still lands, at transcript
@@ -379,7 +379,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    has no live route to travel:
 
    ```sh
-   hyp detach --client openclaw
+   hyp client detach openclaw
    openclaw gateway restart
    SINCE2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    SINCE2_SQL=${SINCE2%Z}
@@ -405,7 +405,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    grep -rl 'x-hypaware-upstream' "${OPENCLAW_HOME:-$HOME/.openclaw}"/agents/*/agent/models.json
    ```
 
-   Pass condition: no matches. `hyp detach` best-effort purges every
+   Pass condition: no matches. `hyp client detach` best-effort purges every
    `agents/<id>/agent/models.json`; a leftover match here means the purge
    missed a cache, not that self-heal happened on its own.
 
@@ -429,7 +429,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    lane, and restart once more:
 
    ```sh
-   hyp attach --client openclaw
+   hyp client attach openclaw
    openclaw gateway restart
    ```
 
@@ -441,7 +441,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
      1's `jq` check and `openclaw models list --all` still showing the
      full catalog.
    - **Item 3** ("no self-heal"): confirmed by step 6's cache-purge grep
-     returning no matches after `hyp detach`.
+     returning no matches after `hyp client detach`.
    - **Item 4** ("no pickup without restart"): confirmed by step 1's
      pre-restart probe turn producing no new row.
 
@@ -505,7 +505,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
   [LLP 0159](../llp/0159-openclaw-route-agreement-by-settlement.decision.md)'s
   open question about append timing, not a dedupe bug.
 - Step 6 finds a row immediately after the detached turn (should be `0`):
-  `hyp detach` did not actually remove the override entries, most likely
+  `hyp client detach` did not actually remove the override entries, most likely
   because the entry on disk was not one this gateway wrote (a hand-edited
   `baseUrl`, or `models` non-empty) and the detach backed it up instead of
   deleting it, per
@@ -572,7 +572,7 @@ two-layer drift detection this discharges),
    ```sh
    SETTINGS="${CLAUDE_HOME:-$HOME/.claude}/settings.json"
    claude --version
-   hyp attach claude
+   hyp client attach claude
    jq '.env, ._hypaware' "$SETTINGS"
    hyp status
    ```
@@ -802,7 +802,8 @@ two-layer drift detection this discharges),
   consuming. Check `hyp status` for a `@hypaware/claude` source error, confirm
   the daemon restarted after step 4, and confirm the port in
   `OTEL_EXPORTER_OTLP_ENDPOINT` is the one the listener actually bound (a
-  dynamic port moves across daemon restarts; `hyp attach claude` rewrites it).
+  dynamic port moves across daemon restarts; `hyp client attach claude`
+  rewrites it).
 - Step 6 finds rows with `with_system = 0` and `with_tools = 0` while step 4
   passed: the bodies are being written but not joined. Check whether the body
   files are landing somewhere other than the attach-written spool, since a

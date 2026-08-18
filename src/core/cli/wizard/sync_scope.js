@@ -96,7 +96,7 @@ export async function runWizardSyncScope(opts) {
   } catch (err) {
     if (!isPromptCancelledError(err)) throw err
     try {
-      opts.stderr.write('hyp init: cancelled\n')
+      opts.stderr.write('hyp setup: cancelled\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -118,7 +118,7 @@ export async function runWizardSyncScope(opts) {
   })
   if (optedOut.length > 0) {
     opts.stdout.write(
-      `Keeping local-only: ${optedOut.join(' · ')}. Change later with 'hyp policy client <name> sync|local-only'.\n`
+      `Keeping local-only: ${optedOut.join(' · ')}. Change later with 'hyp privacy client <name> sync|local-only'.\n`
     )
   }
   return await finishSpan({ optedOut }, opts)

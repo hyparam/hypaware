@@ -362,7 +362,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)
-    ctx.stderr.write("  the service is gone; run 'hyp detach <client>' for each attached client by hand\n")
+    ctx.stderr.write("  the service is gone; run 'hyp client detach <client>' for each attached client by hand\n")
     return 1
   }
   for (const client of sweep.detached) {
@@ -384,7 +384,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   }
   for (const failure of sweep.failed) {
     ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
-    ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
+    ctx.stderr.write(`  run 'hyp client detach ${failure.name}' to finish reversing it\n`)
   }
   if (sweep.failed.length > 0) {
     // Exit 1 here means the sweep, not the teardown: without this line a

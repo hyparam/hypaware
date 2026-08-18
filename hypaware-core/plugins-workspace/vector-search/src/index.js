@@ -71,22 +71,30 @@ export async function activate(ctx) {
   ctx.provideCapability('hypaware.vector-search', CAPABILITY_VERSION, capability)
 
   ctx.commands.register({
-    name: 'vector',
+    name: 'query vector',
+    aliases: ['vector'],
     plugin: PLUGIN_NAME,
+    category: 'explore-share',
+    audience: 'everyday',
     summary: 'Vector similarity search (see subcommands: search, status)',
-    usage: 'hyp vector <subcommand> [args...]',
+    usage: 'hyp query vector <subcommand> [args...]',
     run: runVector,
   })
   ctx.commands.register({
-    name: 'vector search',
+    name: 'query vector search',
+    aliases: ['vector search'],
     plugin: PLUGIN_NAME,
+    category: 'explore-share',
+    audience: 'everyday',
     summary: 'Similarity search across configured vector indexes',
-    usage: 'hyp vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
+    usage: 'hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
     run: runVectorSearch,
   })
   ctx.commands.register({
     name: 'vector status',
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Per-index vector shard coverage and staleness',
     usage: 'hyp vector status [--json]',
     run: runVectorStatus,

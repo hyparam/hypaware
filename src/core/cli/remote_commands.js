@@ -857,7 +857,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     if (attached.length > 0) {
       ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
     } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
+      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -1109,5 +1109,4 @@ async function readLocalConfigRaw(configPath) {
     throw new Error(`local config is not valid JSON: ${configPath}`)
   }
 }
-
 

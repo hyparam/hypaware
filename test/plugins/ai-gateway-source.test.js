@@ -2,6 +2,8 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
@@ -406,6 +408,8 @@ test('a gateway whose upstreams all compile reports no drop and logs nothing', a
  * @param {Record<string, unknown>} config
  * @param {{ level: string, event: string, attrs: any }[]} [logged]
  */
+let fakeCtxSequence = 0
+
 function fakeCtx(config, logged) {
   /** @param {string} level */
   const record = (level) => (/** @type {string} */ event, /** @type {any} */ attrs) => {
@@ -413,6 +417,12 @@ function fakeCtx(config, logged) {
   }
   return /** @type {any} */ ({
     config,
+    // Never inspect the developer machine's real CA. A real proxy attach there
+    // correctly turns an otherwise idle source into a tunnel-only listener.
+    env: {
+      HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence}`),
+      HYP_HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence++}`),
+    },
     storage: {
       cacheTablePath(dataset, partitions) {
         return [dataset, ...(partitions ?? [])].join('/')

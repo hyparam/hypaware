@@ -243,13 +243,13 @@ test('bootstrap floor: no local config file at all skips the prompt entirely', a
   await withTempHome(async (home) => {
     // Deliberately no writeLocalConfig(home): nothing exists to add an entry
     // to, so even with a TTY and an accepting answer queued up, the prompt
-    // must never fire, and T3's existing `hyp init`-naming refusal stands.
+    // must never fire, and T3's existing setup-naming refusal stands.
     const { ctx, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
     assert.doesNotMatch(stderr.text(), /Enable @hypaware/)
     assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
-    assert.match(stderr.text(), /enable it with 'hyp init'/)
+    assert.match(stderr.text(), /enable it with 'hyp setup'/)
   })
 })
 

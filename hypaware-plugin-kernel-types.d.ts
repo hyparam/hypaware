@@ -431,6 +431,13 @@ export type PickerDetectProbe =
 
 export interface PluginCommandManifest {
   name: string
+  /** Help presentation category, mirrored onto the runtime registration. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Compatibility spellings used for inactive-plugin ownership checks. */
+  aliases?: string[]
+  /** Callable contract omitted from manifest-derived help. */
+  hidden?: boolean
   summary?: string
   usage?: string
 }
@@ -922,6 +929,14 @@ export interface CommandGroupRegistration {
 export interface CommandRegistration {
   name: string
   plugin?: PluginName
+  /** Help presentation category used to organize the command surface. */
+  category?: string
+  /** Intended help audience. Machine commands are hidden contracts. */
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Plugin activation policy selected after semantic command resolution. */
+  bootProfile?: 'config' | 'all-available' | 'none'
+  /** True for a help-only namespace command created by core. */
+  group?: boolean
   summary: string
   usage: string
   /**
@@ -930,6 +945,7 @@ export interface CommandRegistration {
    * summary stays one line for command listings.
    */
   help?: string
+  /** Compatibility spellings. Indexed for dispatch and omitted from help. */
   aliases?: string[]
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>
@@ -1673,6 +1689,11 @@ export interface VerbRenderResult {
 export interface VerbRegistration {
   /** CLI command name, e.g. `'graph neighbors'`. */
   name: string
+  /** CLI-only compatibility spellings. The MCP tool name is unchanged. */
+  aliases?: string[]
+  /** CLI help metadata. Does not affect MCP exposure or auth. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
   plugin?: PluginName
@@ -2658,4 +2679,3 @@ export interface BackfillMaterializeContext {
   /** Stable run id propagated from the CLI runner. */
   devRunId?: string
 }
-

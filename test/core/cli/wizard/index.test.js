@@ -268,7 +268,7 @@ test('runInitWizard: cancelling the disconnect question ends the run without dis
   assert.equal(leaveRan, false, 'a cancel never disconnects')
   assert.equal(calls.filter((c) => c === 'fork').length, 1, 'the fork is not re-presented')
   assert.ok(!calls.includes('pick'), 'the cancel ended the run before any phase')
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
 })
 
 test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {
@@ -690,7 +690,7 @@ test('runInitWizard: a team-path overwrite refusal narrates the enrolled state a
   assert.equal(result.exitCode, 1)
   const text = stdout.text()
   assert.match(text, /This machine is enrolled/)
-  assert.match(text, /hyp policy client <name> local-only/)
+  assert.match(text, /hyp privacy client <name> local-only/)
   assert.match(text, /Nothing has been uploaded yet/)
   // No sync offer follows an abort, so the narration keeps the way out.
   assert.match(text, /To send it sooner, run `hyp sync`/)
@@ -742,7 +742,7 @@ test('runInitWizard: a cancelled finale returns 130 with the cancel notice', asy
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
 })
 
 // --- run summary + privacy narration ---
@@ -870,13 +870,13 @@ test('runInitWizard: an attended run repeats the stranded-attach warning after t
 
   // The names and the one command that clears each, not a bare mention.
   assert.match(text, /Still attached, no longer collected: codex/, text)
-  assert.match(text, /hyp detach --client codex/, text)
+  assert.match(text, /hyp client detach codex/, text)
   // Past the block that buried the finale's own print.
   assert.ok(text.indexOf('First look') >= 0, text)
-  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('First look'), text)
+  assert.ok(text.indexOf('hyp client detach codex') > text.indexOf('First look'), text)
   // And still ahead of the privacy narration, which stays the last words.
   assert.ok(
-    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text.indexOf('hyp client detach codex') < text.indexOf('Nothing has been uploaded yet'),
     text
   )
 })
@@ -892,7 +892,7 @@ test('runInitWizard: a scripted run does not repeat the stranded-attach warning'
     finaleRunner: async () => strandedFinale(['codex']),
   })
   await runInitWizard(opts)
-  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+  assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 
 // A cancel at the backfill consent skips the first look, so the run summary is
@@ -912,7 +912,7 @@ test('runInitWizard: a run cancelled at the finale does not repeat the stranded-
   })
   const result = await runInitWizard(opts)
   assert.equal(result.cancelled, true)
-  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+  assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 
 // The first look is documented to degrade rather than fail a finished install
@@ -936,7 +936,7 @@ test('runInitWizard: an attended run whose first look skips itself does not repe
   await runInitWizard(opts)
   const text = stdout.text()
   assert.doesNotMatch(text, /First look/, text)
-  assert.doesNotMatch(text, /hyp detach --client/, text)
+  assert.doesNotMatch(text, /hyp client detach/, text)
 })
 
 // The skip that is not silent, and the reason the gate measures writes rather
@@ -974,9 +974,9 @@ test('runInitWizard: an attended run whose first look skips slowly still repeats
   // The repeat still ran, under what the skip wrote and ahead of the privacy
   // narration, which stays the last words.
   assert.match(text, /Still attached, no longer collected: codex/, text)
-  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('Skipped the first look'), text)
+  assert.ok(text.indexOf('hyp client detach codex') > text.indexOf('Skipped the first look'), text)
   assert.ok(
-    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text.indexOf('hyp client detach codex') < text.indexOf('Nothing has been uploaded yet'),
     text
   )
 })

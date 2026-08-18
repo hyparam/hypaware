@@ -21,7 +21,7 @@
  *   beat `gascity` when both are registered.
  *
  * @returns {CommandRegistry & {
- *   match: (argv: string[]) => { command: CommandRegistration, prefixLength: number, rest: string[] } | undefined,
+ *   match: (argv: string[]) => { command: CommandRegistration, invokedName: string, prefixLength: number, rest: string[] } | undefined,
  *   has: (name: string) => boolean,
  *   size: () => number,
  * }}
@@ -51,6 +51,25 @@ export function createCommandRegistry() {
     }
     if (typeof command.run !== 'function') {
       throw new TypeError(`CommandRegistry.register: '${command.name}' missing run()`)
+    }
+    // Fill the common metadata at the registry boundary so third-party
+    // commands participate without boilerplate. Canonical registrations can
+    // override every field; aliases always inherit this one semantic record.
+    // @ref LLP 0248#semantic-boot [implements]: category, audience, and boot policy live on the canonical registry entry
+    command.category ??= command.plugin ? 'additional' : command.name.split(' ')[0]
+    command.audience ??= command.hidden
+      ? 'machine'
+      : command.category === 'additional'
+        ? 'operator'
+        : command.category === 'dev'
+          ? 'developer'
+          : 'everyday'
+    command.bootProfile ??= 'config'
+    if (command.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(command.audience)) {
+      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid audience '${command.audience}'`)
+    }
+    if (command.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(command.bootProfile)) {
+      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid bootProfile '${command.bootProfile}'`)
     }
     if (byName.has(command.name) || aliasIndex.has(command.name)) {
       throw new Error(`CommandRegistry.register: duplicate command name '${command.name}'`)
@@ -134,7 +153,7 @@ export function createCommandRegistry() {
    */
   function match(argv) {
     if (!Array.isArray(argv) || argv.length === 0) return undefined
-    /** @type {{ command: CommandRegistration, prefixLength: number, rest: string[] } | undefined} */
+    /** @type {{ command: CommandRegistration, invokedName: string, prefixLength: number, rest: string[] } | undefined} */
     let best
     let prefix = ''
     for (let i = 0; i < argv.length; i += 1) {
@@ -145,6 +164,7 @@ export function createCommandRegistry() {
       if (command) {
         best = {
           command,
+          invokedName: prefix,
           prefixLength: i + 1,
           rest: argv.slice(i + 1),
         }

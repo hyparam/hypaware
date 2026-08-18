@@ -507,7 +507,7 @@ export function recentEntrypointsFromSources(sources) {
  * running for this state root, no status file exists, or the gateway source
  * recorded no bound port.
  *
- * This is the discovery mechanism manual `hyp attach` uses on a default
+ * This is the discovery mechanism manual `hyp client attach` uses on a default
  * install: only the running daemon knows which port it actually bound (the
  * well-known default, its ephemeral fallback when that port was taken - LLP
  * 0114 - or a pre-0114 ephemeral bind), and the daemon persists it here
@@ -549,7 +549,7 @@ export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
  *
  * The generic sibling of the gateway resolver above, for sources that publish
  * `details.listen_port` (the OTLP receiver, the Claude telemetry listener).
- * The first consumer is `hyp attach claude` in `otel` mode: only the running
+ * The first consumer is `hyp client attach claude` in `otel` mode: only the running
  * daemon knows which port the listener actually bound (its configured default,
  * or the ephemeral fallback when that port was taken), so the endpoint attach
  * writes must come from here whenever a daemon is up.
@@ -759,14 +759,14 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'config_missing',
         message: `no config found - neither a central layer nor ${configPath}`,
-        repair: ['hyp init', 'hyp init --from-file <config.json>', 'hyp join <url> <token>'],
+        repair: ['hyp setup', 'hyp setup --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
       diagnostics.push({
         severity: 'error',
         kind: 'config_unreadable',
         message: localLoaded.message,
-        repair: ['hyp init --from-file <config.json>'],
+        repair: ['hyp setup --from-file <config.json>'],
       })
     }
   } else {
@@ -777,7 +777,7 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'config_local_unreadable',
         message: `local config layer is unreadable (${localLoaded.message}) - running on the central layer only`,
-        repair: ['hyp init --from-file <config.json> --force'],
+        repair: ['hyp setup --from-file <config.json> --force'],
       })
     }
     for (const err of validationErrors) {
@@ -1123,7 +1123,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // only alternative, which is no surface at all.
     // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
     if (configured && !probe.attached) {
-      // The repair is `hyp attach` only for a client whose plugin registers a
+      // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
       // adapter (claude-desktop: its plist is placed by an attended command
@@ -1133,7 +1133,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // plugin's picker row, which already declares it as `configure_command`.
       // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
       const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
-      const repair = configureCommand ? `hyp ${configureCommand}` : `hyp attach --client ${clientName}`
+      const repair = configureCommand ? `hyp ${configureCommand}` : `hyp client attach ${clientName}`
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
@@ -1156,8 +1156,8 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_stale',
-        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
-        repair: [`hyp attach --client ${clientName}`],
+        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp client attach ${clientName}' to re-point it`,
+        repair: [`hyp client attach ${clientName}`],
       })
     } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
       // The mirror image of `client_attach_missing`: the marker is on disk but
@@ -1177,8 +1177,8 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attached_not_configured',
-        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
-        repair: [`hyp detach --client ${clientName}`],
+        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp client detach ${clientName}' to unhook it`,
+        repair: [`hyp client detach ${clientName}`],
       })
     }
 
@@ -1240,9 +1240,9 @@ export async function collectHypAwareStatus(opts = {}) {
         diagnostics.push({
           severity: 'warning',
           kind: 'client_telemetry_stale',
-          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp attach --client ${clientName}' to re-point it`,
+          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp client attach ${clientName}' to re-point it`,
           repair: [
-            `hyp attach --client ${clientName}`,
+            `hyp client attach ${clientName}`,
             `start a fresh ${clientName} session - the settings env applies at launch`,
           ],
         })
@@ -1293,7 +1293,7 @@ export async function collectHypAwareStatus(opts = {}) {
           message,
           repair: [
             'hyp daemon restart  # the telemetry listener runs in the daemon',
-            `hyp attach --client ${clientName}  # rewrites the telemetry env block with the live listener port`,
+            `hyp client attach ${clientName}  # rewrites the telemetry env block with the live listener port`,
             `start a fresh ${clientName} session - the settings env applies at launch`,
           ],
         })
@@ -2255,14 +2255,13 @@ function repairForConfigError(kind) {
     case 'sink_plugin_unknown':
     case 'sink_schedule_invalid':
     case 'request_sink_invalid_keys':
-      return ['hyp init --from-file <config.json>']
+      return ['hyp setup --from-file <config.json>']
     case 'capability_ambiguous':
       return ['# Add a disambiguate.<capability> entry to your config']
     case 'duplicate_plugin':
     case 'plugin_unknown':
-      return ['hyp init --from-file <config.json>']
+      return ['hyp setup --from-file <config.json>']
     default:
       return []
   }
 }
-

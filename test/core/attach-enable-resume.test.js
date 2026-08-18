@@ -21,7 +21,7 @@ import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 //   names the failed step, states that the config change persists, names the
 //   `.bak-<ts>` backup path, and says a re-run resumes - and it must not
 //   retry `enableClientAdapter` a second time within the same invocation;
-// - a second `hyp attach <name>` invocation after that partial failure must
+// - a second `hyp client attach <name>` invocation after that partial failure must
 //   not re-ask the enable question: the client is no longer `not_enabled`
 //   once the write landed, so it falls through to the registered-client /
 //   endpoint-give-up path (T7) instead of back to T9's prompt.
@@ -199,7 +199,7 @@ test('accept, write succeeds, restart fails: names the restart step, the backup 
     assert.match(message, /config change already persists/)
     assert.match(message, /config backed up to (.+)\.bak-/)
     // Says a re-run resumes.
-    assert.match(message, /re-running 'hyp attach claude' resumes from the new state/)
+    assert.match(message, /re-running 'hyp client attach claude' resumes from the new state/)
 
     // The write itself really did land (additive: gateway + claude appended).
     const written = JSON.parse(readFileSync(localConfigPath(home), 'utf8'))

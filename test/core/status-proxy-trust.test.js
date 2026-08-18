@@ -117,8 +117,8 @@ test('a CA the keychain does not trust is stated, with the repair, on both surfa
 
     const text = renderText(report, path.join(stateRoot, 'cache'))
     assert.ok(text.includes(`ca fingerprint: ${ca.fingerprint}`))
-    assert.match(text, /login keychain: not trusted - .*hyp attach claude/)
-    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set - .*hyp attach claude/)
+    assert.match(text, /login keychain: not trusted - .*hyp client attach claude/)
+    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set - .*hyp client attach claude/)
     // The report is still healthy: capture works without keychain trust
     // (LLP 0237#attach-anyway-on-refusal), which is exactly why the line has
     // to exist.

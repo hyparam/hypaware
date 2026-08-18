@@ -488,7 +488,7 @@ export async function run({ harness, expect }) {
     await kernel.sources.stop('ai-gateway')
 
     // ----------------------------------------------------------------
-    // Kernel #2: NO ai-gateway. `hyp attach` must exit 1 at the
+    // Kernel #2: NO ai-gateway. `hyp client attach` must exit 1 at the
     // capability gate, and the gate reports which enablement state the
     // requested name is in rather than one message for both.
     // ----------------------------------------------------------------
@@ -502,7 +502,7 @@ export async function run({ harness, expect }) {
     const capMissingStdout = makeBuf()
     const capMissingStderr = makeBuf()
     const capMissingCode = await dispatch(
-      ['attach', '--client', 'claude'],
+      ['client', 'attach', 'claude'],
       {
         stdout: capMissingStdout,
         stderr: capMissingStderr,
@@ -535,7 +535,7 @@ export async function run({ harness, expect }) {
     const unknownStdout = makeBuf()
     const unknownStderr = makeBuf()
     const unknownCode = await dispatch(
-      ['attach', '--client', 'frobnicator'],
+      ['client', 'attach', 'frobnicator'],
       {
         stdout: unknownStdout,
         stderr: unknownStderr,
@@ -697,7 +697,7 @@ function smokeEnv(harness) {
  * }} opts
  */
 async function runAttach(extra, opts) {
-  return dispatch(['attach', ...extra], {
+  return dispatch(['client', 'attach', ...extra], {
     stdout: opts.stdout ?? makeBuf(),
     stderr: opts.stderr ?? makeBuf(),
     kernel: opts.kernel,
@@ -717,7 +717,7 @@ async function runAttach(extra, opts) {
  * }} opts
  */
 async function runDetach(extra, opts) {
-  return dispatch(['detach', ...extra], {
+  return dispatch(['client', 'detach', ...extra], {
     stdout: opts.stdout ?? makeBuf(),
     stderr: opts.stderr ?? makeBuf(),
     kernel: opts.kernel,
