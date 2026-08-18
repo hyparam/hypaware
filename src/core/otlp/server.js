@@ -3,6 +3,8 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
 
+import { isControlPath } from '../control/session_ignore.js'
+
 /**
  * @import { OtlpJsonServerOptions, OtlpSignal } from '../../../src/core/otlp/types.js'
  */
@@ -51,6 +53,19 @@ export function createOtlpJsonServer(options) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
     const route = url.pathname
+
+    // The reserved `/_hypaware/` prefix is a LOCAL control surface, exactly
+    // as it is on the gateway proxy: short-circuited before any OTLP
+    // routing, so a control request is never read as an export and an
+    // OTLP path can never shadow a control route. Hosts that register no
+    // handler keep the old behavior (the paths fall through and 404 as
+    // unknown OTLP routes below).
+    // @ref LLP 0256#control-route-on-listener [implements]: the listener serves
+    // the same control surface the proxy serves, through the same handler
+    if (isControlPath(route) && typeof options.onControlRequest === 'function') {
+      options.onControlRequest(req, res, url)
+      return
+    }
 
     if (req.method === 'GET' && route === '/') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })

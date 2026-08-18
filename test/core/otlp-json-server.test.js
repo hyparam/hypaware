@@ -13,7 +13,7 @@ import zlib from 'node:zlib'
 import { createOtlpJsonServer, listenAndResolve } from '../../src/core/otlp/server.js'
 
 /**
- * @import { OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
+ * @import { OtlpJsonServerOptions, OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
  */
 
 /**
@@ -21,7 +21,12 @@ import { createOtlpJsonServer, listenAndResolve } from '../../src/core/otlp/serv
  * the requests the handler saw. `onRequest` lets a test make the handler
  * fail.
  *
- * @param {{ name?: string, signals?: readonly OtlpSignal[], onRequest?: (req: OtlpRequest) => void }} [options]
+ * @param {{
+ *   name?: string,
+ *   signals?: readonly OtlpSignal[],
+ *   onRequest?: (req: OtlpRequest) => void,
+ *   onControlRequest?: OtlpJsonServerOptions['onControlRequest'],
+ * }} [options]
  */
 async function startServer(options = {}) {
   /** @type {OtlpRequest[]} */
@@ -29,6 +34,7 @@ async function startServer(options = {}) {
   const server = createOtlpJsonServer({
     name: options.name ?? 'hypaware/test',
     signals: options.signals,
+    onControlRequest: options.onControlRequest,
     handler: {
       async handle(req) {
         seen.push(req)
@@ -290,6 +296,67 @@ test('a handler failure becomes a 500 carrying its message', async () => {
     })
     assert.equal(res.status, 500)
     assert.deepEqual(await res.json(), { code: 13, message: 'persist failed' })
+  } finally {
+    await s.close()
+  }
+})
+
+// @ref LLP 0256#control-route-on-listener [tests]: the reserved `/_hypaware/`
+// prefix is a local control surface on the shared server too, short-circuited
+// before OTLP routing, so the claude listener can host the session-ignore
+// route with the identical shape the gateway proxy serves.
+test('a registered control handler owns the reserved /_hypaware/ prefix, before OTLP routing', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(`${req.method} ${url.pathname}`)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    // All three verbs the session-ignore route serves reach the handler,
+    // including GET, which the OTLP side would have refused with 405.
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      const res = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+        method,
+        ...(method === 'GET' ? {} : { headers: { 'content-type': 'application/json' }, body: '{}' }),
+      })
+      assert.equal(res.status, 200, `${method} reaches the control handler`)
+      assert.deepEqual(await res.json(), { ok: true })
+    }
+    assert.deepEqual(controlPaths, [
+      'GET /_hypaware/ignore/session',
+      'POST /_hypaware/ignore/session',
+      'DELETE /_hypaware/ignore/session',
+    ])
+    assert.equal(s.seen.length, 0, 'a control request never reads as an OTLP export')
+
+    // A look-alike path is NOT a control path, so it still routes as OTLP.
+    const lookAlike = await fetch(`${s.origin}/_hypawarefoo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(lookAlike.status, 404)
+    assert.equal(controlPaths.length, 3, 'the look-alike never reached the control handler')
+  } finally {
+    await s.close()
+  }
+})
+
+test('without a control handler, control paths fall through as unknown OTLP routes', async () => {
+  const s = await startServer()
+  try {
+    const post = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(post.status, 404)
+    assert.equal(s.seen.length, 0)
   } finally {
     await s.close()
   }

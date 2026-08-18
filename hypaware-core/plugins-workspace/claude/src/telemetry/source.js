@@ -2,10 +2,11 @@
 
 import { Attr, getActiveSpan, withSpan } from '../../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../../src/core/observability/env.js'
+import { createControlHandler } from '../../../../../src/core/control/session_ignore.js'
 import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
-import { deleteSpooledBodies, loadSpooledBodies } from './bodies.js'
+import { deleteSpooledBodies, deleteSpooledBodiesForEvents, loadSpooledBodies } from './bodies.js'
 import { flattenClaudeTelemetryEvents, flattenClaudeTelemetryMetrics } from './events.js'
 import {
   CLAUDE_TELEMETRY_EVENT_COLUMNS,
@@ -98,16 +99,28 @@ export function createStartClaudeTelemetrySource(deps) {
       rowsSkipped: 0,
       telemetryRowsWritten: 0,
       eventsReceived: 0,
+      eventsDropped: 0,
       lastEventAt: undefined,
       lastError: undefined,
       listenFallbackFrom: undefined,
       spoolBytes: 0,
       bodiesProjected: 0,
       bodiesDeleted: 0,
+      bodiesDropped: 0,
       bodiesEvicted: 0,
       bodiesMissing: 0,
       bodiesUnparseable: 0,
     }
+
+    // The same per-session opt-out the gateway keeps: an in-memory set that
+    // dies with the process, written through the identical control route and
+    // matched verbatim against the `session.id` the events carry (LLP 0066
+    // R5). Nothing about it touches disk.
+    // @ref LLP 0256#in-memory-only [implements]: no new on-disk contract; the
+    //   durable expressions of the same intent stay `.hypignore` and the
+    //   machine-local list
+    /** @type {Set<string>} */
+    const ignoredSessions = new Set()
 
     // The spool exists whether or not this daemon was up when attach ran:
     // Claude Code starts writing bodies the moment a session launches with
@@ -190,11 +203,24 @@ export function createStartClaudeTelemetrySource(deps) {
       sessionBodyFacts,
       readSessionContext,
       spoolDir: spool.dir,
+      ignoredSessions,
     })
     const server = createOtlpJsonServer({
       name: LISTENER_NAME,
       handler: { handle: handler },
       signals: [...SERVED_SIGNALS],
+      // The same `/_hypaware/ignore/session` route the gateway proxy hosts,
+      // over this listener's own set: with Claude Code traffic no longer on
+      // the gateway's wire, "don't record this conversation" has to reach
+      // the recorder that now writes the rows.
+      // @ref LLP 0256#control-route-on-listener [implements]: same shape,
+      //   verbs, and reply as the gateway's, via the shared handler
+      onControlRequest: createControlHandler({
+        ignoredSessions,
+        log: ctx.log,
+        logEvent: 'claude.telemetry.control.ignore_session',
+        logFields: { [Attr.PLUGIN]: PLUGIN_NAME, [Attr.COMPONENT]: 'sources' },
+      }),
     })
     const bound = await bindWithFallback({ server, listen, log: ctx.log, state })
 
@@ -227,6 +253,13 @@ export function createStartClaudeTelemetrySource(deps) {
             spool_bytes: state.spoolBytes,
             bodies_projected: state.bodiesProjected,
             bodies_evicted: state.bodiesEvicted,
+            // The live opt-out surface, mirroring the gateway source's
+            // details: the set size plus what enforcing it dropped.
+            // @ref LLP 0066#ephemeral: an active session drop is visible in
+            //   status, not only in logs
+            ignored_sessions: ignoredSessions.size,
+            events_dropped: state.eventsDropped,
+            bodies_dropped: state.bodiesDropped,
             ...(state.lastEventAt ? { last_event_at: state.lastEventAt } : {}),
             ...(state.listenFallbackFrom !== undefined
               ? { listen_fallback_from: state.listenFallbackFrom }
@@ -270,10 +303,52 @@ export function createStartClaudeTelemetrySource(deps) {
  *   sessionBodyFacts: Map<string, { systemText?: string, tools?: unknown }>,
  *   readSessionContext: () => Promise<SessionContextRecord[]>,
  *   spoolDir: string,
+ *   ignoredSessions: Set<string>,
  * }} args
  * @returns {(req: OtlpRequest) => Promise<void>}
  */
-function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, spoolDir }) {
+function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, spoolDir, ignoredSessions }) {
+  /**
+   * Enforce the per-session opt-out on one batch: delete the dropped
+   * sessions' spooled bodies without reading them, count the drops, and
+   * emit one policy-drop signal per ignored session so the audit trail
+   * matches the proxy path's (`policy_source: 'session_opt_out'`).
+   *
+   * @ref LLP 0256#bodies-deleted [implements]: an ignored session's bodies
+   *   are a deletion target, not a skip target
+   * @param {Map<string, ClaudeTelemetryEvent[]>} droppedBySession
+   * @param {{ setAttribute(key: string, value: unknown): unknown }} span
+   */
+  async function dropIgnoredSessions(droppedBySession, span) {
+    let eventsDropped = 0
+    let bodiesDropped = 0
+    for (const [sessionId, sessionEvents] of droppedBySession) {
+      const removal = await deleteSpooledBodiesForEvents(sessionEvents, { spoolDir })
+      eventsDropped += sessionEvents.length
+      bodiesDropped += removal.deleted
+      state.eventsDropped += sessionEvents.length
+      state.bodiesDropped += removal.deleted
+      for (const ref of removal.refused) {
+        ctx.log.warn('claude.telemetry.body_ref_refused', {
+          [Attr.PLUGIN]: PLUGIN_NAME,
+          error_kind: 'body_ref_outside_spool',
+          body_ref: ref,
+        })
+      }
+      ctx.log.info('claude.telemetry.usage_policy_drop', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        [Attr.COMPONENT]: 'sources',
+        [Attr.OPERATION]: 'usage_policy_drop',
+        policy_source: 'session_opt_out',
+        session_id: sessionId,
+        events_dropped: sessionEvents.length,
+        bodies_deleted: removal.deleted,
+      })
+    }
+    span.setAttribute('events_dropped', eventsDropped)
+    span.setAttribute('bodies_dropped', bodiesDropped)
+  }
+
   return async function handle(req) {
     await withSpan(
       'claude.telemetry.receive',
@@ -292,18 +367,31 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         // (cost and activity counters), so they take the short path:
         // flatten, record, done - no bodies, no projection.
         if (req.signal === 'metrics') {
-          const metricEvents = flattenClaudeTelemetryMetrics(req.data)
-          span.setAttribute('event_count', metricEvents.length)
+          const allMetricEvents = flattenClaudeTelemetryMetrics(req.data)
+          span.setAttribute('event_count', allMetricEvents.length)
           span.setAttribute('row_count', 0)
-          if (metricEvents.length === 0) {
+          if (allMetricEvents.length === 0) {
             span.setAttribute('telemetry_row_count', 0)
             return
           }
-          state.eventsReceived += metricEvents.length
-          for (const event of metricEvents) {
+          state.eventsReceived += allMetricEvents.length
+          for (const event of allMetricEvents) {
             if (event.timestamp && (state.lastEventAt === undefined || event.timestamp > state.lastEventAt)) {
               state.lastEventAt = event.timestamp
             }
+          }
+          // The opt-out covers the behavioral record too: a metric data
+          // point names its session, so it is droppable on the same key.
+          // @ref LLP 0256#control-route-on-listener [implements]: ingest drops
+          //   by session id on every signal this listener serves
+          const metricSplit = partitionIgnoredSessionEvents(allMetricEvents, ignoredSessions)
+          if (metricSplit.droppedBySession.size > 0) {
+            await dropIgnoredSessions(metricSplit.droppedBySession, span)
+          }
+          const metricEvents = metricSplit.kept
+          if (metricEvents.length === 0) {
+            span.setAttribute('telemetry_row_count', 0)
+            return
           }
           const written = await recordTelemetryEvents(metricEvents, { ctx, state, span })
           span.setAttribute('telemetry_row_count', written)
@@ -316,17 +404,33 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           return
         }
 
-        const events = flattenClaudeTelemetryEvents(req.data)
-        span.setAttribute('event_count', events.length)
-        if (events.length === 0) {
+        const allEvents = flattenClaudeTelemetryEvents(req.data)
+        span.setAttribute('event_count', allEvents.length)
+        if (allEvents.length === 0) {
           span.setAttribute('row_count', 0)
           return
         }
-        state.eventsReceived += events.length
-        for (const event of events) {
+        state.eventsReceived += allEvents.length
+        for (const event of allEvents) {
           if (event.timestamp && (state.lastEventAt === undefined || event.timestamp > state.lastEventAt)) {
             state.lastEventAt = event.timestamp
           }
+        }
+
+        // The per-session opt-out, enforced at ingest BEFORE the spool is
+        // read: a dropped session's events project nothing into either
+        // dataset, and its body files are deleted rather than skipped, so
+        // the transport works AND the content goes.
+        // @ref LLP 0256#bodies-deleted [implements]
+        const split = partitionIgnoredSessionEvents(allEvents, ignoredSessions)
+        if (split.droppedBySession.size > 0) {
+          await dropIgnoredSessions(split.droppedBySession, span)
+        }
+        const events = split.kept
+        if (events.length === 0) {
+          span.setAttribute('row_count', 0)
+          span.setAttribute('telemetry_row_count', 0)
+          return
         }
 
         // @ref LLP 0257#ingest [implements]: body files named by `body_ref`
@@ -429,6 +533,42 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
       { component: 'plugin.claude' }
     )
   }
+}
+
+/**
+ * Split one batch by the in-memory ignored-session set: events whose
+ * `session.id` is in the set are dropped, everything else is kept.
+ *
+ * The match key is the raw `session.id` the event carries, compared
+ * verbatim against the raw token the control route stored - the same R5
+ * discipline the gateway's drop applies, so `hyp session ignore` reaches
+ * both recorders with one resolved id. An event that names NO session is
+ * kept: the set holds exact keys, and dropping what cannot be matched
+ * would suppress rows nobody opted out.
+ *
+ * @ref LLP 0066#requirements: R5 - the match key is the session_id the
+ *   recorder resolves and stamps, verbatim
+ * @param {ClaudeTelemetryEvent[]} events
+ * @param {Set<string>} ignoredSessions
+ * @returns {{ kept: ClaudeTelemetryEvent[], droppedBySession: Map<string, ClaudeTelemetryEvent[]> }}
+ */
+export function partitionIgnoredSessionEvents(events, ignoredSessions) {
+  /** @type {ClaudeTelemetryEvent[]} */
+  const kept = []
+  /** @type {Map<string, ClaudeTelemetryEvent[]>} */
+  const droppedBySession = new Map()
+  if (ignoredSessions.size === 0) return { kept: events.slice(), droppedBySession }
+  for (const event of events) {
+    const sessionId = event.attributes['session.id']
+    if (typeof sessionId === 'string' && ignoredSessions.has(sessionId)) {
+      const bucket = droppedBySession.get(sessionId)
+      if (bucket) bucket.push(event)
+      else droppedBySession.set(sessionId, [event])
+    } else {
+      kept.push(event)
+    }
+  }
+  return { kept, droppedBySession }
 }
 
 /**

@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
 /** The three OTLP signals the shared http/json listener routes. */
 export type OtlpSignal = 'logs' | 'traces' | 'metrics'
 
@@ -24,4 +26,10 @@ export interface OtlpJsonServerOptions {
   handler: OtlpReceiveHandler
   /** Signal paths to serve. Defaults to logs, traces and metrics. */
   signals?: readonly OtlpSignal[]
+  /**
+   * Serves the reserved `/_hypaware/` local control surface, short-circuited
+   * before OTLP routing. The handler owns the request lifecycle (body and
+   * response). Absent, control paths fall through as unknown OTLP routes.
+   */
+  onControlRequest?: (req: IncomingMessage, res: ServerResponse, url: URL) => void
 }

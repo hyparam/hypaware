@@ -26,6 +26,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/projection.js'
 import {
   DEFAULT_TELEMETRY_PORT,
+  partitionIgnoredSessionEvents,
   readListenConfig,
 } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import { validateClaudeConfig } from '../../hypaware-core/plugins-workspace/claude/src/config.js'
@@ -296,6 +297,47 @@ test('replaying the same events re-expands to the same part ids', () => {
   const first = aiGatewayRowsFromProjectedExchange(projectAll(turnRecords())[0])
   const second = aiGatewayRowsFromProjectedExchange(projectAll(turnRecords())[0])
   assert.deepEqual(first.map((r) => r.part_id), second.map((r) => r.part_id))
+})
+
+// @ref LLP 0256#control-route-on-listener [tests]: ingest drops by session
+// id against the listener's own in-memory set, on the same verbatim-token
+// match the gateway applies (LLP 0066 R5).
+test('an ignored session\'s events are partitioned out, keyed verbatim on session.id', () => {
+  const events = flattenClaudeTelemetryEvents(envelope(turnRecords()))
+  const { kept, droppedBySession } = partitionIgnoredSessionEvents(events, new Set([SESSION]))
+  assert.deepEqual(kept, [])
+  assert.equal(droppedBySession.size, 1)
+  assert.equal(droppedBySession.get(SESSION)?.length, 3)
+
+  // The token is opaque and never normalized: a trimmed or case-shifted
+  // variant of the id matches nothing, so those events are recorded.
+  const nearMiss = partitionIgnoredSessionEvents(events, new Set([` ${SESSION} `, SESSION.toUpperCase()]))
+  assert.equal(nearMiss.kept.length, 3)
+  assert.equal(nearMiss.droppedBySession.size, 0)
+})
+
+test('only the ignored session drops; other sessions and unattributed events are kept', () => {
+  const other = record('user_prompt', { prompt: 'second', 'message.uuid': 'other-uuid' }, '2026-08-17T19:31:00.000Z')
+  other.attributes = other.attributes.map((a) =>
+    a.key === 'session.id' ? { key: 'session.id', value: { stringValue: 'session-two' } } : a
+  )
+  // An event naming NO session cannot match an exact key, so it is kept:
+  // dropping it would suppress rows nobody opted out.
+  const anonymous = record('user_prompt', { prompt: 'third', 'message.uuid': 'anon-uuid' }, '2026-08-17T19:32:00.000Z')
+  anonymous.attributes = anonymous.attributes.filter((a) => a.key !== 'session.id')
+
+  const events = flattenClaudeTelemetryEvents(envelope([...turnRecords(), other, anonymous]))
+  const { kept, droppedBySession } = partitionIgnoredSessionEvents(events, new Set(['session-two']))
+  assert.equal(kept.length, 4)
+  assert.deepEqual([...droppedBySession.keys()], ['session-two'])
+  assert.equal(droppedBySession.get('session-two')?.length, 1)
+})
+
+test('an empty ignore set keeps every event and allocates no buckets', () => {
+  const events = flattenClaudeTelemetryEvents(envelope(turnRecords()))
+  const { kept, droppedBySession } = partitionIgnoredSessionEvents(events, new Set())
+  assert.equal(kept.length, events.length)
+  assert.equal(droppedBySession.size, 0)
 })
 
 test('the listener config defaults to loopback on its own port', () => {

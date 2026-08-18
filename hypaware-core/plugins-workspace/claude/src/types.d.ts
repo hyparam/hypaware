@@ -64,6 +64,8 @@ export interface ClaudeTelemetryListenerState {
   /** Rows written to `claude_telemetry_events`, counted apart from the message rows. */
   telemetryRowsWritten: number
   eventsReceived: number
+  /** Events suppressed by the per-session opt-out (LLP 0256). */
+  eventsDropped: number
   lastEventAt: string | undefined
   lastError: string | undefined
   listenFallbackFrom: number | undefined
@@ -71,6 +73,8 @@ export interface ClaudeTelemetryListenerState {
   spoolBytes: number
   bodiesProjected: number
   bodiesDeleted: number
+  /** Bodies deleted unread because their session was policy-dropped. */
+  bodiesDropped: number
   bodiesEvicted: number
   bodiesMissing: number
   bodiesUnparseable: number

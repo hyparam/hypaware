@@ -145,6 +145,48 @@ export async function deleteSpooledBodies(files) {
 }
 
 /**
+ * Delete the spooled bodies a set of events references WITHOUT reading
+ * them: the deletion arm of a policy drop. When ingest drops a session
+ * (a per-session ignore today; the usage-policy governors take the same
+ * path), its body files must not sit in the spool until the cap evicts
+ * them - the content of exactly the session the user asked us not to
+ * keep. The events' `body_ref`s are resolved under the same
+ * spool-containment rule as `loadSpooledBodies`, refs outside the spool
+ * are refused and counted, and nothing is parsed or projected.
+ *
+ * @ref LLP 0253#delete-on-drop [implements]: a dropped session's bodies are
+ *   deleted, never merely skipped
+ * @ref LLP 0256#bodies-deleted [implements]: the session-ignore transport
+ *   works AND the content goes
+ * @param {ClaudeTelemetryEvent[]} events
+ * @param {{ spoolDir: string }} opts
+ * @returns {Promise<{ deleted: number, refused: string[] }>}
+ */
+export async function deleteSpooledBodiesForEvents(events, opts) {
+  const spoolRoot = path.resolve(opts.spoolDir)
+  /** @type {string[]} */
+  const files = []
+  /** @type {string[]} */
+  const refused = []
+  /** @type {Set<string>} */
+  const seen = new Set()
+  for (const event of events) {
+    if (!BODY_EVENT_NAMES.includes(event.name)) continue
+    const ref = stringValue(event.attributes.body_ref)
+    if (!ref || seen.has(ref)) continue
+    seen.add(ref)
+    const file = path.resolve(ref)
+    if (!file.startsWith(spoolRoot + path.sep)) {
+      refused.push(ref)
+      continue
+    }
+    files.push(file)
+  }
+  const deleted = await deleteSpooledBodies(files)
+  return { deleted, refused }
+}
+
+/**
  * The exchange-level fields a request body supplies: the system prompt,
  * the tool declarations, and the model. These are columns stamped on
  * every row of the projection, which events never carry.

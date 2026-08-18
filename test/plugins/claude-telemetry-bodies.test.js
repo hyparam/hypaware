@@ -19,6 +19,7 @@ import test from 'node:test'
 import {
   BODY_EVENT_NAMES,
   deleteSpooledBodies,
+  deleteSpooledBodiesForEvents,
   loadSpooledBodies,
   requestBodyFacts,
   spooledBodyGapMessages,
@@ -165,6 +166,49 @@ test('deleteSpooledBodies removes projected files and tolerates absence', async 
   const deleted = await deleteSpooledBodies([file, path.join(dir, 'never-existed.json')])
   assert.equal(deleted, 2)
   await assert.rejects(fsp.stat(file))
+})
+
+// @ref LLP 0253#delete-on-drop [tests] / LLP 0256#bodies-deleted [tests]: a
+// policy-dropped session's bodies are deleted unread, under the same
+// spool-containment rule as the read path.
+test('deleteSpooledBodiesForEvents removes a dropped session\'s bodies without reading them', async () => {
+  const dir = await tmpSpool()
+  const reqFile = await writeBody(dir, 'dropped.request.json', requestBody())
+  const respFile = await writeBody(dir, 'dropped.response.json', responseBody(true))
+  const events = [
+    evt('user_prompt', { prompt: 'secret' }),
+    evt('api_request_body', { body_ref: reqFile, request_id: REQUEST_ID }),
+    // The same ref twice must not double-count.
+    evt('api_request_body', { body_ref: reqFile, request_id: REQUEST_ID }),
+    evt('api_response_body', { body_ref: respFile, request_id: REQUEST_ID }),
+  ]
+  const removal = await deleteSpooledBodiesForEvents(events, { spoolDir: dir })
+  assert.equal(removal.deleted, 2)
+  assert.deepEqual(removal.refused, [])
+  await assert.rejects(fsp.stat(reqFile))
+  await assert.rejects(fsp.stat(respFile))
+})
+
+test('deleteSpooledBodiesForEvents refuses refs outside the spool and leaves them alone', async () => {
+  const dir = await tmpSpool()
+  await fsp.mkdir(dir, { recursive: true })
+  // The ref arrives over the wire from whatever found the loopback port, so
+  // an uncontained ref would turn the DROP into a delete primitive over the
+  // whole filesystem, same threat as the read path's.
+  const outside = await writeBody(path.dirname(dir), 'not-ours.json', { private: true })
+  // Concatenated, not path.join'd: join would normalize the `..` away and
+  // the two refs would be one string, which the ref-level dedupe collapses.
+  const traversal = dir + path.sep + '..' + path.sep + 'not-ours.json'
+  const removal = await deleteSpooledBodiesForEvents(
+    [
+      evt('api_request_body', { body_ref: outside }),
+      evt('api_response_body', { body_ref: traversal }),
+    ],
+    { spoolDir: dir }
+  )
+  assert.equal(removal.deleted, 0)
+  assert.equal(removal.refused.length, 2)
+  assert.deepEqual(JSON.parse(await fsp.readFile(outside, 'utf8')), { private: true })
 })
 
 test('requestBodyFacts pulls system, tools, and model from a request body only', () => {
