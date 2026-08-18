@@ -596,8 +596,19 @@ export async function run({ harness, expect }) {
  *
  * Reading only `loaded` keeps the default-activation boundary without
  * restating it: it agrees with the cut `ridersInDefaultSet` makes, because
- * the allowlist and the excluded set together cover every bundled plugin and
- * `loadPickerCatalog` reads only those two buckets.
+ * the allowlist and the excluded set are disjoint, so nothing in `loaded` is
+ * something that filter drops. A plugin in neither list is invisible to both
+ * sides: it is not in `loaded`, and `loadPickerCatalog` reads only those two
+ * buckets. It is disjointness, not coverage, that does the work here: the
+ * union can span the whole bundled workspace while a name sits in both sets,
+ * and `discoverBundledPlugins` checks the allowlist before the exclude set,
+ * so that name stays in `loaded`. For a rider that is a live disagreement:
+ * this function composes it into the golden while `ridersInDefaultSet` drops
+ * it from what the install writes. A name that declares no `compose_with`
+ * never reaches that filter, so the two reads here still agree and this
+ * smoke stays green; `computeSelectedPlugins` (src/core/runtime/boot.js) is
+ * where an overlap bites in that case.
+ * `test/core/bundled-sets.test.js` guards the disjointness.
  *
  * @param {string[]} picked  plugin names the picker composed from its rows
  * @returns {Promise<string[]>}
