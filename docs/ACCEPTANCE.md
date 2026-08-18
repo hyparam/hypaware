@@ -515,6 +515,349 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 
 ---
 
+## `claude_proxy_capture`
+
+**What it proves:** that proxy-mode attach ([LLP 0231](../llp/0231-proxy-mode-capture.rfc.md),
+design [LLP 0245](../llp/0245-proxy-mode-capture.design.md)) works end to end
+against a real, installed daemon and a real macOS keychain: attach writes
+only the two proxy-mode environment keys into `~/.claude/settings.json`, the
+keychain trust dialog names every intercepted provider host, the launchd
+environment carries `NODE_USE_SYSTEM_CA`, a live Claude Code session lands
+rows in `ai_gateway_messages` while Remote Control's inbound channel keeps
+working (the reason this design exists at all), `hyp status` reports the
+trust state, and detach, purge and uninstall each remove exactly what they
+are supposed to and nothing more.
+
+**What it does not prove:** anything about the Codex adapter (Codex stays on
+base-URL attach and is out of this design's scope), anything about
+`upstream_proxy` field-testing against a corporate egress proxy (an open
+item, not covered here), the exact Bun trust-store behaviour underlying
+[LLP 0236](../llp/0236-claude-code-split-trust-stores.research.md) (its
+canary caveat is a standing risk this procedure can only observe the
+symptom of, not the cause), or fleet forwarding. It also proves nothing
+about base-URL attach, which is the default and is already exercised by
+`hyp smoke gateway_claude_capture` and `hyp smoke client_attach_idempotent`.
+
+**Requires:**
+
+- A real Mac (the keychain trust dialog and `launchctl` env delivery are
+  Darwin-only; see [LLP 0237 #darwin-only](../llp/0237-attach-trusts-ca-in-login-keychain.decision.md#darwin-only)).
+  Do not attempt this on Linux; the design states Remote
+  Control inbound is unsupported there under proxy mode and there is no
+  dialog or launchd table to check.
+- Claude Code installed and signed in, with Remote Control reachable from a
+  second device (the mobile app or web) so step 4 has something to pair
+  against.
+- HypAware installed from the package under test, with no prior HypAware CA
+  trusted in the login keychain (a machine that has run this procedure
+  before will not see the dialog again in step 2; that is expected, not a
+  failure, per
+  [LLP 0238 #ca-survives-detach](../llp/0238-long-lived-ca-full-provider-constraints.decision.md#ca-survives-detach)).
+  If you need a clean first-trust observation, run `hyp detach claude --purge`
+  **and then `hyp daemon restart`**, and confirm
+  `~/.hyp/hypaware/tls/ca-cert.pem` is back before you start: purge deletes
+  the CA, the running daemon holds its own copy in memory and never re-mints,
+  and step 2 reads that file to decide which mode to attach in. Attaching
+  against the gap silently produces a base-URL attach.
+
+**Related:** [LLP 0231](../llp/0231-proxy-mode-capture.rfc.md) (the request),
+[LLP 0245](../llp/0245-proxy-mode-capture.design.md) (the design this
+procedure gates, sections 1, 4 and 6),
+[LLP 0237](../llp/0237-attach-trusts-ca-in-login-keychain.decision.md)
+(keychain trust), [LLP 0238](../llp/0238-long-lived-ca-full-provider-constraints.decision.md)
+(CA and trust survive detach), [LLP 0239](../llp/0239-node-use-system-ca-via-launchd.decision.md)
+(the launchd delivery and its terminal caveat).
+
+### Steps
+
+1. Turn proxy mode on and do a **real** daemon install and start (not
+   `hyp daemon foreground`; this procedure exists specifically to exercise
+   the real launchd service and the real keychain, which a foreground dev
+   run never touches):
+
+   ```sh
+   cp ~/.hyp/hypaware-config.json ~/.hyp/hypaware-config.json.pre-acceptance
+   jq '.plugins |= map(if .name == "@hypaware/ai-gateway"
+         then .config.proxy_mode = true else . end)' \
+     ~/.hyp/hypaware-config.json > /tmp/hypaware-config.json \
+     && mv /tmp/hypaware-config.json ~/.hyp/hypaware-config.json
+   hyp daemon install
+   hyp daemon start
+   hyp daemon restart   # reload the config edit above
+   hyp status
+   ls ~/.hyp/hypaware/tls/ca-cert.pem
+   ```
+
+   The backup copy is how you put your machine back afterwards; nothing below
+   restores the original `proxy_mode` for you. The `restart` is not
+   redundant: a daemon that was already installed and running does not re-read
+   the config on `install`/`start`, so without it the CA check at the end of
+   this step fails for a reason that has nothing to do with the feature.
+
+   Pass condition: `hyp status` shows the daemon running and, under
+   `sources:`, the gateway source `[started]`, and the CA file exists. Check
+   all three: the `jq` edit is a silent no-op if the config has no
+   `@hypaware/ai-gateway` entry, and on a centrally managed host a local
+   `proxy_mode` write loses the LLP 0031 layer merge outright. The CA is the
+   only proof that proxy mode is actually being *served*, and step 2 reads
+   exactly that file to decide which mode to attach in
+   ([LLP 0245 #claude-attach](../llp/0245-proxy-mode-capture.design.md#claude-attach),
+   realizing [LLP 0232 #proxy-attach-preflight](../llp/0232-claude-attaches-by-proxy.decision.md#proxy-attach-preflight)).
+   With no CA, `hyp attach claude` does not refuse,
+   it quietly attaches in base-URL mode instead, and every step below would
+   then be measuring the wrong feature.
+
+2. Attach Claude Code and watch for the keychain dialog:
+
+   ```sh
+   hyp attach claude
+   ```
+
+   A macOS password/consent dialog should appear during this command on a
+   machine with no prior HypAware trust, naming **HypAware Local CA** as the
+   certificate and offering to add it as a trusted root. Read the dialog
+   text: it must name (or the surrounding attach output must state) all
+   three hosts the CA is constrained to, `api.anthropic.com`,
+   `api.openai.com`, and `chatgpt.com`, not only the one this attach is for
+   ([LLP 0238 #full-provider-constraints](../llp/0238-long-lived-ca-full-provider-constraints.decision.md#full-provider-constraints):
+   one certificate, one dialog, every provider,
+   and the grant must be informed about all of them). Approve it.
+
+   Confirm the settings write:
+
+   ```sh
+   cat ~/.claude/settings.json | jq '.env'
+   ```
+
+   Pass condition: `env` carries exactly `HTTPS_PROXY` and
+   `NODE_EXTRA_CA_CERTS` and nothing else HypAware manages for proxy mode.
+   In particular `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH`, and
+   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` must be **absent** (or, if this
+   machine previously ran base-URL attach, must have been released by the
+   mode migration, not merely left stale)
+   ([LLP 0232 #mode-migration](../llp/0232-claude-attaches-by-proxy.decision.md#mode-migration)).
+   `NODE_EXTRA_CA_CERTS` must point at
+   `~/.hyp/hypaware/tls/ca-cert.pem` (or
+   `$HYP_HOME/hypaware/tls/ca-cert.pem`).
+
+3. Confirm the launchd environment, respecting the terminal caveat: only
+   processes launchd starts **after** the `setenv` see the variable, and a
+   terminal app is single-process, so a window that predates step 2 will not
+   see it even though it is genuinely set
+   ([LLP 0239 #terminals-predating-attach](../llp/0239-node-use-system-ca-via-launchd.decision.md#terminals-predating-attach)).
+   Read attach's own final output line first:
+   it states this caveat explicitly. Then, in the **same terminal window**
+   you ran step 2 in (do not open a new window yet):
+
+   ```sh
+   launchctl getenv NODE_USE_SYSTEM_CA
+   ```
+
+   Pass condition: `1`. This reads launchd's table directly, so it passes
+   regardless of the terminal caveat above; the caveat only matters for
+   whether a *shell's own* `$NODE_USE_SYSTEM_CA` is set, which this command
+   does not test. Now **fully quit and reopen your terminal application**
+   (closing the window is not enough; the app itself must relaunch) and
+   confirm the shell environment a freshly-launched Claude Code process
+   would actually inherit:
+
+   ```sh
+   echo $NODE_USE_SYSTEM_CA
+   ```
+
+   Pass condition: `1`, only after the full quit-and-reopen. A pre-existing
+   window still printing empty here is the expected, documented gap, not a
+   failure; do not file it.
+
+4. Hold a Claude Code session and confirm both halves of the RFC's point:
+   capture works, and Remote Control still does too.
+
+   ```sh
+   hyp query sql "select count(*) from ai_gateway_messages"
+   ```
+
+   Note the count, then **fully quit and reopen Claude Code** (it reads
+   `settings.json` at launch) and hold a short conversation: send at least
+   one message and let it answer.
+
+   ```sh
+   TODAY=$(date -u +%Y-%m-%d)
+   hyp query sql "
+     select entrypoint, client_name, count(*) n, max(message_created_at) last_seen
+     from ai_gateway_messages
+     where date >= '$TODAY'
+     group by 1, 2
+     order by last_seen desc"
+   ```
+
+   Pass condition: a new row whose `client_name` names Claude, `entrypoint`
+   is populated, and `last_seen` is inside the last few minutes, with the
+   total count grown against the value noted above.
+
+   Now, without quitting Claude Code again, pair the second device to
+   Remote Control (or, if already paired from before this procedure, send
+   one instruction from it) and confirm it drives this session. Pass
+   condition: Remote Control connects and controls the session normally,
+   with no "Remote Control is only available when using Claude via
+   api.anthropic.com" refusal. This is the one observation the whole design
+   exists to produce: base-URL attach would have failed this step.
+
+5. Confirm `hyp status` reports the trust state:
+
+   ```sh
+   hyp status
+   hyp status --json | jq '.proxy_trust'
+   ```
+
+   Pass condition: the text output has a `proxy trust:` block naming the CA
+   fingerprint, `login keychain: trusted`, and
+   `launchd env: NODE_USE_SYSTEM_CA=1 set`; the JSON
+   carries the same three facts as `ca_fingerprint`, `ca_trusted: true`, and
+   `launchd_env_set: true`
+   ([LLP 0245#status](../llp/0245-proxy-mode-capture.design.md#status),
+   `ProxyTrustReport`).
+
+6. Detach and confirm the CA and its trust survive, per
+   [LLP 0238 #ca-survives-detach](../llp/0238-long-lived-ca-full-provider-constraints.decision.md#ca-survives-detach):
+
+   ```sh
+   hyp detach claude
+   cat ~/.claude/settings.json | jq '.env'
+   launchctl getenv NODE_USE_SYSTEM_CA
+   hyp status --json | jq '.proxy_trust'
+   security find-certificate -c "HypAware Local CA" ~/Library/Keychains/login.keychain-db
+   ```
+
+   Pass condition: `env` no longer carries `HTTPS_PROXY` or
+   `NODE_EXTRA_CA_CERTS` (restored from the marker's `prev_env`, or removed
+   if none existed); `launchctl getenv` now prints nothing (the launchd
+   environment and its LaunchAgent are removed, since that half is
+   recreatable for free and follows the attach per
+   [LLP 0239#launchctl-setenv](../llp/0239-node-use-system-ca-via-launchd.decision.md#launchctl-setenv));
+   but `hyp status --json`'s `.proxy_trust.ca_trusted` is still `true` and
+   the `security find-certificate` call still finds the CA. Re-attaching
+   after this point should show no keychain dialog, proving the trust grant
+   really did survive:
+
+   ```sh
+   hyp attach claude
+   ```
+
+7. Purge, then uninstall, and confirm every artifact this design created is
+   gone:
+
+   ```sh
+   hyp detach claude --purge
+   security find-certificate -c "HypAware Local CA" ~/Library/Keychains/login.keychain-db
+   ls ~/.hyp/hypaware/tls/ 2>&1 || echo 'tls dir gone'
+   ```
+
+   Pass condition: `security find-certificate` now fails to find the
+   certificate, and the `tls/` directory under the state root is gone or
+   empty of key material.
+
+   ```sh
+   hyp daemon uninstall
+   ls ~/Library/LaunchAgents/ | grep hyperparam || echo 'no hypaware launchd residue'
+   ```
+
+   Pass condition: no HypAware daemon or `node-system-ca` LaunchAgent plist
+   remains under `~/Library/LaunchAgents`, and `hyp status` (if you still
+   have the binary) reports no running daemon.
+
+   Then, if this is your working machine, re-install and re-attach so you do
+   not silently leave it uncaptured:
+
+   ```sh
+   hyp daemon install
+   hyp daemon start
+   ls ~/.hyp/hypaware/tls/ca-cert.pem   # wait for this before attaching
+   hyp attach claude
+   cp ~/.hyp/hypaware-config.json.pre-acceptance ~/.hyp/hypaware-config.json
+   ```
+
+   Do not skip the `ls`. The gateway mints the CA after it boots and
+   `hyp attach claude` does not wait for it, so an attach fired immediately
+   after `start` can find no CA and silently write a base-URL attach,
+   leaving your working machine with Remote Control broken. Restore the
+   config backup last, and `hyp daemon restart` after it if you want the
+   machine back on its original mode.
+
+### If it fails
+
+- `hyp attach claude` reports a base-URL attach, or writes
+  `ANTHROPIC_BASE_URL` instead of the two proxy keys, and no dialog appears:
+  the gateway is not serving proxy mode, so there is no CA and attach fell
+  back to base-URL rather than refusing. Check that step 1's
+  `proxy_mode: true` edit actually landed and that `hyp daemon restart` (or a
+  fresh `hyp daemon start`) ran after it, then re-check
+  `~/.hyp/hypaware/tls/ca-cert.pem`. Do not treat the silent fallback as a
+  pass: it is the whole reason step 1 checks for the CA file. The one hard
+  refusal on this path (`CA_MISSING`) fires only when proxy mode was already
+  selected and the certificate became unreadable between the probe and the
+  write.
+- No dialog in step 2 on a machine that has never run this procedure:
+  confirm no earlier HypAware install already trusted a CA under this same
+  login keychain (`security find-certificate -c "HypAware Local CA" ...`);
+  if one exists, `hyp detach claude --purge` first for a clean observation,
+  then `hyp daemon restart` and confirm `~/.hyp/hypaware/tls/ca-cert.pem` is
+  back before re-attaching. Purge deletes the CA and never touches config,
+  and the running daemon keeps serving the copy it loaded at boot rather than
+  re-minting, so a `hyp attach claude` in that window finds no CA and quietly
+  writes a base-URL attach instead of raising the dialog again. That reads
+  identically to "still no dialog", so check the CA file rather than the
+  symptom. A refused or dismissed dialog is not a failure on its own:
+  attach still completes and states plainly that Remote Control inbound will not work
+  ([LLP 0237 #attach-anyway-on-refusal](../llp/0237-attach-trusts-ca-in-login-keychain.decision.md#attach-anyway-on-refusal));
+  re-running `hyp attach claude` retries the dialog.
+- Step 3's `echo $NODE_USE_SYSTEM_CA` is empty even after a full quit and
+  reopen of the terminal application: confirm you quit the *application*,
+  not just the window (window managers and some terminal emulators keep the
+  process alive across "close window"); confirm `launchctl getenv` (which
+  does not have this caveat) shows `1` first to isolate whether the launchd
+  side or the terminal side is the gap.
+- Step 4 shows new rows but Remote Control still refuses: check
+  `~/.claude/settings.json` for a lingering `ANTHROPIC_BASE_URL` (mode
+  migration should have released it; a stale value here means migration
+  regressed), then check `hyp status --json | jq '.proxy_trust.ca_trusted'`
+  for `false` (an untrusted CA is exactly the state that leaves capture
+  working and Remote Control inbound broken, per
+  [LLP 0245#failure-modes](../llp/0245-proxy-mode-capture.design.md#failure-modes)).
+  If both are clean, and the refusal names the *account* rather than the base
+  URL ("Remote Control environments are not available for your account"), it
+  is the absolute-form regression, not the trust story: the bridge client
+  sends absolute-form requests straight at the proxy port and the gateway
+  must route them by the host the request line names
+  ([LLP 0246](../llp/0246-remote-control-absolute-form-requests.issue.md),
+  [LLP 0247](../llp/0247-absolute-form-third-front-door.decision.md)).
+  Otherwise this may be the LLP 0236 canary: an upstream Bun
+  behaviour change silently breaking Remote Control's trust-store lookup is
+  out of this design's control; file it against claude-code#75050 rather
+  than against this procedure.
+- Step 4 shows no new rows at all: confirm `proxy_mode_error` is absent from
+  the gateway source's details in the daemon status file, which is where the
+  source publishes it (`hyp daemon status --json | jq '.sources[] |
+  select(.plugin == "@hypaware/ai-gateway") | .details'`; note `hyp status
+  --json`'s own `.sources` carries only name, plugin and state, not the
+  details block). A CA-preparation failure at boot degrades the gateway to
+  reverse-proxy-only, so an attached proxy-mode client's traffic never gets
+  terminated. Then confirm you fully quit and reopened Claude Code so it
+  re-read `settings.json`.
+- Step 6 finds the CA no longer trusted, or the `tls/` directory gone, right
+  after a plain `hyp detach claude` (no `--purge`): this is the LLP 0238
+  regression to watch for specifically, since keeping the CA and trust
+  across detach is the entire point of that decision; do not treat "detach
+  cleaned up everything" as a pass here the way it would for the settings
+  keys.
+- Step 7 still finds the certificate after `hyp detach claude --purge`:
+  confirm `purgeProxyTrustResidue` actually ran (its output names the
+  keychain and CA removal explicitly); a permission prompt cancelled
+  mid-purge can leave the keychain entry behind while still removing the CA
+  files on disk, which is worth filing as its own gap rather than assuming
+  the whole purge silently no-op'd.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

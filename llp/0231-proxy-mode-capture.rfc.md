@@ -7,6 +7,7 @@
 **Date:** 2026-08-14
 **Related:** LLP 0016, LLP 0044, LLP 0045, LLP 0049, LLP 0066, LLP 0086, LLP 0114, LLP 0116, LLP 0176, LLP 0192, LLP 0206
 **Spawns:** LLP 0232, LLP 0233, LLP 0234, LLP 0235
+**Designed-by:** LLP 0245, proxy-mode capture technical design
 
 > Claude Code disables **Remote Control** whenever `ANTHROPIC_BASE_URL` points
 > anywhere other than `api.anthropic.com`. Attach repoints exactly that key, so
