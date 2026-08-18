@@ -7,6 +7,8 @@
 **Date:** 2026-08-17
 **Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0262 (the RFC this
 decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257, LLP 0258
+**Extended-by:** LLP 0263 (#byte-cap is also enforced by the client hook, so
+the bound holds while the daemon is down)
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB
