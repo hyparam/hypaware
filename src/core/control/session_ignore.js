@@ -2,46 +2,70 @@
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
- * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**
  * The single V1 control route. The reserved `/_hypaware/` prefix is a
- * LOCAL control surface (see `isControlPath` in proxy.js); this is the one
+ * LOCAL control surface (see `isControlPath` below); this is the one
  * endpoint served under it today.
+ *
+ * The route is hosted by every recorder that keeps an in-memory
+ * ignored-session set: the gateway proxy and the claude telemetry
+ * listener. One shape (verbs, body, reply) means one client, one skill,
+ * and one set of tests, which is why the handler lives in core rather
+ * than in either plugin.
+ * @ref LLP 0256#control-route-on-listener [implements]: the second host serves
+ * the identical route, so the handler is shared machinery, not a copy
  */
-const IGNORE_SESSION_PATH = '/_hypaware/ignore/session'
+export const SESSION_IGNORE_CONTROL_PATH = '/_hypaware/ignore/session'
 
 /**
  * Max request-body size for a control request. The skill sends a tiny
  * `{"session_id":"..."}` object; anything larger is rejected with 413
- * rather than buffered, so a stray large body cannot grow gateway memory.
+ * rather than buffered, so a stray large body cannot grow the hosting
+ * process's memory.
  */
 const MAX_BODY_BYTES = 64 * 1024
 
 /**
- * Build the `onControlRequest` callback the proxy invokes for any request
- * under the reserved `/_hypaware/` prefix (proxy.js short-circuits these
- * BEFORE upstream matching, so a control request is never proxied and never
- * starts an exchange).
+ * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
+ * segment-boundary discipline as the gateway's `pathMatchesPrefix`:
+ * `/_hypaware` itself and any `/_hypaware/...` sub-path match, but
+ * `/_hypawarefoo` does not, so a look-alike upstream path is never mistaken
+ * for a control request.
+ *
+ * @ref LLP 0066#control-path [implements]
+ * @param {string} pathname
+ */
+export function isControlPath(pathname) {
+  return pathname === '/_hypaware' || pathname.startsWith('/_hypaware/')
+}
+
+/**
+ * Build the control-request callback a hosting server invokes for any
+ * request under the reserved `/_hypaware/` prefix (the gateway proxy and
+ * the shared OTLP server both short-circuit these BEFORE their own
+ * routing, so a control request is never proxied, never starts an
+ * exchange, and never reads as an OTLP export).
  *
  * One route (`GET` / `POST` / `DELETE /_hypaware/ignore/session`) over
  * the in-memory `ignoredSessions` set. The mutating verbs are idempotent by
  * `Set` semantics (re-POSTing an ignored id or DELETEing an unknown id is a
  * 200 no-op); `GET` mutates nothing and answers the membership question for
  * one id. All three return `{ session_id, ignored, total }`; the skill reads
- * `.total`. The `session_id` is an opaque token: the gateway never
+ * `.total`. The `session_id` is an opaque token: the host never
  * interprets it, keeping the LLP 0050 provider-agnostic boundary exact.
  *
  * **`ignored: true` is set membership, and is not a verified drop.** The
- * gateway holds tokens, not traffic: the drop happens in the client adapter,
- * keyed on the `session_id` it stamps on the row (LLP 0066 R5), so this route
- * cannot tell a live session id from a Codex thread id or a typo and answers
- * `ignored: true` for all three. Making it able to would mean teaching a
- * deliberately provider-agnostic route about client grain, which is the
- * boundary above. So the contract is the narrow one and the CALLER owns
- * resolving the right key before it posts; responses that read as more than
- * that are what LLP 0066 R14 forbids.
+ * route holds tokens, not traffic: the drop happens where the recorder
+ * resolves a `session_id` for the rows it is about to write (LLP 0066 R5),
+ * so this route cannot tell a live session id from a Codex thread id or a
+ * typo and answers `ignored: true` for all three. Making it able to would
+ * mean teaching a deliberately provider-agnostic route about client grain,
+ * which is the boundary above. So the contract is the narrow one and the
+ * CALLER owns resolving the right key before it posts; responses that read
+ * as more than that are what LLP 0066 R14 forbids.
  * @ref LLP 0066#receipt-is-membership [constrained-by]: the route confirms the
  * write only, so callers must resolve the key rather than expect an echo to
  * prove the drop.
@@ -54,12 +78,17 @@ const MAX_BODY_BYTES = 64 * 1024
  * @param {{
  *   ignoredSessions: Set<string>,
  *   log?: PluginLogger,
- * }} opts
+ *   logEvent?: string,
+ *   logFields?: Record<string, unknown>,
+ * }} opts `logEvent` / `logFields` let each host stamp its own identity on
+ * the mutation log; the defaults keep the gateway's original signal shape.
  * @returns {(req: IncomingMessage, res: ServerResponse, url: URL) => void}
  */
 export function createControlHandler(opts) {
   const ignoredSessions = opts.ignoredSessions
   const log = opts.log
+  const logEvent = opts.logEvent ?? 'aigw.control.ignore_session'
+  const logFields = opts.logFields ?? { component: 'ai-gateway' }
 
   /**
    * @param {IncomingMessage} req
@@ -67,7 +96,7 @@ export function createControlHandler(opts) {
    * @param {URL} url
    */
   return function onControlRequest(req, res, url) {
-    if (url.pathname !== IGNORE_SESSION_PATH) {
+    if (url.pathname !== SESSION_IGNORE_CONTROL_PATH) {
       req.resume()
       sendJson(res, 404, { error: 'unknown control path', path: url.pathname })
       return
@@ -78,7 +107,7 @@ export function createControlHandler(opts) {
     // @ref LLP 0066#readable [implements]: the set is a privacy control, so it
     // must be readable, not only writable. `GET` answers "is this session
     // being dropped right now?" without mutating anything, which is what makes
-    // the two fail-open transitions - a gateway restart (LLP 0066#ephemeral)
+    // the two fail-open transitions - a host restart (LLP 0066#ephemeral)
     // and a session id that changed under the client - detectable instead of
     // silent. The id rides the query string rather than a body because a
     // read has no body; `URLSearchParams` round-trips the token byte-exactly,
@@ -129,8 +158,8 @@ export function createControlHandler(opts) {
         ignored = false
       }
       const total = ignoredSessions.size
-      log?.info?.('aigw.control.ignore_session', {
-        component: 'ai-gateway',
+      log?.info?.(logEvent, {
+        ...logFields,
         operation: 'ignore_session',
         method,
         session_id: sessionId,
@@ -144,20 +173,21 @@ export function createControlHandler(opts) {
 
 /**
  * Pull the opaque `session_id` token out of a parsed control-request body.
- * The gateway never interprets the value; it only requires a non-empty
+ * The host never interprets the value; it only requires a non-empty
  * string (missing / empty / non-string → the caller returns 400).
  *
  * The returned value is the RAW string verbatim, NOT trimmed. Trimming is
  * used only to validate non-emptiness; the token itself must stay
- * byte-identical to what the caller posted, because the adapters key the
+ * byte-identical to what the caller posted, because the recorders key the
  * drop on the RAW resolved session id (Claude's `resolveClaudeSessionId`,
- * Codex's metadata/header readers) and none of them trim. Trimming here
- * would desync the stored token from the adapter's lookup key: a
- * whitespace-padded `session_id` would be stored trimmed but looked up raw,
- * so `ignoredSessions.has()` would miss and the exchange would be RECORDED
- * despite the opt-out, the privacy-relevant failure direction.
+ * Codex's metadata/header readers, the telemetry events' `session.id`) and
+ * none of them trim. Trimming here would desync the stored token from the
+ * recorder's lookup key: a whitespace-padded `session_id` would be stored
+ * trimmed but looked up raw, so `ignoredSessions.has()` would miss and the
+ * exchange would be RECORDED despite the opt-out, the privacy-relevant
+ * failure direction.
  * @ref LLP 0066#requirements: R5: the match key MUST be the session_id the
- * adapter resolves and stamps, verbatim.
+ * recorder resolves and stamps, verbatim.
  *
  * @param {unknown} body
  * @returns {string | undefined}

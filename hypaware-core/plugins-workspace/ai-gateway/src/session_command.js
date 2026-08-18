@@ -140,7 +140,7 @@ const MAX_ROLLOUT_SCAN = 5000
  * Hard cap on a control response body. The route's own answers are a few dozen
  * bytes; anything larger is not the gateway, and buffering it unbounded lets
  * whatever owns the port balloon the CLI's memory. Mirrors the server-side
- * `MAX_BODY_BYTES` in control.js.
+ * `MAX_BODY_BYTES` in src/core/control/session_ignore.js.
  */
 const MAX_RESPONSE_BYTES = 64 * 1024
 
