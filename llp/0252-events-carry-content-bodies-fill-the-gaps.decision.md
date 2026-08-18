@@ -5,8 +5,8 @@
 **Systems:** Sources, Plugins, Privacy
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0245 (the RFC this
-decision realizes; Draft until 0245 is accepted), LLP 0253, LLP 0257, LLP 0258
+**Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0262 (the RFC this
+decision realizes; Draft until 0262 is accepted), LLP 0253, LLP 0257, LLP 0258
 
 > The OTEL event stream is the primary producer: it arrives pre-deduplicated
 > and supplies identity, content, usage, and behavioral data. Raw body files
@@ -18,7 +18,7 @@ decision realizes; Draft until 0245 is accepted), LLP 0253, LLP 0257, LLP 0258
 
 Claude Code exports two things at once: an event stream over OTLP, and raw
 request and response bodies written to a directory. Either alone is incomplete
-(LLP 0245 records the measurements). This decision settles how the two are
+(LLP 0262 records the measurements). This decision settles how the two are
 combined, and what happens to a body file afterwards.
 
 ## Decision

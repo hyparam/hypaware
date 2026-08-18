@@ -254,7 +254,7 @@ export async function activate(ctx) {
             // trust is OFFERED, never taken: it carries the once-per-machine
             // password-dialog grant, other clients may still proxy through the
             // gateway, and ending the grant is `hyp detach --purge`'s job.
-            // @ref LLP 0245#migration [implements]: release the proxy keys, unwind the launchd env, offer detach --purge, write the OTEL block
+            // @ref LLP 0262#migration [implements]: release the proxy keys, unwind the launchd env, offer detach --purge, write the OTEL block
             const migratedFrom = result.changed && result.priorMode === MODE_PROXY
               ? MODE_PROXY
               : undefined
@@ -626,7 +626,7 @@ function safeEndpointPort(endpoint) {
  * carry the user's once-per-machine password-dialog grant, and only `hyp
  * detach --purge` or `hyp daemon uninstall` may end it. The migration OFFERS
  * that step in its output; it never runs it.
- * @ref LLP 0245#migration [implements]: the launchd env is unwound; the CA trust is offered, never forced
+ * @ref LLP 0262#migration [implements]: the launchd env is unwound; the CA trust is offered, never forced
  * @ref LLP 0239#launchctl-setenv [implements]: the migration is one more path that reverses a proxy attach, so it releases the env too
  *
  * @param {{
@@ -753,7 +753,7 @@ function writeAttachOutput(attachCtx, fields) {
   // released, what was unwound, and the one residue that is theirs to end
   // (the CA trust, offered as `hyp detach claude --purge`, never run for
   // them).
-  // @ref LLP 0245#migration [implements]: the offer is a printed step, not an action
+  // @ref LLP 0262#migration [implements]: the offer is a printed step, not an action
   for (const note of fields.migrationNotes ?? []) {
     attachCtx.stdout.write(`  ${note}\n`)
   }

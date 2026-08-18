@@ -264,7 +264,7 @@ export async function attach(opts) {
   // already replaced it, so the prior mode is reported on the result. Only the
   // three known modes are reported: a legacy marker without one predates modes
   // entirely and has no residue to unwind.
-  // @ref LLP 0245#migration [implements]: the prior mode is what tells the adapter a proxy attach is being migrated
+  // @ref LLP 0262#migration [implements]: the prior mode is what tells the adapter a proxy attach is being migrated
   /** @type {'proxy' | 'base_url' | 'otel' | undefined} */
   let priorMode
   if (

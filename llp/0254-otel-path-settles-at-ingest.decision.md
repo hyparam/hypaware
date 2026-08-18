@@ -5,8 +5,8 @@
 **Systems:** Gateway, Cache, Plugins, Privacy
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0085, LLP 0103, LLP 0245 (the
-RFC this decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257
+**Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0085, LLP 0103, LLP 0262 (the
+RFC this decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257
 
 > Events carry `message.uuid`, so a row's identity is known when it is written
 > and there is no provisional row to settle later. The usage-policy check runs
@@ -42,7 +42,7 @@ window LLP 0085 patches cannot reappear here: there is no window.
 
 **The hook remains the source of `cwd`, `git_branch`, `git_remote`,
 `head_sha`, and `repo_root`.** Events do not carry `workspace.host_paths` on a
-plain local session (LLP 0245 spike finding), and deriving repo identity from
+plain local session (LLP 0262 spike finding), and deriving repo identity from
 the body's system text is parseable but fragile. Removing the hook would cost
 both the repo columns and the inline policy check that depends on them.
 

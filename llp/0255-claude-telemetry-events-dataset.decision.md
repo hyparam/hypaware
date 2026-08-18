@@ -5,8 +5,8 @@
 **Systems:** Plugins, Query, Sources
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0245 (the
-RFC this decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257
+**Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0262 (the
+RFC this decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257
 
 > The events that describe behavior rather than conversation (tool accept and
 > reject decisions, permission mode changes, hook executions, MCP server
@@ -18,7 +18,7 @@ RFC this decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257
 
 The OTEL stream carries two different kinds of thing. One is the conversation,
 which already has a home in `ai_gateway_messages`. The other is behavior the
-wire never showed, and it has no home at all. LLP 0245 resolved that it needs
+wire never showed, and it has no home at all. LLP 0262 resolved that it needs
 one; this decision settles which one.
 
 ## Decision

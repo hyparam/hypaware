@@ -8,7 +8,7 @@
 **Related:** LLP 0130, LLP 0135, LLP 0213, LLP 0232, LLP 0242
 **Extends:** LLP 0233 (#proxy-mode-is-explicit: the key is still the only
 switch and is still explicit in the file; what changes is who writes it)
-**Extended-by:** LLP 0245 (on acceptance of 0245 the Claude row stops
+**Extended-by:** LLP 0262 (on acceptance of 0262 the Claude row stops
 declaring `compose.gateway_proxy_mode`, because the client it composes for
 is no longer captured by proxy; the composition rule itself is unchanged)
 

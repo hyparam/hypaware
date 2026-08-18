@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0044, LLP 0045, LLP 0163, LLP 0232, LLP 0237, LLP 0239,
-LLP 0245 (the RFC this decision realizes; Draft until 0245 is accepted)
+LLP 0262 (the RFC this decision realizes; Draft until 0262 is accepted)
 
 > `hyp attach claude` gains a third mode, `otel`, that merges a fixed set of
 > telemetry keys into the `env` block of `~/.claude/settings.json` and writes
@@ -16,7 +16,7 @@ LLP 0245 (the RFC this decision realizes; Draft until 0245 is accepted)
 
 ## Context
 
-See LLP 0245 for why the `claude` client leaves proxy attach at all. This
+See LLP 0262 for why the `claude` client leaves proxy attach at all. This
 decision settles only the injection mechanism: which surface carries the
 telemetry configuration, and what attach is allowed to touch to put it there.
 
@@ -82,7 +82,7 @@ exists to prevent.
 
 - Attaching Claude Code raises no macOS security dialog and needs no `sudo`.
 - A machine migrating from proxy mode still has a trusted CA in its login
-  keychain until `detach --purge` runs; migration offers that step (LLP 0245),
+  keychain until `detach --purge` runs; migration offers that step (LLP 0262),
   it does not perform it silently.
 - `hyp status` reports the third mode, so a machine can be seen to be on
   `otel`, `proxy`, or `base_url` attach.

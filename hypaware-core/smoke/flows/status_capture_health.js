@@ -15,7 +15,7 @@ import { resolveDependencies } from '../../../src/core/dep_graph.js'
 import { writeStatusFile } from '../../../src/core/daemon/status.js'
 
 /**
- * Capture-health smoke (LLP 0257 S17, the RFC 0245 open-question-1 duty),
+ * Capture-health smoke (LLP 0257 S17, the RFC 0262 open-question-1 duty),
  * modeled on `status_diagnostics`. Drives `hyp status` against one
  * otel-attached claude install in three states and validates that:
  *

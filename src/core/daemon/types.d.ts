@@ -379,7 +379,7 @@ export interface HypAwareStatusReport {
   recentEntrypoints: RecentEntrypoint[]
   /**
    * Capture health for every otel-attached client (LLP 0257#status-and-health,
-   * the RFC 0245 open-question-1 duty): last event seen on the telemetry path
+   * the RFC 0262 open-question-1 duty): last event seen on the telemetry path
    * vs the client's own last activity. Empty when no configured client is
    * otel-attached, so the pre-otel surface is unchanged. Like
    * `recentEntrypoints` this reads status.json without a liveness gate: a

@@ -1,11 +1,11 @@
-# LLP 0245: OTEL telemetry replaces proxy attach for Claude Code
+# LLP 0262: OTEL telemetry replaces proxy attach for Claude Code
 
 **Type:** RFC
 **Status:** Draft
 **Systems:** Gateway, Sources, Config, Plugins, Privacy, Observability
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0231, LLP 0242, LLP 0243, LLP 0244, LLP 0027, LLP 0030, LLP 0032, LLP 0049, LLP 0085, LLP 0103, LLP 0012, LLP 0015
+**Related:** LLP 0231, LLP 0242, LLP 0243, LLP 0244, LLP 0027, LLP 0030, LLP 0032, LLP 0049, LLP 0085, LLP 0103, LLP 0012, LLP 0015; formerly numbered 0245, ceded to PR #815 (2026-08-17)
 **Tracker:** hyparam/hypaware#798 (implementation spec)
 **Spawns (on acceptance):** LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256,
 LLP 0258 (decisions), LLP 0257 (spec). All Draft until this RFC is accepted.

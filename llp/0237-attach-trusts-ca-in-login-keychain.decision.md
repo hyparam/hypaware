@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-15
 **Related:** LLP 0044, LLP 0232, LLP 0235, LLP 0236, LLP 0238, LLP 0239
-**Extended-by:** LLP 0245 (on acceptance of 0245, attaching the `claude`
+**Extended-by:** LLP 0262 (on acceptance of 0262, attaching the `claude`
 client asks for no keychain trust at all; this decision governs the clients
 still proxied, and `detach --purge` stays the removal path for a grant a
 migrated machine already made)

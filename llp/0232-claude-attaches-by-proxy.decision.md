@@ -10,7 +10,7 @@
 installs user-domain keychain trust and the launchd `NODE_USE_SYSTEM_CA`
 environment, because the two-key attach alone breaks Remote Control inbound;
 see LLP 0236)
-**Superseded-by (in part):** LLP 0245, LLP 0258 (on acceptance of 0245,
+**Superseded-by (in part):** LLP 0262, LLP 0258 (on acceptance of 0262,
 attaching the `claude` client writes a telemetry `env` block instead of
 `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`; #mode-migration and the `prev_env`
 undo record are what the third mode reuses unchanged)

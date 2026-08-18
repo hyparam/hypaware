@@ -519,7 +519,7 @@ reads, the raw body files still carry the fields the projector fills its
 column gaps from, and the whole path lands `ai_gateway_messages` and
 `claude_telemetry_events` rows with nothing null that should not be.
 
-This is the release-gate half of LLP 0245's flag-stability duty (open
+This is the release-gate half of LLP 0262's flag-stability duty (open
 question 5). The other half runs in production: the `hyp status` capture-health
 line. Neither can be replaced by a hermetic smoke, because a smoke POSTs a
 fixture we wrote and therefore agrees with itself forever. Only a real Claude
@@ -548,7 +548,7 @@ central forwarding, or anything on a machine other than the one you ran it on.
 - Willingness to have two short real conversations recorded on this machine.
 
 **Related:**
-[LLP 0245](../llp/0245-otel-attach-replaces-proxy.rfc.md) (the design record and
+[LLP 0262](../llp/0262-otel-attach-replaces-proxy.rfc.md) (the design record and
 open question 5),
 [LLP 0257](../llp/0257-claude-telemetry-listener-source.spec.md) (S21, the
 two-layer drift detection this discharges),
@@ -786,7 +786,7 @@ two-layer drift detection this discharges),
   started **after** the attach (the settings `env` applies at launch), then
   check `jq '.env.OTEL_LOG_RAW_API_BODIES' "$SETTINGS"` names the
   spool with the `file:` prefix. If both hold, `OTEL_LOG_RAW_API_BODIES` is no
-  longer honored upstream. That is the flag-stability failure LLP 0245 open
+  longer honored upstream. That is the flag-stability failure LLP 0262 open
   question 5 predicts. File it and hold the release: events alone lose
   `system_text`, the `tools` list, and untruncated tool args.
 - Step 4 finds a body whose keys have changed shape: file it with the observed

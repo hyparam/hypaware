@@ -6,8 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
-LLP 0049, LLP 0066, LLP 0103, LLP 0245 (the RFC this spec realizes; Draft until
-0245 is accepted), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
+LLP 0049, LLP 0066, LLP 0103, LLP 0262 (the RFC this spec realizes; Draft until 0262 is accepted), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
 **Tracker:** hyparam/hypaware#798
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json
@@ -15,7 +14,7 @@ LLP 0049, LLP 0066, LLP 0103, LLP 0245 (the RFC this spec realizes; Draft until
 > `ai_gateway_messages` rows and `claude_telemetry_events` rows. This is the
 > requirements document the listener implementation and its tests answer to.
 > The decisions it composes are LLP 0252 through LLP 0256 plus LLP 0258; the
-> rationale lives there and in LLP 0245, not here.
+> rationale lives there and in LLP 0262, not here.
 
 ## Summary
 
@@ -93,7 +92,7 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
 
 - **S18** Delivery is best effort. A down daemon loses events; content is
   recovered by transcript backfill, and behavioral-event loss in that window
-  is accepted (LLP 0245 open question 1).
+  is accepted (LLP 0262 open question 1).
 - **S19** A body that cannot be parsed or projected is deleted and counted,
   not retried forever (LLP 0252 #project-then-delete).
 - **S20** An unrecognized event name is recorded in

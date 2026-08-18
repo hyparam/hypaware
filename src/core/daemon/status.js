@@ -1078,7 +1078,7 @@ export async function collectHypAwareStatus(opts = {}) {
       })
     }
 
-    // ----- capture health (LLP 0245 open question 1's duty) -----
+    // ----- capture health (LLP 0262 open question 1's duty) -----
     // On the otel path capture is best-effort: a stale endpoint, a down
     // daemon, or upstream event drift all fail into the same silence, with
     // every other line here healthy. This holds the client's own file trail
@@ -1307,7 +1307,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // §failure-is-surfaced-not-fatal); note it is not even a diagnostic, so
   // it cannot reach this computation. A `capture_gap` that escalated to
   // `error` severity degrades through the severity rule below by design
-  // (LLP 0245 open question 1): silent session loss is an outage, not an
+  // (LLP 0262 open question 1): silent session loss is an outage, not an
   // unfinished setup.
   const degradingKinds = new Set(['config_missing', 'config_unreadable'])
   const overall =
@@ -1825,7 +1825,7 @@ export const CAPTURE_GAP_WARNING_MS = 15 * 60_000
  * Past this the gap severity escalates to `error`, which degrades `overall`:
  * two hours of transcript activity with no telemetry is a whole working
  * session lost, not a timing artifact. The escalation is the "visible
- * instead of discovered at report time" duty of LLP 0245 open question 1 -
+ * instead of discovered at report time" duty of LLP 0262 open question 1 -
  * best-effort delivery was accepted on the condition that a silent gap
  * cannot stay silent.
  */

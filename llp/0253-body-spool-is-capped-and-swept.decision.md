@@ -5,8 +5,8 @@
 **Systems:** Privacy, Config, Sources, Daemon
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0245 (the RFC this
-decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257, LLP 0258
+**Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0262 (the RFC this
+decision realizes; Draft until 0262 is accepted), LLP 0252, LLP 0257, LLP 0258
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB
@@ -19,7 +19,7 @@ decision realizes; Draft until 0245 is accepted), LLP 0252, LLP 0257, LLP 0258
 Claude Code writes bodies to a directory we name at attach (LLP 0258
 #env-keys) and it keeps writing whether or not the daemon is reading. Measured
 volume is about 145 KB per request, so a heavy day passes gigabytes through the
-directory. LLP 0245 settles that transient spool presence is acceptable, given
+directory. LLP 0262 settles that transient spool presence is acceptable, given
 the same content already sits in `~/.claude/projects`, on three conditions.
 This decision is those conditions.
 
@@ -75,4 +75,4 @@ sweeps the directory that was actually used.
 - The spool is a privacy surface with three named duties, so a review can check
   it against this list rather than against intent.
 - Nothing in the spool outlives the user's decision to remove it, which is what
-  lets LLP 0245 accept transient presence at all.
+  lets LLP 0262 accept transient presence at all.

@@ -9,7 +9,7 @@
 **Superseded-by (in part):** LLP 0237 (#client-scoped-trust), LLP 0238
 (#detach-removes-the-ca, #ca-name-constraints mint-from-routing-table,
 #ca-lifecycle one-year validity)
-**Extended-by:** LLP 0245 (on acceptance of 0245 the `claude` client's
+**Extended-by:** LLP 0262 (on acceptance of 0262 the `claude` client's
 attach no longer depends on the CA; the CA lifecycle stands for any client
 still routed through the proxy)
 
