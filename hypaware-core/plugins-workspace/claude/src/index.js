@@ -275,9 +275,14 @@ export async function activate(ctx) {
               if (launchdEnvRemoved === true) {
                 migrationNotes.push('Removed NODE_USE_SYSTEM_CA from the launchd environment.')
               }
+              // "any trust it was granted" rather than "the trust you granted":
+              // a proxy attach whose keychain dialog was refused still ran and
+              // still left the CA, so claiming a grant we never verified would
+              // be the one false line in the migration's story.
               migrationNotes.push(
                 (process.platform === 'darwin'
-                  ? 'The HypAware Local CA is still trusted in your login keychain. '
+                  ? 'The HypAware Local CA, and any login-keychain trust it was granted, ' +
+                    'is still in place. '
                   : 'The HypAware local CA is still on disk. ') +
                 "Run 'hyp detach claude --purge' to remove it (then 'hyp attach claude' " +
                 'to keep capturing); it is never removed without you asking.'
