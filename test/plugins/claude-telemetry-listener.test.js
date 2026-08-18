@@ -7,7 +7,7 @@
  * yield.
  *
  * The event fixtures below are trimmed from a real capture (Claude Code
- * 2.1.233, the LLP 0245 spike): same attribute names, same value
+ * 2.1.233, the LLP 0262 spike): same attribute names, same value
  * wrappers, same string-typed numerics.
  *
  * @ref LLP 0257#testing [tests]: the deterministic parts (projection identity,

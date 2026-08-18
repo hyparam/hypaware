@@ -20,7 +20,7 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 
-// The capture-health line (LLP 0257 S17, the RFC 0245 open-question-1 duty):
+// The capture-health line (LLP 0257 S17, the RFC 0262 open-question-1 duty):
 // on the otel path a broken exporter, a stale endpoint, and a down daemon all
 // fail into the same silence, so `hyp status` holds the client's own
 // transcript trail against the last event the listener recorded and gets

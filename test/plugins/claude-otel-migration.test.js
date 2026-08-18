@@ -2,7 +2,7 @@
 
 /**
  * The proxy-to-otel migration `hyp attach claude` performs on a machine that
- * is still proxy-attached (LLP 0245 #migration): the settings write flips the
+ * is still proxy-attached (LLP 0262 #migration): the settings write flips the
  * marker and releases the proxy keys through the ordinary mode-switch rule,
  * the launchd environment is unwound, and the CA trust is OFFERED as
  * `hyp detach claude --purge` but never taken. These tests drive the real
@@ -10,7 +10,7 @@
  * the writer-level key release itself is pinned by
  * claude-settings-otel-attach.test.js.
  *
- * @ref LLP 0245#migration [tests]: one command migrates a proxy-attached machine, and the CA purge is offered, never forced
+ * @ref LLP 0262#migration [tests]: one command migrates a proxy-attached machine, and the CA purge is offered, never forced
  */
 
 import assert from 'node:assert/strict'
@@ -281,7 +281,7 @@ test('the migration facts ride the --json payload', async (t) => {
 // The migration is only finished when the surface a human checks agrees. The
 // probe above is one half of `hyp status`; this drives both halves end to end
 // over the same machine, before and after the one command.
-// @ref LLP 0245#migration [tests]: hyp status reflects the new attach mode after the migration
+// @ref LLP 0262#migration [tests]: hyp status reflects the new attach mode after the migration
 test('hyp status reads the migrated machine as otel-attached', async (t) => {
   const r = await rig()
   t.after(() => r.cleanup())

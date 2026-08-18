@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * The migration overlap window (LLP 0245 #migration): sessions started
+ * The migration overlap window (LLP 0262 #migration): sessions started
  * before the mode flip keep proxying until they restart while new events
  * arrive over OTEL, so for a while BOTH producers capture the same session.
  * That is harmless only if the two producers agree on row identity, and
@@ -18,7 +18,7 @@
  * (`dedupeByPartId` in dataset.js), so identical part identity is what makes
  * either arrival order collapse.
  *
- * @ref LLP 0245#migration [tests]: a session captured by both producers dedupes to one row set
+ * @ref LLP 0262#migration [tests]: a session captured by both producers dedupes to one row set
  * @ref LLP 0252#projection-unchanged [tests]: producer overlap collapses on part_id before the write
  */
 

@@ -12,12 +12,12 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /**
  * The attach mode on the text surface. `--json` has carried
- * `client_attach[].mode` since the marker grew one; a machine the LLP 0245
+ * `client_attach[].mode` since the marker grew one; a machine the LLP 0262
  * migration just moved from `proxy` to `otel` must be readable off the plain
  * `hyp status` too, or the migration's outcome is invisible on the surface a
  * human actually checks. Markers that predate modes keep the bare word.
  *
- * @ref LLP 0245#migration [tests]: hyp status reflects the new attach mode after the migration
+ * @ref LLP 0262#migration [tests]: hyp status reflects the new attach mode after the migration
  */
 
 async function makeHome() {
