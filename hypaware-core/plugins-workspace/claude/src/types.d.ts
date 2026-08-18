@@ -45,6 +45,46 @@ export interface ClaudeTelemetrySessionFacts {
   agentName?: string
   model?: string
   startedAt?: string
+  /**
+   * Exchange-level fields only a spooled request body carries (events never
+   * do): the system prompt and the tool declarations, stamped on every row of
+   * the session's projection.
+   */
+  systemText?: string
+  tools?: unknown
+}
+
+/**
+ * Mutable counters one running Claude telemetry listener accumulates,
+ * surfaced through `status()` details.
+ */
+export interface ClaudeTelemetryListenerState {
+  rowsWritten: number
+  rowsSkipped: number
+  eventsReceived: number
+  lastEventAt: string | undefined
+  lastError: string | undefined
+  listenFallbackFrom: number | undefined
+  /** Spool size as of the last sweep, decremented as bodies are consumed. */
+  spoolBytes: number
+  bodiesProjected: number
+  bodiesDeleted: number
+  bodiesEvicted: number
+  bodiesMissing: number
+  bodiesUnparseable: number
+}
+
+/**
+ * One raw body file Claude Code dropped into the spool, located through an
+ * `api_request_body` / `api_response_body` event's `body_ref` and parsed. A
+ * `request` is a full Anthropic Messages request (system, tools, message
+ * history); a `response` is the assistant message the API returned.
+ */
+export interface SpooledClaudeBody {
+  kind: 'request' | 'response'
+  /** Resolved absolute path, proven to live inside the spool directory. */
+  file: string
+  body: Record<string, unknown>
 }
 
 export interface TranscriptEntry {

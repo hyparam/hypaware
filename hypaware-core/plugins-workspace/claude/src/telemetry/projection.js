@@ -1,8 +1,10 @@
 // @ts-check
 
+import { BODY_EVENT_NAMES, requestBodyFacts, spooledBodyGapMessages } from './bodies.js'
+
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage } from '../../../../../hypaware-plugin-kernel-types.js'
- * @import { ClaudeTelemetryEvent, ClaudeTelemetrySessionFacts, SessionContextRecord } from '../types.js'
+ * @import { ClaudeTelemetryEvent, ClaudeTelemetrySessionFacts, SessionContextRecord, SpooledClaudeBody } from '../types.js'
  */
 
 /** Every row this path writes describes Claude Code talking to Anthropic. */
@@ -33,6 +35,17 @@ const CONVERSATION_SOURCE = 'claude_code'
 export const CONTENT_EVENT_NAMES = Object.freeze(['user_prompt', 'assistant_response'])
 
 /**
+ * How many sessions' body-derived exchange facts (system prompt, tools)
+ * to carry between batches. A request body arrives in an early batch
+ * and the assistant response often in a later one; without carry-over
+ * only the rows that share a POST with the body would get the
+ * `system_text` and `tools` columns the proxy path stamps on every row.
+ * Bounded because system prompts are large and sessions are minted
+ * freely.
+ */
+export const SESSION_BODY_FACTS_LIMIT = 64
+
+/**
  * Split a batch of events into one projected exchange per session.
  *
  * The event stream is the spine: `user_prompt` and `assistant_response`
@@ -47,6 +60,13 @@ export const CONTENT_EVENT_NAMES = Object.freeze(['user_prompt', 'assistant_resp
  * exporter flushes on a timer, so a turn's `api_request` and its
  * `assistant_response` can arrive in different POSTs.
  *
+ * Body events (`api_request_body`, `api_response_body`) join through
+ * `opts.spooledBodies`, keyed by the event's `body_ref`: the caller has
+ * already read the files (an async step this pure function cannot do).
+ * Their gap messages are spliced in at the body event's stream position,
+ * so within a session the projected order follows the body's canonical
+ * message ordering, which is one of the things events do not carry.
+ *
  * @ref LLP 0252#events-first [implements]: each content event is projected
  *   once, from the event that carries it, with `message.uuid` as the identity
  * @ref LLP 0254#identity-at-ingest [implements]: native identity, so no
@@ -56,12 +76,25 @@ export const CONTENT_EVENT_NAMES = Object.freeze(['user_prompt', 'assistant_resp
  *   clientName: string,
  *   usageByRequestId: Map<string, Record<string, unknown>>,
  *   sessionContext?: (sessionId: string) => SessionContextRecord | undefined,
+ *   spooledBodies?: Map<string, SpooledClaudeBody>,
+ *   sessionBodyFacts?: Map<string, { systemText?: string, tools?: unknown }>,
  * }} opts
  * @returns {AiGatewayProjectedExchange[]}
  */
 export function projectClaudeTelemetryEvents(events, opts) {
   /** @type {Map<string, { facts: ClaudeTelemetrySessionFacts, messages: AiGatewayProjectedMessage[] }>} */
   const bySession = new Map()
+
+  /** @param {string} sessionId @param {ClaudeTelemetryEvent} event */
+  const sessionEntry = (sessionId, event) => {
+    let entry = bySession.get(sessionId)
+    if (!entry) {
+      entry = { facts: sessionFacts(event), messages: [] }
+      bySession.set(sessionId, entry)
+    }
+    mergeSessionFacts(entry.facts, event)
+    return entry
+  }
 
   for (const event of events) {
     const sessionId = stringAttr(event, 'session.id')
@@ -72,24 +105,39 @@ export function projectClaudeTelemetryEvents(events, opts) {
       if (requestId) rememberUsage(opts.usageByRequestId, requestId, usageFromApiRequest(event))
       continue
     }
+
+    if (BODY_EVENT_NAMES.includes(event.name)) {
+      const ref = stringAttr(event, 'body_ref')
+      const spooled = ref ? opts.spooledBodies?.get(ref) : undefined
+      if (!spooled) continue
+      const entry = sessionEntry(sessionId, event)
+      mergeBodyFacts(entry.facts, spooled, sessionId, opts.sessionBodyFacts)
+      entry.messages.push(...spooledBodyGapMessages(spooled, {
+        event,
+        usageByRequestId: opts.usageByRequestId,
+      }))
+      continue
+    }
+
     if (!CONTENT_EVENT_NAMES.includes(event.name)) continue
 
     const message = messageFromEvent(event, opts.usageByRequestId)
     if (!message) continue
-
-    let entry = bySession.get(sessionId)
-    if (!entry) {
-      entry = { facts: sessionFacts(event), messages: [] }
-      bySession.set(sessionId, entry)
-    }
-    mergeSessionFacts(entry.facts, event)
-    entry.messages.push(message)
+    sessionEntry(sessionId, event).messages.push(message)
   }
 
   /** @type {AiGatewayProjectedExchange[]} */
   const projections = []
   for (const [sessionId, entry] of bySession) {
     if (entry.messages.length === 0) continue
+    // A batch without this session's request body (the exporter splits a
+    // turn across POSTs) still stamps the remembered system prompt and
+    // tools, so the assistant rows match the proxy path's.
+    const remembered = opts.sessionBodyFacts?.get(sessionId)
+    if (remembered) {
+      entry.facts.systemText ??= remembered.systemText
+      entry.facts.tools ??= remembered.tools
+    }
     projections.push(buildProjection({
       sessionId,
       facts: entry.facts,
@@ -130,6 +178,11 @@ function buildProjection({ sessionId, facts, messages, clientName, record }) {
   if (facts.userId) projection.user_id = facts.userId
   if (facts.model) projection.model = facts.model
   if (facts.startedAt) projection.conversation_started_at = facts.startedAt
+  // @ref LLP 0252#bodies-for-gaps [implements]: the system prompt and the tool
+  // declarations exist only in the spooled request body; stamped
+  // exchange-level, exactly where the proxy path puts them.
+  if (facts.systemText) projection.system_text = facts.systemText
+  if (facts.tools !== undefined) projection.tools = /** @type {any} */ (facts.tools)
   // @ref LLP 0252#consequences [implements]: `query_source` and `agent.name`
   // are the attribution source on this path; parent_uuid, logical_parent_uuid,
   // user_type and permission_mode are left unset and read null.
@@ -252,6 +305,32 @@ function usageFromApiRequest(event) {
   if (Object.keys(usage).length > 0) attributes.usage = usage
   if (Object.keys(claude).length > 0) attributes.claude = claude
   return attributes
+}
+
+/**
+ * Fold a spooled request body's exchange-level fields into the session
+ * facts, and remember them (bounded, oldest session evicted first) so a
+ * later batch of the same session can still stamp them.
+ *
+ * @param {ClaudeTelemetrySessionFacts} facts
+ * @param {SpooledClaudeBody} spooled
+ * @param {string} sessionId
+ * @param {Map<string, { systemText?: string, tools?: unknown }> | undefined} cache
+ */
+function mergeBodyFacts(facts, spooled, sessionId, cache) {
+  const bodyFacts = requestBodyFacts(spooled)
+  facts.systemText ??= bodyFacts.system_text
+  if (facts.tools === undefined) facts.tools = bodyFacts.tools
+  facts.model ??= bodyFacts.model
+  if (cache && (facts.systemText !== undefined || facts.tools !== undefined)) {
+    cache.delete(sessionId)
+    cache.set(sessionId, { systemText: facts.systemText, tools: facts.tools })
+    while (cache.size > SESSION_BODY_FACTS_LIMIT) {
+      const oldest = cache.keys().next()
+      if (oldest.done) break
+      cache.delete(oldest.value)
+    }
+  }
 }
 
 /**
