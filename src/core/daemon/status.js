@@ -125,10 +125,15 @@ export function gatewaySourceDetails(sources) {
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
   // @ref LLP 0114#fallback-is-visible [implements]: the gateway records whether this bind came through the default-port fallback
   const listenFallback = details.listen_fallback === true
-  const listenFallbackFrom =
-    typeof details.listen_fallback_from === 'string' && details.listen_fallback_from.length > 0
-      ? details.listen_fallback_from
-      : undefined
+  // Display-only, and read out of a file: `listen_fallback_from` is the
+  // configured listen address the gateway could not take, and it is printed
+  // verbatim into `gateway_port_fallback`'s message and its repair line. That
+  // makes it the same kind of value as an upstream `name` or an `entrypoint`,
+  // so it is cleaned at the same last point before render. `host` above is
+  // deliberately left alone: it is not display-only (it composes the endpoint
+  // attach writes into client settings), so bounding it is a separate change.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: a string read back out of status.json is cleaned before it is printed, whichever detail it came from
+  const listenFallbackFrom = sanitizeLabel(details.listen_fallback_from)
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
 }
 
@@ -149,6 +154,62 @@ function gatewaySourceRawDetails(sources) {
   const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
   if (!rawDetails) return undefined
   return /** @type {Record<string, unknown>} */ (rawDetails)
+}
+
+/**
+ * How many upstream names a single warning line will spell out before it stops
+ * naming them and counts the remainder.
+ *
+ * `sanitizeLabel` bounds each name; nothing bounds how many of them the file
+ * holds. These names are read inside one sentence rather than down a block of
+ * lines, so the cap sits well under `recent clients`' 32: the count leads that
+ * sentence and is the number that actually matters, which leaves the list free
+ * to be a sample.
+ */
+const MAX_PRINTED_UPSTREAM_NAMES = 8
+
+/**
+ * A list of upstream names out of the status file, rendered for the one
+ * warning line that prints it: each name cleaned through `sanitizeLabel`, the
+ * list capped, and everything the two filters held back counted at the end, so
+ * a truncated list never reads as a complete one. `''` for an empty list,
+ * which every caller already renders as "no names to show".
+ *
+ * These names arrive in the same file as `recent_entrypoints`, so the reason
+ * that list is sanitized on read applies here unchanged: `status.json` is a
+ * *file*, and core cannot assume the daemon that wrote it was this version,
+ * this build, or well behaved, while everything read here is about to be
+ * printed to a terminal. An upstream `name` is config-authored rather than
+ * client-authored, which lowers the odds but not the reachability, and two
+ * paths reading one file should not disagree about whether it is trusted.
+ *
+ * Rendering is where the cleaning happens, not `gatewayDroppedUpstreams`,
+ * because the names are not display-only there: `attributeDroppedUpstreams`
+ * intersects them with `registered_presets` to decide each dropped name's
+ * fate, and a cleaned or capped list would silently change that answer.
+ * Cleaning bounds what is *printed*, and must revise neither the counts the
+ * message leads with nor the sets it splits them into.
+ *
+ * @param {string[]} list
+ * @returns {string}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: the sanitize-and-cap on read is a property of reading status.json, not of the entrypoint list that first needed it
+ */
+function printableUpstreamNames(list) {
+  /** @type {string[]} */
+  const printed = []
+  for (const name of list) {
+    if (printed.length === MAX_PRINTED_UPSTREAM_NAMES) break
+    const label = sanitizeLabel(name)
+    // A name that cleans away to nothing is withheld rather than printed
+    // empty, and counted with the ones the cap dropped: from the reader's side
+    // both are names the file holds and the line does not show.
+    if (label !== undefined) printed.push(label)
+  }
+  const hidden = list.length - printed.length
+  // Nothing survived cleaning: say how many names are being withheld rather
+  // than render an empty list, which would read as "no names in the file".
+  if (printed.length === 0) return hidden > 0 ? `${hidden} unprintable` : ''
+  return hidden > 0 ? `${printed.join(', ')}, +${hidden} more` : printed.join(', ')
 }
 
 /**
@@ -190,6 +251,11 @@ function gatewaySourceRawDetails(sources) {
  *
  * `attribution` answers the question the bound-gateway message would otherwise
  * have to hedge on: see `attributeDroppedUpstreams` below.
+ *
+ * Every name here is the file's own, uncleaned: the counts and the attribution
+ * split are decided off them, and `printableUpstreamNames` cleans and caps at
+ * each point one is rendered instead. Nothing in this function may be revised
+ * by what a warning line is willing to print.
  *
  * @param {SourceSnapshot[] | undefined} sources
  * @returns {{ idle: boolean, configured: number, dropped: number, names: string[], attribution: DroppedUpstreamAttribution | undefined } | undefined}
@@ -324,7 +390,8 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
     // Labelled, because unlike the idle branch these are not the configured
     // set: an unlabelled `(openai)` next to "2 configured upstreams" invites
     // exactly the wrong reading.
-    const named = names.length > 0 ? ` (dropped: ${names.join(', ')})` : ''
+    const printed = printableUpstreamNames(names)
+    const named = printed.length > 0 ? ` (dropped: ${printed})` : ''
     const oneEntry = dropped === 1
     // The entry nouns count entries and the name nouns count names, because
     // the two differ: the dedupe in `readConfiguredUpstreams` prints one name
@@ -337,18 +404,21 @@ function droppedUpstreamConsequence(dropped, names, attribution) {
   /** @type {string[]} */
   const parts = []
   const { silent, covered } = attribution
+  // Each set's grammar counts the names the *file* holds, not the ones this
+  // line prints, so cleaning and capping cannot make a plural set read as a
+  // singular one.
   // Silence leads: it is the more damaging of the two, and the reason the
   // operator is reading this line at all.
   if (silent.length > 0) {
     const one = silent.length === 1
     parts.push(
-      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${silent.join(', ')} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its path matches' : 'their paths match'}`,
+      `nothing is proxied or captured under the ${one ? 'name' : 'names'} ${printableUpstreamNames(silent)} (no adapter preset covers ${one ? 'that name' : 'those names'}), so ${one ? 'a request' : 'requests'} aimed at ${one ? 'it' : 'them'} ${one ? 'gets' : 'get'} a 404 or ${one ? 'falls' : 'fall'} through to whatever surviving route ${one ? 'its path matches' : 'their paths match'}`,
     )
   }
   if (covered.length > 0) {
     const one = covered.length === 1
     parts.push(
-      `${covered.join(', ')} ${one ? 'is' : 'are'} in the routing table only as the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and routing rules are in force, nothing this config set for ${one ? 'it' : 'them'} took effect, and a surviving upstream can still outrank ${one ? 'the preset' : 'a preset'} on any path`,
+      `${printableUpstreamNames(covered)} ${one ? 'is' : 'are'} in the routing table only as the adapter ${one ? 'preset' : 'presets'} registered under the same ${one ? 'name' : 'names'}, so ${one ? "that preset's" : "each preset's"} own base_url and routing rules are in force, nothing this config set for ${one ? 'it' : 'them'} took effect, and a surviving upstream can still outrank ${one ? 'the preset' : 'a preset'} on any path`,
     )
   }
   return parts.join('; ')
@@ -965,7 +1035,15 @@ export async function collectHypAwareStatus(opts = {}) {
     // placement reads "1 of its 2 configured upstreams (openai)" as if openai
     // were the configured set; there the names move to the consequence they
     // actually belong to.
-    const named = names.length > 0 ? ` (${names.join(', ')})` : ''
+    //
+    // The names are the file's, so they are cleaned and capped on the way into
+    // the line, and whatever `printableUpstreamNames` holds back is counted
+    // there rather than dropped silently: a truncated list must never read as
+    // a complete one. The count ahead of the parenthetical is the file's own
+    // and stays untouched, which is the whole signal separating a dropped
+    // upstream from a legitimately upstream-less gateway.
+    const printed = printableUpstreamNames(names)
+    const named = printed.length > 0 ? ` (${printed})` : ''
     const message = idle
       // Kept verbatim for the total loss. "Listening on nothing" and
       // "connection refused" are true only here, and an operator reading
@@ -1004,13 +1082,26 @@ export async function collectHypAwareStatus(opts = {}) {
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
-    const probe = descriptor.attachProbe
+    // Attach state is only a real state for a client that declares an
+    // `attach_probe`. Without one there is no settings-file write to read back,
+    // `action_attach.desired()` skips the descriptor for exactly that reason
+    // (attach must be reversible), so no attach is ever performed and no marker
+    // is ever written. Deriving `attached: false` from that silence is the wrong
+    // negative indistinguishable from a right one (#544): the honest answer is
+    // "not applicable", so the two surfaces that report attach *state* (the
+    // clients row, and the attach action in `buildClientActionsReport`) read
+    // this flag rather than a probe result that was never taken. The
+    // `client_attach_missing` diagnostic just below deliberately does not.
+    // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
+    const attachable = !!descriptor.attachProbe
+    const probe = attachable
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,
       configured,
+      attachable,
       attached: probe.attached,
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
@@ -1018,6 +1109,15 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.mode !== undefined ? { mode: probe.mode } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
+    // Deliberately ungated by `attachable`, unlike the two derived-state
+    // surfaces above and below. This is not attach state: it is the standing
+    // incomplete-setup prompt LLP 0224 #repair-surface leans on after it
+    // stopped the wizard re-offering setup on every reconfigure. For a
+    // probe-less client it cannot be cleared by observation, which LLP 0224
+    // records as a known limitation with its own named follow-up (give Desktop
+    // a plist-reading probe); until that lands, an unclearable prompt beats the
+    // only alternative, which is no surface at all.
+    // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
     if (configured && !probe.attached) {
       // The repair is `hyp attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
@@ -1486,25 +1586,33 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     if (entry.enabled === false) continue
     enabledByPlugin.set(entry.name, entry)
   }
-  /** @type {Map<string, { onJoin: boolean }>} */
+  /** @type {Map<string, { onJoin: boolean, inert?: boolean }>} */
   const declaredAttach = new Map()
   for (const [clientName, descriptor] of clientDescriptors ?? new Map()) {
     const entry = enabledByPlugin.get(descriptor.plugin)
     if (!entry) continue
+    // A probe-less descriptor is the third way the reconciler is a no-op, next
+    // to `on_join: false` and a non-joined host. `desired()` skips it because
+    // attach must be reversible and only the probe can reverse it, so no marker
+    // will ever appear and `pending` would be permanent (#544). Same shape as
+    // the `readAttachPolicy` sharing above: status must not derive a target the
+    // reconciler would never name.
+    // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less attach target is n/a, never pending
+    const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
     if (hasBlock) {
       const onJoin = readAttachPolicy(entry).onJoin !== false
-      declaredAttach.set(clientName, { onJoin })
+      declaredAttach.set(clientName, { onJoin, inert })
     } else if (hasCentral) {
-      declaredAttach.set(clientName, { onJoin: true })
+      declaredAttach.set(clientName, { onJoin: true, inert })
     }
   }
 
   // Kinds to render: every kind the markers record, plus a kind for each
   // handler that declared a target (so a configured-but-unrun target shows even
   // with no marker yet). `backfill` keys by plugin, `attach` by client name.
-  /** @type {Record<string, Map<string, { onJoin: boolean }>>} */
+  /** @type {Record<string, Map<string, { onJoin: boolean, inert?: boolean }>>} */
   const declaredByKind = { backfill: declared, attach: declaredAttach }
   /** @type {Set<string>} */
   const kinds = new Set(Object.keys(byKind))
@@ -1550,10 +1658,11 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
         })
       } else {
         // No marker: a declared backfill or attach target. Suppressed
-        // (on_join:false) or inert (host never joined → the reconciler is a
-        // no-op) → n/a; otherwise desired and simply not run yet → pending.
+        // (on_join:false), inert (host never joined, or the handler's own
+        // `desired()` would skip this target) → the reconciler is a no-op →
+        // n/a; otherwise desired and simply not run yet → pending.
         const decl = declaredForKind?.get(requestKey)
-        const suppressed = decl ? !decl.onJoin : false
+        const suppressed = decl ? !decl.onJoin || decl.inert === true : false
         const state = suppressed || !hasCentral ? 'n/a' : 'pending'
         actions.push({ kind, requestKey, state })
       }

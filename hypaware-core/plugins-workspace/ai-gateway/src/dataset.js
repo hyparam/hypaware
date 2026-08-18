@@ -164,8 +164,9 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
  * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
- * itself is unchanged: a row object that lacks the key simply reads as null,
- * which is the correct value for "this partition predates the column".
+ * itself is unchanged: a column an old partition physically lacks stays
+ * addressable, and the exact value a read of it yields depends on the read path
+ * (LLP 0015#multi-partition-union).
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
  * @param {AsyncDataSource} source
@@ -199,8 +200,12 @@ function withSchemaColumns(source) {
   // engine's streaming fast path. A partition that physically lacks the
   // requested column (the additive schema-drift case this wrapper exists
   // for) surfaces its values as `undefined` holes in the chunk; normalize
-  // them to null, the same "this partition predates the column" value the
-  // row path reads, so accumulators see one representation either way.
+  // them to null so every partition's chunk reads the same way and an
+  // accumulator sees one representation across the merged stream. This is
+  // NOT the value the row path reads: `scan` above pads an absent cell with
+  // `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
+  // null/undefined split between the two paths unsettled, so nothing may
+  // branch on which one it got.
   //
   // A `where` naming a DECLARED-but-physically-absent column can't be
   // handed to the source: this wrapper is the only layer that knows the
