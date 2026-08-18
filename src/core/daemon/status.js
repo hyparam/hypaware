@@ -51,7 +51,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
@@ -999,6 +999,8 @@ export async function collectHypAwareStatus(opts = {}) {
   }
   /** @type {ClientAttachReport[]} */
   const clients = []
+  /** @type {CaptureHealthReport[]} */
+  const captureHealth = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
@@ -1013,6 +1015,7 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
+      ...(probe.mode !== undefined ? { mode: probe.mode } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     if (configured && !probe.attached) {
@@ -1073,6 +1076,68 @@ export async function collectHypAwareStatus(opts = {}) {
         message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
         repair: [`hyp detach --client ${clientName}`],
       })
+    }
+
+    // ----- capture health (LLP 0245 open question 1's duty) -----
+    // On the otel path capture is best-effort: a stale endpoint, a down
+    // daemon, or upstream event drift all fail into the same silence, with
+    // every other line here healthy. This holds the client's own file trail
+    // (fresh, probed off $HOME like the attach marker was) against the last
+    // event the listener recorded (from status.json - deliberately NOT
+    // liveness-gated, the LLP 0164 argument: "last seen at T" survives its
+    // daemon, and the dead-daemon case is precisely the gap to surface).
+    // Gated on `configured` because an otel marker with no enabled plugin is
+    // `client_attached_not_configured`'s finding above, where the repair is a
+    // detach rather than a capture fix.
+    // @ref LLP 0257#status-and-health [implements]: last event seen vs last transcript activity, answered without a dataset or cache read
+    if (configured && probe.attached && probe.mode === 'otel') {
+      const snapshots = Array.isArray(daemonStatusFile?.sources) ? daemonStatusFile.sources : []
+      const owned = snapshots.filter((s) => s && s.plugin === descriptor.plugin)
+      // The plugin's listener source advertises itself by carrying the
+      // `last_event_at` detail (null before the first event), the same
+      // self-advertisement pattern as `control_routes`.
+      const listenerSnap = owned.find((s) => {
+        const details = sourceDetails(s)
+        return !!details && 'last_event_at' in details
+      }) ?? owned[0]
+      const listenerDetails = sourceDetails(listenerSnap)
+      const lastEventAt = typeof listenerDetails?.last_event_at === 'string'
+        ? listenerDetails.last_event_at
+        : null
+      const lastTranscriptActivityAt =
+        (await probeClientActivityFromDescriptor({ descriptor, homeDir, env })) ?? null
+      const attachedAt = probe.attachedAt ?? null
+      const verdict = assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt })
+      captureHealth.push({
+        client: clientName,
+        plugin: descriptor.plugin,
+        source: listenerSnap?.name ?? null,
+        lastEventAt,
+        lastTranscriptActivityAt,
+        attachedAt,
+        gapMs: verdict.gapMs,
+        state: verdict.state,
+      })
+      if (verdict.state === 'gap' && verdict.severity !== undefined) {
+        // Escalates to a degrading `error` past CAPTURE_GAP_ERROR_MS, unlike
+        // the attach diagnostics above: a not-yet-attached install is merely
+        // unfinished, but an attached one silently losing sessions is the
+        // failure this line exists to make loud.
+        const gapText = formatGapDuration(verdict.gapMs)
+        const message = lastEventAt !== null
+          ? `${clientName} is otel-attached, but its transcripts stayed active ${gapText} past the last telemetry event - those sessions are not being captured`
+          : `${clientName} is otel-attached, but no telemetry has arrived and its transcripts show activity ${gapText} after the attach - those sessions are not being captured`
+        diagnostics.push({
+          severity: verdict.severity,
+          kind: 'capture_gap',
+          message,
+          repair: [
+            'hyp daemon restart  # the telemetry listener runs in the daemon',
+            `hyp attach --client ${clientName}  # rewrites the telemetry env block with the live listener port`,
+            `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
     }
   }
 
@@ -1240,7 +1305,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // client-action (e.g. backfill-on-join) is likewise excluded. It has
   // its own status line but never flips `overall` (LLP 0041
   // §failure-is-surfaced-not-fatal); note it is not even a diagnostic, so
-  // it cannot reach this computation.
+  // it cannot reach this computation. A `capture_gap` that escalated to
+  // `error` severity degrades through the severity rule below by design
+  // (LLP 0245 open question 1): silent session loss is an outage, not an
+  // unfinished setup.
   const degradingKinds = new Set(['config_missing', 'config_unreadable'])
   const overall =
     diagnostics.some((d) => d.severity === 'error') ? 'degraded'
@@ -1269,6 +1337,7 @@ export async function collectHypAwareStatus(opts = {}) {
     usagePolicy,
     firstSyncHoldDeadline,
     recentEntrypoints,
+    captureHealth,
     proxyTrust,
   }
 }
@@ -1588,7 +1657,7 @@ function readRetention(config) {
  *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
- * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
+ * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
@@ -1618,6 +1687,11 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         settingsPath,
         version: typeof markerObj.version === 'string' ? markerObj.version : undefined,
         port: typeof markerObj.port === 'number' ? String(markerObj.port) : undefined,
+        // The marker's `mode` / `attached_at`, absent on markers that predate
+        // them: mode is what gates the capture-health section, and the attach
+        // timestamp is its baseline for a listener that has seen nothing yet.
+        ...(typeof markerObj.mode === 'string' ? { mode: markerObj.mode } : {}),
+        ...(typeof markerObj.attached_at === 'string' ? { attachedAt: markerObj.attached_at } : {}),
       }
     }
 
@@ -1655,6 +1729,161 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       error: err instanceof Error ? err.message : String(err),
     }
   }
+}
+
+/**
+ * Ceiling on how deep the activity-probe walk descends below the declared
+ * directory. Claude transcripts sit two levels down
+ * (`projects/<slug>/<session>.jsonl`) and subagent transcripts four
+ * (`projects/<slug>/<session>/subagents/agent-*.jsonl`); the cap exists so a
+ * manifest pointing at a pathological tree bounds the probe instead of the
+ * probe walking it to the bottom.
+ */
+const MAX_ACTIVITY_PROBE_DEPTH = 5
+
+/**
+ * When this client last left a file behind: the newest matching mtime under
+ * the descriptor's `activity_probe.dir`, as an ISO timestamp.
+ *
+ * This is the transcript half of the capture-health comparison, probed fresh
+ * on every `hyp status` run rather than read from `status.json`, because the
+ * moment it matters most is a daemon that has been down while the user
+ * worked - exactly when nothing was alive to record it. It stats file
+ * metadata only, never opens a file, and is best-effort like every probe in
+ * this collector: any failure reads as `undefined` (no claim), never as a
+ * fabricated timestamp.
+ *
+ * @ref LLP 0257#status-and-health [implements]: the last-transcript-activity side of the capture-health line
+ * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
+ * @returns {Promise<string | undefined>}
+ */
+export async function probeClientActivityFromDescriptor({ descriptor, homeDir, env }) {
+  const probe = descriptor.activityProbe
+  if (!probe || !homeDir) return undefined
+  /** @type {string} */
+  let dirPath
+  try {
+    dirPath = resolveClientSettingsPath(descriptor.name, probe.dir, env, homeDir, {
+      field: 'activity_probe.dir',
+    })
+  } catch {
+    return undefined
+  }
+  const newest = await newestMtimeMs(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH)
+  return newest === undefined ? undefined : new Date(newest).toISOString()
+}
+
+/**
+ * Newest mtime (epoch ms) of any matching regular file under `dir`, walked
+ * to `depth` levels. Symlinks are not followed and every fs error skips the
+ * entry: a probe that cannot read a corner of the tree still answers from
+ * the rest of it.
+ *
+ * @param {string} dir
+ * @param {string | undefined} suffix
+ * @param {number} depth
+ * @returns {Promise<number | undefined>}
+ */
+async function newestMtimeMs(dir, suffix, depth) {
+  /** @type {Dirent[]} */
+  let entries
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true })
+  } catch {
+    return undefined
+  }
+  /** @type {number | undefined} */
+  let newest
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (depth <= 1) continue
+      const nested = await newestMtimeMs(full, suffix, depth - 1)
+      if (nested !== undefined && (newest === undefined || nested > newest)) newest = nested
+    } else if (entry.isFile()) {
+      if (suffix !== undefined && !entry.name.endsWith(suffix)) continue
+      try {
+        const stat = await fsp.stat(full)
+        if (newest === undefined || stat.mtimeMs > newest) newest = stat.mtimeMs
+      } catch { /* raced deletion or unreadable file: skip */ }
+    }
+  }
+  return newest
+}
+
+/**
+ * Client activity newer than the capture baseline by more than this is a
+ * capture gap worth a diagnostic. Under working capture the two move in near
+ * lockstep - Claude Code appends the transcript and flushes the exporter on
+ * the same turns, seconds apart - so the threshold only has to clear flush
+ * cadence and batch timing, and fifteen minutes clears them by an order of
+ * magnitude while still catching a broken path within the same sitting.
+ */
+export const CAPTURE_GAP_WARNING_MS = 15 * 60_000
+
+/**
+ * Past this the gap severity escalates to `error`, which degrades `overall`:
+ * two hours of transcript activity with no telemetry is a whole working
+ * session lost, not a timing artifact. The escalation is the "visible
+ * instead of discovered at report time" duty of LLP 0245 open question 1 -
+ * best-effort delivery was accepted on the condition that a silent gap
+ * cannot stay silent.
+ */
+export const CAPTURE_GAP_ERROR_MS = 2 * 3_600_000
+
+/**
+ * Judge one otel-attached client's capture gap. Pure, so the threshold
+ * contract is unit-testable without a filesystem.
+ *
+ * The baseline is the newer of the last event seen and the attach timestamp:
+ * activity older than the attach proves nothing about the otel path (the
+ * usual shape right after a migration from proxy attach, where months of
+ * transcripts predate the first possible event), and a listener that has
+ * seen nothing at all is measured from the attach instead. No baseline at
+ * all - no events and an unreadable attach time - reads as `ok`, because a
+ * gap claim needs a moment capture was supposed to start.
+ *
+ * @ref LLP 0257#status-and-health [implements]: the gap threshold and its severity
+ * @param {{ lastEventAt?: string | null, lastTranscriptActivityAt?: string | null, attachedAt?: string | null }} args
+ * @returns {{ state: 'ok' | 'gap', gapMs: number, severity?: 'warning' | 'error' }}
+ */
+export function assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt }) {
+  const transcriptMs = parseIsoMs(lastTranscriptActivityAt)
+  if (transcriptMs === undefined) return { state: 'ok', gapMs: 0 }
+  const eventMs = parseIsoMs(lastEventAt)
+  const attachedMs = parseIsoMs(attachedAt)
+  if (eventMs === undefined && attachedMs === undefined) return { state: 'ok', gapMs: 0 }
+  const baseline = Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity)
+  const gapMs = Math.max(0, transcriptMs - baseline)
+  if (gapMs <= CAPTURE_GAP_WARNING_MS) return { state: 'ok', gapMs }
+  return {
+    state: 'gap',
+    gapMs,
+    severity: gapMs > CAPTURE_GAP_ERROR_MS ? 'error' : 'warning',
+  }
+}
+
+/**
+ * A gap length for diagnostic prose: coarse on purpose, like
+ * `formatEntrypointAge`, because the message's claim is "a sitting" or "a
+ * day", never a precise bound.
+ *
+ * @param {number} gapMs
+ * @returns {string}
+ */
+export function formatGapDuration(gapMs) {
+  const minutes = Math.floor(gapMs / 60_000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+/** @param {string | null | undefined} value @returns {number | undefined} */
+function parseIsoMs(value) {
+  if (typeof value !== 'string') return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
 }
 
 /**

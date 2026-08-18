@@ -254,8 +254,7 @@ export function createStartClaudeTelemetrySource(deps) {
             // rows) so a capture gap in either dataset is visible alone.
             telemetry_rows_written: state.telemetryRowsWritten,
             // @ref LLP 0257#status-and-health [implements]: the status details
-            // carry the last event seen and the spool's byte size and eviction
-            // count; `hyp status` renders health from them.
+            // carry the spool's byte size and eviction count.
             spool_bytes: state.spoolBytes,
             bodies_projected: state.bodiesProjected,
             bodies_evicted: state.bodiesEvicted,
@@ -266,7 +265,14 @@ export function createStartClaudeTelemetrySource(deps) {
             ignored_sessions: ignoredSessions.size,
             events_dropped: state.eventsDropped,
             bodies_dropped: state.bodiesDropped,
-            ...(state.lastEventAt ? { last_event_at: state.lastEventAt } : {}),
+            // Null before the first event rather than absent: the key's
+            // presence is how the capture-health reader recognizes this
+            // snapshot as the telemetry listener's (the `control_routes`
+            // self-advertisement pattern), and "attached but nothing ever
+            // arrived" is exactly the state that comparison must be able
+            // to see.
+            // @ref LLP 0257#status-and-health [implements]: the last event seen, published for the hyp status comparison
+            last_event_at: state.lastEventAt ?? null,
             ...(state.listenFallbackFrom !== undefined
               ? { listen_fallback_from: state.listenFallbackFrom }
               : {}),

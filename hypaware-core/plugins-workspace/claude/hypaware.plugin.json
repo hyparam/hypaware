@@ -38,6 +38,10 @@
         "settings_file": ".claude/settings.json",
         "marker_key": "_hypaware"
       },
+      "activity_probe": {
+        "dir": ".claude/projects",
+        "file_suffix": ".jsonl"
+      },
       "required_upstreams": ["anthropic"],
       "transcript_entrypoints": ["cli", "sdk-cli"],
       "launch": { "bin": "claude", "args": ["{prompt}"], "label": "Claude Code" }

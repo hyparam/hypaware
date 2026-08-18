@@ -202,6 +202,29 @@ export interface PluginClientManifest {
    * attachable but never launchable.
    */
   launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, for the
+   * `hyp status` capture-health comparison (LLP 0257#status-and-health):
+   * the newest matching mtime under `dir` is the client's last activity,
+   * which status holds against the telemetry the daemon actually
+   * captured. Declared here rather than in a core table for the same
+   * reason as `attach_probe`: the path is the client's business, and
+   * core must be able to read it without importing plugin code.
+   */
+  activity_probe?: PluginActivityProbeManifest
+}
+
+/**
+ * A client-written directory core may stat (never parse) to answer
+ * "when was this client last active?". Same home-relative contract as
+ * `attach_probe.settings_file`: relative to `$HOME`, first segment
+ * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
+ */
+export interface PluginActivityProbeManifest {
+  /** Directory of activity files, RELATIVE to the user's home (e.g. `.claude/projects`). */
+  dir: string
+  /** Only files ending in this suffix count (e.g. `.jsonl`); absent means every file. */
+  file_suffix?: string
 }
 
 /**
