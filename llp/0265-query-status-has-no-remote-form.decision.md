@@ -1,4 +1,4 @@
-# LLP 0264: `hyp query status` has no remote form
+# LLP 0265: `hyp query status` has no remote form
 
 **Type:** Decision
 **Status:** Accepted

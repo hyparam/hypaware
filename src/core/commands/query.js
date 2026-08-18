@@ -60,8 +60,8 @@ export async function runQuerySchema(argv, ctx) {
  * the server have" have been observed to read the local answer as the
  * server's and carry on.
  *
- * @ref LLP 0264#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
- * @ref LLP 0264#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
+ * @ref LLP 0265#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
+ * @ref LLP 0265#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */

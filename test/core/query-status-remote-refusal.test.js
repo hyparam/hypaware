@@ -1,6 +1,6 @@
 // @ts-check
 
-// @ref LLP 0264#evidence [tests]: `hyp query status` reports the local
+// @ref LLP 0265#evidence [tests]: `hyp query status` reports the local
 // cache, so `--remote` is refused rather than ignored. Recorded sessions
 // show the silent-ignore failure mode is not theoretical: agents ran
 // `hyp query status --remote prod` to "list datasets on the server", got a
