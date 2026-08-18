@@ -21,6 +21,18 @@
 export const SESSION_IGNORE_CONTROL_PATH = '/_hypaware/ignore/session'
 
 /**
+ * The name a recorder advertises in its status details (`control_routes`)
+ * to say "I host the session-ignore route at my bound listener". The CLI's
+ * `hyp session ignore` / `unignore` discovers additional recorders by this
+ * advertisement (`resolveLiveControlRouteEndpointsFromStatus`), so offering
+ * the route is stated by the recorder itself, never guessed from a source
+ * name - which is what keeps the client-agnostic verb free of any list of
+ * client plugins.
+ * @ref LLP 0256#cli-posts-to-both [implements]
+ */
+export const SESSION_IGNORE_ROUTE = 'ignore/session'
+
+/**
  * Max request-body size for a control request. The skill sends a tiny
  * `{"session_id":"..."}` object; anything larger is rejected with 413
  * rather than buffered, so a stray large body cannot grow the hosting

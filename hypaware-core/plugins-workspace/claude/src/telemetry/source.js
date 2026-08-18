@@ -2,7 +2,7 @@
 
 import { Attr, getActiveSpan, withSpan } from '../../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../../src/core/observability/env.js'
-import { createControlHandler } from '../../../../../src/core/control/session_ignore.js'
+import { SESSION_IGNORE_ROUTE, createControlHandler } from '../../../../../src/core/control/session_ignore.js'
 import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
@@ -242,6 +242,12 @@ export function createStartClaudeTelemetrySource(deps) {
           details: {
             listen_host: bound.host,
             listen_port: bound.port,
+            // Says "I host the session-ignore route here", which is how
+            // `hyp session ignore` discovers this recorder beside the
+            // gateway without the client-agnostic verb naming any plugin.
+            // @ref LLP 0256#cli-posts-to-both [implements]: offering the route
+            //   is advertised by the recorder itself
+            control_routes: [SESSION_IGNORE_ROUTE],
             events_received: state.eventsReceived,
             rows_skipped: state.rowsSkipped,
             // Behavioral rows, counted apart from `rowsWritten` (message

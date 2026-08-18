@@ -55,15 +55,18 @@ export async function activate(ctx) {
     start: createStartSource(state),
   })
 
-  // @ref LLP 0067#cli [implements]: the gateway owns `/_hypaware/ignore/session`,
-  // so it owns the verbs over it (LLP 0003). One client-agnostic verb group
-  // serves Claude and Codex alike, and as a plugin-contributed group it
-  // inherits the inactive-plugin `repair:` line (LLP 0153/0154) for free.
-  // Deliberately NOT `hyp ignore --session`: LLP 0110 diagnosed that shape.
+  // @ref LLP 0067#cli [implements]: the gateway hosts the original
+  // `/_hypaware/ignore/session`, so it owns the verbs over it (LLP 0003). One
+  // client-agnostic verb group serves Claude and Codex alike, and as a
+  // plugin-contributed group it inherits the inactive-plugin `repair:` line
+  // (LLP 0153/0154) for free. The mutations also address every OTHER recorder
+  // that advertises the route (the claude telemetry listener, LLP 0256), so
+  // one verb reaches them all. Deliberately NOT `hyp ignore --session`:
+  // LLP 0110 diagnosed that shape.
   ctx.commands.register({
     name: 'session ignore',
     plugin: PLUGIN_NAME,
-    summary: 'Stop recording this AI session (in-memory, until the gateway restarts)',
+    summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
     usage: 'hyp session ignore [session-id] [--json]',
     run: runSessionIgnore,
   })

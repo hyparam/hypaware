@@ -488,6 +488,66 @@ export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
  * @returns {number | undefined}
  */
 export function resolveLiveSourceListenPortFromStatus({ stateRoot, sourceName }) {
+  const list = liveStatusSources(stateRoot)
+  if (!list) return undefined
+  const source = list.find((s) => s && s.name === sourceName)
+  const details = sourceDetails(source)
+  const port = details?.listen_port
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return undefined
+  }
+  return port
+}
+
+/**
+ * Every live source advertising a named `/_hypaware/` control route in its
+ * status details (`control_routes`), resolved to the base URL of its bound
+ * listener.
+ *
+ * This is how `hyp session ignore` / `unignore` finds the recorders beyond
+ * the gateway: a recorder that hosts the route says so in its own status
+ * details, so the verb stays client-agnostic and a listener that is not
+ * running (absent from a live snapshot, or no live daemon at all) is simply
+ * not addressed - it is recording nothing, so there is nothing to notify.
+ * The gateway itself is NOT discovered here; its endpoint has its own,
+ * richer resolution (`status.json` plus the pinned `listen` fallback).
+ *
+ * @ref LLP 0256#cli-posts-to-both [implements]: the CLI addresses every
+ * listener that offers the route; offering is advertised, never guessed
+ * @param {{ stateRoot: string, route: string }} args
+ * @returns {Array<{ source: string, endpoint: string }>}
+ */
+export function resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route }) {
+  const list = liveStatusSources(stateRoot)
+  if (!list) return []
+  /** @type {Array<{ source: string, endpoint: string }>} */
+  const out = []
+  for (const source of list) {
+    if (!source || typeof source.name !== 'string') continue
+    const details = sourceDetails(source)
+    const routes = details?.control_routes
+    if (!Array.isArray(routes) || !routes.includes(route)) continue
+    const port = details?.listen_port
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) continue
+    const host = typeof details?.listen_host === 'string' && details.listen_host.length > 0
+      ? details.listen_host
+      : '127.0.0.1'
+    const endpoint = endpointFromListen(`${host}:${port}`)
+    if (endpoint) out.push({ source: source.name, endpoint })
+  }
+  return out
+}
+
+/**
+ * The liveness-gated snapshot read shared by the resolvers above: a live pid
+ * and a readable status file, or nothing. A `status.json` outlives its
+ * daemon, so a bound port in it proves nothing without a living process
+ * behind the pid file.
+ *
+ * @param {string} stateRoot
+ * @returns {SourceSnapshot[] | undefined}
+ */
+function liveStatusSources(stateRoot) {
   let pidEntry
   try {
     pidEntry = readPidFile(stateRoot)
@@ -503,16 +563,17 @@ export function resolveLiveSourceListenPortFromStatus({ stateRoot, sourceName })
   } catch {
     return undefined
   }
-  const list = Array.isArray(status?.sources) ? status.sources : []
-  const source = list.find((s) => s && s.name === sourceName)
-  const details = source && typeof source.details === 'object' && source.details !== null
+  return Array.isArray(status?.sources) ? status.sources : []
+}
+
+/**
+ * @param {SourceSnapshot | undefined} source
+ * @returns {Record<string, unknown> | undefined}
+ */
+function sourceDetails(source) {
+  return source && typeof source.details === 'object' && source.details !== null
     ? /** @type {Record<string, unknown>} */ (source.details)
     : undefined
-  const port = details?.listen_port
-  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
-    return undefined
-  }
-  return port
 }
 
 /* ---------- Phase 8: top-level status collector ---------- */
