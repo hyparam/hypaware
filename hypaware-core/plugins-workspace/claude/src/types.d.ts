@@ -55,6 +55,40 @@ export interface ClaudeTelemetrySessionFacts {
 }
 
 /**
+ * What the usage policy says about one session at ingest, resolved from the
+ * cwd its SessionStart hook recorded (LLP 0254 #policy-inline).
+ *
+ * `class` is a `UsageClass` plus `'undetermined'`, the state a session is in
+ * while (or because) no hook record names its cwd: not `full`, because nothing
+ * was asked, and not `ignore`, because nothing said so.
+ */
+export interface ClaudeTelemetrySessionVerdict {
+  class: 'ignore' | 'local-only' | 'full' | 'undetermined'
+  /** The cwd the verdict was resolved from; absent when undetermined. */
+  cwd?: string
+  /** Absolute path of the governing `.hypignore` or machine-local list. */
+  governedBy?: string | null
+  /** The raw token before the fail-safe clamp. */
+  declared?: string | null
+  /** Present only on a fail-safe clamp of an unknown token. */
+  warn?: string
+}
+
+/**
+ * What one received batch suppressed, accumulated across the opt-out gate and
+ * the usage-policy gate so the batch's span reports one total per outcome
+ * rather than whichever gate ran last.
+ */
+export interface BatchSuppressionTally {
+  /** Events a policy answered "no" for: the opt-out, or an `ignore` cwd. */
+  eventsDropped: number
+  /** Events withheld because no verdict existed yet (no hook record). */
+  eventsUndetermined: number
+  /** Spooled bodies deleted unread across both. */
+  bodiesDropped: number
+}
+
+/**
  * Mutable counters one running Claude telemetry listener accumulates,
  * surfaced through `status()` details.
  */
@@ -64,8 +98,16 @@ export interface ClaudeTelemetryListenerState {
   /** Rows written to `claude_telemetry_events`, counted apart from the message rows. */
   telemetryRowsWritten: number
   eventsReceived: number
-  /** Events suppressed by the per-session opt-out (LLP 0256). */
+  /**
+   * Events suppressed at ingest by a policy that said no: the per-session
+   * opt-out (LLP 0256) or an `ignore` cwd (LLP 0254 #policy-inline).
+   */
   eventsDropped: number
+  /**
+   * Events withheld at ingest because the session's cwd was not known, so no
+   * policy verdict existed to write under (LLP 0257 S10).
+   */
+  eventsUndetermined: number
   lastEventAt: string | undefined
   lastError: string | undefined
   listenFallbackFrom: number | undefined

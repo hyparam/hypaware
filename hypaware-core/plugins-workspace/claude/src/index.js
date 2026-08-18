@@ -379,6 +379,12 @@ export async function activate(ctx) {
         gateway,
         clientName: CLIENT_NAME,
         stateFile,
+        // The same shared-state-root list every other capture seam above gets.
+        // The listener is a capture seam too, and this is the arm of the policy
+        // that no `.hypignore` dotfile expresses.
+        // @ref LLP 0254#policy-inline [implements]: the machine-local list is in
+        //   scope at ingest, not only the committable dotfile
+        localOnlyListPath: localOnlyList,
       }),
     })
   } else {

@@ -5,8 +5,10 @@ import { readObservabilityEnv } from '../../../../../src/core/observability/env.
 import { SESSION_IGNORE_ROUTE, createControlHandler } from '../../../../../src/core/control/session_ignore.js'
 import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
+import { createUsagePolicyResolver } from '../../../../../src/core/usage-policy/index.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
 import { deleteSpooledBodies, deleteSpooledBodiesForEvents, loadSpooledBodies } from './bodies.js'
+import { partitionByUsagePolicy, resolveSessionUsagePolicy } from './policy.js'
 import { flattenClaudeTelemetryEvents, flattenClaudeTelemetryMetrics } from './events.js'
 import {
   CLAUDE_TELEMETRY_EVENT_COLUMNS,
@@ -25,7 +27,8 @@ import {
  * @import { Server } from 'node:http'
  * @import { AiGatewayCapability, PluginActivationContext, SourceStatus, StartedSource } from '../../../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpRequest } from '../../../../../src/core/otlp/types.js'
- * @import { ClaudeTelemetryEvent, ClaudeTelemetryListenerState, SessionContextRecord } from '../types.js'
+ * @import { UsagePolicyResolver } from '../../../../../src/core/usage-policy/types.js'
+ * @import { BatchSuppressionTally, ClaudeTelemetryEvent, ClaudeTelemetryListenerState, SessionContextRecord } from '../types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'
@@ -83,7 +86,12 @@ const SPOOL_SWEEP_INTERVAL_MS = 60_000
  *
  * @ref LLP 0257#registration [implements]: a listener source contributed by
  *   `@hypaware/claude` through the kernel source registry
- * @param {{ gateway: AiGatewayCapability, clientName: string, stateFile: string }} deps
+ * @param {{
+ *   gateway: AiGatewayCapability,
+ *   clientName: string,
+ *   stateFile: string,
+ *   localOnlyListPath?: string,
+ * }} deps
  */
 export function createStartClaudeTelemetrySource(deps) {
   /**
@@ -100,6 +108,7 @@ export function createStartClaudeTelemetrySource(deps) {
       telemetryRowsWritten: 0,
       eventsReceived: 0,
       eventsDropped: 0,
+      eventsUndetermined: 0,
       lastEventAt: undefined,
       lastError: undefined,
       listenFallbackFrom: undefined,
@@ -177,6 +186,18 @@ export function createStartClaudeTelemetrySource(deps) {
       })
     })
 
+    // One resolver per listener (per daemon run), like the projector's: the
+    // per-cwd cache rides the source's lifetime so the ingest path adds no
+    // unbounded fs work. `localOnlyListPath` is threaded from the plugin's
+    // SHARED state root, which is where the machine-local list actually lives;
+    // without it the resolver would see `.hypignore` dotfiles only and a
+    // `--private` directory would record here after being dropped everywhere
+    // else.
+    // @ref LLP 0254#policy-inline [implements]: the same shared resolver every
+    //   other capture seam uses, so `.hypignore` and the machine-local list
+    //   both reach the OTEL path
+    const resolver = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath })
+
     /**
      * Held across batches: the exporter flushes on a timer, so a turn's
      * `api_request` (which carries the tokens) and its
@@ -202,6 +223,7 @@ export function createStartClaudeTelemetrySource(deps) {
       usageByRequestId,
       sessionBodyFacts,
       readSessionContext,
+      resolver,
       spoolDir: spool.dir,
       ignoredSessions,
     })
@@ -265,6 +287,13 @@ export function createStartClaudeTelemetrySource(deps) {
             ignored_sessions: ignoredSessions.size,
             events_dropped: state.eventsDropped,
             bodies_dropped: state.bodiesDropped,
+            // A capture gap, not a policy outcome: these events named a session
+            // whose cwd nothing had recorded yet, so there was no verdict to
+            // record them under. Published because a machine whose hook is not
+            // installed would otherwise look idle rather than blind.
+            // @ref LLP 0257#ingest [implements]: S10 - undetermined is its own
+            //   visible state, not silence
+            events_undetermined: state.eventsUndetermined,
             // Null before the first event rather than absent: the key's
             // presence is how the capture-health reader recognizes this
             // snapshot as the telemetry listener's (the `control_routes`
@@ -314,51 +343,163 @@ export function createStartClaudeTelemetrySource(deps) {
  *   usageByRequestId: Map<string, Record<string, unknown>>,
  *   sessionBodyFacts: Map<string, { systemText?: string, tools?: unknown }>,
  *   readSessionContext: () => Promise<SessionContextRecord[]>,
+ *   resolver: UsagePolicyResolver,
  *   spoolDir: string,
  *   ignoredSessions: Set<string>,
  * }} args
  * @returns {(req: OtlpRequest) => Promise<void>}
  */
-function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, spoolDir, ignoredSessions }) {
+function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, resolver, spoolDir, ignoredSessions }) {
   /**
-   * Enforce the per-session opt-out on one batch: delete the dropped
-   * sessions' spooled bodies without reading them, count the drops, and
-   * emit one policy-drop signal per ignored session so the audit trail
-   * matches the proxy path's (`policy_source: 'session_opt_out'`).
+   * Suppress one session's events at ingest: delete its spooled bodies
+   * WITHOUT reading them, count it, and emit one drop signal so the audit
+   * trail matches the proxy path's.
    *
-   * @ref LLP 0256#bodies-deleted [implements]: an ignored session's bodies
-   *   are a deletion target, not a skip target
-   * @param {Map<string, ClaudeTelemetryEvent[]>} droppedBySession
-   * @param {{ setAttribute(key: string, value: unknown): unknown }} span
+   * The deletion is the half that makes an opt-out mean what it says. A skip
+   * would leave the content of exactly the session the user asked us not to
+   * keep sitting in our own directory until the cap evicted it.
+   *
+   * @ref LLP 0253#delete-on-drop [implements]: a dropped session's bodies are
+   *   deleted, never merely skipped
+   * @ref LLP 0256#bodies-deleted [implements]: the same duty for the
+   *   per-session opt-out
+   * @param {{
+   *   sessionId: string,
+   *   events: ClaudeTelemetryEvent[],
+   *   policySource: string,
+   *   withheld?: boolean,
+   *   fields?: Record<string, unknown>,
+   *   tally: BatchSuppressionTally,
+   * }} args
    */
-  async function dropIgnoredSessions(droppedBySession, span) {
-    let eventsDropped = 0
-    let bodiesDropped = 0
-    for (const [sessionId, sessionEvents] of droppedBySession) {
-      const removal = await deleteSpooledBodiesForEvents(sessionEvents, { spoolDir })
-      eventsDropped += sessionEvents.length
-      bodiesDropped += removal.deleted
-      state.eventsDropped += sessionEvents.length
-      state.bodiesDropped += removal.deleted
-      for (const ref of removal.refused) {
-        ctx.log.warn('claude.telemetry.body_ref_refused', {
-          [Attr.PLUGIN]: PLUGIN_NAME,
-          error_kind: 'body_ref_outside_spool',
-          body_ref: ref,
-        })
-      }
-      ctx.log.info('claude.telemetry.usage_policy_drop', {
+  async function suppressSession({ sessionId, events, policySource, withheld = false, fields = {}, tally }) {
+    const removal = await deleteSpooledBodiesForEvents(events, { spoolDir })
+    tally.bodiesDropped += removal.deleted
+    state.bodiesDropped += removal.deleted
+    if (withheld) {
+      tally.eventsUndetermined += events.length
+      state.eventsUndetermined += events.length
+    } else {
+      tally.eventsDropped += events.length
+      state.eventsDropped += events.length
+    }
+    for (const ref of removal.refused) {
+      ctx.log.warn('claude.telemetry.body_ref_refused', {
         [Attr.PLUGIN]: PLUGIN_NAME,
-        [Attr.COMPONENT]: 'sources',
-        [Attr.OPERATION]: 'usage_policy_drop',
-        policy_source: 'session_opt_out',
-        session_id: sessionId,
-        events_dropped: sessionEvents.length,
-        bodies_deleted: removal.deleted,
+        error_kind: 'body_ref_outside_spool',
+        body_ref: ref,
       })
     }
-    span.setAttribute('events_dropped', eventsDropped)
-    span.setAttribute('bodies_dropped', bodiesDropped)
+    // Warn for a withheld session, info for a policy that answered: the first
+    // is a capture gap an operator can close (install the hook), the second is
+    // the system doing what it was told.
+    ctx.log[withheld ? 'warn' : 'info']('claude.telemetry.usage_policy_drop', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: 'usage_policy_drop',
+      policy_source: policySource,
+      session_id: sessionId,
+      events_dropped: events.length,
+      bodies_deleted: removal.deleted,
+      ...fields,
+    })
+  }
+
+  /**
+   * Enforce the per-session opt-out (LLP 0066 / LLP 0256) on one batch.
+   *
+   * @param {Map<string, ClaudeTelemetryEvent[]>} droppedBySession
+   * @param {BatchSuppressionTally} tally
+   */
+  async function dropIgnoredSessions(droppedBySession, tally) {
+    for (const [sessionId, sessionEvents] of droppedBySession) {
+      await suppressSession({
+        sessionId,
+        events: sessionEvents,
+        policySource: 'session_opt_out',
+        tally,
+      })
+    }
+  }
+
+  /**
+   * Enforce the folder usage policy on one batch, INLINE, before anything is
+   * read from the spool and before any row is written.
+   *
+   * Three outcomes per session: an `ignore` cwd is dropped with its bodies, a
+   * session whose cwd nothing has recorded is withheld the same way (no
+   * verdict exists, so there is nothing to record it under), and everything
+   * else is returned to be projected. `local-only` is deliberately in that
+   * last group: it is enforced at the export and query seams, not by refusing
+   * to record.
+   *
+   * There is no second look at flush. That is the point: the proxy path writes
+   * provisionally and lets settlement drop a late-resolved `ignore` row
+   * (LLP 0085), and this path has no such window to patch because the verdict
+   * is in hand before the write.
+   *
+   * @ref LLP 0254#policy-inline [implements]: the check runs at ingest with cwd
+   *   in hand, so the fail-open window cannot reappear
+   * @ref LLP 0254#scope [constrained-by]: LLP 0027 / LLP 0085 stay in force for
+   *   the proxy and backfill producers; only this path settles at ingest
+   * @param {ClaudeTelemetryEvent[]} events
+   * @param {{ records: SessionContextRecord[], tally: BatchSuppressionTally }} args
+   * @returns {Promise<ClaudeTelemetryEvent[]>} the events cleared to be written
+   */
+  async function applyUsagePolicy(events, { records, tally }) {
+    const split = partitionByUsagePolicy(events, {
+      verdictFor: (sessionId) => resolveSessionUsagePolicy({
+        record: pickLatestMatching(records, { sessionId }),
+        resolver,
+      }),
+    })
+    for (const [sessionId, entry] of split.droppedBySession) {
+      await suppressSession({
+        sessionId,
+        events: entry.events,
+        policySource: 'usage_policy',
+        tally,
+        fields: {
+          // The governing file, as the proxy projector reports it, so one query
+          // answers "what suppressed this" across both producers. The cwd
+          // itself is not logged on either path.
+          governed_by: entry.verdict.governedBy ?? null,
+          declared: entry.verdict.declared ?? null,
+          ...(entry.verdict.warn ? { warn: entry.verdict.warn } : {}),
+        },
+      })
+    }
+    for (const [sessionId, entry] of split.withheldBySession) {
+      await suppressSession({
+        sessionId,
+        events: entry.events,
+        policySource: 'undetermined_cwd',
+        withheld: true,
+        tally,
+        fields: {
+          // Names the recovery path in the signal itself: the content is still
+          // in the Claude Code transcript, where `hyp backfill claude` reads it
+          // with the cwd resolved per session.
+          recovery: 'transcript_backfill',
+        },
+      })
+    }
+    return split.kept
+  }
+
+  /**
+   * Publish one batch's suppression counts on its receive span. Set only when
+   * non-zero, so a routine batch's span stays free of noise fields.
+   *
+   * @param {{ setAttribute(key: string, value: unknown): unknown }} span
+   * @param {BatchSuppressionTally} tally
+   */
+  function recordSuppression(span, tally) {
+    if (tally.eventsDropped > 0) span.setAttribute('events_dropped', tally.eventsDropped)
+    if (tally.bodiesDropped > 0) span.setAttribute('bodies_dropped', tally.bodiesDropped)
+    if (tally.eventsUndetermined > 0) {
+      span.setAttribute('events_undetermined', tally.eventsUndetermined)
+    }
   }
 
   return async function handle(req) {
@@ -374,6 +515,9 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         status: 'ok',
       },
       async (span) => {
+        /** @type {BatchSuppressionTally} */
+        const tally = { eventsDropped: 0, eventsUndetermined: 0, bodiesDropped: 0 }
+
         // Metrics ride the same exporter config; the message dataset has
         // nothing to learn from them, but the behavioral dataset does
         // (cost and activity counters), so they take the short path:
@@ -398,9 +542,16 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           //   by session id on every signal this listener serves
           const metricSplit = partitionIgnoredSessionEvents(allMetricEvents, ignoredSessions)
           if (metricSplit.droppedBySession.size > 0) {
-            await dropIgnoredSessions(metricSplit.droppedBySession, span)
+            await dropIgnoredSessions(metricSplit.droppedBySession, tally)
           }
-          const metricEvents = metricSplit.kept
+          // And so does the folder policy: a cost counter names its session
+          // and its model, which is attribution for a directory the user asked
+          // us to leave alone.
+          const metricEvents = await applyUsagePolicy(metricSplit.kept, {
+            records: await readSessionContext(),
+            tally,
+          })
+          recordSuppression(span, tally)
           if (metricEvents.length === 0) {
             span.setAttribute('telemetry_row_count', 0)
             return
@@ -436,9 +587,18 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         // @ref LLP 0256#bodies-deleted [implements]
         const split = partitionIgnoredSessionEvents(allEvents, ignoredSessions)
         if (split.droppedBySession.size > 0) {
-          await dropIgnoredSessions(split.droppedBySession, span)
+          await dropIgnoredSessions(split.droppedBySession, tally)
         }
-        const events = split.kept
+
+        // Then the folder policy, on the same batch, still before the spool is
+        // read and before anything is written. Both gates run ahead of every
+        // write on this path, which is what leaves no window for a verdict to
+        // arrive after the data.
+        // @ref LLP 0254#policy-inline [implements]: `.hypignore` and the
+        //   machine-local list decide at ingest, from the hook's cwd
+        const records = await readSessionContext()
+        const events = await applyUsagePolicy(split.kept, { records, tally })
+        recordSuppression(span, tally)
         if (events.length === 0) {
           span.setAttribute('row_count', 0)
           span.setAttribute('telemetry_row_count', 0)
@@ -467,7 +627,8 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           })
         }
 
-        const records = await readSessionContext()
+        // The same records the policy gate decided on, so the cwd a row is
+        // stamped with is the cwd its verdict was resolved from.
         const projections = projectClaudeTelemetryEvents(events, {
           clientName: deps.clientName,
           usageByRequestId,
