@@ -27,8 +27,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *      staged restart.
  *   2. relaunch on rev-1 → first poll clears probation → the confirmation edge
  *      schedules a reconcile pass → **claude auto-attaches**: the `_hypaware`
- *      marker + the gateway `ANTHROPIC_BASE_URL` land in the client settings,
- *      and the `attach.claude` client-action marker reads `done`.
+ *      marker + the LLP 0258 telemetry env block land in the client settings
+ *      (`otel` mode: the base URL is never written), and the `attach.claude`
+ *      client-action marker reads `done`.
  *   3. a second confirmed boot pass (a fresh relaunch on the same rev-1) hits
  *      the **drift** branch of the freshness check: rev-1 lets the gateway bind
  *      an ephemeral port, so the relaunch is at a *new* endpoint, the `done`
@@ -73,6 +74,11 @@ export async function run({ harness, expect }) {
   const previousClaudeHome = process.env.CLAUDE_HOME
   process.env.HOME = fakeHome
   delete process.env.CLAUDE_HOME
+  // Pin the version the LLP 0258 floor check sees: the daemon's auto-attach
+  // runs the same adapter, and the flow must not depend on whatever `claude`
+  // binary the machine running it carries.
+  const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
+  process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
   process.env.HYP_HOME = harness.hypHome
   delete process.env.HYP_CONFIG
@@ -139,10 +145,20 @@ export async function run({ harness, expect }) {
         attached?._hypaware,
         (v) => v !== null && typeof v === 'object' && typeof v.port === 'number'
       )
+      // `otel` mode: the telemetry block lands and no routing key is written,
+      // so the fleet path delivers the same env block a manual attach does.
+      // @ref LLP 0258#settings-env [tests]: managed settings deliver the same block
       expect.that(
-        'auto-attach: env.ANTHROPIC_BASE_URL points at the local gateway',
-        attached?.env?.ANTHROPIC_BASE_URL,
+        'auto-attach: the telemetry env block points at the loopback listener',
+        attached?.env?.OTEL_EXPORTER_OTLP_ENDPOINT,
         (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(v)
+      )
+      expect.that(
+        'auto-attach: mode=otel on the marker, and no base URL was written',
+        attached,
+        (v) =>
+          v?._hypaware?.mode === 'otel' &&
+          !Object.hasOwn(v?.env ?? {}, 'ANTHROPIC_BASE_URL')
       )
       expect.that(
         'auto-attach: the unrelated seed key (ANTHROPIC_API_KEY) survived attach',
@@ -171,7 +187,7 @@ export async function run({ harness, expect }) {
     // ephemeral port, so this boot is at a *different* endpoint: the marker is
     // stale, the unit is a forward gap, and the attach re-performs at the new
     // port instead of short-circuiting forever.
-    // @ref LLP 0086#re-attach-on-drift [tests]: a done marker at a moved endpoint re-performs, which is what keeps ANTHROPIC_BASE_URL pointing at a bound port
+    // @ref LLP 0086#re-attach-on-drift [tests]: a done marker at a moved endpoint re-performs, which is what keeps the settings marker recording a bound port
     const driftHandle = await runDaemonHandle(harness)
     try {
       await waitFor(
@@ -194,10 +210,16 @@ export async function run({ harness, expect }) {
         (v) => typeof v === 'string' && v.length > 0 && v !== attachedEndpoint
       )
       const rewritten = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
+      // In `otel` mode no env key carries the gateway port; the settings
+      // marker's `port` is what the freshness check compares, so it is what
+      // must follow the rebound endpoint.
       expect.that(
-        'drift: env.ANTHROPIC_BASE_URL was rewritten to the newly bound port',
-        rewritten?.env?.ANTHROPIC_BASE_URL,
-        (v) => typeof v === 'string' && v === drifted?.endpoint
+        'drift: the settings marker port was rewritten to the newly bound port',
+        rewritten?._hypaware?.port,
+        (v) =>
+          typeof v === 'number' &&
+          typeof drifted?.endpoint === 'string' &&
+          drifted.endpoint.endsWith(`:${v}`)
       )
       expect.that(
         'drift: the unrelated seed key (ANTHROPIC_API_KEY) survived the re-attach',
@@ -338,9 +360,14 @@ export async function run({ harness, expect }) {
         (v) => v === undefined
       )
       expect.that(
-        'reverse: the managed ANTHROPIC_BASE_URL was removed (no prior to restore)',
-        JSON.parse(restored)?.env?.ANTHROPIC_BASE_URL,
-        (v) => v === undefined
+        'reverse: the managed telemetry keys were removed (no prior to restore)',
+        JSON.parse(restored)?.env,
+        (v) =>
+          v !== null &&
+          typeof v === 'object' &&
+          !Object.hasOwn(v, 'OTEL_EXPORTER_OTLP_ENDPOINT') &&
+          !Object.hasOwn(v, 'CLAUDE_CODE_ENABLE_TELEMETRY') &&
+          !Object.hasOwn(v, 'OTEL_LOG_RAW_API_BODIES')
       )
       expect.that(
         'reverse: the unrelated seed key (ANTHROPIC_API_KEY) survived the round-trip',
@@ -357,6 +384,8 @@ export async function run({ harness, expect }) {
     else process.env.HOME = previousHome
     if (previousClaudeHome === undefined) delete process.env.CLAUDE_HOME
     else process.env.CLAUDE_HOME = previousClaudeHome
+    if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
+    else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
   }
 
   await obs.shutdown()

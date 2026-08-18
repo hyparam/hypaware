@@ -13,6 +13,9 @@ see LLP 0236); LLP 0247 (#attach-writes-https_proxy-not-a-base-url: the
 gateway now serves absolute-form request-targets to registered hosts on
 forward-proxy listeners, so the case against `HTTP_PROXY` rests on the
 no-plaintext-traffic-worth-capturing rationale alone)
+**Superseded-by (in part):** LLP 0262, LLP 0258 (accepted 2026-08-17; attaching the `claude` client writes a telemetry `env` block instead of
+`HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`; #mode-migration and the `prev_env`
+undo record are what the third mode reuses unchanged)
 
 > Attach stops writing `env.ANTHROPIC_BASE_URL` and writes `env.HTTPS_PROXY`
 > plus `env.NODE_EXTRA_CA_CERTS` instead. The endpoint stays

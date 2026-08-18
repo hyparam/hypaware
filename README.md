@@ -276,16 +276,46 @@ client's own config file (for example `~/.claude/settings.json` for
 Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
 Codex); unrelated keys in every file are preserved.
 
-### Proxy mode (keeps Claude Code's Remote Control working)
+### Claude Code attaches by telemetry, not by proxy
 
-By default `hyp attach claude` points `ANTHROPIC_BASE_URL` at the local
-gateway. Claude Code disables **Remote Control** whenever that variable
-points anywhere other than `api.anthropic.com`, so an attached machine
-loses it.
+`hyp attach claude` writes one reversible `env` block into
+`~/.claude/settings.json` that turns on Claude Code's own OpenTelemetry
+export and points it at a loopback listener the daemon runs. It leaves
+`ANTHROPIC_BASE_URL` alone, sets no proxy, and installs no certificate
+authority, so Claude Code still talks straight to `api.anthropic.com`,
+**Remote Control keeps working**, and a daemon that is down or wedged costs
+you capture rather than your session. Nothing has to be quit and reopened:
+Claude Code reads the `env` block at launch, on every launch path.
 
-Proxy mode avoids that by leaving the base URL alone and routing Claude
-Code through the gateway as an HTTPS proxy instead. Turn it on in the
-`ai-gateway` section of `~/.hyp/hypaware-config.json` and restart the
+Two things ride along with the conversation rows:
+
+- **Raw request and response bodies** land in `~/.hyp/spool/claude-bodies`
+  (owner-only) until the listener projects them and deletes them. They carry
+  what the events do not: the system prompt, the tool list, and untruncated
+  tool arguments. The directory is capped (512 MB by default, oldest evicted
+  first), and both `hyp purge` and `hyp detach claude` empty it.
+- **Behavioral signals the wire never showed** land in their own
+  `claude_telemetry_events` table: tool accept and reject decisions,
+  permission mode changes, per-request cost, hook and MCP health.
+
+Claude Code **2.1.193 or newer** is required (2.1.214 for the full
+tool-decision detail). Below the floor, attach refuses the switch, leaves any
+existing attach exactly as it is, and prints `claude update`, rather than
+silently capturing less.
+
+`hyp detach claude` removes exactly those keys, restores anything they
+displaced, and sweeps the spool.
+
+If this machine was attached by proxy before, `hyp attach claude` is also the
+migration: it releases the proxy keys, unwinds the launchd environment, and
+tells you how to end the CA trust that it will not end for you
+(`hyp detach claude --purge`).
+
+### Proxy mode (TLS interception for the clients that still proxy)
+
+Claude Code no longer uses this path. It remains how the gateway captures a
+client that cannot simply be pointed at a different base URL. Turn it on in
+the `ai-gateway` section of `~/.hyp/hypaware-config.json` and restart the
 daemon:
 
 ```json
@@ -294,37 +324,35 @@ daemon:
 
 ```sh
 hyp daemon restart
-hyp attach claude
 ```
 
-On the next attach, HypAware sets `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`
-instead of the base URL. What this changes:
+Such a client is then pointed at the gateway with `HTTPS_PROXY` and
+`NODE_EXTRA_CA_CERTS` rather than a base URL. What that changes:
 
 - **A machine-local certificate authority is generated** under
   `~/.hyp/hypaware/tls`, readable only by you, and name-constrained so it
   cannot vouch for any host outside the provider set HypAware intercepts.
-  On macOS, attach also adds it to your **login keychain** as a user-domain
-  trusted root, because Claude Code's Remote Control transport trusts only
-  the keychain: macOS raises its own password dialog, and declining it
-  leaves capture working with Remote Control's inbound channel off. No admin
-  rights are needed and the machine-wide system keychain is not touched. On
-  other platforms trust stays file-scoped to Claude Code's own settings.
-  `hyp status` shows the fingerprint and whether the keychain still trusts
-  it. `hyp detach claude` keeps the CA and the trust, so re-attaching does
-  not ask again; `hyp detach claude --purge` and `hyp daemon uninstall`
-  remove both.
-- **Only `api.anthropic.com` is decrypted**, because that is the only host
-  a registered upstream names. Every other host Claude Code talks to is
-  tunnelled through without being decrypted.
-- **What gets recorded does not change.** Only `/v1/messages` is recorded,
-  exactly as before; the other paths Claude Code calls on that host are
-  passed through without being stored.
+  On macOS it can also be added to your **login keychain** as a user-domain
+  trusted root, for a client whose transport trusts only the keychain: macOS
+  raises its own password dialog, and declining it leaves capture working
+  with that inbound channel off. No admin rights are needed and the
+  machine-wide system keychain is not touched. On other platforms trust
+  stays file-scoped to the client's own settings. `hyp status` shows the
+  fingerprint and whether the keychain still trusts it.
+  `hyp detach <client>` keeps the CA and the trust, so re-attaching does not
+  ask again; `hyp detach <client> --purge` and `hyp daemon uninstall` remove
+  both.
+- **Only the hosts a registered upstream names are decrypted.** Every other
+  host the client talks to is tunnelled through without being decrypted.
+- **What gets recorded does not change.** Only the recorded API paths are
+  stored; the other paths a client calls on the same host are passed through
+  without being stored.
 
 Two things to know before turning it on:
 
-- If the daemon is not running, Claude Code's HTTPS all fails, not just its
-  model calls. Attach refuses to write the settings unless proxy mode is
-  actually running, and `hyp detach claude` is the escape hatch.
+- If the daemon is not running, a proxied client's HTTPS all fails, not just
+  its model calls. Attach refuses to write the settings unless proxy mode is
+  actually running, and `hyp detach <client>` is the escape hatch.
 - If you already use a corporate proxy, set `upstream_proxy` to it so
   traffic still chains through it. Attach warns and backs up your existing
   `HTTPS_PROXY` (restored on detach) rather than silently replacing it:
