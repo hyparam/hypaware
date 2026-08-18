@@ -23,6 +23,26 @@ text, not just metadata. Rows age out of the local cache after the
 retention window init set (90 days on a team install, 120 on a
 local-only one; `hyp init --retention-days <N>` overrides).
 
+### The raw-body spool
+
+With Claude Code attached, Claude Code writes each raw request and response
+body into `~/.hyp/spool/claude-bodies`, a directory HypAware creates
+owner-only (`0700`). It is a transit area, not storage: HypAware reads a file
+only for the few fields its event stream leaves out (the system prompt, the
+tool list, message ordering, untruncated tool arguments) and deletes the file
+as soon as it has them. The same content is already in Claude Code's own
+transcripts under `~/.claude/projects`.
+
+Three things keep it from becoming a second record:
+
+- A session you ignored, by `.hypignore`, by a machine-local marking, or with
+  `hyp session ignore`, has its bodies **deleted unread**, not skipped.
+- The directory has a size cap (512 MB by default, `spool_max_bytes` in the
+  `@hypaware/claude` config). Past it the oldest files go first, so a stopped
+  daemon costs detail, never disk.
+- `hyp purge` empties it, whatever else you asked that purge to delete, and
+  `hyp detach claude` empties it on the way out.
+
 ### If you turned on proxy mode
 
 Proxy mode (see the README) routes all of Claude Code's HTTPS through the
@@ -176,6 +196,11 @@ hyp purge --all           # everything, wholesale
 ```
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
+
+Every form of it also empties the raw-body spool described above, including
+the targeted ones: a spooled body has not been read yet, so nothing about it
+says which directory or session it belongs to, and leaving it would let the
+next batch write back rows you just deleted.
 
 ## Enrolling with a team: the first-sync review
 
