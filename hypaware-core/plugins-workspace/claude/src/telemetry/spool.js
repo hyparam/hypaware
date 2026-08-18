@@ -3,19 +3,24 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { captureSpoolRoot } from '../../../../../src/core/capture_spool.js'
+
 /**
  * Where Claude Code drops the raw request/response bodies attach asks it for.
  *
  * The path is fixed rather than configurable: attach writes it into the client
  * settings, the listener reads it, and `hyp purge` and detach sweep it, so
- * three unrelated surfaces have to agree on it without being told.
+ * three unrelated surfaces have to agree on it without being told. The parent
+ * is core's capture-spool root rather than a second spelling of it, which is
+ * what makes this directory one `hyp purge` empties and one detach is allowed
+ * to sweep.
  *
  * @ref LLP 0253#spool-location [implements]: `<hyp-home>/spool/claude-bodies`,
  *   owner-only
  */
 
-/** Path segments under the HypAware home. */
-const SPOOL_SEGMENTS = ['spool', 'claude-bodies']
+/** This client's directory name under the shared capture-spool root. */
+const SPOOL_DIRNAME = 'claude-bodies'
 
 /**
  * Default byte cap for the spool.
@@ -32,7 +37,7 @@ export const DEFAULT_SPOOL_MAX_BYTES = 512 * 1024 * 1024
  * @returns {string}
  */
 export function claudeBodySpoolDir(hypHome) {
-  return path.join(hypHome, ...SPOOL_SEGMENTS)
+  return path.join(captureSpoolRoot(hypHome), SPOOL_DIRNAME)
 }
 
 /**
