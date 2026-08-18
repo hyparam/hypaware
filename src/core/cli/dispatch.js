@@ -233,6 +233,15 @@ export async function dispatch(argv, opts = {}) {
     stdout.write(`hypaware ${version}\n`)
     return 0
   }
+  // `hyp help <command...>` is the spelled-out form of `hyp <command...>
+  // --help`, so rewrite it and let the ordinary match path render the same
+  // registry-backed help. Routing rather than re-implementing is what makes it
+  // reach plugin commands too: those only exist in the registry after boot,
+  // which the pre-boot top-level help path deliberately skips.
+  // @ref LLP 0265#help-verb [implements]: `help <command>` is rewritten to that command's `--help`, never silently answered with the top-level table
+  if (argv.length > 1 && argv[0] === 'help' && !argv[1].startsWith('-')) {
+    argv = [...argv.slice(1), '--help']
+  }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
   }
@@ -736,6 +745,10 @@ async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
  * `daemon`, ...). A group with no bare command (plugin namespaces like
  * `graph`) gets a synthesized subcommand listing instead.
  *
+ * Two short sections follow the command table for the surfaces that are
+ * not commands and so never had a row: the global flags, and the
+ * registry's command aliases.
+ *
  * @ref LLP 0009#layered-help [implements]: one row per top-level token; subcommand summaries live in group help
  * @param {{
  *   stdout: { write(chunk: string): unknown },
@@ -744,10 +757,16 @@ async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
  * }} args
  */
 function renderHelp({ stdout, registry, pluginCommands = [] }) {
-  const core = registry
-    .list()
-    .filter((c) => !c.hidden)
-    .map((c) => ({ name: c.name, summary: c.summary }))
+  const listed = registry.list().filter((c) => !c.hidden)
+  const core = listed.map((c) => ({ name: c.name, summary: c.summary }))
+  // Aliases route but never get a command row of their own, so without this
+  // section a working spelling (`hyp unattach`) is discoverable only by
+  // reading the help of the command it forwards to. Read off the registry so
+  // a new alias lists itself. Manifest-declared plugin commands carry no
+  // aliases at discovery time, so this is the core set.
+  const aliasRows = listed
+    .flatMap((c) => (c.aliases ?? []).map((alias) => ({ alias, target: c.name })))
+    .sort((a, b) => (a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : 0))
   const coreNames = new Set(core.map((c) => c.name))
   const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))]
 
@@ -779,6 +798,27 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   const nameWidth = Math.max(...names.map((n) => n.length), 8)
   for (const name of names) {
     stdout.write(`  ${name.padEnd(nameWidth)}  ${rows.get(name)}\n`)
+  }
+  // The rows above are commands; these two are neither, and both work. A user
+  // who cannot find `--version` in the command table concludes it is absent.
+  // @ref LLP 0265#global-options [implements]: top-level help names the global options and aliases that route but own no command row
+  stdout.write('\n')
+  stdout.write('Global options:\n')
+  const globals = [
+    ['--help, -h', "show this list, or a command's help (`hyp help <command>` too)"],
+    ['--version, -V', 'print the version (`hyp version` adds runtime detail)'],
+  ]
+  const globalWidth = Math.max(...globals.map(([flag]) => flag.length))
+  for (const [flag, summary] of globals) {
+    stdout.write(`  ${flag.padEnd(globalWidth)}  ${summary}\n`)
+  }
+  if (aliasRows.length > 0) {
+    stdout.write('\n')
+    stdout.write('Aliases:\n')
+    const aliasWidth = Math.max(...aliasRows.map((r) => r.alias.length), 8)
+    for (const row of aliasRows) {
+      stdout.write(`  ${row.alias.padEnd(aliasWidth)}  ${row.target}\n`)
+    }
   }
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)

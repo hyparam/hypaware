@@ -232,10 +232,16 @@ function buildCoreCommands(registry) {
       name: 'init',
       summary: 'Initialize a new HypAware install (interactive walkthrough or preset)',
       usage: 'hyp init [preset] [flags]',
+      // @ref LLP 0137#pathway-defaults [constrained-by]: the walkthrough has no retention question to describe, so the help states the pathway defaults instead
       help: [
         'With no arguments, runs the interactive walkthrough: pick which clients',
-        'and sources to capture, an export strategy, and a retention window, then',
-        'write the config, install the daemon, and attach the selected clients.',
+        'and sources to capture and an export strategy, then write the config,',
+        'install the daemon, and attach the selected clients.',
+        '',
+        'The walkthrough never asks how long to keep cached rows: the pathway',
+        'sets it (90 days when you join a team, 120 days for a local-only',
+        'install). --retention-days below is the override, and the written',
+        'query.cache.retention.default_days stays editable afterwards.',
         '',
         'Pass a preset name to skip the walkthrough. Passing any flag below also',
         'skips it: the non-interactive path is chosen by the presence of a flag,',
@@ -472,7 +478,8 @@ function buildCoreCommands(registry) {
       //   kinds of client asset; no separate agents verb.
       name: 'skills install',
       summary: 'Install registered skills and subagents into AI client directories',
-      usage: 'hyp skills install [--client <name>]',
+      usage: 'hyp skills install [--client <name>|all]',
+      help: 'Without --client the target is all, so every configured client gets the copies.',
       run: runSkillsInstall,
     },
     makeGroupCommand({
@@ -483,7 +490,18 @@ function buildCoreCommands(registry) {
     {
       name: 'daemon install',
       summary: 'Install the persistent user service (launchd / systemd)',
-      usage: 'hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]',
+      usage: 'hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json] [--platform darwin|linux]]',
+      // @ref LLP 0265#platform-is-a-render-override [implements]: --platform is public but dry-run only, so it can never install the wrong platform's unit
+      help: [
+        '  --config <path>    config the unit should load (default: the resolved one)',
+        '  --bin <path>       hyp binary to record in the unit',
+        '  --dry-run          render the plist / unit without touching disk',
+        '  --json             machine shape for --dry-run',
+        '  --platform darwin|linux',
+        '                     render the other platform\'s unit. Inspection only:',
+        '                     it requires --dry-run, because an install always',
+        '                     targets the host it runs on.',
+      ].join('\n'),
       run: runDaemonInstall,
     },
     {
@@ -523,8 +541,16 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'daemon restart',
-      summary: 'Stop the daemon (and direct the operator to relaunch)',
+      summary: 'Restart the installed daemon service (launchd / systemd)',
       usage: 'hyp daemon restart',
+      help: [
+        'Restarts the installed launchd / systemd service in place, so a config',
+        'change takes effect without an uninstall.',
+        '',
+        'With no installed service there is nothing to bring back up: the running',
+        'foreground daemon is stopped and the command prints how to relaunch it',
+        '(hyp daemon run --foreground) or how to install the service instead.',
+      ].join('\n'),
       run: runDaemonRestart,
     },
     {
@@ -574,13 +600,23 @@ function buildCoreCommands(registry) {
     {
       name: 'remote login',
       summary: 'Store the query-scoped token for a remote target (0600)',
-      usage: 'hyp remote login <name> [--token-file <path>] [--no-forward] [--no-daemon]',
+      // @ref LLP 0062#bare-remote [constrained-by]: the name is optional here because a bare login resolves the default target
+      usage:
+        'hyp remote login [name] [--org <name>] [--host <label>] [--token-file <path>]' +
+        ' [--browser | --no-browser] [--no-forward] [--no-daemon]',
       help: [
-        'Browser sign-in by default; --token-file/stdin for a static token,',
-        '--org <name> to select an org, --no-browser to print the URL,',
-        '--host <label> to override the forwarding host label (default: hostname),',
-        '--no-forward to sign in for queries only (no fleet enrollment),',
-        '--no-daemon to provision the sink without installing the service.',
+        'With no name, signs in to the default target: query.default_remote when',
+        'the config sets one, else the shipped built-in central server.',
+        '',
+        '  --org <name>          select an org to sign in to',
+        '  --host <label>        forwarding host label (default: this hostname)',
+        '  --token-file <path>   read a static token from a file instead of',
+        '                        signing in (piping the token in works too, with',
+        '                        no flag at all)',
+        '  --browser             force the browser flow even with a piped stdin',
+        '  --no-browser          print the authorization URL instead of opening it',
+        '  --no-forward          sign in for queries only (no fleet enrollment)',
+        '  --no-daemon           provision the sink without installing the service',
       ].join('\n'),
       run: runRemoteLogin,
     },

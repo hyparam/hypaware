@@ -174,7 +174,9 @@ export async function runDaemonRestart(_argv, ctx) {
 export async function runDaemonInstall(argv, ctx) {
   const parsed = parseDaemonInstallArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]\n')
+    ctx.stdout.write(
+      'usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json] [--platform darwin|linux]]\n'
+    )
     return 0
   }
   if (parsed.error) {
@@ -366,6 +368,12 @@ function parseDaemonInstallArgs(argv) {
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ 'dry-run': boolean, json: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
   if (p.json && !p['dry-run']) return { error: '--json requires --dry-run' }
+  // A real install writes into the host's own service directory and then calls
+  // that host's service manager, so a cross-platform install is never anything
+  // but a broken one. The flag stays public for rendering the other platform's
+  // unit, and is refused everywhere else.
+  // @ref LLP 0265#platform-is-a-render-override [implements]: --platform is accepted only alongside --dry-run
+  if (p.platform !== undefined && !p['dry-run']) return { error: '--platform requires --dry-run' }
   return { dryRun: p['dry-run'], json: p.json, configPath: p.config, binPath: p.bin, platform: p.platform }
 }
 
