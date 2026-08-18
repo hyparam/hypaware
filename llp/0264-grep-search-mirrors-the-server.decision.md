@@ -5,6 +5,7 @@
 **Systems:** Query, Cache, CLI, MCP
 **Author:** Brendan / Claude
 **Date:** 2026-08-18
+**Extended-by:** LLP 0265 (implementation plan; its #sequencing resolves the #open item)
 **Related:** LLP 0003, LLP 0013, LLP 0034, LLP 0104, LLP 0105, LLP 0209, LLP 0222; hypaware-server LLP 0127, LLP 0128, LLP 0130, LLP 0136, LLP 0157, LLP 0158 (out of tree, design authority for the mechanism)
 
 > Full-text search over recorded sessions ships as `hyp query grep`, a
