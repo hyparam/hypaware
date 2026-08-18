@@ -12,8 +12,9 @@
  *
  * Everything runs against an isolated `HYP_HOME` and an injected kernel, so
  * no boot happens, no listener is bound, no real user state is read or
- * written, and no command body executes: `--help` is intercepted by dispatch
- * before `run`.
+ * written. `--help` is intercepted by dispatch before `run`, so no command
+ * body executes except the bare group commands the unknown-subcommand sweep
+ * exercises on purpose, whose whole body is a registry read and an error.
  *
  * Assertions stay structural (names, usage tokens, option spellings, child
  * sets, exit codes) rather than one prose snapshot, so a wording change to a
@@ -95,7 +96,13 @@ function coreRegistry() {
 async function harness(registry = coreRegistry()) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cli-gate-home-'))
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cli-gate-ws-'))
-  const kernel = createKernelRuntime({ commandRegistry: registry })
+  // Without an explicit `cacheRoot` the kernel falls back to
+  // `process.env.HYP_HOME`, i.e. the developer's real `~/.hyp`, which the
+  // `readdir(hypHome)` guard below could never see.
+  const kernel = createKernelRuntime({
+    commandRegistry: registry,
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
   /**
    * @param {string[]} argv
    * @returns {Promise<{ code: number, out: string, err: string }>}
@@ -106,7 +113,9 @@ async function harness(registry = coreRegistry()) {
     const code = await dispatch(argv, {
       stdout,
       stderr,
-      env: { ...process.env, HYP_HOME: hypHome },
+      // `resolveConfigPath` honours `HYP_CONFIG` ahead of `HYP_HOME`, so an
+      // exported one would aim the help path at the developer's real config.
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
       registry,
       kernel,
       workspaceDir,
@@ -158,7 +167,9 @@ test('every usage line has balanced <required> and [optional] groups', () => {
 test('every option named in a usage line is spelled as an option the parsers accept', () => {
   for (const command of coreRegistry().list()) {
     const tail = command.usage.slice(`hyp ${command.name}`.length)
-    for (const token of tail.split(/[\s[\]<>|]+/)) {
+    // `=` splits too: `--format=<fmt>` is a spelling `verb_codec` parses, so
+    // the check is on the option name rather than on the whole token.
+    for (const token of tail.split(/[\s[\]<>|=]+/)) {
       if (!token.startsWith('-')) continue
       assert.ok(
         LONG_OPTION.test(token) || SHORT_OPTION.test(token),
@@ -275,7 +286,7 @@ test('-h renders the same top-level help as --help', async () => {
   assert.equal(short.out, long.out)
 })
 
-test('hidden commands stay out of help but stay dispatchable', async () => {
+test('hidden commands stay out of help but stay dispatchable', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const hidden = registry.list().filter((c) => c.hidden)
   assert.ok(hidden.length > 0, 'expected at least one hidden command to guard')
@@ -284,13 +295,24 @@ test('hidden commands stay out of help but stay dispatchable', async () => {
   const body = out.split('Commands:\n')[1] ?? ''
   for (const command of hidden) {
     assert.doesNotMatch(body, new RegExp(`^ {2}${command.name}\\s`, 'm'), `${command.name} leaked into help`)
-    assert.equal(registry.match(command.name.split(' '))?.command.name, command.name)
+    // Through `dispatch`, not `registry.match`: a visibility guard added
+    // around the lookup would leave a registry-only assertion green while
+    // `hyp smoke <flow>` stopped resolving.
+    const reached = await run([...command.name.split(' '), '--help'])
+    assert.equal(reached.code, 0, `${command.name} --help exited ${reached.code}`)
+    assert.ok(
+      reached.out.startsWith(`hyp ${command.name} - `) || reached.out.includes(`usage: ${command.usage}`),
+      `${command.name}: dispatch did not reach the hidden registration`
+    )
   }
 })
 
-// Help must not read or seed the user's install: LLP 0009 renders it before
-// boot precisely so nothing is loaded or bound to print it.
-// @ref LLP 0009#top-level-help-lists-plugin-commands-without-booting [tests]: help touches no state
+// Help must not read or seed the user's install. That help renders *before
+// boot* is pinned by test/core/command-dispatch.test.js; this harness injects
+// a kernel, so `bootKernel` is never reached and cannot be the thing under
+// test. What is under test is the consequence: no help page on any
+// registration seeds state.
+// @ref LLP 0009#top-level-help-lists-plugin-commands-without-booting [tests]: no registration's help page seeds the install it renders from
 test('rendering help writes nothing under HYP_HOME', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const { run, hypHome } = await harness()
   await run(['--help'])
@@ -305,10 +327,12 @@ test('rendering help writes nothing under HYP_HOME', { timeout: SWEEP_TIMEOUT_MS
 test('every visible group renders its registry-backed subcommand table', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)
+  let checked = 0
   for (const command of registry.list()) {
     if (command.hidden) continue
     const children = listGroupChildren(registry, command.name)
     if (children.length === 0) continue
+    checked += 1
     const { code, out, err } = await run([...command.name.split(' '), '--help'])
     assert.equal(code, 0, `${command.name} --help exited ${code}`)
     assert.equal(err, '', `${command.name} --help wrote to stderr`)
@@ -318,20 +342,24 @@ test('every visible group renders its registry-backed subcommand table', { timeo
       assert.match(out, new RegExp(`^ {2}${child.name}\\s`, 'm'), `${command.name} --help omits child '${child.name}'`)
     }
   }
+  assert.ok(checked > 0, 'expected at least one visible group')
 })
 
 test('every visible leaf renders its own summary, usage, and nothing on stderr', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)
+  let checked = 0
   for (const command of registry.list()) {
     if (command.hidden) continue
     if (listGroupChildren(registry, command.name).length > 0) continue
+    checked += 1
     const { code, out, err } = await run([...command.name.split(' '), '--help'])
     assert.equal(code, 0, `${command.name} --help exited ${code}`)
     assert.equal(err, '', `${command.name} --help wrote to stderr`)
     assert.ok(out.startsWith(`hyp ${command.name} - ${command.summary}\n`), `${command.name} --help header drifted`)
     assert.ok(out.includes(`usage: ${command.usage}\n`), `${command.name} --help omits its usage line`)
   }
+  assert.ok(checked > 0, 'expected at least one visible leaf')
 })
 
 test('every help-only group rejects an unknown subcommand with exit 2 and names the real ones', { timeout: SWEEP_TIMEOUT_MS }, async () => {
