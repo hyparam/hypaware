@@ -933,7 +933,12 @@ async function collectPluginHelpCommands(discovery) {
     const out = new Map()
     for (const entry of selection.selectedManifests) {
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
-        if (!cmd || cmd.hidden || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
+        if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
+        // An internal mechanism keeps its manifest entry (the miss path
+        // still names its plugin) but is not CLI surface, so it never
+        // reaches a help row. Mirrors the registry's `hidden` filter above.
+        // @ref LLP 0268#field [implements]: hidden is a help filter over a declaration that stays
+        if (cmd.hidden === true) continue
         out.set(cmd.name, {
           name: cmd.name,
           summary: typeof cmd.summary === 'string' ? cmd.summary : '',

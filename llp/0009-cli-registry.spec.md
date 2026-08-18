@@ -19,6 +19,13 @@
 > [no cross-plugin option injection](#no-cross-plugin-option-injection). `hyp mcp`
 > (serve) is a core command.
 
+> **Extended by [LLP 0268](./0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).**
+> A manifest-declared command may be an internal mechanism rather than CLI
+> surface. 0268 replaces the mechanism the discovery section below names
+> (omit the command from `contributes.commands`) with a `hidden: true` flag
+> on the declaration, which keeps it out of help without losing the
+> declaration the dispatch-miss path reads.
+
 ## Core owns dispatch
 
 Core owns command dispatch and help assembly. Plugins register commands; core

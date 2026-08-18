@@ -168,6 +168,10 @@ export function validateManifest(value) {
       /** @type {Record<string, unknown>} */ (m.contributes).picker
     )
     if (!pickerCheck.ok) return pickerCheck
+    const commandCheck = validateCommandContributions(
+      /** @type {Record<string, unknown>} */ (m.contributes).commands
+    )
+    if (!commandCheck.ok) return commandCheck
   }
   /** @type {PluginManifest} */
   const manifest = {
@@ -186,6 +190,48 @@ export function validateManifest(value) {
   if (isStringArray(m.compose_with)) manifest.compose_with = /** @type {PluginName[]} */ (m.compose_with)
   if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
   return { ok: true, manifest }
+}
+
+/**
+ * Validate `contributes.commands`. It is optional; when present it must
+ * be an array of rows, each with a `name` (the space-separated command
+ * path) and, optionally, `summary`/`usage` strings and a `hidden`
+ * boolean. Unknown fields pass through untouched, like the rest of the
+ * `contributes` block.
+ *
+ * `hidden` is checked here rather than left opaque for the reason the
+ * picker's is: it is the field that decides whether a command is CLI
+ * surface at all, and a manifest that spells it `"true"` would silently
+ * advertise an internal mechanism with nothing to say so.
+ *
+ * @param {unknown} commands
+ * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ * @ref LLP 0268#field [implements]: internal commands stay declared and are marked, not deleted
+ */
+function validateCommandContributions(commands) {
+  if (commands === undefined) return { ok: true }
+  if (!Array.isArray(commands)) {
+    return invalid('contributes.commands must be an array when present')
+  }
+  for (const row of commands) {
+    if (!isPlainObject(row)) {
+      return invalid('contributes.commands entries must be objects')
+    }
+    const c = /** @type {Record<string, unknown>} */ (row)
+    if (!isNonEmptyString(c.name)) {
+      return invalid('contributes.commands entries require a name (string)')
+    }
+    if (c.summary !== undefined && typeof c.summary !== 'string') {
+      return invalid('contributes.commands summary must be a string when present')
+    }
+    if (c.usage !== undefined && typeof c.usage !== 'string') {
+      return invalid('contributes.commands usage must be a string when present')
+    }
+    if (c.hidden !== undefined && typeof c.hidden !== 'boolean') {
+      return invalid('contributes.commands hidden must be a boolean when present')
+    }
+  }
+  return { ok: true }
 }
 
 /**

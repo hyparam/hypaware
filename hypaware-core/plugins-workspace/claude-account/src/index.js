@@ -75,6 +75,10 @@ export async function activate(ctx) {
   }
   ctx.provideCapability(CREDENTIAL_CAPABILITY, '1.0.0', capability)
 
+  // Internal mechanism, not CLI surface: the caller is the no-arg wrapper
+  // Desktop execs, and the whole stdout is a live credential. Advertising it
+  // in help invites a person to run it and paste the result somewhere.
+  // @ref LLP 0268#internal [implements]: the helper contract is hidden in the registry and in the manifest, and stays dispatchable
   ctx.commands.register({
     name: 'claude-account credential',
     plugin: PLUGIN_NAME,
@@ -117,6 +121,12 @@ export async function activate(ctx) {
     audience: 'everyday',
     summary: 'Show credential mode and sign-in state',
     usage: 'hyp client claude-account status',
+    help: 'Reports which credential this fleet uses (org_key or subscription) and whether this '
+      + 'machine can present one: for org_key, whether the key resolves from config or the named '
+      + "env var; for subscription, whether a token is stored and when it expires. It prints the "
+      + 'token fingerprint only, never the token, so the output is safe to paste into a bug report. '
+      + "Exits nonzero when no credential resolves, so it doubles as a check before 'hyp "
+      + "client claude-desktop install'.",
     run: async (argv, cmdCtx) => runStatus(cmdCtx, config, mode, stateDir),
   })
 

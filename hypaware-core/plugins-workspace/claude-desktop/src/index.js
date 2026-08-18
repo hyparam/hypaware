@@ -115,6 +115,13 @@ export async function activate(ctx) {
     audience: 'everyday',
     summary: 'Show the resolved Desktop profile inputs (endpoint, mode, helper)',
     usage: 'hyp client claude-desktop status',
+    help: 'Prints what the profile WOULD be built from: the gateway endpoint, the credential mode '
+      + 'and auth scheme, the wrapper path and whether it exists on disk, the advertised models, and '
+      + 'the target bundle id. It reads config and disk only, changes nothing, and works on a non-Mac '
+      + "admin box. It carries no secret: for sign-in state run 'hyp client claude-account status', "
+      + "and for whether the install actually took, run 'hyp client claude-desktop verify' - this command answers "
+      + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
+      + 'credential wrapper is missing.',
     run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
   })
 
