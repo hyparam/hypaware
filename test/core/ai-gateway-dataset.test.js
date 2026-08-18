@@ -251,13 +251,13 @@ test('ai-gateway createDataSource unions legacy and source-table data', async ()
   }
 })
 
-test('ai-gateway createDataSource pads declared schema columns absent from an old partition', async () => {
+test('ai-gateway createDataSource advertises declared schema columns absent from an old partition', async () => {
   // A v7 column (e.g. git_remote, LLP 0032) read over a pre-v7 partition that
-  // physically lacks it must surface as a null-valued column, not throw
+  // physically lacks it must stay addressable rather than throwing
   // ColumnNotFoundError. `withSchemaColumns` is the only thing guaranteeing
   // this, and every other test stages partitions that already carry all
-  // columns. So without this test a regression dropping the padding would pass
-  // the suite while breaking real queries over old data. @ref LLP 0032#capture
+  // columns. So without this test a regression dropping the advertisement would
+  // pass the suite while breaking real queries over old data. @ref LLP 0032#capture
   const cacheRoot = await makeTmpDir('schema-pad')
   try {
     // Stage a partition with ONLY id/date: no repo-identity columns at all.
@@ -277,14 +277,16 @@ test('ai-gateway createDataSource pads declared schema columns absent from an ol
       assert.ok(source.columns.includes(col), `source advertises declared column ${col}`)
     }
 
-    // Scanning reads them as null/undefined rather than throwing.
+    // Scanning does not throw. The exact value such a column yields depends on
+    // the read path (LLP 0015#multi-partition-union), so assert only that it is
+    // nullish rather than pinning one representation here.
     const seen = []
     for await (const row of source.scan({}).rows()) {
       if (row.resolved) seen.push(row.resolved)
     }
     assert.equal(seen.length, 1)
     assert.equal(seen[0].id, 1)
-    assert.equal(seen[0].git_remote ?? null, null, 'absent column reads as null')
+    assert.equal(seen[0].git_remote ?? null, null, 'absent column stays addressable and reads as nullish')
     assert.equal(seen[0].repo_root ?? null, null)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })

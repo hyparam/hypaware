@@ -824,6 +824,163 @@ test('runInitWizard: a non-interactive or dry run skips the first look', async (
   assert.equal(dry.seen.length, 0)
 })
 
+// --- the stranded-attach warning's closing repeat (LLP 0230) ---
+
+/**
+ * A finale summary that reports clients this run left attached but no longer
+ * collects. The finale itself printed the full warning before the daemon
+ * restart; this is what it hands back for the closing repeat to read.
+ *
+ * @param {string[]} clients
+ */
+function strandedFinale(clients) {
+  return /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun: false },
+    globalInstall: { skipped: true, installed: false },
+    attach: [],
+    skillsInstalled: [],
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun: false, ok: false },
+    backfill: [],
+    attachedNotConfigured: clients,
+  })
+}
+
+// The finale names the stranded clients before the daemon restart (LLP 0185
+// #warn-do-not-detach) and then the wizard writes the run summary, the first
+// look's ~60 lines, and the privacy narration on top of it, so by the time an
+// attended run ends the warning has scrolled away. On a managed host it is
+// the only signal there is, because `hyp status`'s mirror diagnostic is gated
+// to hosts with no central layer.
+// @ref LLP 0230#repeat-at-the-end [tests]: the wizard repeats what its own closing output buried
+test('runInitWizard: an attended run repeats the stranded-attach warning after the first look', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const stub = firstLookStub(
+    [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+    [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }]
+  )
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: stub.runner,
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+
+  // The names and the one command that clears each, not a bare mention.
+  assert.match(text, /Still attached, no longer collected: codex/, text)
+  assert.match(text, /hyp detach --client codex/, text)
+  // Past the block that buried the finale's own print.
+  assert.ok(text.indexOf('First look') >= 0, text)
+  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('First look'), text)
+  // And still ahead of the privacy narration, which stays the last words.
+  assert.ok(
+    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text
+  )
+})
+
+// The repeat exists because the wizard's closing sequence buries the finale's
+// print. A scripted run writes nothing between the two, so repeating there
+// would be the double-print on one screen the shared run summary would have
+// caused. Its output stays byte-identical to what the finale alone produced.
+// @ref LLP 0230#when [tests]: no closing sequence, no repeat
+test('runInitWizard: a scripted run does not repeat the stranded-attach warning', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+})
+
+// A cancel at the backfill consent skips the first look, so the run summary is
+// the only thing between the finale's own warning (which the finale prints
+// before its restart block, cancelled or not) and the end of the run. The team
+// pathway is not on its own a reason to repeat: a pathway is only resolved on
+// an interactive run, so an uncancelled non-dry team run has already run the
+// first look, and the runs a `pathway === 'team'` clause would add are exactly
+// the ones with nothing in between.
+// @ref LLP 0230#when [tests]: a cancelled team run buried nothing, so it does not repeat
+test('runInitWizard: a run cancelled at the finale does not repeat the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    finaleRunner: async () => ({ ...strandedFinale(['codex']), cancelled: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.cancelled, true)
+  assert.doesNotMatch(stdout.text(), /hyp detach --client/, stdout.text())
+})
+
+// The first look is documented to degrade rather than fail a finished install
+// (LLP 0135 #first-look): an unregistered dataset, an unreadable cache, or a
+// render that throws all leave an attended run that attempted the block and
+// printed none of it. The gate that admits the repeat is therefore what the
+// step wrote, not what it attempted: on a silent skip the finale's own print
+// is still the last thing above the summary, and repeating under it would be
+// the same-screen double print.
+// @ref LLP 0230#when [tests]: a first look that printed nothing buried nothing
+test('runInitWizard: an attended run whose first look skips itself does not repeat the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    // The shape `firstLookRunnerFromCtx` yields when the overview dataset is
+    // not registered: the step returns `{ wrote: false }` without writing.
+    firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.doesNotMatch(text, /First look/, text)
+  assert.doesNotMatch(text, /hyp detach --client/, text)
+})
+
+// The skip that is not silent, and the reason the gate measures writes rather
+// than reading `shown`. When the deadline expires with nothing renderable
+// (`reason: 'slow'`, the branch `FIRST_LOOK_BUDGET_MS` exists for: a
+// pathological day, a disk that stalls), the block does not render and two
+// lines saying so do land on stdout. Those lines, plus the run summary and
+// the privacy narration, bury the finale's own warning exactly as a full
+// render would, so this run must repeat it. A gate reading `shown` drops the
+// repeat here, which on a managed host is the only signal there is: LLP 0185
+// #status-backstop gates `hyp status`'s mirror diagnostic off on a joined
+// machine.
+// @ref LLP 0230#when [tests]: a skip that still wrote buried the finale's print, so it repeats
+test('runInitWizard: an attended run whose first look skips slowly still repeats the stranded-attach warning', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: {
+      hasDataset: () => true,
+      // Far longer than the budget below, so no section ever lands. `unref`
+      // so the abandoned query does not hold the test runner open.
+      run: () => new Promise((resolve) => {
+        setTimeout(() => resolve({ columns: [], rows: [] }), 5000).unref()
+      }),
+    },
+    firstLookBudgetMs: 40,
+    finaleRunner: async () => strandedFinale(['codex']),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  // The block itself never rendered.
+  assert.match(text, /Skipped the first look/, text)
+  assert.doesNotMatch(text, /First look at what HypAware has recorded/, text)
+  // The repeat still ran, under what the skip wrote and ahead of the privacy
+  // narration, which stays the last words.
+  assert.match(text, /Still attached, no longer collected: codex/, text)
+  assert.ok(text.indexOf('hyp detach --client codex') > text.indexOf('Skipped the first look'), text)
+  assert.ok(
+    text.indexOf('hyp detach --client codex') < text.indexOf('Nothing has been uploaded yet'),
+    text
+  )
+})
+
 /**
  * A first look that finds something, so the closing first ask has data
  * for its questions to be about (LLP 0198#empty-cache).

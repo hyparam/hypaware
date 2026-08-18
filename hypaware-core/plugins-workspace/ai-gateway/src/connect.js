@@ -33,8 +33,8 @@ import tls from 'node:tls'
 /**
  * Marks a socket that arrived through a terminated CONNECT tunnel, carrying the
  * host the client asked for. `handleRequest` reads it to route by CONNECT
- * target rather than by path, and to tell proxy-mode traffic from
- * reverse-proxy traffic.
+ * target rather than by path, and to tell proxy-mode traffic from everything
+ * arriving on a plain socket.
  */
 export const CONNECT_HOST = Symbol('hypaware.connectHost')
 
@@ -43,8 +43,9 @@ export const CONNECT_HOST = Symbol('hypaware.connectHost')
  *
  * Separate from {@link CONNECT_HOST} because that symbol is also the
  * proxy-mode discriminator (`handleRequest` reads "is this defined?" to tell
- * the two front doors apart), and folding a port into it would change what an
- * absent value means. The pair is what routing keys on: `interceptsHost` made
+ * the CONNECT front door from plain-socket traffic, which then splits by
+ * request-line shape, LLP 0247), and folding a port into it would change what
+ * an absent value means. The pair is what routing keys on: `interceptsHost` made
  * the trust decision on host AND port, so resolving the upstream on the host
  * alone could hand the decrypted request to an entry addressing a different
  * port on the same name.
@@ -90,9 +91,11 @@ function markConnectTarget(socket, host, port) {
 }
 
 /**
- * The CONNECT target a request arrived through, or `undefined` for
- * reverse-proxy traffic. This is how `handleRequest` tells the two front doors
- * apart.
+ * The CONNECT target a request arrived through, or `undefined` for traffic
+ * on a plain socket. This is how `handleRequest` tells the CONNECT front door
+ * from the other two: a plain socket carries origin-form reverse-proxy
+ * traffic or an absolute-form request-target (LLP 0247), split by the
+ * request line, not by the socket.
  *
  * @param {Duplex | null | undefined} socket
  * @returns {string | undefined}

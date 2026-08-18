@@ -72,8 +72,47 @@ union (partitions with additive schema drift) can otherwise push a filter on a
 column a given partition physically lacks, and a parquet-backed source throws
 `parquet filter columns not found` rather than reading it as null; when a
 partition can't satisfy the predicate the union drops `where` for it and lets
-the engine filter. `columns` is always forwarded: projecting an absent column
-reads as null, never throws.
+the engine filter. `columns` is always forwarded, which adds no failure the
+merged stream did not already have, but an absent column does **not** read as
+null: it reads as `undefined`. The union pads every row out to the column list
+the scan advertised
+([LLP 0241 §alignment](./0241-scan-rows-carry-advertised-columns.decision.md#alignment)),
+so a column a partition physically lacks is still a real cell on the row, and
+that cell resolves to `undefined`. The value is outside `SqlPrimitive` and
+`JSON.stringify` drops it, so a padded column renders as an absent key even
+though the row object owns it, and `Object.keys(row).length` over a star counts
+the **advertised** columns rather than the physical ones. Every **row**-path
+read agrees on that value: reading the row's pre-materialized `resolved` map
+(`collect()`'s fast path), invoking the cell directly, and evaluating the column
+above the scan in a `WHERE`, an expression or function over it, `ORDER BY`,
+`GROUP BY`, `DISTINCT`, or an aggregate. The `scanColumn` column-stream path is
+**not** part of that agreement and is not what padding changed: the union
+forwards each partition's chunks unchanged, and a wrapper above it normalizes
+the holes if it wants them uniform (LLP 0032's `withSchemaColumns` maps them to
+`null`). LLP 0241 deliberately left that `null`/`undefined` split between the
+two paths unsettled. `SELECT *` renders identically to the unpadded star,
+because the key it now owns is one `JSON.stringify` drops. The column is
+addressable at all only because the union advertises the superset of partition
+columns; when no partition has it, planning fails unless a wrapper advertises
+the declared schema on top of the union (LLP 0032's `withSchemaColumns`), which
+keeps such a column addressable; the exact value a read of it then yields
+depends on the read path and is not settled here. Pinned by
+[`test/core/union-source.test.js`](../test/core/union-source.test.js).
+
+> **Corrected (#731, PR #740).** This section previously stated that projecting
+> an absent column "reads as null, never throws". That was never true of the
+> code when it was written; the paragraph above records the measured contract.
+> No runtime behaviour changed.
+
+> **Corrected again (#820).** PR #740 was cut before, and merged after,
+> [LLP 0241](./0241-scan-rows-carry-advertised-columns.decision.md), so the text
+> it landed described a tree that no longer existed: an unresolved drifted cell,
+> `undefined` only via `collect()`'s pre-materialized fast path, and a
+> `ColumnNotFoundError` from anything that evaluated the column or merely sat
+> beside it as a non-identifier sibling. 0241's padding removed that seam, and
+> the semantic conflict turned `master` red. The paragraph above records the
+> contract as measured on the current tree. No runtime behaviour changed in this
+> correction either.
 
 > **Extended-by: [LLP 0241 §alignment](./0241-scan-rows-carry-advertised-columns.decision.md#alignment).**
 > The hints above say what a union may forward; LLP 0241 adds what shape the
