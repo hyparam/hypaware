@@ -303,9 +303,13 @@ async function runClientLifecycle(action, argv, ctx) {
       // the attach: base-URL attach is exactly what this install already
       // does, so it stays the fallback.
       // @ref LLP 0244#attach-offers [implements]: attach is the migration verb for a base-URL install whose client attaches by proxy
+      // What it returns matters below: a migration or repair that actually
+      // landed changed the mode the adapter is about to write, so a marker
+      // this client already holds is stale whatever port it names.
+      let proxyStateChanged = false
       if (action === 'attach') {
         try {
-          await maybeOfferProxyModeMigration({ name, ctx, parsed })
+          proxyStateChanged = await maybeOfferProxyModeMigration({ name, ctx, parsed })
         } catch (migrationErr) {
           ctx.stderr.write(
             `warning: proxy-mode migration failed (${migrationErr instanceof Error ? migrationErr.message : String(migrationErr)}); ` +
@@ -355,9 +359,21 @@ async function runClientLifecycle(action, argv, ctx) {
             // not running) keep the pre-#277 behavior - a present marker is a
             // no-op success, an absent one the actionable error.
             // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
+            // A migration or repair that just landed is not finished until
+            // the client is rewritten: the marker's port can match the live
+            // port and still record the wrong *mode*, and the adapter's
+            // keychain-trust grant only runs inside `attach()`. Reporting
+            // "already attached" there would print a repair's success line
+            // over a client the repair never reached, which is the silent
+            // wrong outcome this whole path exists to remove. Only when a
+            // live endpoint was discovered, though: with none there is
+            // nothing to re-attach at, and a present marker still beats the
+            // give-up error below.
+            // @ref LLP 0259#repair-is-a-restart [implements]: the repair's success line is only true if the attach it enables actually runs
             const livePort = portFromEndpoint(liveEndpoint)
             const alreadyCurrent =
               probe.attached === true &&
+              !(proxyStateChanged && liveEndpoint !== undefined) &&
               (liveEndpoint === undefined ||
                 (probe.port !== undefined && probe.port === livePort))
             if (alreadyCurrent) {
@@ -820,7 +836,9 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * @ref LLP 0244#non-interactive [implements]: non-TTY and --json attaches never migrate; they emit the one-line pointer
  * @ref LLP 0259#gate-reads-both [implements]: the gate reads config AND the CA, so proxy_mode with no CA reaches the repair instead of returning
  * @param {{ name: string, ctx: CommandRunContext, parsed: { client: string, dryRun: boolean, json: boolean } }} args
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} true when the proxy state actually moved under
+ *   this call (a write or a re-mint landed), which makes any marker the client
+ *   already holds stale: the caller must re-attach rather than no-op on it.
  */
 async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   // A dry run changes nothing and promises nothing, so it says nothing.
@@ -829,11 +847,11 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   // falls through to the one-line pointer below, because LLP 0244
   // #non-interactive owes every non-migrating attach shape the line naming
   // what was skipped and the command that migrates.
-  if (parsed.dryRun) return
+  if (parsed.dryRun) return false
 
   const catalog = await buildAttachPluginCatalog(ctx)
   const descriptor = catalog.pickerDescriptors.get(name)
-  if (descriptor?.compose?.gateway_proxy_mode !== true) return
+  if (descriptor?.compose?.gateway_proxy_mode !== true) return false
 
   // The effective config this process booted with decides whether there is
   // anything to offer. An entry the LLP 0174 enable path appended seconds ago
@@ -855,9 +873,8 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   // downgrade this branch exists to stop being silent.
   // @ref LLP 0259#gate-reads-both [implements]: proxy_mode plus a CA returns; proxy_mode without one is the stranded state
   if (effectiveGateway?.config?.proxy_mode === true) {
-    if (await hasLocalCa(ctx)) return
-    await repairStrandedProxyMode({ name, ctx, parsed, catalog, log })
-    return
+    if (await hasLocalCa(ctx)) return false
+    return await repairStrandedProxyMode({ name, ctx, parsed, catalog, log })
   }
 
   // A fleet-owned gateway block has no local remedy, so report instead of
@@ -897,7 +914,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
       `note: this install attaches ${name} by base URL, and its gateway config is ` +
       `centrally managed; enable proxy_mode in the fleet config to switch it\n`
     )
-    return
+    return false
   }
 
   if (parsed.client === 'all' || parsed.json || !isTty(ctx.stdin)) {
@@ -905,7 +922,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
       `note: this install attaches ${name} by base URL; run 'hyp attach ${name}' in an ` +
       `interactive terminal to switch it to proxy mode\n`
     )
-    return
+    return false
   }
 
   const localLoaded = await loadConfigFile(configPath)
@@ -914,7 +931,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     : undefined
   if (!localGateway) {
     // No gateway in any layer: the attach ladder below owns that error.
-    return
+    return false
   }
 
   const accepted = await askYesNo(
@@ -935,7 +952,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
       status: 'ok',
       accepted: false,
     })
-    return
+    return false
   }
 
   const result = await enableGatewayProxyMode({
@@ -961,9 +978,12 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
         `start one (hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
       )
     }
-    return
+    // Only the restarted case moved the mode: `ok` with no daemon means the
+    // key is on disk and no CA was minted, so the attach below still writes
+    // base URL and the client's marker is not stale after all.
+    return result.daemonInstalled === true
   }
-  if (result.outcome === 'already') return
+  if (result.outcome === 'already') return false
   if (result.ok && result.outcome === 'remint') {
     // The layers moved between this offer and the write: the key was already
     // there, so only the CA was missing and only the restart ran. With no
@@ -979,7 +999,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
         `hyp daemon start) and re-run 'hyp attach ${name}'\n`
       )
     }
-    return
+    return result.daemonInstalled === true
   }
   ctx.stderr.write(
     `warning: could not switch to proxy mode` +
@@ -987,6 +1007,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     `${result.backupPath ? `; the previous config was backed up at ${result.backupPath}` : ''}; ` +
     `attaching by base URL instead\n`
   )
+  return false
 }
 
 /**
@@ -996,9 +1017,13 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
  * the config asks for - the adapter itself never sees config and cannot make
  * that comparison.
  *
- * An unreadable or malformed CA counts as absent, the same reading
- * `readLocalCaInfo` hands the adapters, so both surfaces agree about what the
- * attach is about to do.
+ * A missing or malformed CA counts as absent, which is exactly what
+ * `readLocalCaInfo` reports to the adapters, so both surfaces agree about
+ * what the attach is about to do. The symmetry stops there: `readLocalCaInfo`
+ * *throws* on any other read failure (EACCES on the cert, say), and the
+ * adapters do not catch it. Catching it here and reading it as absent errs on
+ * the side this whole path exists for - a warning plus the repair offer, not
+ * silence - and the adapter's own throw still surfaces below.
  *
  * @param {CommandRunContext} ctx
  * @returns {Promise<boolean>}
@@ -1043,7 +1068,9 @@ async function hasLocalCa(ctx) {
  *   catalog: Awaited<ReturnType<typeof buildAttachPluginCatalog>>,
  *   log: ReturnType<typeof getLogger>,
  * }} args
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} true when the repair actually landed and the CA
+ *   now exists, so the caller must let the attach rewrite the client instead
+ *   of no-opping on a marker that records the pre-repair mode.
  */
 async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
   ctx.stderr.write(
@@ -1063,7 +1090,7 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
       `note: run 'hyp daemon restart', then 'hyp attach ${name}' in an interactive terminal, ` +
       `to restore the proxy attach\n`
     )
-    return
+    return false
   }
 
   const accepted = await askYesNo(
@@ -1085,7 +1112,7 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
       status: 'ok',
       accepted: false,
     })
-    return
+    return false
   }
 
   const result = await enableGatewayProxyMode({
@@ -1106,7 +1133,7 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
     // The CA appeared between the gate above and this call (a daemon reload
     // landed mid-run). Nothing to restart; the attach below sees it.
     ctx.stdout.write(`✓ the local CA is present again; attaching in proxy mode\n`)
-    return
+    return true
   }
   if (result.ok && result.outcome === 'remint') {
     if (result.daemonInstalled) {
@@ -1119,7 +1146,7 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
         `(hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
       )
     }
-    return
+    return result.daemonInstalled === true
   }
   if (result.ok && result.outcome === 'enabled') {
     // The two layered reads can disagree: this function's gate read
@@ -1135,13 +1162,14 @@ async function repairStrandedProxyMode({ name, ctx, parsed, catalog, log }) {
         `start one (hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
       )
     }
-    return
+    return result.daemonInstalled === true
   }
   ctx.stderr.write(
     `warning: could not restore proxy mode` +
     `${result.message ? ` (${result.message})` : ''}; ` +
     `attaching by base URL instead\n`
   )
+  return false
 }
 
 /**

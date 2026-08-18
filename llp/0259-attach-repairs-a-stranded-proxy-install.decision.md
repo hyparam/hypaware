@@ -100,6 +100,15 @@ Three properties follow from writing nothing:
 - **It is idempotent and cheap to decline**: nothing is backed up, nothing is
   rewritten, and the base-URL attach proceeds as the working fallback.
 
+A repair is not finished until the attach it enables rewrites the client. On a
+daemon-managed install (no configured `listen`) attach short-circuits at
+"already attached" whenever the client's marker names the live port, and that
+port survives a restart: the marker records the *mode* too, and after a
+re-mint the recorded one is wrong. A landed repair therefore disqualifies that
+no-op, so the run that printed the success line is the run that makes it true.
+An offer that changed nothing (declined, or reported with no daemon to
+restart) leaves the no-op exactly as it was.
+
 Consent is still asked, and automation is still never restarted mid-run: a
 daemon restart is exactly the consequential side effect LLP 0244
 #non-interactive keeps out of scripts, and on macOS the attach that follows

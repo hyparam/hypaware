@@ -1369,9 +1369,12 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
  * mechanisms that exist only there) while the config-versus-disk
  * disagreement above it is platform-independent.
  *
- * An unreadable or malformed CA counts as absent: that is exactly the reading
- * the attach preflight gives it (LLP 0232 #proxy-attach-preflight), so status
- * describes the mode the next attach would actually pick.
+ * A missing or malformed CA counts as absent: that is exactly the reading the
+ * attach preflight gives it (LLP 0232 #proxy-attach-preflight), so status
+ * describes the mode the next attach would actually pick. A CA that exists
+ * but cannot be read at all (EACCES) makes `readLocalCaInfo` throw rather
+ * than return, and is read as absent too: status must never fail on a probe,
+ * and a certificate this process cannot read is one it cannot vouch for.
  *
  * @param {string} stateRoot
  * @returns {Promise<boolean>}

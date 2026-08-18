@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
@@ -68,7 +69,16 @@ function stateRootOf(home) {
 async function purgeTheCa(home) {
   const stateRoot = stateRootOf(home)
   await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+  const tls = path.join(stateRoot, 'tls')
+  /** @type {Array<[string, Buffer]>} */
+  const saved = ['ca-cert.pem', 'ca-key.pem'].map((f) => [f, readFileSync(path.join(tls, f))])
   await deleteLocalCa({ stateRoot })
+  // Handed back so a test can put the same bytes down again synchronously,
+  // which is how it stages the mint a daemon restart would do mid-run.
+  return () => {
+    mkdirSync(tls, { recursive: true })
+    for (const [f, bytes] of saved) writeFileSync(path.join(tls, f), bytes)
+  }
 }
 
 /**
@@ -97,12 +107,26 @@ function writeGatewayConfig(home, opts) {
  * enable prompt never fires and the migration offer is the only question in
  * play. `answer` (when stdin is a TTY) is pre-buffered for it.
  *
- * @param {{ home: string, answer?: string, tty?: boolean, json?: boolean }} opts
+ * `unbound` swaps in the daemon-managed shape instead: the gateway is not
+ * running in this CLI process, so `localEndpoint()` throws and the command
+ * falls through to the status.json live-port discovery (LLP 0086). That is
+ * the branch that owns the "already attached" no-op, so it is the only one
+ * that can short-circuit past a repair. `onStderr` observes stderr as it is
+ * written, which is how a test stages a mid-run change.
+ *
+ * @param {{
+ *   home: string,
+ *   answer?: string,
+ *   tty?: boolean,
+ *   unbound?: boolean,
+ *   onStderr?: (chunk: unknown) => void,
+ * }} opts
  */
-function makeCtx({ home, answer, tty = true }) {
+function makeCtx({ home, answer, tty = true, unbound = false, onStderr }) {
   const registered = ['claude', 'codex']
   const gateway = {
     localEndpoint() {
+      if (unbound) throw new Error('ai-gateway: localEndpoint() called before the gateway started')
       return 'http://127.0.0.1:60680'
     },
     /** @param {string} name */
@@ -136,7 +160,7 @@ function makeCtx({ home, answer, tty = true }) {
   if (tty) Object.defineProperty(stdin, 'isTTY', { value: true })
   if (answer !== undefined) stdin.write(`${answer}\n`)
   const stdoutBuf = makeBuf()
-  const stderrBuf = makeBuf()
+  const stderrBuf = makeBuf(onStderr ? { onWrite: onStderr } : undefined)
   // The effective config the process booted with mirrors the local file, the
   // shape runAttach reads it in.
   const config = JSON.parse(readFileSync(localConfigPath(home), 'utf8'))
@@ -476,5 +500,119 @@ test('a failed accepted migration warns and the attach still succeeds', async ()
       chmodSync(hypDir, 0o755)
     }
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before, 'the config on disk is untouched')
+  })
+})
+
+/**
+ * The daemon-managed install: no `listen` in config, so only the running
+ * daemon knows the bound port and it publishes it to status.json (LLP 0086).
+ * Seeded with this process's own pid so the liveness gate passes.
+ *
+ * @param {string} home
+ * @param {number} port
+ */
+function seedDaemonRun(home, port) {
+  const runDir = path.join(home, '.hyp', 'hypaware', 'run')
+  mkdirSync(runDir, { recursive: true })
+  writeFileSync(
+    path.join(runDir, 'hypaware.pid'),
+    JSON.stringify({ pid: process.pid, runId: 'test-run', mode: 'foreground' })
+  )
+  writeFileSync(
+    path.join(runDir, 'status.json'),
+    JSON.stringify({
+      state: 'healthy',
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      uptimeMs: 0,
+      runId: 'test-run',
+      mode: 'foreground',
+      sources: [
+        {
+          name: 'ai-gateway',
+          plugin: '@hypaware/ai-gateway',
+          state: 'started',
+          details: { host: '127.0.0.1', port, upstreams: ['anthropic'] },
+        },
+      ],
+      sinks: [],
+    })
+  )
+}
+
+/**
+ * A claude settings marker recorded at `port`, which is what makes the
+ * LLP 0086 "already attached at the live port" no-op fire.
+ *
+ * @param {string} home
+ * @param {number} port
+ */
+function seedClaudeMarker(home, port) {
+  mkdirSync(path.join(home, '.claude'), { recursive: true })
+  writeFileSync(
+    path.join(home, '.claude', 'settings.json'),
+    JSON.stringify({ _hypaware: { version: '2.0.0', port } })
+  )
+}
+
+// The repair has to reach the client, not just the machine. On a
+// daemon-managed install the attach short-circuits at "already attached"
+// whenever the marker names the live port - and a restart keeps that port, so
+// the marker still matches while the *mode* it records has just gone stale.
+// Short-circuiting there prints the repair's success line over a client the
+// repair never touched, which is the silent wrong outcome LLP 0259 exists to
+// remove. The CA is staged into place as the downgrade warning is written,
+// the same race the `already` branch is written for.
+test('a repair that lands re-attaches the client instead of no-opping on its pre-repair marker', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home, { proxyMode: true })
+    const remintTheCa = await purgeTheCa(home)
+    seedDaemonRun(home, 55555)
+    seedClaudeMarker(home, 55555)
+    let staged = false
+    const { ctx, stdout, stderr } = makeCtx({
+      home,
+      answer: 'y',
+      unbound: true,
+      onStderr: (chunk) => {
+        if (staged || !String(chunk).includes('no local interception CA')) return
+        staged = true
+        // The daemon's restart lands mid-run and the gateway mints again.
+        remintTheCa()
+      },
+    })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.ok(staged, 'the downgrade warning must be written before anything else')
+    assert.ok(stderr.text().includes(REMINT_QUESTION))
+    assert.match(stdout.text(), /the local CA is present again/)
+    assert.doesNotMatch(
+      stdout.text(),
+      /already attached/,
+      'a repair that landed must not be reported over a no-op'
+    )
+    const attached = JSON.parse(readFileSync(path.join(home, 'claude-attached.json'), 'utf8'))
+    assert.equal(attached.mode, 'proxy', 'the client is rewritten in the mode the repair restored')
+    assert.equal(attached.endpoint, 'http://127.0.0.1:55555')
+  })
+})
+
+// The other half of the same gate: nothing moved, so the LLP 0086 no-op is
+// still the right answer and must survive untouched.
+test('a declined repair leaves the already-attached no-op exactly as it was', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home, { proxyMode: true })
+    await purgeTheCa(home)
+    seedDaemonRun(home, 55555)
+    seedClaudeMarker(home, 55555)
+    const { ctx, stdout, stderr } = makeCtx({ home, answer: 'n', unbound: true })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.match(stderr.text(), /no local interception CA/)
+    assert.match(stdout.text(), /already attached/)
+    assert.throws(
+      () => readFileSync(path.join(home, 'claude-attached.json'), 'utf8'),
+      'nothing changed, so the adapter is still left alone'
+    )
   })
 })
