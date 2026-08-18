@@ -433,7 +433,10 @@ hyp daemon uninstall    # remove the service and detach clients (config + record
 
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
 content and target paths without touching the filesystem, useful for
-verifying what `hyp init` will install.
+verifying what `hyp init` will install. Add `--platform darwin` or
+`--platform linux` to render the *other* platform's unit; it is an
+inspection flag and requires `--dry-run`, because an install always
+targets the host it runs on.
 
 ## Troubleshooting
 

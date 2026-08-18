@@ -137,6 +137,24 @@ test('hyp help <group> <subcommand> renders the leaf command help', async () => 
   assert.match(stdout.text(), /^hyp daemon install - /)
 })
 
+test('hyp help <unknown> reports the argv the user typed, not the rewritten one', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['help', 'zzz-not-a-command'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 2)
+  // The `--help` the rewrite appends is an implementation detail, so the
+  // diagnostic must not quote it back as part of the command the user named.
+  assert.equal(
+    /unknown command '[^']*--help/.test(stderr.text()),
+    false,
+    `unknown-command diagnostic quotes the rewritten argv: ${stderr.text()}`
+  )
+  assert.match(stderr.text(), /unknown command 'help zzz-not-a-command'/)
+})
+
 test('bare hyp help still renders the top-level table', async () => {
   const stdout = makeBuf()
   const stderr = makeBuf()

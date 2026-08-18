@@ -2205,7 +2205,7 @@ function isUnderDir(p, dir) {
 }
 
 /**
- * `hyp skills install [--client <name>]`
+ * `hyp skills install [--client <name>|all]` (the parser defaults to `all`)
  *
  * Materializes every registered skill **and subagent** into the right
  * per-client directories. One command, because a user asking for their

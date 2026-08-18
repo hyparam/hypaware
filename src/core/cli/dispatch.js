@@ -238,7 +238,13 @@ export async function dispatch(argv, opts = {}) {
   // registry-backed help. Routing rather than re-implementing is what makes it
   // reach plugin commands too: those only exist in the registry after boot,
   // which the pre-boot top-level help path deliberately skips.
+  //
+  // `typedArgv` keeps what the user actually wrote: the appended `--help` is
+  // ours, so a diagnostic echoing the rewritten argv would report `hyp help
+  // bogus` as `unknown command 'bogus --help'`, naming a flag nobody typed.
+  //
   // @ref LLP 0265#help-verb [implements]: `help <command>` is rewritten to that command's `--help`, never silently answered with the top-level table
+  const typedArgv = argv
   if (argv.length > 1 && argv[0] === 'help' && !argv[1].startsWith('-')) {
     argv = [...argv.slice(1), '--help']
   }
@@ -393,7 +399,7 @@ export async function dispatch(argv, opts = {}) {
         )
       }
     } else {
-      stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
+      stderr.write(`hyp: unknown command '${typedArgv.join(' ')}'\n`)
       stderr.write(`run 'hyp --help' for the list of available commands\n`)
     }
     if (ownsKernel) {
@@ -618,6 +624,18 @@ function isInteractiveStream(stream) {
 }
 
 /**
+ * Render one of dispatch's flag sets in the `--long, -s` spelling top-level
+ * help prints, dropping any command-shaped token matched alongside the flags
+ * (the bare `help` verb) that is not one.
+ *
+ * @param {Set<string>} flags
+ * @returns {string}
+ */
+function flagList(flags) {
+  return [...flags].filter((f) => f.startsWith('-')).join(', ')
+}
+
+/**
  * Pick the boot profile based on the requested command. `hyp init`
  * (interactive walkthrough or preset) needs bundled defaults plus
  * installed plugins loaded so the picker can list plugin presets before
@@ -804,9 +822,12 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   // @ref LLP 0265#global-options [implements]: top-level help names the global options and aliases that route but own no command row
   stdout.write('\n')
   stdout.write('Global options:\n')
+  // Spellings come off the same sets dispatch matches on, so a flag added
+  // there lists itself, exactly as an alias does. `HELP_FLAGS` also carries
+  // the bare `help` verb, which is a command-shaped token and not a flag.
   const globals = [
-    ['--help, -h', "show this list, or a command's help (`hyp help <command>` too)"],
-    ['--version, -V', 'print the version (`hyp version` adds runtime detail)'],
+    [flagList(HELP_FLAGS), "show this list, or a command's help (`hyp help <command>` too)"],
+    [flagList(VERSION_FLAGS), 'print the version (`hyp version` adds runtime detail)'],
   ]
   const globalWidth = Math.max(...globals.map(([flag]) => flag.length))
   for (const [flag, summary] of globals) {
