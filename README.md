@@ -545,6 +545,8 @@ forwarded to a team server or exported to Parquet are not affected; see
 
 User-facing guides live under [`docs/`](./docs/):
 
+- [`docs/CLI.md`](./docs/CLI.md): install, operate, upgrade, and recover HypAware with the task-oriented CLI
+- [`docs/CLI_REFERENCE.md`](./docs/CLI_REFERENCE.md): complete syntax and behavior for every visible CLI command
 - [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
 - [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp dev plugin new` / `hyp dev plugin doctor`)
