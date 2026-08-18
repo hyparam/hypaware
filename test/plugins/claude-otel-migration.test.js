@@ -31,7 +31,8 @@ import {
   otelModeEnv,
 } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
 import { ensureLocalCa } from '../../src/core/tls/ca.js'
-import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
+import { renderStatusText } from '../../src/core/commands/status.js'
 
 const GATEWAY_PORT = 18521
 const ENDPOINT = `http://127.0.0.1:${GATEWAY_PORT}`
@@ -62,6 +63,30 @@ async function rig(opts = {}) {
     permissions: { allow: ['Bash(ls *)'] },
   }
   await fsp.writeFile(settingsPath, JSON.stringify(seed, null, 2) + '\n')
+
+  // The install's own config, so `hyp status` reads this machine the way it
+  // reads a real one: the claude plugin is enabled, which is what makes the
+  // client line say `configured` beside the attach state.
+  await fsp.mkdir(path.join(root, '.hyp'), { recursive: true })
+  await fsp.writeFile(
+    path.join(root, '.hyp', 'hypaware-config.json'),
+    JSON.stringify({
+      version: 2,
+      plugins: [
+        {
+          name: '@hypaware/ai-gateway',
+          config: {
+            upstreams: [{
+              name: 'anthropic',
+              base_url: 'https://api.anthropic.com',
+              path_prefix: '/v1/messages',
+            }],
+          },
+        },
+        { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      ],
+    }, null, 2) + '\n'
+  )
 
   const env = {
     HOME: root,
@@ -144,6 +169,36 @@ function makeBuf() {
   }
 }
 
+/**
+ * The `hyp status` client line for this rig, produced the way the command
+ * produces it: the real collector (which discovers the bundled claude
+ * descriptor and probes the marker this rig wrote) feeding the real text
+ * renderer. Nothing about the line is fabricated, so it moves only when a
+ * real attach moves the marker.
+ *
+ * @param {Awaited<ReturnType<typeof rig>>} r
+ * @returns {Promise<string>}
+ */
+async function statusClientLine(r) {
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HOME: r.root, HYP_HOME: path.join(r.root, '.hyp'), HYP_CONFIG: '' },
+    homeDir: r.root,
+  })
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    // The live gateway's registered clients, which is what the command passes:
+    // this rig's activation registered the claude adapter on its gateway.
+    clientNames: ['claude'],
+    datasets: [],
+    cacheRoot: path.join(r.root, 'cache'),
+    stdout,
+  })
+  const line = stdout.text().split('\n').find((l) => l.includes('- claude '))
+  assert.ok(line !== undefined, 'hyp status listed no claude client line')
+  return line
+}
+
 test('hyp attach claude migrates a proxy attach: marker flips, proxy keys release, nothing else is touched', async (t) => {
   const r = await rig()
   t.after(() => r.cleanup())
@@ -223,6 +278,23 @@ test('the migration facts ride the --json payload', async (t) => {
   }
 })
 
+// The migration is only finished when the surface a human checks agrees. The
+// probe above is one half of `hyp status`; this drives both halves end to end
+// over the same machine, before and after the one command.
+// @ref LLP 0245#migration [tests]: hyp status reflects the new attach mode after the migration
+test('hyp status reads the migrated machine as otel-attached', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  await seedProxyAttach(r)
+
+  assert.match(await statusClientLine(r), /- claude {2}\[configured, attached \(proxy\)\]/)
+
+  const buf = makeBuf()
+  await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: buf, stderr: buf })
+
+  assert.match(await statusClientLine(r), /- claude {2}\[configured, attached \(otel\)\]/)
+})
+
 // Below the floor the migration must not begin: the proxy attach keeps
 // working exactly as it is, and no residue is unwound for a switch that never
 // happened.
@@ -242,6 +314,9 @@ test('a floor refusal leaves the proxy attach untouched and unwinds nothing', as
   assert.equal((await r.read())._hypaware.mode, 'proxy')
   await fsp.access(ca.certPath)
   assert.doesNotMatch(buf.text(), /Migrated from proxy attach/)
+  // The residue unwind is downstream of the settings write, so a refusal
+  // never reaches it: on darwin an attempted release would have printed here.
+  assert.doesNotMatch(buf.text(), /launchd/)
 })
 
 test('a re-attach after the migration is routine: no migration notes, no offer', async (t) => {
@@ -257,6 +332,7 @@ test('a re-attach after the migration is routine: no migration notes, no offer',
   await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: second, stderr: second })
   assert.doesNotMatch(second.text(), /Migrated from proxy attach/)
   assert.doesNotMatch(second.text(), /hyp detach claude --purge/)
+  assert.doesNotMatch(second.text(), /launchd/)
   assert.equal((await r.read())._hypaware.mode, 'otel')
 })
 
@@ -280,6 +356,9 @@ test('a base-URL attach switches to otel without migration notes', async (t) => 
   assert.equal(value._hypaware.mode, 'otel')
   assert.equal(Object.hasOwn(value.env, 'ANTHROPIC_BASE_URL'), false)
   assert.doesNotMatch(buf.text(), /Migrated from proxy attach/)
+  // No proxy attach means no residue, so the launchd environment is left
+  // alone: a base-URL machine may never have had it set at all.
+  assert.doesNotMatch(buf.text(), /launchd/)
 })
 
 test('the writer reports the prior marker mode for the adapter to act on', async (t) => {
