@@ -218,12 +218,16 @@ procedure has nothing to assert about a "deferred" turn.
   because the reader upstream of it has nothing to hand it. A red step 5
   or 6 against an unmerged #552 is not evidence of a Lane B regression;
   confirm the merge before filing anything.
-- **The `client_attach` status-row re-confirmation in steps 1 and 7 needs
-  PR #553 (fix/issue-544) merged.** Without it, a now-probed `openclaw`
-  (its `attach_probe` is real again as of this change set, for the first
-  time since [LLP 0143](../llp/0143-openclaw-registers-no-attach-probe.decision.md))
-  falls back to whatever pre-#553 `hyp status` did for a client that used
-  to be probe-less, which this procedure was not written to describe.
+- **The `client_attach` status-row re-confirmation in steps 1 and 7 needs no
+  pending PR.** `openclaw` declares a real `attach_probe` again as of this
+  change set, for the first time since
+  [LLP 0143](../llp/0143-openclaw-registers-no-attach-probe.decision.md)
+  removed it and [LLP 0169](../llp/0169-openclaw-attach-surface-returns.decision.md)
+  brought it back, so `hyp status` derives its row from disk like any other
+  probed client. The probe-less `attach n/a` rendering
+  ([LLP 0229 #status-derives-by-the-same-gate](../llp/0229-status-derives-attach-state-by-the-desired-gate.decision.md#status-derives-by-the-same-gate))
+  applies to `claude-desktop`, not to `openclaw`, and is not what this
+  procedure checks.
 
 **Related:** [LLP 0167](../llp/0167-openclaw-capture-via-config-provider-override.rfc.md)
 (the override design and the verify-results this procedure re-confirms),
@@ -269,9 +273,9 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 
    Pass condition: `hyp status` shows a running daemon and
    `openclaw  [configured, attached]` among the clients, with no
-   `client_attach_missing` diagnostic (this is the PR #553 re-confirmation:
-   a probe-less `openclaw` used to be stuck reading as `attach n/a`
-   regardless of what was on disk). The `jq` output shows
+   `client_attach_missing` diagnostic (this is the LLP 0169 re-confirmation:
+   with the probe back, that row is read off disk again rather than reported
+   as not applicable). The `jq` output shows
    `anthropic.baseUrl` as the bare gateway origin and `openai.baseUrl` as
    the same origin plus `/v1`, both carrying `headers["x-hypaware-upstream"]`
    set to their own key, and **both carrying `models: []`**. That empty
@@ -475,9 +479,10 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
   relies on hot reload, it only prints the restart instruction.
 - Step 1 finds `client_attach_missing` still firing after a successful
   attach and restart: check `openclaw --version` against the floor in
-  **Requires** first, then confirm PR #553 is actually in the binary under
-  test (a probe-less-client `attach n/a` state is exactly what an unmerged
-  #553 reproduces here).
+  **Requires** first, then re-run step 1's `jq` check. The warning is
+  probe-derived, so it means the probe read `openclaw.json` and found no
+  HypAware-owned entry: either the write did not land, or it landed
+  somewhere other than the `OPENCLAW_HOME` the probe reads.
 - Step 4 finds no rows at all: check `hyp status` for a stopped daemon,
   then re-run step 1's `jq` check for a config that did not actually write
   (a concurrent edit under `openclaw.json` fails the write's mtime guard

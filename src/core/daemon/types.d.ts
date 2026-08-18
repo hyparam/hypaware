@@ -205,7 +205,17 @@ export interface ClientAttachReport {
   plugin: string
   /** Plugin enabled in config. */
   configured: boolean
-  /** Settings file carries the HypAware marker. */
+  /**
+   * The client declares an `attach_probe`, so attach is a state that can be
+   * observed (and reversed). False for a probe-less client (`claude-desktop`
+   * is the only one shipping today, LLP 0115 #no-attach-on-join), whose attach
+   * state is not applicable rather than negative: `attached` is then
+   * structurally false and means nothing (LLP 0229
+   * #status-derives-by-the-same-gate). Read off the descriptor, so a client
+   * that gains or loses a probe changes this answer with no core change.
+   */
+  attachable: boolean
+  /** Settings file carries the HypAware marker. Only meaningful when `attachable`. */
   attached: boolean
   /** Path the probe inspected. */
   settingsPath?: string
