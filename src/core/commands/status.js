@@ -394,7 +394,12 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
-      state.push(c.attached ? 'attached' : 'not attached')
+      // The marker's mode rides the attached state (`attached (otel)`), so a
+      // machine that just migrated modes is visibly on the new one from the
+      // surface a human reads, not only under --json (LLP 0258's consequence,
+      // completed by the LLP 0245 migration). Markers that predate modes carry
+      // none and keep the bare word.
+      state.push(c.attached ? (c.mode ? `attached (${c.mode})` : 'attached') : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.error) stdout.write(`        error: ${c.error}\n`)
     }
