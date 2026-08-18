@@ -20,7 +20,7 @@ import {
   DEFAULT_SPOOL_MAX_BYTES,
   claudeBodySpoolDir,
   enforceClaudeBodySpoolCap,
-  ensureClaudeBodySpool,
+  tightenClaudeBodySpool,
 } from './spool.js'
 
 /**
@@ -136,10 +136,16 @@ export function createStartClaudeTelemetrySource(deps) {
     // the attach-written env, so the listener repairs permissions and
     // enforces the cap on every start, then keeps enforcing on a timer for
     // the window where bodies arrive but nothing consumes them.
+    //
+    // Repair, never create: attach is the write that mints this directory,
+    // because it is the same write that tells Claude Code to put bodies in
+    // it. A daemon that created it regardless would leave a raw-prompt
+    // directory on every install that never attached this client, in whatever
+    // HYP_HOME the activation context resolved.
     // @ref LLP 0253#spool-location [implements]: owner-only under the HypAware
     //   home, tightened here even when Claude Code created it first
     try {
-      await ensureClaudeBodySpool(spool.dir)
+      await tightenClaudeBodySpool(spool.dir)
     } catch (err) {
       ctx.log.warn('claude.telemetry.spool_unavailable', {
         [Attr.PLUGIN]: PLUGIN_NAME,

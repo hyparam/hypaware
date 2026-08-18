@@ -442,13 +442,19 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       // machine that just migrated modes is visibly on the new one from the
       // surface a human reads, not only under --json (LLP 0258's consequence,
       // completed by the LLP 0262 migration). Markers that predate modes carry
-      // none and keep the bare word.
+      // none and keep the bare word. The mode goes through `printable` because
+      // it is read back off the client's own settings file, which a hand edit
+      // can fill with anything: an unsanitized value here would let a settings
+      // file drive the operator's terminal, which is what LLP 0225 exists to
+      // stop. A value that sanitizes away entirely leaves the bare word.
       // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
+      // @ref LLP 0225#one-vocabulary [implements]: a label lifted off disk is stripped before it reaches the terminal
+      const mode = printable(c.mode)
       state.push(
         c.attachable === false
           ? 'attach n/a'
           : c.attached
-            ? (c.mode ? `attached (${c.mode})` : 'attached')
+            ? (mode ? `attached (${mode})` : 'attached')
             : 'not attached'
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)

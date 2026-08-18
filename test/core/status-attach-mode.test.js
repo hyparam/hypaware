@@ -88,3 +88,58 @@ test('a mode-less marker and a detached client keep the bare words', async () =>
   assert.match(text, /- claude {2}\[configured, attached\]/)
   assert.match(text, /- codex {2}\[configured, not attached\]/)
 })
+
+test('a probe-less client says attach n/a whatever mode its marker claims', async () => {
+  const hypHome = await makeHome()
+  const report = await reportWithClients(hypHome, [
+    {
+      name: 'hermes',
+      plugin: '@hypaware/hermes',
+      configured: true,
+      attachable: false,
+      attached: true,
+      mode: 'otel',
+    },
+  ])
+
+  const stdout = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+
+  assert.match(stdout.text(), /- hermes {2}\[configured, attach n\/a\]/)
+})
+
+/**
+ * The mode is read back out of the client's own settings file, which a hand
+ * edit reaches, so it is a captured label rather than an in-process constant.
+ *
+ * @ref LLP 0225#one-vocabulary [tests]: a label lifted off disk cannot drive the terminal it is printed to
+ */
+test('a marker mode carrying terminal control bytes is stripped before it is printed', async () => {
+  const hypHome = await makeHome()
+  const report = await reportWithClients(hypHome, [
+    {
+      name: 'claude',
+      plugin: '@hypaware/claude',
+      configured: true,
+      attached: true,
+      mode: 'ot\u001b[2Kel\n',
+    },
+    {
+      name: 'codex',
+      plugin: '@hypaware/codex',
+      configured: true,
+      attached: true,
+      mode: '\u200b\u200b',
+    },
+  ])
+
+  const stdout = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  const text = stdout.text()
+
+  assert.ok(!text.includes('\u001b'), 'no escape byte reaches the terminal')
+  assert.match(text, /- claude {2}\[configured, attached \(ot\[2Kel\)\]/)
+  // A mode that sanitizes away to nothing leaves the bare word rather than an
+  // empty parenthesis.
+  assert.match(text, /- codex {2}\[configured, attached\]/)
+})

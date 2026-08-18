@@ -237,15 +237,43 @@ export async function activate(ctx) {
             // nothing behind, and Claude Code only starts writing bodies once a
             // session launches with the new settings. Created owner-only here
             // so raw prompts never pass through a default-mode directory.
+            //
+            // In its own try, because the settings write above has already
+            // landed: an unwritable spool root would otherwise report the whole
+            // attach as failed while the client is in fact attached, and would
+            // swallow the migration notes below - including the line naming
+            // `hyp detach claude --purge` for the CA a migrated machine still
+            // carries. A warning names the one thing that did not happen.
             // @ref LLP 0253#spool-location [implements]
-            await ensureClaudeBodySpool(spoolDir)
+            /** @type {string | undefined} */
+            let spoolWarning
+            try {
+              await ensureClaudeBodySpool(spoolDir)
+            } catch (spoolErr) {
+              const detail = spoolErr instanceof Error ? spoolErr.message : String(spoolErr)
+              spoolWarning =
+                `could not prepare the raw-body spool at ${spoolDir} (${detail}); ` +
+                'capture falls back to the events alone until it is writable'
+              logger.warn('client.attach.spool_unavailable', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                spool_dir: spoolDir,
+                error: detail,
+              })
+            }
             // Malformed `env` / `hooks` blocks attach rebuilt after backing the
             // displaced value up into the marker (LLP 0163). Reported on the
             // span, in the log, and to the user - the whole point of the
             // decision is that the repair stops being silent.
-            const warnings = result.changed && result.warnings !== undefined
+            const malformedWarnings = result.changed && result.warnings !== undefined
               ? [...result.warnings]
               : []
+            // The spool warning rides the same user-facing list but is counted
+            // apart: `malformed_blocks_repaired` names one specific repair, and
+            // folding an unrelated warning into it would make the count lie.
+            const warnings = spoolWarning === undefined
+              ? malformedWarnings
+              : [...malformedWarnings, spoolWarning]
 
             // A prior proxy marker makes this attach a migration. The settings
             // write above already released the proxy keys (the LLP 0232
@@ -303,16 +331,16 @@ export async function activate(ctx) {
             }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            span.setAttribute('malformed_blocks_repaired', warnings.length)
+            span.setAttribute('malformed_blocks_repaired', malformedWarnings.length)
             logger.info('client.attach.write', {
               hyp_plugin: PLUGIN_NAME,
               hyp_client: CLIENT_NAME,
               settings_path: settingsPath,
               port,
               changed: result.changed === true,
-              malformed_blocks_repaired: warnings.length,
+              malformed_blocks_repaired: malformedWarnings.length,
             })
-            for (const warning of warnings) {
+            for (const warning of malformedWarnings) {
               logger.warn('client.attach.malformed_block', {
                 hyp_plugin: PLUGIN_NAME,
                 hyp_client: CLIENT_NAME,

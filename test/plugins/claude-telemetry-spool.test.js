@@ -20,6 +20,7 @@ import {
   claudeBodySpoolDir,
   enforceClaudeBodySpoolCap,
   ensureClaudeBodySpool,
+  tightenClaudeBodySpool,
 } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/spool.js'
 import {
   readSpoolConfig,
@@ -59,6 +60,28 @@ test('ensureClaudeBodySpool creates the directory owner-only', async () => {
   await ensureClaudeBodySpool(dir)
   const stat = await fsp.stat(dir)
   assert.equal(stat.mode & 0o777, 0o700)
+})
+
+/**
+ * The daemon's half of the same duty. Attach is what mints the spool (it is
+ * the same write that tells Claude Code where to put bodies), so the listener
+ * repairs a directory it finds and creates none: a daemon that minted one
+ * anyway would leave a raw-prompt directory on every install that never
+ * attached this client, under whatever HYP_HOME the activation context
+ * resolved - which is how a test run reaches a developer's real `~/.hyp`.
+ *
+ * @ref LLP 0253#spool-location [tests]: the daemon keeps the directory owner-only without minting it
+ */
+test('tightenClaudeBodySpool repairs an existing spool and creates nothing', async () => {
+  const dir = await tmpSpool()
+
+  assert.equal(await tightenClaudeBodySpool(dir), false)
+  await assert.rejects(fsp.stat(dir), /ENOENT/)
+
+  await fsp.mkdir(dir, { recursive: true, mode: 0o755 })
+  await fsp.chmod(dir, 0o755)
+  assert.equal(await tightenClaudeBodySpool(dir), true)
+  assert.equal((await fsp.stat(dir)).mode & 0o777, 0o700)
 })
 
 test('an existing spool with loose permissions is tightened, not trusted', async () => {

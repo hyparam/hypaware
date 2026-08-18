@@ -59,6 +59,33 @@ export async function ensureClaudeBodySpool(dir) {
 }
 
 /**
+ * Tighten the spool's permissions IF it already exists, and create nothing.
+ *
+ * The daemon's job on this directory is repair, not creation: attach is what
+ * brings the spool into being (it is the same write that tells Claude Code
+ * where to put bodies), so a daemon that creates it anyway announces a capture
+ * surface on a machine that never attached this client - and does it against
+ * whatever `HYP_HOME` the activation context happened to resolve, which is how
+ * a test run reaches the developer's real `~/.hyp`. A missing directory is the
+ * normal state for an unattached install, so it is silently nothing to do.
+ *
+ * @ref LLP 0253#spool-location [implements]: the daemon keeps the directory
+ *   owner-only; it is not the thing that mints it
+ * @param {string} dir
+ * @returns {Promise<boolean>} whether a directory was found and tightened
+ */
+export async function tightenClaudeBodySpool(dir) {
+  try {
+    const stat = await fs.stat(dir)
+    if (!stat.isDirectory()) return false
+  } catch {
+    return false
+  }
+  await fs.chmod(dir, 0o700)
+  return true
+}
+
+/**
  * Enforce the spool's byte cap: when the directory's regular files sum
  * past `maxBytes`, delete files strictly oldest-first (mtime, then name
  * for a stable order when mtimes tie) until the total fits.
