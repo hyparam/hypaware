@@ -1,17 +1,25 @@
 // @ts-check
 
 import { Attr, getActiveSpan, withSpan } from '../../../../../src/core/observability/index.js'
+import { readObservabilityEnv } from '../../../../../src/core/observability/env.js'
 import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
+import { deleteSpooledBodies, loadSpooledBodies } from './bodies.js'
 import { flattenClaudeTelemetryEvents } from './events.js'
 import { projectClaudeTelemetryEvents } from './projection.js'
+import {
+  DEFAULT_SPOOL_MAX_BYTES,
+  claudeBodySpoolDir,
+  enforceClaudeBodySpoolCap,
+  ensureClaudeBodySpool,
+} from './spool.js'
 
 /**
  * @import { Server } from 'node:http'
  * @import { AiGatewayCapability, PluginActivationContext, SourceStatus, StartedSource } from '../../../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpRequest } from '../../../../../src/core/otlp/types.js'
- * @import { SessionContextRecord } from '../types.js'
+ * @import { ClaudeTelemetryListenerState, SessionContextRecord } from '../types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'
@@ -50,6 +58,16 @@ export const DEFAULT_TELEMETRY_PORT = 4319
 const SERVED_SIGNALS = /** @type {const} */ (['logs', 'metrics'])
 
 /**
+ * How often the daemon re-enforces the spool's byte cap. The listener
+ * deletes what it projects, so under normal flow the sweep finds
+ * nothing; the interval exists for the window where Claude Code is
+ * writing bodies and nothing is consuming them (a misdirected exporter,
+ * a wedged storage service), which is exactly when nobody else would
+ * notice the directory growing.
+ */
+const SPOOL_SWEEP_INTERVAL_MS = 60_000
+
+/**
  * Build the `SourceContribution.start` callback for the Claude
  * telemetry listener.
  *
@@ -68,7 +86,8 @@ export function createStartClaudeTelemetrySource(deps) {
    */
   return async function startClaudeTelemetrySource(ctx) {
     const listen = readListenConfig(ctx)
-    /** @type {{ rowsWritten: number, rowsSkipped: number, eventsReceived: number, lastEventAt: string | undefined, lastError: string | undefined, listenFallbackFrom: number | undefined }} */
+    const spool = readSpoolConfig(ctx)
+    /** @type {ClaudeTelemetryListenerState} */
     const state = {
       rowsWritten: 0,
       rowsSkipped: 0,
@@ -76,7 +95,61 @@ export function createStartClaudeTelemetrySource(deps) {
       lastEventAt: undefined,
       lastError: undefined,
       listenFallbackFrom: undefined,
+      spoolBytes: 0,
+      bodiesProjected: 0,
+      bodiesDeleted: 0,
+      bodiesEvicted: 0,
+      bodiesMissing: 0,
+      bodiesUnparseable: 0,
     }
+
+    // The spool exists whether or not this daemon was up when attach ran:
+    // Claude Code starts writing bodies the moment a session launches with
+    // the attach-written env, so the listener repairs permissions and
+    // enforces the cap on every start, then keeps enforcing on a timer for
+    // the window where bodies arrive but nothing consumes them.
+    // @ref LLP 0253#spool-location [implements]: owner-only under the HypAware
+    //   home, tightened here even when Claude Code created it first
+    try {
+      await ensureClaudeBodySpool(spool.dir)
+    } catch (err) {
+      ctx.log.warn('claude.telemetry.spool_unavailable', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        spool_dir: spool.dir,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    const sweepSpool = async () => {
+      try {
+        const swept = await enforceClaudeBodySpoolCap(spool.dir, spool.maxBytes)
+        state.spoolBytes = swept.spoolBytes
+        if (swept.evictedCount > 0) {
+          state.bodiesEvicted += swept.evictedCount
+          // A machine that is routinely evicting is losing detail to the
+          // backfill path; the count is what makes that visible.
+          // @ref LLP 0253#byte-cap [implements]: eviction is logged with a count
+          ctx.log.warn('claude.telemetry.spool_evicted', {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            [Attr.COMPONENT]: 'sources',
+            [Attr.OPERATION]: 'spool_sweep',
+            spool_dir: spool.dir,
+            evicted_count: swept.evictedCount,
+            evicted_bytes: swept.evictedBytes,
+            spool_bytes: swept.spoolBytes,
+            spool_max_bytes: spool.maxBytes,
+          })
+        }
+      } catch (err) {
+        ctx.log.warn('claude.telemetry.spool_sweep_failed', {
+          [Attr.PLUGIN]: PLUGIN_NAME,
+          spool_dir: spool.dir,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    await sweepSpool()
+    const sweepTimer = setInterval(sweepSpool, SPOOL_SWEEP_INTERVAL_MS)
+    sweepTimer.unref?.()
 
     const readSessionContext = createSessionContextReader(deps.stateFile, (err) => {
       ctx.log.warn('claude.telemetry.session_context_unreadable', {
@@ -95,7 +168,23 @@ export function createStartClaudeTelemetrySource(deps) {
     /** @type {Map<string, Record<string, unknown>>} */
     const usageByRequestId = new Map()
 
-    const handler = makeReceiveHandler({ ctx, deps, state, usageByRequestId, readSessionContext })
+    /**
+     * Also held across batches: a session's system prompt and tool
+     * declarations arrive once, in the request body, while the rows they
+     * belong on keep arriving for the session's lifetime.
+     */
+    /** @type {Map<string, { systemText?: string, tools?: unknown }>} */
+    const sessionBodyFacts = new Map()
+
+    const handler = makeReceiveHandler({
+      ctx,
+      deps,
+      state,
+      usageByRequestId,
+      sessionBodyFacts,
+      readSessionContext,
+      spoolDir: spool.dir,
+    })
     const server = createOtlpJsonServer({
       name: LISTENER_NAME,
       handler: { handle: handler },
@@ -124,8 +213,11 @@ export function createStartClaudeTelemetrySource(deps) {
             events_received: state.eventsReceived,
             rows_skipped: state.rowsSkipped,
             // @ref LLP 0257#status-and-health [implements]: the status details
-            // carry the last event seen; `hyp status` renders the health line
-            // from it.
+            // carry the last event seen and the spool's byte size and eviction
+            // count; `hyp status` renders health from them.
+            spool_bytes: state.spoolBytes,
+            bodies_projected: state.bodiesProjected,
+            bodies_evicted: state.bodiesEvicted,
             ...(state.lastEventAt ? { last_event_at: state.lastEventAt } : {}),
             ...(state.listenFallbackFrom !== undefined
               ? { listen_fallback_from: state.listenFallbackFrom }
@@ -137,6 +229,7 @@ export function createStartClaudeTelemetrySource(deps) {
       },
 
       async stop() {
+        clearInterval(sweepTimer)
         await new Promise((resolve, reject) => {
           server.close((err) => (err ? reject(err) : resolve(undefined)))
           server.closeIdleConnections?.()
@@ -149,23 +242,29 @@ export function createStartClaudeTelemetrySource(deps) {
 
 /**
  * Wrap one decoded OTLP request in a `claude.telemetry.receive` span,
- * project its events, and write the rows.
+ * read the spooled bodies its events reference, project everything, and
+ * write the rows. Consumed body files are deleted only after the writes
+ * succeeded: a write failure becomes an HTTP error the exporter
+ * retries, and the retried batch re-reads the same files.
  *
  * A throw here becomes an HTTP 500 the exporter will retry, so
  * everything recoverable is handled: an unparseable envelope yields zero
- * events, an event this listener does not model is skipped, and only a
- * genuine write failure propagates.
+ * events, an event this listener does not model is skipped, a missing
+ * or refused body ref is counted, and only a genuine write failure
+ * propagates.
  *
  * @param {{
  *   ctx: PluginActivationContext,
  *   deps: { gateway: AiGatewayCapability, clientName: string, stateFile: string },
- *   state: { rowsWritten: number, rowsSkipped: number, eventsReceived: number, lastEventAt: string | undefined, lastError: string | undefined },
+ *   state: ClaudeTelemetryListenerState,
  *   usageByRequestId: Map<string, Record<string, unknown>>,
+ *   sessionBodyFacts: Map<string, { systemText?: string, tools?: unknown }>,
  *   readSessionContext: () => Promise<SessionContextRecord[]>,
+ *   spoolDir: string,
  * }} args
  * @returns {(req: OtlpRequest) => Promise<void>}
  */
-function makeReceiveHandler({ ctx, deps, state, usageByRequestId, readSessionContext }) {
+function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, spoolDir }) {
   return async function handle(req) {
     // Metrics ride the same exporter config; the message dataset has
     // nothing to learn from them.
@@ -196,11 +295,35 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, readSessionCon
           }
         }
 
+        // @ref LLP 0257#ingest [implements]: body files named by `body_ref`
+        // are read for the gap fields, then deleted after the write below.
+        const spooled = await loadSpooledBodies(events, { spoolDir })
+        state.bodiesMissing += spooled.missing
+        state.bodiesUnparseable += spooled.unparseable
+        span.setAttribute('body_count', spooled.bodies.size)
+        if (spooled.unparseable > 0) {
+          span.setAttribute('bodies_unparseable', spooled.unparseable)
+          ctx.log.warn('claude.telemetry.body_unparseable', {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            error_kind: 'body_unparseable',
+            body_count: spooled.unparseable,
+          })
+        }
+        for (const ref of spooled.refused) {
+          ctx.log.warn('claude.telemetry.body_ref_refused', {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            error_kind: 'body_ref_outside_spool',
+            body_ref: ref,
+          })
+        }
+
         const records = await readSessionContext()
         const projections = projectClaudeTelemetryEvents(events, {
           clientName: deps.clientName,
           usageByRequestId,
           sessionContext: (sessionId) => pickLatestMatching(records, { sessionId }),
+          spooledBodies: spooled.bodies,
+          sessionBodyFacts,
         })
         span.setAttribute('session_count', projections.length)
 
@@ -231,6 +354,20 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, readSessionCon
 
         state.rowsWritten += rowsWritten
         state.rowsSkipped += rowsSkipped
+
+        // Projected, then deleted: the write above succeeded, so nothing
+        // will ever need these files again.
+        // @ref LLP 0252#project-then-delete [implements]: deletion is the
+        //   normal end of a body's life, not a cleanup pass
+        if (spooled.consumedFiles.length > 0) {
+          const deleted = await deleteSpooledBodies(spooled.consumedFiles)
+          state.bodiesProjected += spooled.bodies.size
+          state.bodiesDeleted += deleted
+          state.spoolBytes = Math.max(0, state.spoolBytes - spooled.consumedBytes)
+          span.setAttribute('bodies_projected', spooled.bodies.size)
+          span.setAttribute('bodies_deleted', deleted)
+        }
+
         span.setAttribute('row_count', rowsWritten)
         span.setAttribute('rows_skipped', rowsSkipped)
         ctx.log.info('claude.telemetry.batch', {
@@ -239,6 +376,8 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, readSessionCon
           session_count: projections.length,
           rows_written: rowsWritten,
           rows_skipped: rowsSkipped,
+          bodies_projected: spooled.bodies.size,
+          bodies_missing: spooled.missing,
         })
       },
       { component: 'plugin.claude' }
@@ -314,6 +453,40 @@ export function resolveAttachTelemetryPort({ stateRoot, config }) {
     return portRaw
   }
   return DEFAULT_TELEMETRY_PORT
+}
+
+/**
+ * Resolve where the body spool lives and how large it may grow. The
+ * directory is fixed under the HypAware home (attach, detach, and
+ * `hyp purge` all derive the same path); only the byte cap is config,
+ * `telemetry.spool_max_bytes`, defaulting to 512 MB. A mistyped cap
+ * falls back to the default and warns, matching `readListenConfig`.
+ *
+ * @ref LLP 0253#byte-cap [implements]: the cap is one config value an operator
+ *   can lower on a small disk
+ * @param {PluginActivationContext} ctx
+ * @returns {{ dir: string, maxBytes: number }}
+ */
+export function readSpoolConfig(ctx) {
+  const dir = claudeBodySpoolDir(readObservabilityEnv(ctx.env).hypHome)
+  const config = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
+  const telemetry = config.telemetry
+  const slice = telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)
+    ? /** @type {Record<string, unknown>} */ (telemetry)
+    : {}
+
+  let maxBytes = DEFAULT_SPOOL_MAX_BYTES
+  const raw = slice.spool_max_bytes
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1) {
+    maxBytes = raw
+  } else if (raw !== undefined) {
+    ctx.log.warn('claude.telemetry.config_invalid', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      key: 'telemetry.spool_max_bytes',
+      value_type: typeof raw,
+    })
+  }
+  return { dir, maxBytes }
 }
 
 /**

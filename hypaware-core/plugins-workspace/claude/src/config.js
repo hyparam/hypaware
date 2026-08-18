@@ -93,14 +93,16 @@ export function validateBackfillSection(value, pointer) {
 
 /**
  * Validate the optional `telemetry` block: where the Claude telemetry
- * listener binds. `listen_host` is a string, `listen_port` an integer in
- * `0..65535` where `0` asks for a dynamic port. Both optional; unknown
- * keys are rejected so a typo (`listen_ports`) surfaces instead of
- * silently leaving the listener on its default port while attach writes
- * the address the operator meant.
+ * listener binds (`listen_host`, string; `listen_port`, integer in
+ * `0..65535` where `0` asks for a dynamic port) and how large the raw
+ * body spool may grow (`spool_max_bytes`, positive integer, default
+ * 512 MB). All optional; unknown keys are rejected so a typo
+ * (`listen_ports`) surfaces instead of silently leaving the listener on
+ * its default port while attach writes the address the operator meant.
  *
  * @ref LLP 0257#registration [implements]: the listener's port is config with a
  *   default, and `0` requests a dynamic port
+ * @ref LLP 0253#byte-cap [implements]: the spool cap is a configured byte value
  *
  * @param {unknown} value
  * @param {string} pointer  JSON-pointer prefix for the `telemetry` object
@@ -130,8 +132,17 @@ export function validateTelemetrySection(value, pointer) {
       })
     }
   }
+  if (raw.spool_max_bytes !== undefined) {
+    const cap = raw.spool_max_bytes
+    if (typeof cap !== 'number' || !Number.isInteger(cap) || cap < 1) {
+      errors.push({
+        pointer: `${pointer}/spool_max_bytes`,
+        message: 'telemetry.spool_max_bytes must be a positive integer',
+      })
+    }
+  }
   for (const key of Object.keys(raw)) {
-    if (key !== 'listen_host' && key !== 'listen_port') {
+    if (key !== 'listen_host' && key !== 'listen_port' && key !== 'spool_max_bytes') {
       errors.push({ pointer: `${pointer}/${key}`, message: `unknown telemetry key '${key}'` })
     }
   }
