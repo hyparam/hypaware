@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { askYesNo } from './confirm.js'
+import { parseCoreCommandArgv } from './command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
@@ -72,9 +73,13 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
  * @returns {Promise<number>}
  */
 export async function runReportRender(argv, ctx) {
+  const parsed = parseCoreCommandArgv('report render', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { renderReports, discoverReports } = await import('../reports/render.js')
 
-  const dir = path.resolve(positionals(argv, VALUE_FLAGS)[0] ?? path.join(os.homedir(), 'hypaware-reports'))
+  const dir = path.resolve(
+    /** @type {string | undefined} */ (parsed.params.dir) ?? path.join(os.homedir(), 'hypaware-reports')
+  )
 
   /** @type {Stats} */
   let stat
@@ -101,7 +106,7 @@ export async function runReportRender(argv, ctx) {
   }
 
   try {
-    const result = renderReports({ dir, refreshAssets: !argv.includes('--no-refresh-assets') })
+    const result = renderReports({ dir, refreshAssets: parsed.params['no-refresh-assets'] !== true })
     ctx.stdout.write(`Built html/ : ${result.reports} report(s) into html/<slug>/ (index + sections + assets)\n`)
     return 0
   } catch (err) {
@@ -120,6 +125,8 @@ export async function runReportRender(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportPublish(argv, ctx) {
+  const gate = parseCoreCommandArgv('report publish', argv, ctx)
+  if (!gate.ok) return gate.code
   const source = positionals(argv, VALUE_FLAGS)[0]
   const kind = valueFlag(argv, '--kind').value
   const period = valueFlag(argv, '--period').value
@@ -229,6 +236,8 @@ export async function runReportPublish(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportList(argv, ctx) {
+  const gate = parseCoreCommandArgv('report list', argv, ctx)
+  if (!gate.ok) return gate.code
   const resolved = resolveReportsTarget(argv, ctx, 'report list')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
@@ -279,6 +288,8 @@ export async function runReportList(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportGet(argv, ctx) {
+  const gate = parseCoreCommandArgv('report get', argv, ctx)
+  if (!gate.ok) return gate.code
   const [kind, period, id, ...fileSegments] = positionals(argv, VALUE_FLAGS)
   if (!kind || !period || !id) {
     ctx.stderr.write('usage: hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]\n')
@@ -342,6 +353,8 @@ export async function runReportGet(argv, ctx) {
  * @ref LLP 0155#delete-confirm [implements]: org-wide destructive verb confirms like purge, not like remote remove
  */
 export async function runReportDelete(argv, ctx) {
+  const gate = parseCoreCommandArgv('report delete', argv, ctx)
+  if (!gate.ok) return gate.code
   const [kind, period, id] = positionals(argv, VALUE_FLAGS)
   if (!kind || !period || !id) {
     ctx.stderr.write('usage: hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]\n')

@@ -3,6 +3,7 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 
@@ -21,11 +22,9 @@ import { useColor } from '../cli/stdio.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const dataset = argv[0]
-  if (!dataset) {
-    ctx.stderr.write('usage: hyp query schema <dataset>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
   return withSpan(
     'query.resolve_tables',
     {
@@ -49,10 +48,12 @@ export async function runQuerySchema(argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runQueryStatus(_argv, ctx) {
+export async function runQueryStatus(argv, ctx) {
+  const parsed = parseCoreCommandArgv('query status', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
@@ -238,7 +239,9 @@ export async function runQueryOverview(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryRefresh(argv, ctx) {
-  const target = argv[0]
+  const parsed = parseCoreCommandArgv('query refresh', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const target = /** @type {string | undefined} */ (parsed.params.dataset)
   const datasets = ctx.query.listDatasets()
   const filtered = target ? datasets.filter((d) => d.name === target) : datasets
   if (target && filtered.length === 0) {

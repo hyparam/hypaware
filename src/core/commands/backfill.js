@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import fsp from 'node:fs/promises'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
@@ -149,7 +150,9 @@ export async function runBackfill(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runBackfillList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('backfill list', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const providers = ctx.backfills.list()
   if (json) {
     ctx.stdout.write(

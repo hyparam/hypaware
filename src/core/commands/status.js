@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -31,7 +32,9 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  * @returns {Promise<number>}
  */
 export async function runStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
 
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)

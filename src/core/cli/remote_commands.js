@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -361,11 +362,10 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
  * @ref LLP 0033#commands [implements]: `remote add` is a local-layer writer; URL in config, token never in config
  */
 export async function runRemoteAdd(argv, ctx) {
-  const [name, url] = positionals(argv)
-  if (!name || !url) {
-    ctx.stderr.write('usage: hyp remote add <name> <url>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('remote add', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.name)
+  const url = String(parsed.params.url)
   if (!/^https?:\/\//.test(url)) {
     ctx.stderr.write(`hyp remote add: url must be an http(s) URL (got ${url})\n`)
     return 2
@@ -448,6 +448,12 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     ctx.stderr.write('hyp remote login: --host expects a host label\n')
     return { exitCode: 2, reason: 'usage' }
   }
+  // The strict gate runs after the three value-flag checks above so their
+  // flag-specific wording ("--org expects an org name") survives; what it
+  // adds is the refusal for everything neither they nor the readers below
+  // name, which used to be dropped in silence.
+  const gate = parseCoreCommandArgv('remote login', argv, ctx)
+  if (!gate.ok) return { exitCode: gate.code, reason: gate.code === 0 ? 'ok' : 'usage' }
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
   // as the target 'acme'.
@@ -964,7 +970,9 @@ function explainLoginError(callbackError, err) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('remote list', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const remotes = await readConfiguredRemotes(ctx)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const stored = await readCredentials(stateDir)
@@ -1001,11 +1009,9 @@ export async function runRemoteList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteRemove(argv, ctx) {
-  const name = positionals(argv)[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote remove <name>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('remote remove', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.name)
   let removedConfig = false
   const configPath = localConfigPath(ctx)
   try {

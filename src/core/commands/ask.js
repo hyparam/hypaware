@@ -2,6 +2,7 @@
 
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
 import {
@@ -35,15 +36,17 @@ import {
  * @returns {Promise<number>}
  */
 export async function runAsk(argv, ctx) {
+  const parsed = parseCoreCommandArgv('ask', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const clients = await askableClients(ctx)
   const descriptors = await buildWalkthroughClientDescriptorMap()
 
-  if (argv.includes('--list')) {
+  if (parsed.params.list === true) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     writeSuggestedPrompts({ stdout: ctx.stdout, launchable: launchers.length > 0 })
     return 0
   }
-  const question = argv.filter((a) => !a.startsWith('-')).join(' ').trim()
+  const question = String(parsed.params.question ?? '').trim()
 
   if (question.length > 0) {
     // A named question wants a launch, not a menu: resolve directly and
