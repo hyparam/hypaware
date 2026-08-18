@@ -6,7 +6,12 @@ import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/d
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
 import { deleteSpooledBodies, loadSpooledBodies } from './bodies.js'
-import { flattenClaudeTelemetryEvents } from './events.js'
+import { flattenClaudeTelemetryEvents, flattenClaudeTelemetryMetrics } from './events.js'
+import {
+  CLAUDE_TELEMETRY_EVENT_COLUMNS,
+  claudeTelemetryEventRows,
+  claudeTelemetryTablePath,
+} from './events_dataset.js'
 import { projectClaudeTelemetryEvents } from './projection.js'
 import {
   DEFAULT_SPOOL_MAX_BYTES,
@@ -19,7 +24,7 @@ import {
  * @import { Server } from 'node:http'
  * @import { AiGatewayCapability, PluginActivationContext, SourceStatus, StartedSource } from '../../../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpRequest } from '../../../../../src/core/otlp/types.js'
- * @import { ClaudeTelemetryListenerState, SessionContextRecord } from '../types.js'
+ * @import { ClaudeTelemetryEvent, ClaudeTelemetryListenerState, SessionContextRecord } from '../types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'
@@ -51,9 +56,9 @@ export const DEFAULT_TELEMETRY_PORT = 4319
 /**
  * Claude Code's exporter is configured with both `OTEL_LOGS_EXPORTER`
  * and `OTEL_METRICS_EXPORTER` (LLP 0258 #env-keys), so it POSTs to
- * `/v1/metrics` too. Serving the route and dropping the payload keeps
- * the exporter from retrying against a 404 forever; the metrics half of
- * the stream lands in `claude_telemetry_events` under LLP 0255, not here.
+ * `/v1/metrics` too. Both halves of the stream are consumed: log events
+ * feed the message projection plus the behavioral dataset, and metric
+ * data points land in `claude_telemetry_events` under LLP 0255.
  */
 const SERVED_SIGNALS = /** @type {const} */ (['logs', 'metrics'])
 
@@ -91,6 +96,7 @@ export function createStartClaudeTelemetrySource(deps) {
     const state = {
       rowsWritten: 0,
       rowsSkipped: 0,
+      telemetryRowsWritten: 0,
       eventsReceived: 0,
       lastEventAt: undefined,
       lastError: undefined,
@@ -212,6 +218,9 @@ export function createStartClaudeTelemetrySource(deps) {
             listen_port: bound.port,
             events_received: state.eventsReceived,
             rows_skipped: state.rowsSkipped,
+            // Behavioral rows, counted apart from `rowsWritten` (message
+            // rows) so a capture gap in either dataset is visible alone.
+            telemetry_rows_written: state.telemetryRowsWritten,
             // @ref LLP 0257#status-and-health [implements]: the status details
             // carry the last event seen and the spool's byte size and eviction
             // count; `hyp status` renders health from them.
@@ -266,10 +275,6 @@ export function createStartClaudeTelemetrySource(deps) {
  */
 function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFacts, readSessionContext, spoolDir }) {
   return async function handle(req) {
-    // Metrics ride the same exporter config; the message dataset has
-    // nothing to learn from them.
-    if (req.signal !== 'logs') return
-
     await withSpan(
       'claude.telemetry.receive',
       {
@@ -282,6 +287,35 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         status: 'ok',
       },
       async (span) => {
+        // Metrics ride the same exporter config; the message dataset has
+        // nothing to learn from them, but the behavioral dataset does
+        // (cost and activity counters), so they take the short path:
+        // flatten, record, done - no bodies, no projection.
+        if (req.signal === 'metrics') {
+          const metricEvents = flattenClaudeTelemetryMetrics(req.data)
+          span.setAttribute('event_count', metricEvents.length)
+          span.setAttribute('row_count', 0)
+          if (metricEvents.length === 0) {
+            span.setAttribute('telemetry_row_count', 0)
+            return
+          }
+          state.eventsReceived += metricEvents.length
+          for (const event of metricEvents) {
+            if (event.timestamp && (state.lastEventAt === undefined || event.timestamp > state.lastEventAt)) {
+              state.lastEventAt = event.timestamp
+            }
+          }
+          const written = await recordTelemetryEvents(metricEvents, { ctx, state, span })
+          span.setAttribute('telemetry_row_count', written)
+          ctx.log.info('claude.telemetry.batch', {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            signal: req.signal,
+            event_count: metricEvents.length,
+            telemetry_rows_written: written,
+          })
+          return
+        }
+
         const events = flattenClaudeTelemetryEvents(req.data)
         span.setAttribute('event_count', events.length)
         if (events.length === 0) {
@@ -355,7 +389,18 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         state.rowsWritten += rowsWritten
         state.rowsSkipped += rowsSkipped
 
-        // Projected, then deleted: the write above succeeded, so nothing
+        // The behavioral half of the batch, written AFTER the message
+        // rows: a failure here becomes an HTTP error the exporter
+        // retries, and on that retry the message rows dedupe by
+        // `part_id` while this write (which never happened) is
+        // re-attempted - the reverse order would duplicate behavioral
+        // rows on every message-write retry.
+        // @ref LLP 0255#own-dataset [implements]: behavioral events land in
+        //   `claude_telemetry_events`, next to (not inside) the message rows
+        const telemetryRowsWritten = await recordTelemetryEvents(events, { ctx, state, span })
+        span.setAttribute('telemetry_row_count', telemetryRowsWritten)
+
+        // Projected, then deleted: the writes above succeeded, so nothing
         // will ever need these files again.
         // @ref LLP 0252#project-then-delete [implements]: deletion is the
         //   normal end of a body's life, not a cleanup pass
@@ -376,6 +421,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           session_count: projections.length,
           rows_written: rowsWritten,
           rows_skipped: rowsSkipped,
+          telemetry_rows_written: telemetryRowsWritten,
           bodies_projected: spooled.bodies.size,
           bodies_missing: spooled.missing,
         })
@@ -383,6 +429,49 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
       { component: 'plugin.claude' }
     )
   }
+}
+
+/**
+ * Write one batch's behavioral rows into `claude_telemetry_events`.
+ * Content and body-pointer events yield no rows (`claudeTelemetryEventRows`
+ * filters them), so a purely conversational batch writes nothing here.
+ *
+ * A failure is handled exactly like a message-dataset write failure:
+ * counted on the state, marked on the span, logged, and re-thrown so
+ * the transport answers with an error the exporter retries.
+ *
+ * @ref LLP 0257#outputs [implements]: one row per event, hot fields typed,
+ *   the remainder in the attributes JSON column
+ * @param {ClaudeTelemetryEvent[]} events
+ * @param {{
+ *   ctx: PluginActivationContext,
+ *   state: ClaudeTelemetryListenerState,
+ *   span: { setAttribute(key: string, value: unknown): unknown },
+ * }} args
+ * @returns {Promise<number>} rows written
+ */
+async function recordTelemetryEvents(events, { ctx, state, span }) {
+  const rows = claudeTelemetryEventRows(events)
+  if (rows.length === 0) return 0
+  try {
+    await ctx.storage.appendRows(
+      claudeTelemetryTablePath(ctx.storage),
+      [...CLAUDE_TELEMETRY_EVENT_COLUMNS],
+      rows
+    )
+  } catch (err) {
+    state.lastError = err instanceof Error ? err.message : String(err)
+    span.setAttribute('error_kind', 'dataset_write')
+    ctx.log.error('claude.telemetry.write_failed', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      dataset: 'claude_telemetry_events',
+      event_count: events.length,
+      error: state.lastError,
+    })
+    throw err
+  }
+  state.telemetryRowsWritten += rows.length
+  return rows.length
 }
 
 /**

@@ -70,6 +70,99 @@ export function flattenClaudeTelemetryEvents(data) {
 }
 
 /**
+ * Decode one OTLP/JSON metrics envelope into the same flat event shape.
+ *
+ * Claude Code exports its activity counters (`claude_code.cost.usage`,
+ * `claude_code.lines_of_code.count`, `claude_code.active_time.total`,
+ * ...) as OTLP metrics on the same exporter config, and they are part of
+ * the behavioral record LLP 0255 gives a home: one data point becomes
+ * one event, named by the metric, its data-point attributes joined by
+ * `value` (and `unit` when the metric declares one). The same scope and
+ * self-marker guards apply, and the same never-throw posture: a shape
+ * this decoder does not recognize contributes nothing.
+ *
+ * @ref LLP 0255#row-shape [implements]: a metric data point is an event too -
+ *   one row, named by the metric, value and attributes preserved
+ * @param {unknown} data OTLP/JSON `ExportMetricsServiceRequest`
+ * @returns {ClaudeTelemetryEvent[]}
+ */
+export function flattenClaudeTelemetryMetrics(data) {
+  /** @type {ClaudeTelemetryEvent[]} */
+  const events = []
+  const root = asObject(data)
+  if (!root) return events
+  const groups = Array.isArray(root.resourceMetrics) ? root.resourceMetrics : []
+
+  for (const groupValue of groups) {
+    const group = asObject(groupValue)
+    if (!group) continue
+    if (resourceHasSelfMarker(group.resource)) continue
+    const scopes = Array.isArray(group.scopeMetrics) ? group.scopeMetrics : []
+    for (const scopeValue of scopes) {
+      const scopeMetric = asObject(scopeValue)
+      if (!scopeMetric) continue
+      const scopeName = stringOf(asObject(scopeMetric.scope)?.name)
+      if (!scopeName || !scopeName.startsWith(CLAUDE_EVENT_SCOPE_PREFIX)) continue
+      const metrics = Array.isArray(scopeMetric.metrics) ? scopeMetric.metrics : []
+      for (const metricValue of metrics) {
+        const metric = asObject(metricValue)
+        if (!metric) continue
+        const name = stringOf(metric.name)
+        if (!name) continue
+        const unit = stringOf(metric.unit)
+        for (const pointValue of metricDataPoints(metric)) {
+          const event = eventFromDataPoint(name, unit, pointValue)
+          if (event) events.push(event)
+        }
+      }
+    }
+  }
+
+  return events
+}
+
+/**
+ * @param {string} name
+ * @param {string | undefined} unit
+ * @param {unknown} value one OTLP `NumberDataPoint`
+ * @returns {ClaudeTelemetryEvent | undefined}
+ */
+function eventFromDataPoint(name, unit, value) {
+  const point = asObject(value)
+  if (!point) return undefined
+  const attributes = decodeAttributes(point.attributes)
+  // `value`/`unit` are plain keys (not `metric.`-namespaced) so SQL
+  // reads them as `JSON_VALUE(attributes, '$.value')`; no Claude Code
+  // data point carries attributes by those names.
+  const pointValue = numberOf(point.asDouble) ?? numberOf(point.asInt) ?? numberOf(point.sum)
+  if (pointValue !== undefined) attributes.value = pointValue
+  if (unit) attributes.unit = unit
+  const timestamp = isoFromUnixNano(point.timeUnixNano) ?? isoFromUnixNano(point.startTimeUnixNano)
+  return {
+    name,
+    attributes,
+    ...(timestamp ? { timestamp } : {}),
+  }
+}
+
+/**
+ * The data points under whichever aggregation the metric carries.
+ * Claude Code's are all sums (counters); gauge and histogram are read
+ * too so an upstream change of aggregation degrades to "value read
+ * differently", not to a dropped metric.
+ *
+ * @param {Record<string, unknown>} metric
+ * @returns {unknown[]}
+ */
+function metricDataPoints(metric) {
+  for (const key of ['sum', 'gauge', 'histogram']) {
+    const aggregation = asObject(metric[key])
+    if (aggregation && Array.isArray(aggregation.dataPoints)) return aggregation.dataPoints
+  }
+  return []
+}
+
+/**
  * @param {unknown} value
  * @returns {ClaudeTelemetryEvent | undefined}
  */

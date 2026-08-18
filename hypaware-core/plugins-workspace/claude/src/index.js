@@ -27,6 +27,7 @@ import {
   createStartClaudeTelemetrySource,
   resolveAttachTelemetryPort,
 } from './telemetry/source.js'
+import { claudeTelemetryDatasetRegistration } from './telemetry/events_dataset.js'
 import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 
 /**
@@ -344,6 +345,14 @@ export async function activate(ctx) {
       )
     },
   })
+
+  // The plugin's first dataset: behavioral events the wire never showed.
+  // Registered unconditionally (not gated on the listener below): the
+  // rows a past daemon wrote must stay queryable and enumerable even
+  // when this boot cannot host the listener.
+  // @ref LLP 0255#owned-by-claude [implements]: the payload shapes are Claude
+  // Code's, so the plugin that interprets them owns the table
+  ctx.query.registerDataset(claudeTelemetryDatasetRegistration())
 
   // The telemetry listener: Claude Code's own OTLP export, received on
   // loopback and projected into the same `ai_gateway_messages` rows the

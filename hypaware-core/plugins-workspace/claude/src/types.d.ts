@@ -61,6 +61,8 @@ export interface ClaudeTelemetrySessionFacts {
 export interface ClaudeTelemetryListenerState {
   rowsWritten: number
   rowsSkipped: number
+  /** Rows written to `claude_telemetry_events`, counted apart from the message rows. */
+  telemetryRowsWritten: number
   eventsReceived: number
   lastEventAt: string | undefined
   lastError: string | undefined

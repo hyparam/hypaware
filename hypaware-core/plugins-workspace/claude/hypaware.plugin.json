@@ -22,6 +22,13 @@
   },
   "contributes": {
     "sources": [{ "name": "claude-telemetry" }],
+    "datasets": [
+      {
+        "name": "claude_telemetry_events",
+        "source": "claude-telemetry",
+        "summary": "Claude Code behavioral telemetry: one row per event (tool decisions, permission mode changes, hook and MCP health, cost and activity metrics)"
+      }
+    ],
     "client": {
       "name": "claude",
       "skill_dir": ".claude/skills",
