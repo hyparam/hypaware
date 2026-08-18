@@ -5,6 +5,7 @@ import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { readObservabilityEnv } from '../observability/env.js'
+import { sanitizeLabel } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -57,6 +58,66 @@ export async function runDaemonRun(argv, ctx) {
 }
 
 /**
+ * How much of an `error=` line a hostile status file may spend. Wider than a
+ * label's 120, because unlike a name this carries a real error message -
+ * typically an fs error naming a full path - and the clamp exists to stop the
+ * line being bloated, not to bound an identifier.
+ */
+const MAX_ERROR_CHARS = 400
+
+/**
+ * A value out of `status.json` on its way to the terminal, made safe to print.
+ *
+ * `hyp status` cleans what it reads back out of this same file at the last
+ * point before render, for a reason that is a property of the file and not of
+ * that command: `status.json` is a *file*, and core cannot assume the daemon
+ * that wrote it was this version, this build, or well behaved
+ * (LLP 0164#status-reads-it-from-the-status-file). Nothing validates a field
+ * on read, so a raw value can carry an escape sequence that repaints the
+ * operator's screen or a newline that forges a plausible extra status line.
+ *
+ * Cleaning happens here rather than in `readStatusFile` because the reader
+ * also feeds `--json`, which is the machine copy and must stay byte-exact:
+ * escaping is a render's job, never a read's (LLP 0225).
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: what core reads back out of status.json is cleaned at the last point before render, on every surface that prints it
+ */
+function printable(value, max) {
+  return sanitizeLabel(value, max) ?? ''
+}
+
+/**
+ * A field `DaemonStatus` types as a number, printed as itself when the file
+ * really holds one and cleaned as a label when it does not. `String` is safe
+ * over anything `JSON.parse` produced, so a wrong-typed field still shows
+ * *something* rather than vanishing into an empty column.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function printableNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return printable(String(value))
+}
+
+/**
+ * A `sources` / `sinks` entry list out of the status file. Anything that is
+ * not an array is no list at all: the walk below would throw straight out
+ * through the CLI, which is the same raw-stack failure the read is guarded
+ * against.
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown>[]}
+ */
+function entryList(value) {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry) => !!entry && typeof entry === 'object')
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -65,8 +126,23 @@ export async function runDaemonStatus(argv, ctx) {
   const { readStatusFile } = await import('../daemon/status.js')
   const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const status = readStatusFile(stateDir)
-  const pidEntry = readPidFile(stateDir)
+  /** @type {ReturnType<typeof readStatusFile>} */
+  let status
+  /** @type {ReturnType<typeof readPidFile>} */
+  let pidEntry
+  try {
+    status = readStatusFile(stateDir)
+    pidEntry = readPidFile(stateDir)
+  } catch (err) {
+    // Both readers throw on a file they cannot make sense of, and
+    // `JSON.parse`'s message quotes an excerpt of the input verbatim. Left
+    // uncaught that reached the operator as a raw stack trace carrying the
+    // file's own bytes: useless as a diagnosis, and the one path on which the
+    // file reached the terminal entirely unfiltered.
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon status: ${printable(message, MAX_ERROR_CHARS)}\n`)
+    return 1
+  }
   const running = !!(pidEntry && processIsAlive(pidEntry.pid))
   if (!status) {
     if (json) {
@@ -84,26 +160,31 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
     return 0
   }
-  ctx.stdout.write(`daemon: ${status.state}${running ? '' : ' (no live process)'}\n`)
-  ctx.stdout.write(`  pid:        ${status.pid}\n`)
-  ctx.stdout.write(`  startedAt:  ${status.startedAt}\n`)
-  if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${status.healthyAt}\n`)
-  if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${status.stoppedAt}\n`)
-  ctx.stdout.write(`  uptime_ms:  ${liveUptimeMs}\n`)
+  // Everything below this line came out of the file and is going to a
+  // terminal, so everything below this line is cleaned on the way.
+  ctx.stdout.write(`daemon: ${printable(status.state)}${running ? '' : ' (no live process)'}\n`)
+  ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
+  ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
+  if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)
+  if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${printable(status.stoppedAt)}\n`)
+  ctx.stdout.write(`  uptime_ms:  ${printableNumber(liveUptimeMs)}\n`)
+  const sources = entryList(status.sources)
+  const sinks = entryList(status.sinks)
   ctx.stdout.write('  sources:\n')
-  if (status.sources.length === 0) {
+  if (sources.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
-    for (const source of status.sources) {
-      ctx.stdout.write(`    - ${source.name} (${source.plugin}): ${source.state}${source.error ? ' - ' + source.error : ''}\n`)
+    for (const source of sources) {
+      const error = printable(source.error, MAX_ERROR_CHARS)
+      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(source.state)}${error ? ' - ' + error : ''}\n`)
     }
   }
   ctx.stdout.write('  sinks:\n')
-  if (status.sinks.length === 0) {
+  if (sinks.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
-    for (const sink of status.sinks) {
-      ctx.stdout.write(`    - ${sink.instance} (${sink.plugin}, ${sink.kind})\n`)
+    for (const sink of sinks) {
+      ctx.stdout.write(`    - ${printable(sink.instance)} (${printable(sink.plugin)}, ${printable(sink.kind)})\n`)
     }
   }
   return 0

@@ -16,7 +16,7 @@ import {
 } from '../../../../src/core/tls/ca.js'
 
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
-import { createControlHandler } from './control.js'
+import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'
@@ -434,11 +434,12 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
     // mode at some point and may still have `HTTPS_PROXY` pointing here. Serve
     // blind tunnels so its egress keeps working, and say so loudly: nothing
     // else on the machine will volunteer that this install is in the degraded
-    // state. A plain re-attach is NOT the remedy: attach reads the mode off
-    // this very CA, so it picks proxy mode again for as long as the file is
-    // here. The remedies that land are removing the CA (`hyp detach claude
-    // --purge`, then re-attach) or turning `proxy_mode` back on.
-    // @ref LLP 0232#proxy-attach-preflight [constrained-by]: attach derives the mode from this CA, so it cannot downgrade while the CA is on disk
+    // state. A plain re-attach is NOT the remedy: attach leaves the CA where
+    // it is on purpose (the trust is offered back, never taken), so the file
+    // that puts the install in this state survives the re-attach. The
+    // remedies that land are removing the CA (`hyp detach claude --purge`,
+    // then re-attach) or turning `proxy_mode` back on.
+    // @ref LLP 0262#migration [constrained-by]: attach offers the CA back rather than removing it, so it cannot clear this state on its own
     const stale = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
     if (stale) {
       liveState.interceptionError = 'proxy_mode is off but a local CA is installed'
@@ -446,9 +447,8 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         ca_cert_path: stale.certPath,
         reason: 'serving blind tunnels so an already-attached client keeps working; ' +
-          're-attach reads the mode off this CA, so run `hyp detach claude --purge` ' +
-          'and re-attach to move the client back to base-URL mode, or turn ' +
-          'proxy_mode back on',
+          're-attaching leaves this CA on disk, so run `hyp detach claude --purge` ' +
+          'and re-attach to clear the proxy residue, or turn proxy_mode back on',
       })
       return { tunnelOnly: true }
     }

@@ -51,7 +51,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
@@ -541,6 +541,111 @@ export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
   return endpointFromListen(`${details.host}:${details.port}`)
 }
 
+/**
+ * Resolve a named listener source's live bound `listen_port` from the on-disk
+ * daemon status snapshot, behind the same daemon-liveness gate as
+ * {@link resolveLiveGatewayEndpointFromStatus}: a stale snapshot from a dead
+ * daemon is never handed back, and no port is ever fabricated.
+ *
+ * The generic sibling of the gateway resolver above, for sources that publish
+ * `details.listen_port` (the OTLP receiver, the Claude telemetry listener).
+ * The first consumer is `hyp attach claude` in `otel` mode: only the running
+ * daemon knows which port the listener actually bound (its configured default,
+ * or the ephemeral fallback when that port was taken), so the endpoint attach
+ * writes must come from here whenever a daemon is up.
+ *
+ * @param {{ stateRoot: string, sourceName: string }} args
+ * @returns {number | undefined}
+ */
+export function resolveLiveSourceListenPortFromStatus({ stateRoot, sourceName }) {
+  const list = liveStatusSources(stateRoot)
+  if (!list) return undefined
+  const source = list.find((s) => s && s.name === sourceName)
+  const details = sourceDetails(source)
+  const port = details?.listen_port
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return undefined
+  }
+  return port
+}
+
+/**
+ * Every live source advertising a named `/_hypaware/` control route in its
+ * status details (`control_routes`), resolved to the base URL of its bound
+ * listener.
+ *
+ * This is how `hyp session ignore` / `unignore` finds the recorders beyond
+ * the gateway: a recorder that hosts the route says so in its own status
+ * details, so the verb stays client-agnostic and a listener that is not
+ * running (absent from a live snapshot, or no live daemon at all) is simply
+ * not addressed - it is recording nothing, so there is nothing to notify.
+ * The gateway itself is NOT discovered here; its endpoint has its own,
+ * richer resolution (`status.json` plus the pinned `listen` fallback).
+ *
+ * @ref LLP 0256#cli-posts-to-both [implements]: the CLI addresses every
+ * listener that offers the route; offering is advertised, never guessed
+ * @param {{ stateRoot: string, route: string }} args
+ * @returns {Array<{ source: string, endpoint: string }>}
+ */
+export function resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route }) {
+  const list = liveStatusSources(stateRoot)
+  if (!list) return []
+  /** @type {Array<{ source: string, endpoint: string }>} */
+  const out = []
+  for (const source of list) {
+    if (!source || typeof source.name !== 'string') continue
+    const details = sourceDetails(source)
+    const routes = details?.control_routes
+    if (!Array.isArray(routes) || !routes.includes(route)) continue
+    const port = details?.listen_port
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) continue
+    const host = typeof details?.listen_host === 'string' && details.listen_host.length > 0
+      ? details.listen_host
+      : '127.0.0.1'
+    const endpoint = endpointFromListen(`${host}:${port}`)
+    if (endpoint) out.push({ source: source.name, endpoint })
+  }
+  return out
+}
+
+/**
+ * The liveness-gated snapshot read shared by the resolvers above: a live pid
+ * and a readable status file, or nothing. A `status.json` outlives its
+ * daemon, so a bound port in it proves nothing without a living process
+ * behind the pid file.
+ *
+ * @param {string} stateRoot
+ * @returns {SourceSnapshot[] | undefined}
+ */
+function liveStatusSources(stateRoot) {
+  let pidEntry
+  try {
+    pidEntry = readPidFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  if (!pidEntry || !processIsAlive(pidEntry.pid)) return undefined
+
+  /** @type {DaemonStatus | null} */
+  let status
+  try {
+    status = readStatusFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  return Array.isArray(status?.sources) ? status.sources : []
+}
+
+/**
+ * @param {SourceSnapshot | undefined} source
+ * @returns {Record<string, unknown> | undefined}
+ */
+function sourceDetails(source) {
+  return source && typeof source.details === 'object' && source.details !== null
+    ? /** @type {Record<string, unknown>} */ (source.details)
+    : undefined
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
@@ -972,6 +1077,8 @@ export async function collectHypAwareStatus(opts = {}) {
   }
   /** @type {ClientAttachReport[]} */
   const clients = []
+  /** @type {CaptureHealthReport[]} */
+  const captureHealth = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
@@ -999,6 +1106,11 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
+      ...(probe.mode !== undefined ? { mode: probe.mode } : {}),
+      // `--json` only, like `version` and `port`: an operator debugging a
+      // silent otel capture needs to see where the client is actually pointed,
+      // and it is the field `client_telemetry_stale` below reasons about.
+      ...(probe.telemetryPort !== undefined ? { telemetryPort: probe.telemetryPort } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     // Deliberately ungated by `attachable`, unlike the two derived-state
@@ -1068,6 +1180,124 @@ export async function collectHypAwareStatus(opts = {}) {
         message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
         repair: [`hyp detach --client ${clientName}`],
       })
+    }
+
+    // ----- capture health (LLP 0262 open question 1's duty) -----
+    // On the otel path capture is best-effort: a stale endpoint, a down
+    // daemon, or upstream event drift all fail into the same silence, with
+    // every other line here healthy. This holds the client's own file trail
+    // (fresh, probed off $HOME like the attach marker was) against the last
+    // event the listener recorded (from status.json - deliberately NOT
+    // liveness-gated, the LLP 0164 argument: "last seen at T" survives its
+    // daemon, and the dead-daemon case is precisely the gap to surface).
+    // Gated on `configured` because an otel marker with no enabled plugin is
+    // `client_attached_not_configured`'s finding above, where the repair is a
+    // detach rather than a capture fix.
+    // @ref LLP 0257#status-and-health [implements]: last event seen vs last transcript activity, answered without a dataset or cache read
+    if (configured && probe.attached && probe.mode === 'otel') {
+      const snapshots = Array.isArray(daemonStatusFile?.sources) ? daemonStatusFile.sources : []
+      const owned = snapshots.filter((s) => s && s.plugin === descriptor.plugin)
+      // The plugin's listener source advertises itself by carrying the
+      // `last_event_at` detail (null before the first event), the same
+      // self-advertisement pattern as `control_routes`.
+      const listenerSnap = owned.find((s) => {
+        const details = sourceDetails(s)
+        return !!details && 'last_event_at' in details
+      }) ?? owned[0]
+      const listenerDetails = sourceDetails(listenerSnap)
+      const lastEventAt = typeof listenerDetails?.last_event_at === 'string'
+        ? listenerDetails.last_event_at
+        : null
+
+      // ----- telemetry endpoint drift -----
+      // The `otel` counterpart of `client_attach_stale` above, which compares
+      // the marker's port against the *gateway* and so watches an address this
+      // mode never uses. Attach writes one endpoint into the client's settings
+      // and nothing rewrites it afterwards, while the listener may since have
+      // bound elsewhere - it falls back to an ephemeral port when its default
+      // is taken (LLP 0114 §ephemeral-fallback), and an attach that ran with no
+      // live daemon could only write the default in the first place. The client
+      // then POSTs its telemetry, prompts and responses included, at whatever
+      // process holds the port it was told about, and every other line here
+      // stays healthy. `capture_gap` below eventually notices the silence, but
+      // only after fifteen minutes of transcript activity and without naming
+      // the cause; this comparison is already on disk and is exact.
+      //
+      // Liveness-gated, unlike `last_event_at` right above: "the listener was
+      // last bound to X" is not a claim a dead daemon's snapshot can support,
+      // and a restart is exactly what moves the port back.
+      // @ref LLP 0114#fallback-is-visible [implements]: a listener that came up on its ephemeral fallback is visible in status, not only in a boot log line - here through the client left pointing at the port it vacated
+      // @ref LLP 0086#status-drift-diagnostic [implements]: the same warn-and-name-the-repair shape, against the port this attach mode actually writes
+      const boundTelemetryPort = daemon.running && typeof listenerDetails?.listen_port === 'number'
+        ? listenerDetails.listen_port
+        : undefined
+      if (
+        probe.telemetryPort !== undefined &&
+        boundTelemetryPort !== undefined &&
+        Number.isInteger(boundTelemetryPort) &&
+        probe.telemetryPort !== boundTelemetryPort
+      ) {
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_stale',
+          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp attach --client ${clientName}' to re-point it`,
+          repair: [
+            `hyp attach --client ${clientName}`,
+            `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
+      const lastTranscriptActivityAt =
+        (await probeClientActivityFromDescriptor({ descriptor, homeDir, env })) ?? null
+      const attachedAt = probe.attachedAt ?? null
+      // Live daemon only, deliberately. A dead daemon's snapshot still carries
+      // the moment its listener started, but that moment stopped bounding
+      // anything when the process ended, and the dead-daemon gap is the one
+      // this line most needs to keep reporting.
+      const listenerStartedAt = daemon.running && typeof listenerDetails?.listener_started_at === 'string'
+        ? listenerDetails.listener_started_at
+        : null
+      const verdict = assessCaptureHealth({
+        lastEventAt,
+        lastTranscriptActivityAt,
+        attachedAt,
+        listenerStartedAt,
+      })
+      captureHealth.push({
+        client: clientName,
+        plugin: descriptor.plugin,
+        source: listenerSnap?.name ?? null,
+        lastEventAt,
+        lastTranscriptActivityAt,
+        attachedAt,
+        listenerStartedAt,
+        gapMs: verdict.gapMs,
+        state: verdict.state,
+      })
+      if (verdict.state === 'gap' && verdict.severity !== undefined) {
+        // Escalates to a degrading `error` past CAPTURE_GAP_ERROR_MS, unlike
+        // the attach diagnostics above: a not-yet-attached install is merely
+        // unfinished, but an attached one silently losing sessions is the
+        // failure this line exists to make loud.
+        const gapText = formatGapDuration(verdict.gapMs)
+        const message = lastEventAt !== null
+          ? `${clientName} is otel-attached, but its transcripts stayed active ${gapText} past the last telemetry event - those sessions are not being captured`
+          // "past the point capture should have been running" rather than
+          // "after the attach": with a live listener the baseline is whichever
+          // of the attach and the listener's own start is newer, so naming the
+          // attach would be wrong exactly when a restart moved the baseline.
+          : `${clientName} is otel-attached, but no telemetry has arrived and its transcripts show activity ${gapText} past the point capture should have been running - those sessions are not being captured`
+        diagnostics.push({
+          severity: verdict.severity,
+          kind: 'capture_gap',
+          message,
+          repair: [
+            'hyp daemon restart  # the telemetry listener runs in the daemon',
+            `hyp attach --client ${clientName}  # rewrites the telemetry env block with the live listener port`,
+            `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
     }
   }
 
@@ -1139,10 +1369,31 @@ export async function collectHypAwareStatus(opts = {}) {
     remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
   if (remoteConfig?.lastRollback) {
+    // The three values in this message are display-only, and none of them is
+    // this build's own: the etag is whatever the joined server served, and
+    // all three come back through `config-control/state.json`, which is read
+    // with no validation beyond "is an object". A diagnostic message is prose
+    // assembled for a person, so its components are cleaned here, where the
+    // prose is assembled, rather than in `readConfigControlStatus`.
+    //
+    // Be precise about what that does and does not mean. The message is
+    // assembled once, here, so the cleaned prose is also what `--json` carries
+    // at `diagnostics[].message`: a machine consumer of *that string* reads
+    // the sanitized line, not the file's bytes, with each component stripped
+    // and clamped to `sanitizeLabel`'s 120. That is accepted, not overlooked.
+    // The prose line is not a parsing surface on either render, and the
+    // unedited values stay one key away and structured, at
+    // `remote_config.last_rollback`, which is where a program reads them and
+    // which stays byte-exact. Cleaning at the single `${d.message}`
+    // interpolation in `renderStatusText` instead would keep the prose raw for
+    // `--json` too, but it would have to pick one clamp width that holds for
+    // every diagnostic kind, not just this one.
+    // @ref LLP 0225#decision [implements]: assembled prose is cleaned where it is assembled; the machine copy of the same values, `remote_config.last_rollback`, stays byte-exact
+    const rolledBack = remoteConfig.lastRollback
     diagnostics.push({
       severity: 'warning',
       kind: 'remote_config_rolled_back',
-      message: `remote config ${remoteConfig.lastRollback.etag} rolled back at ${remoteConfig.lastRollback.at} (${remoteConfig.lastRollback.reason})`,
+      message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
       repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
     })
   }
@@ -1235,7 +1486,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // client-action (e.g. backfill-on-join) is likewise excluded. It has
   // its own status line but never flips `overall` (LLP 0041
   // §failure-is-surfaced-not-fatal); note it is not even a diagnostic, so
-  // it cannot reach this computation.
+  // it cannot reach this computation. A `capture_gap` that escalated to
+  // `error` severity degrades through the severity rule below by design
+  // (LLP 0262 open question 1): silent session loss is an outage, not an
+  // unfinished setup.
   const degradingKinds = new Set(['config_missing', 'config_unreadable'])
   const overall =
     diagnostics.some((d) => d.severity === 'error') ? 'degraded'
@@ -1264,6 +1518,7 @@ export async function collectHypAwareStatus(opts = {}) {
     usagePolicy,
     firstSyncHoldDeadline,
     recentEntrypoints,
+    captureHealth,
     proxyTrust,
   }
 }
@@ -1579,6 +1834,42 @@ function readRetention(config) {
 }
 
 /**
+ * The port an attach marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` names.
+ *
+ * This is not {@link probeClientAttachFromDescriptor}'s `port`, which records
+ * the gateway. An `otel`-mode client sends nothing to the gateway: its whole
+ * capture path is this one endpoint, written into the client's settings once
+ * at attach and never revisited. So it is the value a drift check has to
+ * compare, and taking it from `managed.env` - the live env block attach wrote
+ * and detach restores - means the check reads the address the client is
+ * actually using rather than a parallel field that could disagree with it.
+ *
+ * Anything that is not a well-formed loopback-shaped `http(s)://host:port`
+ * with an in-range port reads as absent: the marker is a file a hand edit
+ * reaches, and a diagnostic built on a guess is worse than no diagnostic.
+ *
+ * @param {Record<string, unknown>} markerObj
+ * @returns {number | undefined}
+ */
+function markerTelemetryPort(markerObj) {
+  const managed = markerObj.managed
+  if (!isPlainObject(managed)) return undefined
+  const env = managed.env
+  if (!isPlainObject(env)) return undefined
+  const endpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return undefined
+  let parsed
+  try {
+    parsed = new URL(endpoint)
+  } catch {
+    return undefined
+  }
+  const port = Number(parsed.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  return port
+}
+
+/**
  * Probe on-disk client settings using the descriptor's attach_probe
  * definition. Supports JSON (marker key lookup) and TOML (header string
  * search) formats. Returns a probe result without importing any client
@@ -1592,7 +1883,7 @@ function readRetention(config) {
  *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
- * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
+ * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, telemetryPort?: number, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
@@ -1617,11 +1908,23 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       const marker = /** @type {Record<string, unknown>} */ (parsed)[probe.marker_key]
       if (!marker || typeof marker !== 'object') return { attached: false, settingsPath }
       const markerObj = /** @type {Record<string, unknown>} */ (marker)
+      const telemetryPort = markerTelemetryPort(markerObj)
       return {
         attached: true,
         settingsPath,
         version: typeof markerObj.version === 'string' ? markerObj.version : undefined,
         port: typeof markerObj.port === 'number' ? String(markerObj.port) : undefined,
+        // The marker's `mode` / `attached_at`, absent on markers that predate
+        // them: mode is what gates the capture-health section, and the attach
+        // timestamp is its baseline for a listener that has seen nothing yet.
+        ...(typeof markerObj.mode === 'string' ? { mode: markerObj.mode } : {}),
+        ...(typeof markerObj.attached_at === 'string' ? { attachedAt: markerObj.attached_at } : {}),
+        // Where the client's own exporter is pointed, which for an `otel`
+        // attach is the only address capture depends on. Read off
+        // `managed.env` rather than added as a second marker field, so it is
+        // literally the value the client is using and cannot fall out of step
+        // with it.
+        ...(telemetryPort !== undefined ? { telemetryPort } : {}),
       }
     }
 
@@ -1659,6 +1962,176 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       error: err instanceof Error ? err.message : String(err),
     }
   }
+}
+
+/**
+ * Ceiling on how deep the activity-probe walk descends below the declared
+ * directory. Claude transcripts sit two levels down
+ * (`projects/<slug>/<session>.jsonl`) and subagent transcripts four
+ * (`projects/<slug>/<session>/subagents/agent-*.jsonl`); the cap exists so a
+ * manifest pointing at a pathological tree bounds the probe instead of the
+ * probe walking it to the bottom.
+ */
+const MAX_ACTIVITY_PROBE_DEPTH = 5
+
+/**
+ * When this client last left a file behind: the newest matching mtime under
+ * the descriptor's `activity_probe.dir`, as an ISO timestamp.
+ *
+ * This is the transcript half of the capture-health comparison, probed fresh
+ * on every `hyp status` run rather than read from `status.json`, because the
+ * moment it matters most is a daemon that has been down while the user
+ * worked - exactly when nothing was alive to record it. It stats file
+ * metadata only, never opens a file, and is best-effort like every probe in
+ * this collector: any failure reads as `undefined` (no claim), never as a
+ * fabricated timestamp.
+ *
+ * @ref LLP 0257#status-and-health [implements]: the last-transcript-activity side of the capture-health line
+ * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
+ * @returns {Promise<string | undefined>}
+ */
+export async function probeClientActivityFromDescriptor({ descriptor, homeDir, env }) {
+  const probe = descriptor.activityProbe
+  if (!probe || !homeDir) return undefined
+  /** @type {string} */
+  let dirPath
+  try {
+    dirPath = resolveClientSettingsPath(descriptor.name, probe.dir, env, homeDir, {
+      field: 'activity_probe.dir',
+    })
+  } catch {
+    return undefined
+  }
+  const newest = await newestMtimeMs(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH)
+  return newest === undefined ? undefined : new Date(newest).toISOString()
+}
+
+/**
+ * Newest mtime (epoch ms) of any matching regular file under `dir`, walked
+ * to `depth` levels. Symlinks are not followed and every fs error skips the
+ * entry: a probe that cannot read a corner of the tree still answers from
+ * the rest of it.
+ *
+ * @param {string} dir
+ * @param {string | undefined} suffix
+ * @param {number} depth
+ * @returns {Promise<number | undefined>}
+ */
+async function newestMtimeMs(dir, suffix, depth) {
+  /** @type {Dirent[]} */
+  let entries
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true })
+  } catch {
+    return undefined
+  }
+  /** @type {number | undefined} */
+  let newest
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (depth <= 1) continue
+      const nested = await newestMtimeMs(full, suffix, depth - 1)
+      if (nested !== undefined && (newest === undefined || nested > newest)) newest = nested
+    } else if (entry.isFile()) {
+      if (suffix !== undefined && !entry.name.endsWith(suffix)) continue
+      try {
+        const stat = await fsp.stat(full)
+        if (newest === undefined || stat.mtimeMs > newest) newest = stat.mtimeMs
+      } catch { /* raced deletion or unreadable file: skip */ }
+    }
+  }
+  return newest
+}
+
+/**
+ * Client activity newer than the capture baseline by more than this is a
+ * capture gap worth a diagnostic. Under working capture the two move in near
+ * lockstep - Claude Code appends the transcript and flushes the exporter on
+ * the same turns, seconds apart - so the threshold only has to clear flush
+ * cadence and batch timing, and fifteen minutes clears them by an order of
+ * magnitude while still catching a broken path within the same sitting.
+ */
+export const CAPTURE_GAP_WARNING_MS = 15 * 60_000
+
+/**
+ * Past this the gap severity escalates to `error`, which degrades `overall`:
+ * two hours of transcript activity with no telemetry is a whole working
+ * session lost, not a timing artifact. The escalation is the "visible
+ * instead of discovered at report time" duty of LLP 0262 open question 1 -
+ * best-effort delivery was accepted on the condition that a silent gap
+ * cannot stay silent.
+ */
+export const CAPTURE_GAP_ERROR_MS = 2 * 3_600_000
+
+/**
+ * Judge one otel-attached client's capture gap. Pure, so the threshold
+ * contract is unit-testable without a filesystem.
+ *
+ * The baseline is the newest of three moments capture could be measured from:
+ * the last event seen, the attach timestamp, and the running listener's own
+ * start. Activity older than the attach proves nothing about the otel path
+ * (the usual shape right after a migration from proxy attach, where months of
+ * transcripts predate the first possible event), and a listener that has seen
+ * nothing at all is measured from the attach instead. No baseline at all - no
+ * events, no listener, and an unreadable attach time - reads as `ok`, because
+ * a gap claim needs a moment capture was supposed to start.
+ *
+ * `listenerStartedAt` is the third because the listener's `lastEventAt` lives
+ * only in its process: every daemon restart republishes `last_event_at: null`
+ * however long capture has been healthy, and without this the baseline would
+ * fall back to an attach timestamp that can be weeks old. A machine attached a
+ * month ago and used an hour ago would then report a month-long gap - severity
+ * `error`, degrading `overall` - immediately after a routine
+ * `hyp daemon restart`, which is itself the first repair `capture_gap` prints.
+ * The caller passes it ONLY for a live daemon: on a dead one the last daemon's
+ * start says nothing about now, and the growing gap is precisely the thing to
+ * surface.
+ *
+ * @ref LLP 0257#status-and-health [implements]: the gap threshold and its severity
+ * @param {{ lastEventAt?: string | null, lastTranscriptActivityAt?: string | null, attachedAt?: string | null, listenerStartedAt?: string | null }} args
+ * @returns {{ state: 'ok' | 'gap', gapMs: number, severity?: 'warning' | 'error' }}
+ */
+export function assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt, listenerStartedAt }) {
+  const transcriptMs = parseIsoMs(lastTranscriptActivityAt)
+  if (transcriptMs === undefined) return { state: 'ok', gapMs: 0 }
+  const eventMs = parseIsoMs(lastEventAt)
+  const attachedMs = parseIsoMs(attachedAt)
+  const listenerMs = parseIsoMs(listenerStartedAt)
+  if (eventMs === undefined && attachedMs === undefined && listenerMs === undefined) {
+    return { state: 'ok', gapMs: 0 }
+  }
+  const baseline = Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity, listenerMs ?? -Infinity)
+  const gapMs = Math.max(0, transcriptMs - baseline)
+  if (gapMs <= CAPTURE_GAP_WARNING_MS) return { state: 'ok', gapMs }
+  return {
+    state: 'gap',
+    gapMs,
+    severity: gapMs > CAPTURE_GAP_ERROR_MS ? 'error' : 'warning',
+  }
+}
+
+/**
+ * A gap length for diagnostic prose: coarse on purpose, like
+ * `formatEntrypointAge`, because the message's claim is "a sitting" or "a
+ * day", never a precise bound.
+ *
+ * @param {number} gapMs
+ * @returns {string}
+ */
+export function formatGapDuration(gapMs) {
+  const minutes = Math.floor(gapMs / 60_000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+/** @param {string | null | undefined} value @returns {number | undefined} */
+function parseIsoMs(value) {
+  if (typeof value !== 'string') return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
 }
 
 /**

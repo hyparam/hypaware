@@ -225,6 +225,16 @@ export function createActionReconciler(opts) {
           if (carried.length > 0) {
             marker.installed_assets = [...new Set([...carried, ...readInstalledAssets(marker)])]
           }
+          // The other half of the same record. A settings-only attach copies no
+          // files, so `installed_assets` says nothing about whether an effect
+          // was applied; without this bit the rewrite would hand the reverse gap
+          // a marker that looks exactly like a refusal that never touched the
+          // disk, and the settings write would be dropped along with it. Set
+          // after the detail spread so a handler's `detail` cannot erase
+          // reconciler bookkeeping about an effect that is really on disk.
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
+          //   effect it overwrites, not only the assets it copied
+          if (markerRecordsPriorDone(existing)) marker.prior_done = true
           markers[action.requestKey] = marker
           results.push({ kind, requestKey: action.requestKey, outcome: 'refused', reason })
           log.error('client_action.refused', {
@@ -259,6 +269,11 @@ export function createActionReconciler(opts) {
             ...(existing?.installed_assets ? { installed_assets: existing.installed_assets } : {}),
             ...(outcome.detail ?? {}),
           }
+          // The settings half of that same record, for a client whose attach
+          // copies no files: see the `refused` branch above.
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
+          //   effect it overwrites, not only the assets it copied
+          if (markerRecordsPriorDone(existing)) marker.prior_done = true
           markers[action.requestKey] = marker
           results.push({ kind, requestKey: action.requestKey, outcome: 'failed', reason, attempts })
           log.error('client_action.failed', {
@@ -310,13 +325,24 @@ export function createActionReconciler(opts) {
           // naming is dropped rather than handed to a `reverse()` that has
           // nothing to undo, while one carrying `installed_assets` from an
           // earlier successful attach takes the reverse path below.
+          //
+          // `installed_assets` is not the whole evidence, though, and reading it
+          // as if it were is what made this gate unsound for a settings-only
+          // client. An attach that reached `done`, wrote the client's settings
+          // and copied no files, then re-`perform()`ed into `failed`/`refused`,
+          // has an assetless terminal marker over a settings write that is still
+          // there. `prior_done` is what tells the two apart, so the drop needs
+          // both halves to be empty (LLP 0250).
           // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
           //   over an effect it recorded, whichever status it carries
           // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: the reverse gap treats refused the way it treats failed
+          // @ref LLP 0250#the-drop-condition [implements]: the drop reads the
+          //   settings half of the record too, not just the asset half
           if (
             !marker ||
             ((marker.status === 'failed' || marker.status === 'refused') &&
-              readInstalledAssets(marker).length === 0)
+              readInstalledAssets(marker).length === 0 &&
+              !markerRecordsPriorDone(marker))
           ) {
             delete markers[requestKey]
             mutated = true
@@ -504,6 +530,31 @@ export function readInstalledAssets(marker) {
 }
 
 /**
+ * Did an earlier pass at this request key reach `done`, i.e. apply an effect
+ * that is still on disk?
+ *
+ * `installed_assets` answers this only for an attach that copied files. An
+ * attach that writes the client's settings and copies nothing (openclaw, and
+ * any settings-only client) leaves no such trace, so a `done` marker later
+ * rewritten to `failed`/`refused` used to be byte-indistinguishable from one
+ * whose attach never applied anything. `prior_done` is the missing half of the
+ * evidence, read defensively because the store is persisted JSON that a
+ * pre-LLP-0250 daemon (or a hand edit) wrote without the field.
+ *
+ * Read off the *existing* marker when writing a terminal rewrite, and off the
+ * stored marker when deciding whether the reverse gap may drop it.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {boolean}
+ * @ref LLP 0250#the-bit [implements]: one accessor for "an earlier pass applied
+ *   something here", beside the one that reads the asset half
+ */
+export function markerRecordsPriorDone(marker) {
+  if (!marker) return false
+  return marker.status === 'done' || marker.prior_done === true
+}
+
+/**
  * Read-only view of the client-action markers for `hyp status`: usable
  * from any process (the CLI is not the daemon), so it never constructs the
  * reconciler or takes its handlers. Mirrors `readConfigControlStatus`.
@@ -575,11 +626,21 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
  * Two shapes, because "re-arm" and "retract" are only the same operation when
  * the marker records no effect:
  *
- *  - **No `installed_assets`.** The marker records nothing that outlives it
- *    (an attach refuses *before* touching the client's settings), so it is
- *    dropped outright. The next reconcile pass's `existing` lookup returns
- *    `undefined`, the request key is a fresh forward gap, and `perform()`
- *    writes a correct `done` marker itself.
+ *  - **No `installed_assets`.** Dropped outright. The next reconcile pass's
+ *    `existing` lookup returns `undefined`, the request key is a fresh forward
+ *    gap, and `perform()` writes a correct `done` marker itself.
+ *
+ *    What makes that safe is the *call site*, not the marker: this runs only
+ *    after an explicit `hyp attach` that already succeeded and rewrote the
+ *    client's settings, and a hand-attached client is undone by `hyp detach`
+ *    reading the client's own file, with no marker needed. So do not read the
+ *    drop as "this marker recorded nothing". Such a marker may carry
+ *    `prior_done: true` (a settings-only attach that reached `done` and was
+ *    later rewritten to `refused`), and that bit is exactly the evidence the
+ *    reconciler's reverse gap must not drop over. Here it may be dropped, and
+ *    the asset half below may not, because the settings name themselves on
+ *    disk and org-installed asset paths are named by nothing but this marker.
+ *    Only the *asset* half of the record outlives an explicit re-attach.
  *  - **With `installed_assets`.** Those name files an *earlier* successful
  *    org-driven attach copied, carried onto the marker across its rewrite to
  *    `refused`; the marker is the only thing on disk naming them, and
@@ -597,6 +658,7 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
  * @returns {boolean} whether a `refused` marker was found and the store rewritten
  * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only a refused one
  * @ref LLP 0138#marker-undo [implements]: the re-arm keeps the record of an applied effect, so a later reversal can still remove what an org-driven attach installed
+ * @ref LLP 0250 [constrained-by]: the re-arm is deliberately left reading only the asset half, so an assetless marker carrying `prior_done` is still dropped here
  */
 export function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)

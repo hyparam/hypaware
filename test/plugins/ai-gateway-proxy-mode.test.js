@@ -582,10 +582,11 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   const staleWarn = logged.find((l) => l.event === 'aigw.proxy_mode_stale_ca')
   assert.ok(staleWarn, 'the stale-CA warning is emitted')
 
-  // The warning has to name a remedy that actually works. Attach derives its
-  // mode from this same CA, so telling the operator to re-attach leaves them
-  // exactly where they started: proxy mode, every time, until the CA is gone.
-  // @ref LLP 0232#proxy-attach-preflight [tests]: the stale-CA remedy cannot be a plain re-attach
+  // The warning has to name a remedy that actually works. Attach deliberately
+  // leaves the CA on disk (it offers the trust back rather than taking it), so
+  // telling the operator to re-attach leaves the install exactly as degraded
+  // as it was, every time, until the CA is gone.
+  // @ref LLP 0262#migration [tests]: the stale-CA remedy cannot be a plain re-attach
   const reason = String(staleWarn.attrs.reason ?? '')
   assert.match(reason, /hyp detach claude --purge/)
   assert.doesNotMatch(reason, /run `hyp attach claude` to move it back/)

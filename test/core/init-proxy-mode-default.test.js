@@ -82,6 +82,7 @@ test('the claude-and-otel-local preset writes proxy_mode: true', async () => {
       commands: { register() {} },
       skills: { register() {} },
       agents: { register() {} },
+      query: { registerDataset() {} },
       initPresets: { register(/** @type {any} */ p) { preset = p } },
     }
     await activateClaude(ctx)
