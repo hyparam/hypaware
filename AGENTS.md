@@ -96,6 +96,16 @@ Written acceptance procedures:
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
   attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+- `openclaw_capture`: opt-in/manual, needs OpenClaw with both `anthropic` and
+  `openai` credentials. Proves both capture lanes (live gateway and the
+  scheduled transcript sweep) and that a turn both lanes observe settles to
+  one row. See `docs/ACCEPTANCE.md`.
+- `claude_otel_shape_check`: opt-in/manual, needs a real Claude Code 2.1.214
+  or newer. The release gate against upstream drift on the OTEL attach path:
+  proves the installed Claude Code still honors the managed `env` block and
+  still emits the event names, attributes, and raw body fields the telemetry
+  listener reads, then checks the rows and the `hyp status` capture-health
+  line agree. See `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
@@ -237,6 +247,18 @@ hypaware daemon uninstall
 If the release touched a client adapter, run the matching procedure in
 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
 release notes.
+
+If the release touched the **claude** adapter (`@hypaware/claude`, the
+telemetry listener, the body spool, or the attach settings writer), the
+matching procedure is
+[`claude_otel_shape_check`](docs/ACCEPTANCE.md#claude_otel_shape_check). It is
+not optional for those releases and it is not substitutable by the hermetic
+smokes: `claude_telemetry_capture` POSTs a fixture we wrote, so it agrees with
+itself no matter what upstream did. Only a real Claude Code can tell you it
+renamed an event, dropped a flag, or changed the raw body format, and the
+failure mode is silent (null columns, not an error). Record the observed
+`claude --version` and the full event-name list in the release notes so the
+next release has a baseline to diff against.
 
 <!-- neutral:llp-conventions -->
 ## LLP conventions
