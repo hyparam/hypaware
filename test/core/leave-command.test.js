@@ -142,7 +142,9 @@ test('leave reverses org-driven attaches and drops the forward identity', async 
       {
         attach: {
           claude: { status: 'done', request_key: 'claude' },
-          // A failed marker never applied an effect: leave just drops it.
+          // A failed attach takes the same undo every other marker takes; it
+          // finds nothing in codex's settings, says nothing, and the marker
+          // goes with it.
           codex: { status: 'failed', request_key: 'codex', reason: 'boom', attempts: 1 },
         },
         // Backfill is run-once by design: its marker survives leave.
@@ -170,7 +172,7 @@ test('leave reverses org-driven attaches and drops the forward identity', async 
   assert.equal('_hypaware' in settings, false)
   assert.equal(settings.env?.ANTHROPIC_BASE_URL, undefined)
 
-  // Attach markers are gone (done reversed, failed dropped); backfill stays.
+  // Attach markers are gone (both reversed, one of them a no-op); backfill stays.
   const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
   assert.equal(markers.attach, undefined)
   assert.equal(markers.backfill['claude:default'].status, 'done')
@@ -403,6 +405,137 @@ test('leave removes the assets its attach marker records, and leaves manual copi
   // that removed it would be deleting the user's own file.
   assert.equal(await fs.readFile(path.join(manualSkill, 'SKILL.md'), 'utf8'), 'mine\n')
   // The marker only drops once its assets are actually gone.
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
+test('leave reverses a settings-only attach whose marker was later rewritten to refused', async () => {
+  // The case that decided #627's direction. A marker's status is not a record
+  // of what is on disk: an attach that wrote the client's settings and
+  // installed no files records `done` with no `installed_assets`, and a later
+  // re-perform() that refuses (LLP 0186) rewrites the status in place. Nothing
+  // carries the settings write forward, so the rewritten marker is
+  // byte-indistinguishable from one whose attach never applied anything -
+  // while the settings edit is still there. Leave therefore runs the
+  // disk-driven undo for every marker it holds and lets the client's own file
+  // decide, instead of reading the status as a proxy for it.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+
+  // The attach's whole effect: the managed block and the env it manages. No
+  // assets, which is the normal shape for a client that contributes none.
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: {
+            status: 'refused',
+            request_key: 'claude',
+            reason: 'settings.json is JSONC; refusing to modify',
+            at: '2026-08-04T00:00:00.000Z',
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+
+  // The settings the attach really wrote are reversed, not stranded behind a
+  // marker whose status claimed nothing had happened.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  assert.equal(settings.env?.ANTHROPIC_BASE_URL, undefined)
+  // And the user is told, because this reversal changed something.
+  assert.match(stdout.text(), /Detached claude/)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
+test('leave stays quiet about a marker whose client has nothing left to reverse', async () => {
+  // #627's actual symptom, fixed at the reporting layer rather than by
+  // skipping the undo. Leave sweeps every attach marker on disk, so it reaches
+  // clients that hold nothing of ours: a refusal never wrote the client's
+  // settings at all. The undo still runs (it is what proves the file is
+  // clean), it reports `changed: false`, and a sweep must not turn that into a
+  // line naming a settings file the user never had. `hyp detach codex` still
+  // says it: there the line is the answer to what was asked.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: { status: 'done', request_key: 'claude' },
+          codex: {
+            status: 'refused',
+            request_key: 'codex',
+            reason: 'model_providers.hypaware already exists and was not written by HypAware',
+            at: '2026-08-04T00:00:00.000Z',
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+
+  assert.doesNotMatch(stdout.text(), /No HypAware marker found/)
+  assert.doesNotMatch(stdout.text(), /\.codex/)
+  // The quiet has to come from the reversal finding nothing, not from codex
+  // having no descriptor to reverse through: that path prints its own line.
+  assert.doesNotMatch(stdout.text(), /'codex' plugin not installed/)
+  // A refusal writes no settings file, and probing for one must not create it.
+  await assert.rejects(fs.stat(path.join(home, '.codex', 'config.toml')))
+
+  // The neighbour is unaffected: an attach that did apply still reverses, and
+  // says so, and both markers are gone.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  assert.match(stdout.text(), /Detached claude/)
   const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
   assert.equal(markers.attach, undefined)
 })

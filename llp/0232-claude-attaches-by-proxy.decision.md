@@ -9,7 +9,10 @@
 **Extended-by:** LLP 0237, LLP 0239 (on macOS, proxy-mode attach additionally
 installs user-domain keychain trust and the launchd `NODE_USE_SYSTEM_CA`
 environment, because the two-key attach alone breaks Remote Control inbound;
-see LLP 0236)
+see LLP 0236); LLP 0247 (#attach-writes-https_proxy-not-a-base-url: the
+gateway now serves absolute-form request-targets to registered hosts on
+forward-proxy listeners, so the case against `HTTP_PROXY` rests on the
+no-plaintext-traffic-worth-capturing rationale alone)
 
 > Attach stops writing `env.ANTHROPIC_BASE_URL` and writes `env.HTTPS_PROXY`
 > plus `env.NODE_EXTRA_CA_CERTS` instead. The endpoint stays

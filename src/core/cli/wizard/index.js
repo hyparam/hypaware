@@ -6,6 +6,7 @@
  * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import {
  *   FirstAskResult,
+ *   FirstLookOutcome,
  *   FirstLookResult,
  *   InitWizardResult,
  *   RunInitWizardOptions,
@@ -23,7 +24,15 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { LOCAL_INSTALL_RETENTION_DAYS, buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory, defaultPickerDetect, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
+import {
+  LOCAL_INSTALL_RETENTION_DAYS,
+  buildWalkthroughClientDescriptorMap,
+  defaultConfirmSelectPromptFactory,
+  defaultPickerDetect,
+  runPickerFinale,
+  writeAttachedNotConfiguredReminder,
+  writeWalkthroughRunSummary,
+} from '../walkthrough.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
@@ -642,20 +651,63 @@ export async function runInitWizard(opts) {
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
+  const firstLookRan = interactive && !cancelled && opts.finale?.dryRun !== true
+  // `firstLookResult.wrote` is whether the step put text on the screen, which
+  // is neither "it ran" nor "the block rendered". The step is documented to
+  // degrade rather than fail a finished install (LLP 0135 #first-look), and it
+  // degrades in two different ways: an unregistered dataset, an unreadable
+  // cache or a render that throws leave `firstLookRan` true and stdout
+  // untouched, while an expired deadline with nothing renderable writes two
+  // lines saying so and still reports `shown: false`. `runWizardFirstLook`
+  // measures the writes, so this is the fact itself rather than an inference
+  // from which branch it took, and a branch added later reports itself without
+  // a change here.
   /** @type {FirstLookResult | undefined} */
   let firstLookResult
-  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+  if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
     firstLookResult = await runWizardFirstLook({
       runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
+      ...(opts.firstLookBudgetMs !== undefined ? { budgetMs: opts.firstLookBudgetMs } : {}),
     })
     // The abandoned queries from an expired deadline keep running and can
     // still resolve with a withheld-row report. Close the sink so that
     // report cannot land after the privacy narration below, which is
     // documented to be the last thing on screen.
     notices.close()
+  }
+
+  // The finale already named these, before the daemon restart that strands
+  // them (LLP 0185 #warn-do-not-detach). That print is no longer on screen by
+  // the time this run ends: the summary, then the first look's block, then
+  // the narration below all follow it without a pause. Repeat it here, short,
+  // and only when this closing sequence actually wrote something, so the
+  // direct `runPickerWalkthrough` entry point (whose summary follows the
+  // finale with nothing in between) keeps its single print.
+  //
+  // `firstLookResult.wrote` is the whole condition, the team pathway included.
+  // It is read rather than `firstLookRan` because a first look that wrote
+  // nothing buried nothing, rather than `shown` because a skip that explains
+  // itself on stdout (the expired deadline) buried the finale's print exactly
+  // as a full render would, and rather than `pathway` because a `pathway` is
+  // only ever resolved on an interactive run: a team run that is neither
+  // cancelled nor a dry run has already run the first look, so
+  // `|| pathway === 'team'` would widen this to exactly the runs where the
+  // first look did *not* run (cancelled at the backfill consent, or a dry
+  // run). Every run either of those conditions would add wrote nothing
+  // between the finale and here, so the repeat would land a few lines under
+  // the print it repeats.
+  // @ref LLP 0230#when [constrained-by]: nothing written in between, no repeat
+  // @ref LLP 0230#repeat-at-the-end [implements]: the wizard repeats what its own closing output buried
+  const stranded = finaleSummary?.attachedNotConfigured ?? []
+  if (stranded.length > 0 && firstLookResult?.wrote === true) {
+    writeAttachedNotConfiguredReminder({
+      clients: stranded,
+      stdout: opts.stdout,
+      dryRun: opts.finale?.dryRun === true,
+    })
   }
 
   // The wizard's last words on a run that enrolled: when the first upload
@@ -759,8 +811,12 @@ export async function runInitWizard(opts) {
  * cache: the dataset exists and holds nothing yet, which is exactly the
  * fresh-install case (LLP 0198#empty-cache).
  *
+ * Takes the outcome half, not the whole {@link FirstLookResult}: this
+ * question is answered from what the step found, and `wrote` (LLP 0230
+ * #when) says nothing about whether the cache has rows.
+ *
  * @ref LLP 0198#empty-cache [tests]: `no-dataset`, `slow`, and `error` each resolve to a distinct answer; collapsing any two is the bug
- * @param {FirstLookResult | undefined} result
+ * @param {FirstLookOutcome | undefined} result
  * @returns {boolean | undefined}
  */
 export function firstLookHadRows(result) {
