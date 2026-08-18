@@ -10,9 +10,7 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
-import { defaultStateRoot, readLocalCaInfo } from '../../../../src/core/tls/ca.js'
-import { installCaTrust, isCaTrusted } from '../../../../src/core/tls/darwin_trust.js'
-import { installLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
+import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -182,88 +180,65 @@ export async function activate(ctx) {
         },
         async (span) => {
           const obsEnv = readObservabilityEnv(ctx.env)
+          // Everything the `otel` env block names, resolved before the
+          // settings write so the write is one atomic decision. `otel` is the
+          // claude client's only attach mode: a machine still carrying a
+          // proxy attach is migrated by this same write (the mode-switch key
+          // release plus the residue unwind below), never re-attached by
+          // proxy.
+          // @ref LLP 0258#version-floor [constrained-by]: one attach mode per client, with no proxy fallback
+          const telemetryPort = resolveAttachTelemetryPort({
+            stateRoot: obsEnv.stateDir,
+            config: ctx.config,
+          })
+          const spoolDir = claudeBodySpoolDir(obsEnv.hypHome)
           if (attachCtx.dryRun) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            const port = safeEndpointPort(attachCtx.endpoint)
-            const dryRunCa = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
               dryRun: true,
               settingsPath,
-              port,
+              port: safeEndpointPort(attachCtx.endpoint),
               changed: false,
               prevValue: undefined,
-              mode: dryRunCa ? MODE_PROXY : MODE_OTEL,
-              caCertPath: dryRunCa?.certPath,
-              ...(dryRunCa
-                ? {}
-                : {
-                    telemetryPort: resolveAttachTelemetryPort({
-                      stateRoot: obsEnv.stateDir,
-                      config: ctx.config,
-                    }),
-                    spoolDir: claudeBodySpoolDir(obsEnv.hypHome),
-                  }),
+              mode: MODE_OTEL,
+              telemetryPort,
+              spoolDir,
             })
             return
           }
           const port = endpointPort(attachCtx.endpoint)
           try {
-            // Proxy mode is used when the daemon is actually running it, which
-            // is exactly when a machine-local CA exists. Reading it here rather
-            // than from config keeps attach honest: the mode it writes is the
-            // mode the gateway is serving, not the one someone asked for.
-            // (A proxy-mode install migrating to `otel` is LLP 0245's ticket
-            // #807, not this branch.)
-            // @ref LLP 0232#proxy-attach-preflight [implements]
-            const ca = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
-
-            // Everything the `otel` env block names, resolved before the
-            // settings write so the write is one atomic decision. The floor
-            // check itself lives in attach(): it refuses before any I/O, so a
-            // too-old Claude Code leaves the settings byte-identical.
+            // The floor check itself lives in attach(): it refuses before any
+            // I/O, so a too-old Claude Code leaves the settings byte-identical,
+            // a proxy attach it would otherwise have migrated included.
             // @ref LLP 0258#version-floor [implements]: the probed version is what attach refuses on; unknown proceeds
-            /** @type {string | undefined} */
-            let spoolDir
-            /** @type {number | undefined} */
-            let telemetryPort
-            /** @type {string | undefined} */
-            let claudeVersion
-            if (!ca) {
-              claudeVersion = await resolveClaudeCodeVersion(ctx.env)
-              telemetryPort = resolveAttachTelemetryPort({
-                stateRoot: obsEnv.stateDir,
-                config: ctx.config,
-              })
-              spoolDir = claudeBodySpoolDir(obsEnv.hypHome)
-            }
+            const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
 
+            // The base URL is never written and no proxy keys appear, which is
+            // what keeps Remote Control's first-party predicate true with no
+            // override keys.
+            // @ref LLP 0258#settings-env [implements]: one settings write is the entire attach
+            // @ref LLP 0258#nothing-else [implements]: no keychain, no launchctl setenv, no LaunchAgent on this path
             const result = await attach({
               port,
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
               binPath: resolveHookBinPath(ctx.env),
-              // No CA means no proxy-mode gateway to route through, and that is
-              // the whole decision: `otel` needs no daemon at all at attach
-              // time, so it is the default rather than the fallback. The base
-              // URL is never written and no proxy keys appear, which is what
-              // keeps Remote Control's first-party predicate true with no
-              // override keys.
-              // @ref LLP 0258#settings-env [implements]: one settings write is the entire attach
-              // @ref LLP 0258#nothing-else [implements]: no keychain, no launchctl setenv, no LaunchAgent on this path
-              ...(ca
-                ? { mode: MODE_PROXY, caCertPath: ca.certPath }
-                : { mode: MODE_OTEL, telemetryPort, spoolDir, claudeVersion }),
+              mode: MODE_OTEL,
+              telemetryPort,
+              spoolDir,
+              claudeVersion,
             })
             // After the settings write, not before: a floor refusal must leave
             // nothing behind, and Claude Code only starts writing bodies once a
             // session launches with the new settings. Created owner-only here
             // so raw prompts never pass through a default-mode directory.
             // @ref LLP 0253#spool-location [implements]
-            if (spoolDir !== undefined) await ensureClaudeBodySpool(spoolDir)
+            await ensureClaudeBodySpool(spoolDir)
             // Malformed `env` / `hooks` blocks attach rebuilt after backing the
             // displaced value up into the marker (LLP 0163). Reported on the
             // span, in the log, and to the user - the whole point of the
@@ -272,31 +247,54 @@ export async function activate(ctx) {
               ? [...result.warnings]
               : []
 
-            // The settings keys alone leave Remote Control's inbound channel
-            // broken (LLP 0236): its transport trusts only the keychain, and
-            // only when NODE_USE_SYSTEM_CA=1 was in the environment at boot.
-            // Both halves are macOS-only, both degrade to a warning rather
-            // than failing the attach - capture works without them.
-            /** @type {'granted' | 'already' | 'refused' | undefined} */
-            let trustState
+            // A prior proxy marker makes this attach a migration. The settings
+            // write above already released the proxy keys (the LLP 0232
+            // mode-switch rule); what is left is the residue outside the
+            // settings file. The launchd environment is unwound here; the CA
+            // trust is OFFERED, never taken: it carries the once-per-machine
+            // password-dialog grant, other clients may still proxy through the
+            // gateway, and ending the grant is `hyp detach --purge`'s job.
+            // @ref LLP 0245#migration [implements]: release the proxy keys, unwind the launchd env, offer detach --purge, write the OTEL block
+            const migratedFrom = result.changed && result.priorMode === MODE_PROXY
+              ? MODE_PROXY
+              : undefined
             /** @type {boolean | undefined} */
-            let launchdEnvSet
-            if (ca && process.platform === 'darwin') {
-              const darwin = await ensureDarwinProxyTrust({
-                certPath: ca.certPath,
-                hosts: ca.hosts,
-                stdout: attachCtx.stdout,
-              })
-              trustState = darwin.trustState
-              launchdEnvSet = darwin.launchdEnvSet
-              warnings.push(...darwin.warnings)
-              span.setAttribute('proxy_trust', darwin.trustState)
-              span.setAttribute('launchd_env_set', darwin.launchdEnvSet)
-            } else if (ca) {
-              // @ref LLP 0237#darwin-only [implements]
-              warnings.push(
-                'Remote Control inbound is not supported under proxy mode on this platform yet'
+            let launchdEnvRemoved
+            /** @type {string[]} */
+            const migrationNotes = []
+            if (migratedFrom !== undefined) {
+              const unwind = await unwindProxyLaunchdEnv({ homeDir })
+              launchdEnvRemoved = unwind.launchdEnvRemoved
+              warnings.push(...unwind.warnings)
+              migrationNotes.push(
+                'Migrated from proxy attach: the proxy env keys are released and ' +
+                'Claude Code talks to Anthropic directly again.',
+                'Sessions started before this keep proxying until they restart; ' +
+                'the overlap dedupes into the same rows.'
               )
+              if (launchdEnvRemoved === true) {
+                migrationNotes.push('Removed NODE_USE_SYSTEM_CA from the launchd environment.')
+              }
+              migrationNotes.push(
+                (process.platform === 'darwin'
+                  ? 'The HypAware Local CA is still trusted in your login keychain. '
+                  : 'The HypAware local CA is still on disk. ') +
+                "Run 'hyp detach claude --purge' to remove it (then 'hyp attach claude' " +
+                'to keep capturing); it is never removed without you asking.'
+              )
+              span.setAttribute('migrated_from', migratedFrom)
+              if (launchdEnvRemoved !== undefined) {
+                span.setAttribute('launchd_env_removed', launchdEnvRemoved)
+              }
+              logger.info('client.attach.migrated', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                from_mode: MODE_PROXY,
+                to_mode: MODE_OTEL,
+                ...(launchdEnvRemoved !== undefined
+                  ? { launchd_env_removed: launchdEnvRemoved }
+                  : {}),
+              })
             }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
@@ -327,12 +325,12 @@ export async function activate(ctx) {
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
                 : undefined,
-              mode: ca ? MODE_PROXY : MODE_OTEL,
-              caCertPath: ca?.certPath,
+              mode: MODE_OTEL,
               telemetryPort,
               spoolDir,
-              trust: trustState,
-              launchdEnvSet,
+              migratedFrom,
+              launchdEnvRemoved,
+              migrationNotes,
               warnings,
             })
           } catch (err) {
@@ -607,64 +605,53 @@ function safeEndpointPort(endpoint) {
 }
 
 /**
- * The two macOS-only halves of a working proxy attach: user-domain keychain
- * trust for the CA, and `NODE_USE_SYSTEM_CA=1` in the launchd user
- * environment. Every failure is a warning, never a throw: capture works
- * without either half, and the attach must say what is degraded rather than
- * refuse to deliver what still works.
- * @ref LLP 0237#attach-anyway-on-refusal [implements]
+ * Unwind the launchd-environment half of a proxy attach when `hyp attach
+ * claude` migrates the machine to `otel` mode.
  *
- * The pre-dialog line is written directly: the macOS password dialog appears
- * mid-attach, and a user who has not been told why gets a scary
- * trust-settings prompt with no context.
+ * Mirrors the detach undo's release (`releaseProxyModeLaunchdEnv` in
+ * `client_detach_disk.js`): darwin-only, best-effort, and the same by-hand
+ * hint on failure, because the attach that just migrated must never fail on
+ * residue it can name. The CA and its keychain trust deliberately stay: they
+ * carry the user's once-per-machine password-dialog grant, and only `hyp
+ * detach --purge` or `hyp daemon uninstall` may end it. The migration OFFERS
+ * that step in its output; it never runs it.
+ * @ref LLP 0245#migration [implements]: the launchd env is unwound; the CA trust is offered, never forced
+ * @ref LLP 0239#launchctl-setenv [implements]: the migration is one more path that reverses a proxy attach, so it releases the env too
  *
- * @param {{ certPath: string, hosts: string[], stdout: { write(s: string): unknown } }} args
- * @returns {Promise<{
- *   trustState: 'granted' | 'already' | 'refused',
- *   launchdEnvSet: boolean,
- *   warnings: string[],
- * }>}
+ * @param {{
+ *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   removeEnv?: typeof removeLaunchdEnv,
+ * }} [args]
+ * @returns {Promise<{ launchdEnvRemoved?: boolean, warnings: string[] }>}
  */
-async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
-  /** @type {string[]} */
-  const warnings = []
-  /** @type {'granted' | 'already' | 'refused'} */
-  let trustState
-
-  if (await isCaTrusted({ certPath })) {
-    trustState = 'already'
-  } else {
-    // Name every host the trust will cover, so the grant is informed - the
-    // constraint set is wider than the one provider being attached.
-    // @ref LLP 0238#full-provider-constraints [constrained-by]: the dialog context must name all permitted hosts
-    stdout.write(
-      `  Requesting keychain trust for the HypAware Local CA (limited to: ${hosts.join(', ')}).\n` +
-      '  macOS will ask for your login password.\n'
-    )
-    const install = await installCaTrust({ certPath })
-    if (install.installed) {
-      trustState = 'granted'
-    } else {
-      trustState = 'refused'
-      warnings.push(
-        'keychain trust was not granted' +
-        `${install.detail ? ` (${install.detail})` : ''}; ` +
-        'capture works, but Remote Control messages sent from other devices will not arrive. ' +
-        'Re-run `hyp attach claude` to retry.'
-      )
+export async function unwindProxyLaunchdEnv({
+  homeDir,
+  platform = process.platform,
+  removeEnv = removeLaunchdEnv,
+} = {}) {
+  if (platform !== 'darwin') return { warnings: [] }
+  try {
+    const removal = await removeEnv({ homeDir })
+    if (removal.unset) return { launchdEnvRemoved: true, warnings: [] }
+    return {
+      launchdEnvRemoved: false,
+      warnings: [
+        'NODE_USE_SYSTEM_CA could not be unset from the launchd environment' +
+        `${removal.detail ? ` (${removal.detail})` : ''}; ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand',
+      ],
+    }
+  } catch (err) {
+    return {
+      launchdEnvRemoved: false,
+      warnings: [
+        'the launchd environment could not be released ' +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand',
+      ],
     }
   }
-
-  const env = await installLaunchdEnv({})
-  if (!env.set) {
-    warnings.push(
-      'NODE_USE_SYSTEM_CA could not be set in the launchd environment' +
-      `${env.detail ? ` (${env.detail})` : ''}; ` +
-      'launch Claude Code with `NODE_USE_SYSTEM_CA=1` in the shell until this is fixed.'
-    )
-  }
-
-  return { trustState, launchdEnvSet: env.set, warnings }
 }
 
 /**
@@ -682,11 +669,11 @@ async function ensureDarwinProxyTrust({ certPath, hosts, stdout }) {
  *   changed: boolean,
  *   prevValue?: string,
  *   mode?: 'proxy' | 'base_url' | 'otel',
- *   caCertPath?: string,
  *   telemetryPort?: number,
  *   spoolDir?: string,
- *   trust?: 'granted' | 'already' | 'refused',
- *   launchdEnvSet?: boolean,
+ *   migratedFrom?: 'proxy',
+ *   launchdEnvRemoved?: boolean,
+ *   migrationNotes?: string[],
  *   warnings?: string[],
  * }} fields
  */
@@ -703,11 +690,13 @@ function writeAttachOutput(attachCtx, fields) {
     }
     if (fields.port !== undefined) payload.port = fields.port
     if (fields.mode !== undefined) payload.mode = fields.mode
-    if (fields.caCertPath !== undefined) payload.ca_cert_path = fields.caCertPath
     if (fields.telemetryPort !== undefined) payload.telemetry_port = fields.telemetryPort
     if (fields.spoolDir !== undefined) payload.spool_dir = fields.spoolDir
-    if (fields.trust !== undefined) payload.keychain_trust = fields.trust
-    if (fields.launchdEnvSet !== undefined) payload.launchd_env_set = fields.launchdEnvSet
+    // The typed migration facts, so a scripted caller can tell a migrating
+    // attach from a routine one without parsing prose; the human notes below
+    // stay off this surface.
+    if (fields.migratedFrom !== undefined) payload.migrated_from = fields.migratedFrom
+    if (fields.launchdEnvRemoved !== undefined) payload.launchd_env_removed = fields.launchdEnvRemoved
     // Named, because `prev_value` alone does not say which key it belonged to
     // and each mode manages different ones.
     if (fields.prevValue !== undefined) {
@@ -746,27 +735,19 @@ function writeAttachOutput(attachCtx, fields) {
   } else if (fields.port !== undefined) {
     attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
   }
-  if (fields.mode === MODE_PROXY && fields.caCertPath !== undefined) {
-    attachCtx.stdout.write(`  NODE_EXTRA_CA_CERTS = ${fields.caCertPath}\n`)
-  }
   if (fields.prevValue !== undefined) {
     attachCtx.stdout.write(`  (previous ${managedKey} was ${fields.prevValue})\n`)
   }
+  // The migration story, told where the user is looking: what the switch
+  // released, what was unwound, and the one residue that is theirs to end
+  // (the CA trust, offered as `hyp detach claude --purge`, never run for
+  // them).
+  // @ref LLP 0245#migration [implements]: the offer is a printed step, not an action
+  for (const note of fields.migrationNotes ?? []) {
+    attachCtx.stdout.write(`  ${note}\n`)
+  }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)
-  }
-  // Last, so it is the line the user acts on. `launchctl setenv` reaches only
-  // processes launchd starts afterwards; windows of an already-running
-  // terminal app inherit the app's stale environment, so "open a new window"
-  // is not enough (proven in the run G acceptance test).
-  // @ref LLP 0239#terminals-predating-attach [implements]: already-open terminal apps are told to relaunch, not fixed
-  if (fields.mode === MODE_PROXY && fields.launchdEnvSet === true && fields.trust !== 'refused') {
-    attachCtx.stdout.write(
-      '  One more step for Remote Control: quit your terminal app completely ' +
-      '(Cmd-Q) and reopen it.\n' +
-      '  A new window or tab is not enough; apps launched from now on pick up ' +
-      'the change automatically.\n'
-    )
   }
 }
 

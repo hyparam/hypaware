@@ -258,6 +258,22 @@ export async function attach(opts) {
   const { value, mtimeMs } = await readSettings(settingsPath)
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
+  // What the marker said before this run rewrites it. A proxy attach leaves
+  // residue no settings write reaches (the launchd environment, the keychain
+  // trust), and by the time the caller could re-read the marker this write has
+  // already replaced it, so the prior mode is reported on the result. Only the
+  // three known modes are reported: a legacy marker without one predates modes
+  // entirely and has no residue to unwind.
+  // @ref LLP 0245#migration [implements]: the prior mode is what tells the adapter a proxy attach is being migrated
+  /** @type {'proxy' | 'base_url' | 'otel' | undefined} */
+  let priorMode
+  if (
+    priorMarker &&
+    (priorMarker.mode === MODE_PROXY || priorMarker.mode === MODE_BASE_URL || priorMarker.mode === MODE_OTEL)
+  ) {
+    priorMode = priorMarker.mode
+  }
+
   // A backup an earlier run already recorded at some path. Read before anything
   // is displaced, because it decides what this run is allowed to claim: a prior
   // entry wins (see below), so a value displaced *this* run at an
@@ -540,6 +556,7 @@ export async function attach(opts) {
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
+  if (priorMode !== undefined) result.priorMode = priorMode
   // Each mode reports the key it actually took over. Reporting a displaced
   // base URL from a mode that never touched `ANTHROPIC_BASE_URL` would be the
   // first thing a user checked when their own value turned out to still be

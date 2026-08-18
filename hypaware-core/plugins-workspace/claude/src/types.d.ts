@@ -220,6 +220,15 @@ export interface ClaudeAttachChanged {
    */
   prevValue?: string
   /**
+   * The mode the prior `_hypaware` marker recorded, when one of the three
+   * known modes. `proxy` is the one the caller acts on: a proxy attach left
+   * residue outside the settings file (the launchd environment, the keychain
+   * trust) that the mode switch alone cannot reach, and by the time the caller
+   * runs, this write has already replaced the marker that said so. Absent on a
+   * first attach and on legacy markers that predate modes.
+   */
+  priorMode?: 'proxy' | 'base_url' | 'otel'
+  /**
    * One notice per `env` / `hooks` block this run found present on disk with
    * the wrong JSON type and had to rebuild. Attach backs the displaced value
    * up into the marker's `prev_malformed` and keeps succeeding (LLP 0163), so
