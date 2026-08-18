@@ -348,3 +348,51 @@ test('a re-attach keeps the original backup rather than backing up our own value
   // Nothing new was displaced this run, so nothing new is warned about.
   assert.equal(second.changed && second.warnings, undefined)
 })
+
+// A per-signal OTLP key outranks the generic endpoint attach writes, so a
+// machine carrying one exports its telemetry - including the prompt and
+// response text this attach turns on - to the collector that key names, while
+// `hyp status` says `attached (otel)` and the listener sees nothing. Attach
+// manages exactly the nine keys LLP 0258 names and no more, so the only honest
+// answer is to say so out loud.
+// @ref LLP 0258#env-keys [tests]: the managed set is unchanged; what is outside it and outranks it is named
+test('a per-signal OTLP override is warned about, without echoing its value', async (t) => {
+  const r = await rig({
+    env: {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://token@collector.corp:4318',
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
+    },
+  })
+  t.after(() => r.cleanup())
+
+  const result = await otelAttach(r)
+  assert.equal(result.changed, true)
+  const warned = String(result.changed && result.warnings?.join(' '))
+  assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
+  assert.match(warned, /OTEL_EXPORTER_OTLP_HEADERS/)
+  assert.match(warned, /outranks/)
+  // Neither the collector nor the credential appears: this string is printed,
+  // logged, and serialised into `--json`.
+  assert.doesNotMatch(warned, /collector\.corp/)
+  assert.doesNotMatch(warned, /sekrit/)
+
+  // Warned about, not touched: they are outside the managed set, so attach
+  // leaves them exactly as it found them and detach has nothing to restore.
+  const attached = await r.read()
+  assert.equal(
+    attached.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+    'https://token@collector.corp:4318'
+  )
+  assert.equal(
+    Object.hasOwn(attached._hypaware.managed.env, 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'),
+    false
+  )
+})
+
+test('an ordinary otel attach warns about no per-signal key', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r)
+  assert.equal(result.changed, true)
+  assert.equal(result.changed && result.warnings, undefined)
+})

@@ -153,6 +153,60 @@ export function otelModeEnv({ telemetryPort, spoolDir }) {
   ]
 }
 
+/**
+ * The OTLP env keys that OUTRANK the ones {@link otelModeEnv} writes.
+ *
+ * In the OTLP environment-variable contract a per-signal key beats the generic
+ * one, so `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` decides where log records go no
+ * matter what `OTEL_EXPORTER_OTLP_ENDPOINT` says. Attach deliberately does not
+ * manage these (LLP 0258 #env-keys is "exactly these keys, and only these"),
+ * which leaves one shape that has to be said out loud rather than discovered:
+ * a user already exporting to their own collector through a per-signal key
+ * gets `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_ASSISTANT_RESPONSES` turned on by
+ * this attach, and their prompts and assistant responses start flowing THERE,
+ * while HypAware reports `attached (otel)` and captures nothing.
+ *
+ * `OTEL_EXPORTER_OTLP_HEADERS` is in the list for the same reason from the
+ * other side: it is the key that carries a collector's credentials, and it
+ * would now ride requests aimed at our listener.
+ */
+const OTEL_PER_SIGNAL_OVERRIDE_KEYS = [
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+]
+
+/**
+ * Warn for each per-signal OTLP key left standing in the settings `env` block
+ * after an `otel` attach.
+ *
+ * A warning, not a refusal: attach has no way to see a key exported from the
+ * user's shell, so refusing on the half it CAN see would buy a false sense of
+ * completeness. The values are never echoed - an endpoint or a headers value
+ * is exactly where a collector token lives, and this string is printed, logged
+ * and serialised into `--json`.
+ *
+ * @param {Record<string, unknown>} env the live `env` block, after the write
+ * @returns {string[]}
+ */
+function perSignalOverrideWarnings(env) {
+  /** @type {string[]} */
+  const out = []
+  for (const key of OTEL_PER_SIGNAL_OVERRIDE_KEYS) {
+    const value = env[key]
+    if (value === undefined || value === null || value === '') continue
+    out.push(
+      `env.${key} is set and outranks the endpoint hypaware just wrote; ` +
+      'Claude Code will export there instead, including the prompt and response ' +
+      'text this attach turns on. Remove it, or point it at the same local ' +
+      'listener, then re-run hyp attach claude'
+    )
+  }
+  return out
+}
+
 export class ClaudeSettingsError extends Error {
   /**
    * @param {string} message
@@ -483,6 +537,7 @@ export async function attach(opts) {
       managedEnv[key] = value
       env[key] = value
     }
+    warnings.push(...perSignalOverrideWarnings(env))
   } else {
     // Undo the defaults Claude Code flips because the gateway URL is not
     // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
