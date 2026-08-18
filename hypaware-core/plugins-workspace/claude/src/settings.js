@@ -12,6 +12,7 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
+import { perSignalOtlpOverrides } from '../../../../src/core/config/otlp_precedence.js'
 import { CLAUDE_OTEL_MIN_VERSION, CLAUDE_UPDATE_HINT, isBelowClaudeVersion } from './claude_version.js'
 
 /**
@@ -154,54 +155,60 @@ export function otelModeEnv({ telemetryPort, spoolDir }) {
 }
 
 /**
- * The OTLP env keys that OUTRANK the ones {@link otelModeEnv} writes.
+ * Warn for each per-signal OTLP key that outranks the endpoint an `otel`
+ * attach just wrote, wherever it is standing.
  *
- * In the OTLP environment-variable contract a per-signal key beats the generic
- * one, so `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` decides where log records go no
- * matter what `OTEL_EXPORTER_OTLP_ENDPOINT` says. Attach deliberately does not
- * manage these (LLP 0258 #env-keys is "exactly these keys, and only these"),
- * which leaves one shape that has to be said out loud rather than discovered:
- * a user already exporting to their own collector through a per-signal key
- * gets `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_ASSISTANT_RESPONSES` turned on by
- * this attach, and their prompts and assistant responses start flowing THERE,
- * while HypAware reports `attached (otel)` and captures nothing.
+ * Two surfaces, because only one of them is where these keys actually live.
+ * Attach writes exactly the nine keys of LLP 0258 #env-keys and never a
+ * per-signal one, so the settings `env` block is essentially guaranteed not to
+ * hold one and a check confined to it can only fire on a hand-edited file. The
+ * keys come from the user's shell: a profile, a launchd variable, a collector
+ * switched off months ago that left its exports behind. That case takes every
+ * event to a collector the user forgot about, or - when the export resolved to
+ * nothing and went out empty - to no collector at all, while attach prints
+ * success, `hyp status` says `attached (otel)`, and the body spool keeps
+ * growing because a file path is immune to endpoint precedence.
  *
- * `OTEL_EXPORTER_OTLP_HEADERS` is in the list for the same reason from the
- * other side: it is the key that carries a collector's credentials, and it
- * would now ride requests aimed at our listener.
- */
-const OTEL_PER_SIGNAL_OVERRIDE_KEYS = [
-  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
-  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
-  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
-  'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
-  'OTEL_EXPORTER_OTLP_HEADERS',
-]
-
-/**
- * Warn for each per-signal OTLP key left standing in the settings `env` block
- * after an `otel` attach.
+ * Redirected, not merely lost: this attach turns on `OTEL_LOG_USER_PROMPTS`
+ * and `OTEL_LOG_ASSISTANT_RESPONSES`, so a live per-signal endpoint carries
+ * the user's prompts and the model's replies to whatever collector it names.
  *
- * A warning, not a refusal: attach has no way to see a key exported from the
- * user's shell, so refusing on the half it CAN see would buy a false sense of
- * completeness. The values are never echoed - an endpoint or a headers value
- * is exactly where a collector token lives, and this string is printed, logged
- * and serialised into `--json`.
+ * A warning, not a refusal, and nothing is unset: the environment read here is
+ * the shell `hyp attach` ran in, which is not necessarily the one Claude Code
+ * will launch from, and no process can reach into the shell that spawned it
+ * anyway. Shadowing the key from the settings block would mean managing a key
+ * LLP 0258 leaves alone and silently breaking a collector that may still be in
+ * use.
  *
- * @param {Record<string, unknown>} env the live `env` block, after the write
+ * A key standing in both places is one finding: the user has one problem, and
+ * a doubled list is a list they learn to skip. The values are never echoed - an
+ * endpoint or a headers value is exactly where a collector token lives, and
+ * this string is printed, logged and serialised into `--json`.
+ *
+ * @ref LLP 0271#attach-reads-the-process-environment [implements]
+ * @ref LLP 0271#warning-not-refusal [constrained-by]: say it, do not refuse it and do not rewrite the user's shell
+ * @param {Record<string, unknown>} env the live settings `env` block, after the write
+ * @param {Record<string, unknown> | undefined} processEnv the environment attach itself was run in
  * @returns {string[]}
  */
-function perSignalOverrideWarnings(env) {
+function perSignalOverrideWarnings(env, processEnv) {
+  const inSettings = new Set(perSignalOtlpOverrides(env))
   /** @type {string[]} */
   const out = []
-  for (const key of OTEL_PER_SIGNAL_OVERRIDE_KEYS) {
-    const value = env[key]
-    if (value === undefined || value === null || value === '') continue
+  for (const key of new Set([...inSettings, ...perSignalOtlpOverrides(processEnv)])) {
+    // The repair differs by where it is set, and only one of the two is a file
+    // the reader would think to open.
+    const where = inSettings.has(key)
+      ? `env.${key} is set in the claude settings file`
+      : `${key} is exported in this shell's environment`
+    const fix = inSettings.has(key)
+      ? 'Remove it from the settings env block, or point it at the same local listener'
+      : 'Unset it in the shell profile or launchd entry that exports it, or point it at the same local listener'
     out.push(
-      `env.${key} is set and outranks the endpoint hypaware just wrote; ` +
+      `${where} and outranks the endpoint hypaware just wrote; ` +
       'Claude Code will export there instead, including the prompt and response ' +
-      'text this attach turns on. Remove it, or point it at the same local ' +
-      'listener, then re-run hyp client attach claude'
+      'text this attach turns on. ' + fix + ', then re-run hyp client attach claude ' +
+      'and start a fresh claude session'
     )
   }
   return out
@@ -275,6 +282,7 @@ export async function attach(opts) {
     telemetryPort,
     spoolDir,
     claudeVersion,
+    processEnv,
   } = opts
   validatePort(port)
   validateVersion(version)
@@ -549,7 +557,7 @@ export async function attach(opts) {
       managedEnv[key] = value
       env[key] = value
     }
-    warnings.push(...perSignalOverrideWarnings(env))
+    warnings.push(...perSignalOverrideWarnings(env, processEnv))
   } else {
     // Undo the defaults Claude Code flips because the gateway URL is not
     // api.anthropic.com: eager tool-schema loading, and a 200k assumed context

@@ -168,6 +168,7 @@ export type StatusDiagnosticKind =
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
+  | 'client_telemetry_env_override'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'

@@ -275,6 +275,14 @@ export interface ClaudeAttachOptions {
    * version is not a refusal, so `undefined` proceeds.
    */
   claudeVersion?: string
+  /**
+   * The environment the attach itself is running in, injected rather than read
+   * off `process`. Inspected for per-signal OTLP keys that outrank the endpoint
+   * `otel` mode writes, which is where those keys really come from: a shell
+   * profile or a launchd variable, not this settings file. Read only, and only
+   * to warn - see LLP 0271. Omitting it silently skips that half of the check.
+   */
+  processEnv?: Record<string, unknown>
 }
 
 export interface ClaudeAttachChanged {

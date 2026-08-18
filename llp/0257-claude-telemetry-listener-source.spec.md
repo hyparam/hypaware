@@ -8,6 +8,8 @@
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
 LLP 0049, LLP 0066, LLP 0103, LLP 0262 (the RFC this spec realizes, accepted 2026-08-17), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
 **Tracker:** hyparam/hypaware#798
+**Extended-by:** LLP 0271 (#status-and-health gains a third leg: a per-signal
+OTLP variable in the user's environment is named as a diagnostic of its own)
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json
 > listener plus a body-file reader, registered by `@hypaware/claude`, producing
