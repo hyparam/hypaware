@@ -3,7 +3,7 @@
 /**
  * @import { PluginCatalog } from '../../../../src/core/types.js'
  * @import { FinaleSummary, PickerSource } from '../../../../src/core/cli/types.js'
- * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
+ * @import { ClientAttachReport, CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import {
  *   FirstAskResult,
  *   FirstLookOutcome,
@@ -29,6 +29,7 @@ import {
   buildWalkthroughClientDescriptorMap,
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
+  governingGatewayProxyMode,
   runPickerFinale,
   writeAttachedNotConfiguredReminder,
   writeWalkthroughRunSummary,
@@ -861,6 +862,12 @@ function printJoinFailure(opts, join) {
  * already-attached clients skip attach (LLP 0134 #login-lane: the finale
  * detects and skips what enrollment already did).
  *
+ * "Already attached" has to mean attached *the way this install attaches*.
+ * A marker alone does not say that: on a machine upgrading from a base-URL
+ * version to a proxy-mode one, every picked client carries a marker, and
+ * reading it as done is what left the upgrade in base-URL mode with no
+ * further prompt. So a marker recording the other mode is not a skip.
+ *
  * @param {{
  *   opts: RunInitWizardOptions,
  *   picked: WizardPickResult,
@@ -876,7 +883,18 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
   if (joinedAlready) {
     const report = await collectStatusSafe(opts)
     if (report?.daemon?.installed) finaleActions.skipDaemonInstall = true
-    const attached = (report?.clients ?? []).filter((c) => c.attached).map((c) => c.name)
+    const proxyMode = await governingGatewayProxyMode({ config: picked.config, env: opts.env })
+    // The picked rows that attach their client through the proxy, by plugin:
+    // the status report names each client's plugin, and the picker row is
+    // where `gateway_proxy_mode` is declared (LLP 0243 #composed-default).
+    const proxyAttachPlugins = new Set(
+      picked.descriptors
+        .filter((descriptor) => descriptor.compose?.gateway_proxy_mode === true)
+        .map((descriptor) => descriptor.plugin)
+    )
+    const attached = (report?.clients ?? [])
+      .filter((client) => client.attached && !attachModeIsStale({ client, proxyMode, proxyAttachPlugins }))
+      .map((client) => client.name)
     if (attached.length > 0) skipAttachClients = new Set(attached)
   }
 
@@ -917,6 +935,33 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
       }),
     { component: 'wizard' }
   )
+}
+
+/**
+ * Whether an existing attach marker records a mode this install no longer
+ * attaches in, which makes re-attaching the point rather than the waste the
+ * skip exists to avoid.
+ *
+ * Only one direction is stale: proxy mode is on and the client's row attaches
+ * through the proxy, but the marker says base URL (or predates modes and says
+ * nothing, which is the same base-URL attach without the label). The reverse
+ * is not this function's call - a proxy marker on an install whose gateway
+ * dropped proxy mode is the LLP 0244 offer's business, and re-attaching a
+ * client whose row never attaches by proxy would only rewrite the file it
+ * already has.
+ *
+ * @ref LLP 0244 [implements]: a base-URL attach on a proxy-mode install is unfinished migration, not a completed attach
+ * @param {{
+ *   client: ClientAttachReport,
+ *   proxyMode: boolean,
+ *   proxyAttachPlugins: Set<string>,
+ * }} args
+ * @returns {boolean}
+ */
+function attachModeIsStale({ client, proxyMode, proxyAttachPlugins }) {
+  if (!proxyMode) return false
+  if (!proxyAttachPlugins.has(client.plugin)) return false
+  return client.mode !== 'proxy'
 }
 
 /**
