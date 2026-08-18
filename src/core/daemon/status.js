@@ -1369,10 +1369,31 @@ export async function collectHypAwareStatus(opts = {}) {
     remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
   if (remoteConfig?.lastRollback) {
+    // The three values in this message are display-only, and none of them is
+    // this build's own: the etag is whatever the joined server served, and
+    // all three come back through `config-control/state.json`, which is read
+    // with no validation beyond "is an object". A diagnostic message is prose
+    // assembled for a person, so its components are cleaned here, where the
+    // prose is assembled, rather than in `readConfigControlStatus`.
+    //
+    // Be precise about what that does and does not mean. The message is
+    // assembled once, here, so the cleaned prose is also what `--json` carries
+    // at `diagnostics[].message`: a machine consumer of *that string* reads
+    // the sanitized line, not the file's bytes, with each component stripped
+    // and clamped to `sanitizeLabel`'s 120. That is accepted, not overlooked.
+    // The prose line is not a parsing surface on either render, and the
+    // unedited values stay one key away and structured, at
+    // `remote_config.last_rollback`, which is where a program reads them and
+    // which stays byte-exact. Cleaning at the single `${d.message}`
+    // interpolation in `renderStatusText` instead would keep the prose raw for
+    // `--json` too, but it would have to pick one clamp width that holds for
+    // every diagnostic kind, not just this one.
+    // @ref LLP 0225#decision [implements]: assembled prose is cleaned where it is assembled; the machine copy of the same values, `remote_config.last_rollback`, stays byte-exact
+    const rolledBack = remoteConfig.lastRollback
     diagnostics.push({
       severity: 'warning',
       kind: 'remote_config_rolled_back',
-      message: `remote config ${remoteConfig.lastRollback.etag} rolled back at ${remoteConfig.lastRollback.at} (${remoteConfig.lastRollback.reason})`,
+      message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
       repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
     })
   }
