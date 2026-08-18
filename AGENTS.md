@@ -96,6 +96,13 @@ Written acceptance procedures:
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
   attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+- `openclaw_capture`: opt-in/manual, needs OpenClaw 2026.4.24 or newer with
+  credentials for both `anthropic` and `openai`. Proves an OpenClaw
+  conversation reaches `ai_gateway_messages` by both lanes the adapter
+  offers, live gateway capture after `hyp attach openclaw` and the periodic
+  transcript sweep, that a turn both lanes observe settles to exactly one
+  row rather than two, and that live capture is reversible via
+  `hyp detach`. See `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
