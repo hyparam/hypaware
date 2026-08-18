@@ -22,12 +22,19 @@ import { claudeBodySpoolDir } from '../../plugins-workspace/claude/src/telemetry
  * SessionStart hook, starts the listener source on a dynamic port, and
  * POSTs a real-shaped Claude Code OTLP/JSON batch at it (`user_prompt`,
  * `api_request`, `assistant_response`, the two body events pointing at
- * spooled body files, plus behavioral events this path does not model).
- * Then asserts, through `hyp query sql`:
+ * spooled body files, plus the behavioral events - `tool_decision`,
+ * `permission_mode_changed`, `tool_result`, and the hook pair). Then
+ * asserts, through `hyp query sql`:
  *
  *  - the rows landed in `ai_gateway_messages` with native uuid identity,
  *    the prompt and response text, the model, the usage the
  *    `api_request` event carried, and the cwd the hook recorded;
+ *  - the behavioral events landed in `claude_telemetry_events`, one row
+ *    per event with the hot fields typed (name, session, tool, decision,
+ *    source, cost) and the rest preserved in the attributes JSON, with
+ *    the content events NOT among them; a metrics POST lands its data
+ *    points in the same dataset; the dataset enumerates alongside
+ *    `ai_gateway_messages` and carries its central-forwarding signal;
  *  - the spooled bodies filled the gaps events never carry: system_text
  *    and the tools list on every row, the untruncated tool args, the
  *    tool result, and the thinking signature, and both body files are
@@ -488,6 +495,107 @@ export async function run({ harness, expect }) {
       )
     }
 
+    // ----- The behavioral half: claude_telemetry_events -----
+    // @ref LLP 0255#row-shape [tests]: one row per event, hot fields typed
+    //   (name, session, tool, decision, source, cost), attributes JSON for
+    //   the rest
+    const eventsSqlFor = (/** @type {string} */ session) => `
+      select
+        event_name,
+        session_id,
+        tool_name,
+        decision,
+        source,
+        cost_usd,
+        event_timestamp,
+        JSON_VALUE(attributes, '$.from_mode') as from_mode,
+        JSON_VALUE(attributes, '$.to_mode') as to_mode,
+        JSON_VALUE(attributes, '$.hook_name') as hook_name,
+        JSON_VALUE(attributes, '$.success') as hook_success,
+        JSON_VALUE(attributes, '$.input_tokens') as input_tokens,
+        JSON_VALUE(attributes, '$.decision') as json_decision,
+        JSON_VALUE(attributes, '$.value') as metric_value,
+        JSON_VALUE(attributes, '$.unit') as metric_unit
+      from claude_telemetry_events
+      where session_id = '${session}'
+      order by event_timestamp, event_name
+    `.trim().replace(/\s+/g, ' ')
+    const eventsSql = eventsSqlFor(sessionId)
+
+    const eventRows = await queryRows({ sql: eventsSql, kernel, registry, env, expect, label: 'behavioral events' })
+    expect.that(
+      'events: one row per behavioral event, content and body events excluded',
+      eventRows.map((/** @type {any} */ r) => r.event_name),
+      (v) => JSON.stringify(v) === JSON.stringify([
+        'permission_mode_changed',
+        'tool_decision',
+        'tool_result',
+        'hook_execution_start',
+        'hook_execution_complete',
+        'api_request',
+      ]),
+    )
+    for (const row of eventRows) {
+      expect.that(
+        `events: the ${row.event_name} row carries the session id and a timestamp`,
+        row,
+        (v) => v.session_id === sessionId && typeof v.event_timestamp === 'string' && v.event_timestamp.length > 0,
+      )
+    }
+    const toolDecision = eventRows.find((/** @type {any} */ r) => r.event_name === 'tool_decision')
+    expect.that(
+      'events: the tool_decision row types the tool, the decision, and its source',
+      toolDecision,
+      (v) => v !== undefined && v.tool_name === 'Read' && v.decision === 'reject' && v.source === 'user_reject',
+    )
+    expect.that(
+      'events: a promoted hot field leaves the attributes JSON',
+      toolDecision,
+      (v) => v !== undefined && (v.json_decision ?? null) === null,
+    )
+    const modeChange = eventRows.find((/** @type {any} */ r) => r.event_name === 'permission_mode_changed')
+    expect.that(
+      'events: the permission_mode_changed row keeps its unpromoted attributes in the JSON',
+      modeChange,
+      (v) => v !== undefined && v.from_mode === 'default' && v.to_mode === 'acceptEdits' &&
+        (v.tool_name ?? null) === null && (v.decision ?? null) === null,
+    )
+    const apiRequest = eventRows.find((/** @type {any} */ r) => r.event_name === 'api_request')
+    expect.that(
+      'events: the api_request row types the cost and keeps the token counts in the JSON',
+      apiRequest,
+      (v) => v !== undefined && Math.abs(Number(v.cost_usd) - 0.0047732) < 1e-9 &&
+        Number(v.input_tokens) === 73,
+    )
+    const hookComplete = eventRows.find((/** @type {any} */ r) => r.event_name === 'hook_execution_complete')
+    expect.that(
+      'events: the hook_execution_complete row carries the hook identity and outcome',
+      hookComplete,
+      (v) => v !== undefined && v.hook_name === 'hypaware-session-context' && v.hook_success === 'true',
+    )
+
+    // The registration surfaces: the dataset enumerates alongside the
+    // existing ones, and carries the ingest signal central forwarding
+    // needs so it never falls back to the dataset name.
+    // @ref LLP 0255#owned-by-claude [tests]: registration sets the source signal
+    const statusOut = makeBuf()
+    const statusCode = await dispatch(
+      ['query', 'status'],
+      { stdout: statusOut, stderr: makeBuf(), kernel, registry, env }
+    )
+    expect.that('dispatch: query status exited 0', statusCode, (v) => v === 0)
+    expect.that(
+      'enumeration: claude_telemetry_events is listed alongside ai_gateway_messages',
+      statusOut.text(),
+      (v) => v.includes('claude_telemetry_events  (@hypaware/claude)') &&
+        v.includes('ai_gateway_messages  (@hypaware/ai-gateway)'),
+    )
+    expect.that(
+      'registration: the dataset declares the claude_telemetry source signal',
+      kernel.query.getDataset('claude_telemetry_events')?.sourceSignal,
+      (v) => v === 'claude_telemetry',
+    )
+
     // ----- A replayed batch adds nothing -----
     // The body files are already gone, so on replay the content events
     // dedupe by part_id and the body refs read as missing, not as errors.
@@ -498,6 +606,17 @@ export async function run({ harness, expect }) {
       'query: replaying the same events did not duplicate the rows',
       afterReplay,
       (v) => Array.isArray(v) && v.length === 5,
+    )
+    // The behavioral dataset has no pre-write dedupe by design (single
+    // producer, one POST per batch; a retry only follows a failed write,
+    // which wrote nothing). A manually re-POSTed identical batch is the
+    // lost-success-response window: the rows double, byte-identical, and
+    // cache compaction's content-hash layer owns the collapse.
+    const eventsAfterReplay = await queryRows({ sql: eventsSql, kernel, registry, env, expect, label: 'behavioral events after the replay' })
+    expect.that(
+      'events: the replayed batch appended its behavioral rows again, byte-identical',
+      eventsAfterReplay,
+      (v) => Array.isArray(v) && v.length === 12,
     )
 
     // ----- A second producer over the same session adds nothing -----
@@ -631,12 +750,41 @@ export async function run({ harness, expect }) {
       (v) => v === 2,
     )
 
+    // ----- The metrics half of the exporter config -----
+    // The same env block turns on OTEL_METRICS_EXPORTER, so Claude Code
+    // POSTs its activity counters at /v1/metrics; each data point lands
+    // as one behavioral row named by its metric.
+    const postedMetrics = await postJson(`${endpoint}/v1/metrics`, buildMetricsBatch({ sessionId }))
+    expect.that('listener: the metrics POST returned 200', postedMetrics.status, (v) => v === 200)
+    const withMetrics = await queryRows({ sql: eventsSql, kernel, registry, env, expect, label: 'behavioral events with metrics' })
+    const costRow = withMetrics.find((/** @type {any} */ r) => r.event_name === 'claude_code.cost.usage')
+    expect.that(
+      'events: the cost metric data point landed with its value, unit, and session',
+      costRow,
+      (v) => v !== undefined && Math.abs(Number(v.metric_value) - 0.0047732) < 1e-9 &&
+        v.metric_unit === 'USD' && v.session_id === sessionId &&
+        typeof v.event_timestamp === 'string' && v.event_timestamp.length > 0,
+    )
+    const locRow = withMetrics.find((/** @type {any} */ r) => r.event_name === 'claude_code.lines_of_code.count')
+    expect.that(
+      'events: the lines-of-code metric data point landed with its integer value',
+      locRow,
+      (v) => v !== undefined && Number(v.metric_value) === 42,
+    )
+
     const finalStatus = await /** @type {NonNullable<typeof started.status>} */ (started.status)()
     const finalDetails = /** @type {any} */ (finalStatus.details ?? {})
     expect.that(
       'status: the listener counted the two projected bodies and an empty spool',
       finalDetails,
       (v) => v.bodies_projected === 2 && v.spool_bytes === 0 && v.bodies_evicted === 1,
+    )
+    // 6 from the first batch, 6 from its replay, 1 (api_request) from the
+    // evicted session, 2 metric data points.
+    expect.that(
+      'status: the behavioral row count is reported apart from the message rows',
+      finalDetails,
+      (v) => v.telemetry_rows_written === 15,
     )
 
     await kernel.sources.stop('claude-telemetry')
@@ -670,7 +818,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'traces: one claude.telemetry.receive span per accepted batch',
       receives,
-      (v) => Array.isArray(v) && v.length === 3,
+      (v) => Array.isArray(v) && v.length === 4,
     )
     expect.that(
       'traces: the first receive span reports ok, the events it saw, and the rows it wrote',
@@ -679,9 +827,10 @@ export async function run({ harness, expect }) {
         v.status === 'ok' &&
         v.signal === 'logs' &&
         Number(v.payload_bytes) > 0 &&
-        Number(v.event_count) === 7 &&
+        Number(v.event_count) === 10 &&
         Number(v.session_count) === 1 &&
-        Number(v.row_count) === 5,
+        Number(v.row_count) === 5 &&
+        Number(v.telemetry_row_count) === 6,
     )
     expect.that(
       'traces: the first receive span counted the two bodies it projected and deleted',
@@ -699,6 +848,12 @@ export async function run({ harness, expect }) {
       receives[2]?.attributes,
       (v) => v !== undefined && Number(v.row_count) === 2 && Number(v.body_count) === 0,
     )
+    expect.that(
+      'traces: the metrics receive span wrote only behavioral rows',
+      receives[3]?.attributes,
+      (v) => v !== undefined && v.signal === 'metrics' && Number(v.event_count) === 2 &&
+        Number(v.row_count) === 0 && Number(v.telemetry_row_count) === 2,
+    )
 
     const cacheAppends = traces.filter(
       (/** @type {any} */ t) =>
@@ -709,14 +864,24 @@ export async function run({ harness, expect }) {
       cacheAppends,
       (v) => Array.isArray(v) && v.length >= 1,
     )
+    const eventAppends = traces.filter(
+      (/** @type {any} */ t) =>
+        t.name === 'cache.append' && t.attributes?.hyp_dataset === 'claude_telemetry_events'
+    )
+    expect.that(
+      'traces: at least one cache.append for claude_telemetry_events',
+      eventAppends,
+      (v) => Array.isArray(v) && v.length >= 1,
+    )
 
     const logs = await expect.logs()
     const batchLogs = logs.filter((/** @type {any} */ l) => l.body === 'claude.telemetry.batch')
     expect.that(
       'logs: the batch log reports the event, row, and body counts',
       batchLogs[0]?.attributes,
-      (v) => v !== undefined && Number(v.event_count) === 7 &&
-        Number(v.rows_written) === 5 && Number(v.bodies_projected) === 2,
+      (v) => v !== undefined && Number(v.event_count) === 10 &&
+        Number(v.rows_written) === 5 && Number(v.telemetry_rows_written) === 6 &&
+        Number(v.bodies_projected) === 2,
     )
     expect.that(
       'logs: the evicted session\'s batch log counts its missing body',
@@ -741,11 +906,12 @@ export async function run({ harness, expect }) {
 // ---------------------------------------------------------------------
 
 /**
- * One turn as Claude Code 2.1.233 exports it: the three content-bearing
- * events this listener models, the two body events whose `body_ref`
- * points into the spool, plus two behavioral events it does not model,
- * so the flow proves the unmodelled ones are skipped rather than
- * breaking the batch.
+ * One turn as Claude Code 2.1.233 exports it: `user_prompt` and
+ * `assistant_response` project into messages, the two body events'
+ * `body_ref`s point into the spool, and the behavioral events
+ * (`permission_mode_changed`, `tool_decision`, `tool_result`, the hook
+ * pair, and `api_request`, which also feeds usage onto the assistant
+ * row) land in `claude_telemetry_events`.
  *
  * @param {{
  *   sessionId: string,
@@ -800,12 +966,30 @@ function buildTelemetryBatch(args) {
                 body_ref: args.requestBodyPath,
                 request_id: args.requestId,
               }),
+              logRecord('tool_decision', '2026-08-17T19:30:26.500Z', {
+                ...common,
+                tool_name: 'Read',
+                decision: 'reject',
+                source: 'user_reject',
+              }),
               logRecord('tool_result', '2026-08-17T19:30:27.679Z', {
                 ...common,
                 tool_name: 'Read',
                 tool_use_id: 'toolu_smoke',
                 success: 'true',
                 duration_ms: '1',
+              }),
+              logRecord('hook_execution_start', '2026-08-17T19:30:28.000Z', {
+                ...common,
+                hook_name: 'hypaware-session-context',
+                hook_event: 'SessionStart',
+              }),
+              logRecord('hook_execution_complete', '2026-08-17T19:30:28.200Z', {
+                ...common,
+                hook_name: 'hypaware-session-context',
+                hook_event: 'SessionStart',
+                success: 'true',
+                duration_ms: '12',
               }),
               logRecord('api_request', '2026-08-17T19:30:31.009Z', {
                 ...common,
@@ -901,6 +1085,60 @@ function buildEvictedSessionBatch(args) {
                 model: 'claude-haiku-4-5-20251001',
                 query_source: 'sdk',
               }),
+            ],
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * The metrics half as Claude Code exports it: monotonic sums under the
+ * `com.anthropic.claude_code` meter scope, `session.id` on every data
+ * point, int64 values as strings on the OTLP/JSON wire.
+ *
+ * @param {{ sessionId: string }} args
+ */
+function buildMetricsBatch(args) {
+  const nanos = String(BigInt(Date.parse('2026-08-17T19:31:00.000Z')) * 1_000_000n)
+  return {
+    resourceMetrics: [
+      {
+        resource: { attributes: kv({ 'service.name': 'claude-code', 'service.version': '2.1.233' }) },
+        scopeMetrics: [
+          {
+            scope: { name: 'com.anthropic.claude_code', version: '2.1.233' },
+            metrics: [
+              {
+                name: 'claude_code.cost.usage',
+                unit: 'USD',
+                sum: {
+                  aggregationTemporality: 2,
+                  isMonotonic: true,
+                  dataPoints: [
+                    {
+                      attributes: kv({ 'session.id': args.sessionId, model: 'claude-haiku-4-5-20251001' }),
+                      timeUnixNano: nanos,
+                      asDouble: 0.0047732,
+                    },
+                  ],
+                },
+              },
+              {
+                name: 'claude_code.lines_of_code.count',
+                sum: {
+                  aggregationTemporality: 2,
+                  isMonotonic: true,
+                  dataPoints: [
+                    {
+                      attributes: kv({ 'session.id': args.sessionId, type: 'added' }),
+                      timeUnixNano: nanos,
+                      asInt: '42',
+                    },
+                  ],
+                },
+              },
             ],
           },
         ],
