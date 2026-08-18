@@ -181,9 +181,14 @@ export function createStartClaudeTelemetrySource(deps) {
         })
       }
     }
+    // The one-shot sweep runs whether or not the bind below succeeds: bodies
+    // already on disk are over the cap regardless. The repeating one does not
+    // get armed until there is a listener behind it, because `stop()` is the
+    // only thing that clears it and a start that throws never returns a handle
+    // to call `stop()` on - an armed timer would then keep scanning the spool
+    // every minute, for the life of the daemon, on behalf of a source that
+    // does not exist.
     await sweepSpool()
-    const sweepTimer = setInterval(sweepSpool, SPOOL_SWEEP_INTERVAL_MS)
-    sweepTimer.unref?.()
 
     const readSessionContext = createSessionContextReader(deps.stateFile, (err) => {
       ctx.log.warn('claude.telemetry.session_context_unreadable', {
@@ -251,6 +256,17 @@ export function createStartClaudeTelemetrySource(deps) {
       }),
     })
     const bound = await bindWithFallback({ server, listen, log: ctx.log, state })
+    const sweepTimer = setInterval(sweepSpool, SPOOL_SWEEP_INTERVAL_MS)
+    sweepTimer.unref?.()
+
+    // When this listener came up, published so `hyp status` can tell "nothing
+    // has arrived yet because the daemon restarted a minute ago" from "nothing
+    // has arrived for a day". `lastEventAt` lives only in this object, so every
+    // restart republishes `last_event_at: null` however long capture has been
+    // healthy, and the capture-health baseline would otherwise fall back to an
+    // attach timestamp that can be weeks old.
+    // @ref LLP 0257#status-and-health [implements]: the gap is measured from a moment capture was actually supposed to be running
+    const startedAt = new Date().toISOString()
 
     const span = getActiveSpan()
     span?.setAttribute('listen_host', bound.host)
@@ -308,6 +324,9 @@ export function createStartClaudeTelemetrySource(deps) {
             // to see.
             // @ref LLP 0257#status-and-health [implements]: the last event seen, published for the hyp status comparison
             last_event_at: state.lastEventAt ?? null,
+            // Beside it, and for the same reader: the window this listener has
+            // actually been able to capture in.
+            listener_started_at: startedAt,
             ...(state.listenFallbackFrom !== undefined
               ? { listen_fallback_from: state.listenFallbackFrom }
               : {}),

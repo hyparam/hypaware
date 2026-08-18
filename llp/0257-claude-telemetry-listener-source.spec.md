@@ -95,6 +95,14 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
   LLP 0114 §fallback-is-visible applied to this listener: the fallback bind
   that moves the port is precisely what leaves the client exporting to a port
   some other process now holds.
+- **S17c** The gap of S17 is measured from the newest of three moments: the
+  last event seen, the attach, and the *running* listener's own start. The
+  last of those is required because `last_event_at` is in-process state, so
+  every daemon restart republishes it as null however long capture has been
+  healthy; without it a long-attached machine reports an `error`-severity gap
+  after a routine `hyp daemon restart`, which is itself the first repair the
+  gap prints. The listener's start counts only while its daemon is alive - on
+  a dead one the growing gap is the finding, not an excuse.
 
 ## Failure modes {#failure-modes}
 

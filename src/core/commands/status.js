@@ -228,6 +228,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       last_event_at: c.lastEventAt,
       last_transcript_activity_at: c.lastTranscriptActivityAt,
       attached_at: c.attachedAt,
+      listener_started_at: c.listenerStartedAt,
       gap_seconds: Math.round(c.gapMs / 1000),
       state: c.state,
     })),

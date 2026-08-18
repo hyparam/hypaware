@@ -15,6 +15,7 @@ import {
   probeClientActivityFromDescriptor,
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
+import { writePidFile } from '../../src/core/daemon/pid.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -432,6 +433,142 @@ test('a daemon that never ran still yields the line, measured from the attach', 
     const stdout = buffer()
     renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
     assert.match(stdout.text(), /- claude {2}no events yet, last transcript activity 1m ago {2}\[capture gap\]\n/)
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+/* ---------- the restart baseline ---------- */
+
+// `state.lastEventAt` lives only in the listener's process, so every daemon
+// restart republishes `last_event_at: null` however long capture has been
+// healthy. With the attach timestamp as the only fallback baseline, a machine
+// attached a month ago and used an hour ago reported a month-long gap - an
+// `error`, degrading `overall` - the moment someone ran `hyp daemon restart`,
+// which is itself the first repair `capture_gap` prints. The running
+// listener's own start is the third baseline that closes that loop.
+// @ref LLP 0257#status-and-health [tests]: the gap is measured from a moment capture was actually supposed to be running
+
+test('a listener that just started cannot be blamed for activity older than it', () => {
+  const now = Date.now()
+  const restarted = assessCaptureHealth({
+    lastEventAt: null,
+    lastTranscriptActivityAt: new Date(now - 1 * HOUR).toISOString(),
+    attachedAt: new Date(now - 30 * 24 * HOUR).toISOString(),
+    listenerStartedAt: new Date(now - 1 * MIN).toISOString(),
+  })
+  assert.deepEqual([restarted.state, restarted.gapMs], ['ok', 0])
+})
+
+test('a listener up long enough to have seen something still reports the gap', () => {
+  const now = Date.now()
+  const real = assessCaptureHealth({
+    lastEventAt: null,
+    lastTranscriptActivityAt: new Date(now - 1 * MIN).toISOString(),
+    attachedAt: new Date(now - 30 * 24 * HOUR).toISOString(),
+    listenerStartedAt: new Date(now - 5 * HOUR).toISOString(),
+  })
+  assert.deepEqual([real.state, real.severity], ['gap', 'error'])
+})
+
+test('an event newer than the listener start still wins the baseline', () => {
+  const now = Date.now()
+  const verdict = assessCaptureHealth({
+    lastEventAt: new Date(now - 1 * MIN).toISOString(),
+    lastTranscriptActivityAt: new Date(now).toISOString(),
+    attachedAt: new Date(now - 30 * 24 * HOUR).toISOString(),
+    listenerStartedAt: new Date(now - 5 * HOUR).toISOString(),
+  })
+  assert.equal(verdict.state, 'ok')
+})
+
+test('a routine daemon restart does not degrade a healthy install', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 30 * 24 * HOUR).toISOString(),
+    transcriptMtime: new Date(now - 1 * HOUR),
+  })
+  try {
+    // A live daemon whose listener came up a minute ago and has not been
+    // POSTed to yet, because no Claude Code session has started since.
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [
+        {
+          name: 'ai-gateway',
+          plugin: '@hypaware/ai-gateway',
+          state: 'started',
+          details: { host: '127.0.0.1', port: 8787 },
+        },
+        {
+          name: 'claude-telemetry',
+          plugin: '@hypaware/claude',
+          state: 'started',
+          details: {
+            listen_host: '127.0.0.1',
+            listen_port: 4319,
+            last_event_at: null,
+            listener_started_at: new Date(now - 1 * MIN).toISOString(),
+          },
+        },
+      ],
+      sinks: [],
+    }))
+    writePidFile(stateRoot, /** @type {any} */ ({
+      pid: process.pid,
+      runId: 'test-run',
+      mode: 'foreground',
+    }))
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    assert.equal(report.captureHealth[0]?.state, 'ok')
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+    assert.equal(report.overall, 'healthy')
+    assert.equal(typeof report.captureHealth[0]?.listenerStartedAt, 'string')
+
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
+    assert.equal(typeof json.capture_health[0].listener_started_at, 'string')
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+test('a dead daemon makes no restart excuse: its listener start bounds nothing now', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 30 * 24 * HOUR).toISOString(),
+    transcriptMtime: new Date(now - 1 * HOUR),
+  })
+  try {
+    // The same snapshot as above, but no pid file: the daemon that wrote it is
+    // gone. "It only just started" stopped being true when the process ended,
+    // and a daemon-down gap is exactly what this line exists to surface.
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [
+        {
+          name: 'claude-telemetry',
+          plugin: '@hypaware/claude',
+          state: 'started',
+          details: {
+            listen_host: '127.0.0.1',
+            listen_port: 4319,
+            last_event_at: null,
+            listener_started_at: new Date(now - 1 * MIN).toISOString(),
+          },
+        },
+      ],
+      sinks: [],
+    }))
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    assert.equal(report.captureHealth[0]?.state, 'gap')
+    assert.equal(report.captureHealth[0]?.listenerStartedAt, null)
+    assert.equal(report.diagnostics.find((d) => d.kind === 'capture_gap')?.severity, 'error')
   } finally {
     await cleanup(hypHome, home)
   }

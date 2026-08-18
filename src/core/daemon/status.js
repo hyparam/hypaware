@@ -1250,7 +1250,19 @@ export async function collectHypAwareStatus(opts = {}) {
       const lastTranscriptActivityAt =
         (await probeClientActivityFromDescriptor({ descriptor, homeDir, env })) ?? null
       const attachedAt = probe.attachedAt ?? null
-      const verdict = assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt })
+      // Live daemon only, deliberately. A dead daemon's snapshot still carries
+      // the moment its listener started, but that moment stopped bounding
+      // anything when the process ended, and the dead-daemon gap is the one
+      // this line most needs to keep reporting.
+      const listenerStartedAt = daemon.running && typeof listenerDetails?.listener_started_at === 'string'
+        ? listenerDetails.listener_started_at
+        : null
+      const verdict = assessCaptureHealth({
+        lastEventAt,
+        lastTranscriptActivityAt,
+        attachedAt,
+        listenerStartedAt,
+      })
       captureHealth.push({
         client: clientName,
         plugin: descriptor.plugin,
@@ -1258,6 +1270,7 @@ export async function collectHypAwareStatus(opts = {}) {
         lastEventAt,
         lastTranscriptActivityAt,
         attachedAt,
+        listenerStartedAt,
         gapMs: verdict.gapMs,
         state: verdict.state,
       })
@@ -1269,7 +1282,11 @@ export async function collectHypAwareStatus(opts = {}) {
         const gapText = formatGapDuration(verdict.gapMs)
         const message = lastEventAt !== null
           ? `${clientName} is otel-attached, but its transcripts stayed active ${gapText} past the last telemetry event - those sessions are not being captured`
-          : `${clientName} is otel-attached, but no telemetry has arrived and its transcripts show activity ${gapText} after the attach - those sessions are not being captured`
+          // "past the point capture should have been running" rather than
+          // "after the attach": with a live listener the baseline is whichever
+          // of the attach and the listener's own start is newer, so naming the
+          // attach would be wrong exactly when a restart moved the baseline.
+          : `${clientName} is otel-attached, but no telemetry has arrived and its transcripts show activity ${gapText} past the point capture should have been running - those sessions are not being captured`
         diagnostics.push({
           severity: verdict.severity,
           kind: 'capture_gap',
@@ -2030,25 +2047,40 @@ export const CAPTURE_GAP_ERROR_MS = 2 * 3_600_000
  * Judge one otel-attached client's capture gap. Pure, so the threshold
  * contract is unit-testable without a filesystem.
  *
- * The baseline is the newer of the last event seen and the attach timestamp:
- * activity older than the attach proves nothing about the otel path (the
- * usual shape right after a migration from proxy attach, where months of
- * transcripts predate the first possible event), and a listener that has
- * seen nothing at all is measured from the attach instead. No baseline at
- * all - no events and an unreadable attach time - reads as `ok`, because a
- * gap claim needs a moment capture was supposed to start.
+ * The baseline is the newest of three moments capture could be measured from:
+ * the last event seen, the attach timestamp, and the running listener's own
+ * start. Activity older than the attach proves nothing about the otel path
+ * (the usual shape right after a migration from proxy attach, where months of
+ * transcripts predate the first possible event), and a listener that has seen
+ * nothing at all is measured from the attach instead. No baseline at all - no
+ * events, no listener, and an unreadable attach time - reads as `ok`, because
+ * a gap claim needs a moment capture was supposed to start.
+ *
+ * `listenerStartedAt` is the third because the listener's `lastEventAt` lives
+ * only in its process: every daemon restart republishes `last_event_at: null`
+ * however long capture has been healthy, and without this the baseline would
+ * fall back to an attach timestamp that can be weeks old. A machine attached a
+ * month ago and used an hour ago would then report a month-long gap - severity
+ * `error`, degrading `overall` - immediately after a routine
+ * `hyp daemon restart`, which is itself the first repair `capture_gap` prints.
+ * The caller passes it ONLY for a live daemon: on a dead one the last daemon's
+ * start says nothing about now, and the growing gap is precisely the thing to
+ * surface.
  *
  * @ref LLP 0257#status-and-health [implements]: the gap threshold and its severity
- * @param {{ lastEventAt?: string | null, lastTranscriptActivityAt?: string | null, attachedAt?: string | null }} args
+ * @param {{ lastEventAt?: string | null, lastTranscriptActivityAt?: string | null, attachedAt?: string | null, listenerStartedAt?: string | null }} args
  * @returns {{ state: 'ok' | 'gap', gapMs: number, severity?: 'warning' | 'error' }}
  */
-export function assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt }) {
+export function assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt, listenerStartedAt }) {
   const transcriptMs = parseIsoMs(lastTranscriptActivityAt)
   if (transcriptMs === undefined) return { state: 'ok', gapMs: 0 }
   const eventMs = parseIsoMs(lastEventAt)
   const attachedMs = parseIsoMs(attachedAt)
-  if (eventMs === undefined && attachedMs === undefined) return { state: 'ok', gapMs: 0 }
-  const baseline = Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity)
+  const listenerMs = parseIsoMs(listenerStartedAt)
+  if (eventMs === undefined && attachedMs === undefined && listenerMs === undefined) {
+    return { state: 'ok', gapMs: 0 }
+  }
+  const baseline = Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity, listenerMs ?? -Infinity)
   const gapMs = Math.max(0, transcriptMs - baseline)
   if (gapMs <= CAPTURE_GAP_WARNING_MS) return { state: 'ok', gapMs }
   return {

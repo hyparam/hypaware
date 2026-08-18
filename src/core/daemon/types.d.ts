@@ -263,6 +263,14 @@ export interface CaptureHealthReport {
   lastTranscriptActivityAt: string | null
   /** The attach timestamp the marker records, or null when unreadable. */
   attachedAt: string | null
+  /**
+   * When the live listener started, or null when no daemon is running. The
+   * third baseline the gap is measured from: `lastEventAt` is in-process
+   * state, so a restart republishes it as null however long capture has been
+   * healthy, and without this the gap would be measured from an attach that
+   * can be weeks old.
+   */
+  listenerStartedAt: string | null
   /** Milliseconds of activity past the capture baseline (0 when none). */
   gapMs: number
   state: 'ok' | 'gap'
