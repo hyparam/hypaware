@@ -87,6 +87,14 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
   against last transcript activity, and raises a diagnostics entry with a
   severity when the gap exceeds a threshold. Status keeps answering from the
   status file only.
+- **S17b** `hyp status` also compares the endpoint the client's own attach
+  marker exports to against the port a live listener is bound to, and warns
+  when they disagree. S17's gap line detects the same failure only after a
+  threshold of transcript activity and cannot name its cause; both ports are
+  already on disk, so the direct comparison is exact and immediate. This is
+  LLP 0114 §fallback-is-visible applied to this listener: the fallback bind
+  that moves the port is precisely what leaves the client exporting to a port
+  some other process now holds.
 
 ## Failure modes {#failure-modes}
 

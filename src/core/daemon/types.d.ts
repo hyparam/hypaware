@@ -98,6 +98,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_telemetry_stale'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
@@ -228,6 +229,14 @@ export interface ClientAttachReport {
   mode?: string
   /** ISO timestamp the marker records the attach at, when present. */
   attachedAt?: string
+  /**
+   * Port the marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` sends telemetry
+   * to, when the marker carries one. Distinct from `port` above (the
+   * gateway's): in `otel` mode this is the only address capture depends on,
+   * and it is what `client_telemetry_stale` compares against the listener's
+   * live bind.
+   */
+  telemetryPort?: number
   /** Probe error string, when the file was unreadable. */
   error?: string
 }

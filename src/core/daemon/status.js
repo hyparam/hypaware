@@ -1107,6 +1107,10 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
       ...(probe.mode !== undefined ? { mode: probe.mode } : {}),
+      // `--json` only, like `version` and `port`: an operator debugging a
+      // silent otel capture needs to see where the client is actually pointed,
+      // and it is the field `client_telemetry_stale` below reasons about.
+      ...(probe.telemetryPort !== undefined ? { telemetryPort: probe.telemetryPort } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     // Deliberately ungated by `attachable`, unlike the two derived-state
@@ -1204,6 +1208,45 @@ export async function collectHypAwareStatus(opts = {}) {
       const lastEventAt = typeof listenerDetails?.last_event_at === 'string'
         ? listenerDetails.last_event_at
         : null
+
+      // ----- telemetry endpoint drift -----
+      // The `otel` counterpart of `client_attach_stale` above, which compares
+      // the marker's port against the *gateway* and so watches an address this
+      // mode never uses. Attach writes one endpoint into the client's settings
+      // and nothing rewrites it afterwards, while the listener may since have
+      // bound elsewhere - it falls back to an ephemeral port when its default
+      // is taken (LLP 0114 §ephemeral-fallback), and an attach that ran with no
+      // live daemon could only write the default in the first place. The client
+      // then POSTs its telemetry, prompts and responses included, at whatever
+      // process holds the port it was told about, and every other line here
+      // stays healthy. `capture_gap` below eventually notices the silence, but
+      // only after fifteen minutes of transcript activity and without naming
+      // the cause; this comparison is already on disk and is exact.
+      //
+      // Liveness-gated, unlike `last_event_at` right above: "the listener was
+      // last bound to X" is not a claim a dead daemon's snapshot can support,
+      // and a restart is exactly what moves the port back.
+      // @ref LLP 0114#fallback-is-visible [implements]: a listener that came up on its ephemeral fallback is visible in status, not only in a boot log line - here through the client left pointing at the port it vacated
+      // @ref LLP 0086#status-drift-diagnostic [implements]: the same warn-and-name-the-repair shape, against the port this attach mode actually writes
+      const boundTelemetryPort = daemon.running && typeof listenerDetails?.listen_port === 'number'
+        ? listenerDetails.listen_port
+        : undefined
+      if (
+        probe.telemetryPort !== undefined &&
+        boundTelemetryPort !== undefined &&
+        Number.isInteger(boundTelemetryPort) &&
+        probe.telemetryPort !== boundTelemetryPort
+      ) {
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_stale',
+          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp attach --client ${clientName}' to re-point it`,
+          repair: [
+            `hyp attach --client ${clientName}`,
+            `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
       const lastTranscriptActivityAt =
         (await probeClientActivityFromDescriptor({ descriptor, homeDir, env })) ?? null
       const attachedAt = probe.attachedAt ?? null
@@ -1753,6 +1796,42 @@ function readRetention(config) {
 }
 
 /**
+ * The port an attach marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` names.
+ *
+ * This is not {@link probeClientAttachFromDescriptor}'s `port`, which records
+ * the gateway. An `otel`-mode client sends nothing to the gateway: its whole
+ * capture path is this one endpoint, written into the client's settings once
+ * at attach and never revisited. So it is the value a drift check has to
+ * compare, and taking it from `managed.env` - the live env block attach wrote
+ * and detach restores - means the check reads the address the client is
+ * actually using rather than a parallel field that could disagree with it.
+ *
+ * Anything that is not a well-formed loopback-shaped `http(s)://host:port`
+ * with an in-range port reads as absent: the marker is a file a hand edit
+ * reaches, and a diagnostic built on a guess is worse than no diagnostic.
+ *
+ * @param {Record<string, unknown>} markerObj
+ * @returns {number | undefined}
+ */
+function markerTelemetryPort(markerObj) {
+  const managed = markerObj.managed
+  if (!isPlainObject(managed)) return undefined
+  const env = managed.env
+  if (!isPlainObject(env)) return undefined
+  const endpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return undefined
+  let parsed
+  try {
+    parsed = new URL(endpoint)
+  } catch {
+    return undefined
+  }
+  const port = Number(parsed.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  return port
+}
+
+/**
  * Probe on-disk client settings using the descriptor's attach_probe
  * definition. Supports JSON (marker key lookup) and TOML (header string
  * search) formats. Returns a probe result without importing any client
@@ -1766,7 +1845,7 @@ function readRetention(config) {
  *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
- * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, error?: string }>}
+ * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, telemetryPort?: number, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
@@ -1791,6 +1870,7 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       const marker = /** @type {Record<string, unknown>} */ (parsed)[probe.marker_key]
       if (!marker || typeof marker !== 'object') return { attached: false, settingsPath }
       const markerObj = /** @type {Record<string, unknown>} */ (marker)
+      const telemetryPort = markerTelemetryPort(markerObj)
       return {
         attached: true,
         settingsPath,
@@ -1801,6 +1881,12 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         // timestamp is its baseline for a listener that has seen nothing yet.
         ...(typeof markerObj.mode === 'string' ? { mode: markerObj.mode } : {}),
         ...(typeof markerObj.attached_at === 'string' ? { attachedAt: markerObj.attached_at } : {}),
+        // Where the client's own exporter is pointed, which for an `otel`
+        // attach is the only address capture depends on. Read off
+        // `managed.env` rather than added as a second marker field, so it is
+        // literally the value the client is using and cannot fall out of step
+        // with it.
+        ...(telemetryPort !== undefined ? { telemetryPort } : {}),
       }
     }
 
