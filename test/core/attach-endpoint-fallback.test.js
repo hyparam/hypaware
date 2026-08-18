@@ -143,12 +143,13 @@ test('attach without endpoint: no daemon installed names hyp daemon install/star
   })
 })
 
-test('attach without endpoint: installed-but-unreachable daemon keeps the existing hyp start message', async () => {
+test('attach without endpoint: installed-but-unreachable daemon names hyp daemon start', async () => {
   await withTempHome(async (home) => {
     // A daemon service IS installed (marker on disk) but not currently
-    // reachable: this is the pre-existing case, and its wording must not
-    // change or gain the daemon-install mention.
-    // @ref LLP 0174#bootstrap-floor [tests]: the installed-but-unreachable give-up message is unchanged
+    // reachable: this case names the lifecycle command only, and must not
+    // gain the daemon-install mention. The command it names has to be one
+    // the dispatcher accepts, so it is `hyp daemon start`, never `hyp start`.
+    // @ref LLP 0174#bootstrap-floor [tests]: the installed-but-unreachable give-up message stays the restart-only one
     installFakeDaemonService(home)
     /** @type {string[]} */
     const attachCalls = []
@@ -156,7 +157,7 @@ test('attach without endpoint: installed-but-unreachable daemon keeps the existi
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
     assert.match(stderr.text(), /cannot resolve the gateway endpoint/)
-    assert.match(stderr.text(), /\(hyp start\)/)
+    assert.match(stderr.text(), /\(hyp daemon start\)/)
     assert.doesNotMatch(stderr.text(), /hyp daemon install/)
     assert.doesNotMatch(stderr.text(), /localEndpoint\(\) called before/)
     assert.deepEqual(attachCalls, [])

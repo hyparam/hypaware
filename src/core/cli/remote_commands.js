@@ -139,7 +139,7 @@ export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
  * *return* on timeout rather than throwing. A timeout is not an error here for
  * the same reason it is not one there: the caller has a better answer than an
  * exception (attach's own endpoint-resolution ladder, which ends in the
- * `hyp daemon install` / `hyp start` guidance the give-up message names).
+ * `hyp daemon install` / `hyp daemon start` guidance the give-up message names).
  *
  * The probed fact is `resolveLiveGatewayEndpointFromStatus`, which is already
  * liveness-gated on the daemon pid, so a stale `status.json` left by the

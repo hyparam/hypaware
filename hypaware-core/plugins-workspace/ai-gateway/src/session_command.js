@@ -588,7 +588,7 @@ export function resolveGatewayEndpointForCli(ctx) {
   return {
     ok: false,
     error:
-      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp start`) or pin a port with `hyp init`.',
+      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp daemon start`) or pin a port with `hyp init`.',
   }
 }
 
