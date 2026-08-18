@@ -1,7 +1,7 @@
 # LLP 0263: The client hook is the body spool's second cap enforcer
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Privacy, Sources, Daemon, Config
 **Author:** Phil / Claude
 **Date:** 2026-08-18
