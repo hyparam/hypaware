@@ -661,10 +661,12 @@ two-layer drift detection this discharges),
      `decision = reject`),
    - change permission mode once, e.g. accept-edits (`permission_mode_changed`).
 
-   Then confirm the spool drained:
+   Then wait out one export interval and confirm the spool drained. Claude
+   Code batches its exports, so an immediate check reads "not yet" as
+   "broken":
 
    ```sh
-   sleep 20
+   sleep 60
    ls -1 "$SPOOL" | wc -l
    ```
 
@@ -718,7 +720,10 @@ two-layer drift detection this discharges),
    Pass condition: the list contains at least `api_request`, `tool_decision`,
    `tool_result`, `permission_mode_changed`, and the metric rows
    `claude_code.cost.usage`, `claude_code.lines_of_code.count`, and
-   `claude_code.active_time.total`. Write the **whole** list into the release
+   `claude_code.active_time.total`. The metric rows ride the metrics exporter,
+   whose interval is longer than the logs one: if the `claude_code.*` names are
+   the only ones missing, wait another minute and re-run this query before
+   concluding anything. Write the **whole** list into the release
    notes, not just the verdict: a name this document does not mention is an
    upstream addition worth a follow-up, and a name that has stopped appearing
    is upstream drift to file before the release ships. Note that `user_prompt`,
