@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import http from 'node:http'
 import readline from 'node:readline/promises'
 
+import { askLineOnce } from '../../../../src/core/cli/line_asker.js'
 import { CLAUDE_ACCOUNT_CONFIG_SECTION, resolveMode, validateClaudeAccountConfig } from './config.js'
 import { resolveCredential } from './credential.js'
 import {
@@ -22,6 +23,7 @@ import {
 } from './store.js'
 
 /**
+ * @import { Interface } from 'node:readline/promises'
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AnthropicCredentialCapability } from './types.js'
  */
@@ -132,6 +134,43 @@ async function runCredential(cmdCtx, config, stateDir) {
 }
 
 /**
+ * The `Code: ` paste fallback as its own lane, so the rule it encodes for
+ * a stdin that can no longer answer is readable and testable without a
+ * browser.
+ *
+ * `rl.question` leaves its promise permanently unsettled at EOF, so with
+ * no loopback listener to race - the port could not be bound, or the
+ * consumer flow fell back to the hosted callback - a login on a stdin
+ * that dried up waited forever on a paste that could never arrive.
+ * `askLineOnce` settles that as `null`, and the two cases part here:
+ *
+ * - No listener: nothing else can finish the login, so EOF is a real
+ *   failure and says so, and `runLogin` prints it and exits 1.
+ * - A listener is up: the browser can still land on it, so the paste lane
+ *   deliberately stays pending rather than losing the race for it. An EOF
+ *   on the fallback input is not evidence about the primary flow, and a
+ *   rejection here would settle `Promise.race` and abort a sign-in that
+ *   was still on its way.
+ *
+ * `null` is not folded into the empty line the way the wizard's prompts
+ * fold it: `parsePastedAuthorization('')` throws `empty authorization
+ * code`, so an unanswerable prompt would report itself as a malformed
+ * paste the user never made.
+ *
+ * @ref LLP 0190#eof-everywhere [implements]: a spent stdin settles the prompt instead of waiting on an answer that can never come; this prompt has no default, so it settles as a failure rather than an answer
+ *
+ * @param {{ rl: Interface, stdin: NodeJS.ReadableStream, hasCallback: boolean }} args
+ * @returns {Promise<{ code: string, state: string }>}
+ */
+export function pasteAuthorizationLane({ rl, stdin, hasCallback }) {
+  return askLineOnce(rl, stdin, 'Code: ').then((pasted) => {
+    if (pasted !== null) return parsePastedAuthorization(pasted)
+    if (hasCallback) return new Promise(() => {})
+    throw new Error('stdin ended before an authorization code was pasted')
+  })
+}
+
+/**
  * @param {CommandRunContext} cmdCtx
  * @param {'org_key' | 'subscription'} mode
  * @param {string} stateDir
@@ -164,9 +203,15 @@ async function runLogin(cmdCtx, mode, stateDir) {
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
   })
   try {
-    const pastePromise = rl.question('Code: ').then((pasted) => parsePastedAuthorization(pasted))
-    // A settled race leaves the loser pending; readline close (finally)
-    // rejects a pending question, so keep that rejection handled.
+    const pastePromise = pasteAuthorizationLane({
+      rl,
+      stdin: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
+      hasCallback: callback !== null && callback !== undefined,
+    })
+    // A settled race leaves the loser pending. Closing the interface does
+    // not settle it either way (that is the defect `askLineOnce` works
+    // around), so what is guarded here is a malformed paste landing after
+    // the callback already won: keep that rejection handled.
     pastePromise.catch(() => {})
     const { code, state } = await (callback
       ? Promise.race([callback.result, pastePromise])

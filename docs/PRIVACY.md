@@ -23,6 +23,26 @@ text, not just metadata. Rows age out of the local cache after the
 retention window init set (90 days on a team install, 120 on a
 local-only one; `hyp init --retention-days <N>` overrides).
 
+### The raw-body spool
+
+With Claude Code attached, Claude Code writes each raw request and response
+body into `~/.hyp/spool/claude-bodies`, a directory HypAware creates
+owner-only (`0700`). It is a transit area, not storage: HypAware reads a file
+only for the few fields its event stream leaves out (the system prompt, the
+tool list, message ordering, untruncated tool arguments) and deletes the file
+as soon as it has them. The same content is already in Claude Code's own
+transcripts under `~/.claude/projects`.
+
+Three things keep it from becoming a second record:
+
+- A session you ignored, by `.hypignore`, by a machine-local marking, or with
+  `hyp session ignore`, has its bodies **deleted unread**, not skipped.
+- The directory has a size cap (512 MB by default, `spool_max_bytes` in the
+  `@hypaware/claude` config). Past it the oldest files go first, so a stopped
+  daemon costs detail, never disk.
+- `hyp purge` empties it, whatever else you asked that purge to delete, and
+  `hyp detach claude` empties it on the way out.
+
 ### If you turned on proxy mode
 
 Proxy mode (see the README) routes all of Claude Code's HTTPS through the
@@ -150,13 +170,17 @@ Two caveats apply to both surfaces:
 To keep one conversation out of the record without marking any directory,
 run `hyp session ignore` from inside that Claude Code or Codex session. It
 resolves the session id itself and refuses rather than guessing when it
-cannot. Reverse it with `hyp session unignore`; `hyp session status` reports
-which state the session is in right now.
+cannot, and it posts the opt-out to every local recorder hosting the control
+route: the gateway, and the Claude telemetry listener when one is running.
+On the listener, a dropped session's spooled raw bodies are deleted, not
+merely skipped. Reverse it with `hyp session unignore`; `hyp session status`
+reports which state the session is in right now.
 
 The opt-out is in-memory and lasts for that session only. Two things drop it
-while you may still believe it holds: a gateway restart, and a fork
-(`claude --fork-session`, `codex fork`), which mints a new session id the
-opt-out no longer covers. A plain resume reuses the id.
+while you may still believe it holds: a daemon restart (which drops both
+recorders' sets), and a fork (`claude --fork-session`, `codex fork`), which
+mints a new session id the opt-out no longer covers. A plain resume reuses
+the id.
 
 ## Deleting what was already recorded
 
@@ -172,6 +196,11 @@ hyp purge --all           # everything, wholesale
 ```
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
+
+Every form of it also empties the raw-body spool described above, including
+the targeted ones: a spooled body has not been read yet, so nothing about it
+says which directory or session it belongs to, and leaving it would let the
+next batch write back rows you just deleted.
 
 ## Enrolling with a team: the first-sync review
 

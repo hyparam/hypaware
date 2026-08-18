@@ -1,0 +1,385 @@
+// @ts-check
+
+// The transport contract of the shared OTLP http/json listener. Two
+// plugins host listeners on this machinery (LLP 0257 #registration), so
+// the routing, content-type, content-encoding and envelope behaviour is
+// pinned here rather than inside either plugin's tests.
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import http from 'node:http'
+import zlib from 'node:zlib'
+
+import { createOtlpJsonServer, listenAndResolve } from '../../src/core/otlp/server.js'
+
+/**
+ * @import { OtlpJsonServerOptions, OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
+ */
+
+/**
+ * Start a listener on a dynamic loopback port and return an origin plus
+ * the requests the handler saw. `onRequest` lets a test make the handler
+ * fail.
+ *
+ * @param {{
+ *   name?: string,
+ *   signals?: readonly OtlpSignal[],
+ *   onRequest?: (req: OtlpRequest) => void,
+ *   onControlRequest?: OtlpJsonServerOptions['onControlRequest'],
+ * }} [options]
+ */
+async function startServer(options = {}) {
+  /** @type {OtlpRequest[]} */
+  const seen = []
+  const server = createOtlpJsonServer({
+    name: options.name ?? 'hypaware/test',
+    signals: options.signals,
+    onControlRequest: options.onControlRequest,
+    handler: {
+      async handle(req) {
+        seen.push(req)
+        options.onRequest?.(req)
+      },
+    },
+  })
+  const bound = await listenAndResolve(server, '127.0.0.1', 0, 'hypaware/test')
+  return {
+    seen,
+    bound,
+    origin: `http://127.0.0.1:${bound.port}`,
+    async close() {
+      await new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve(undefined)))
+        server.closeIdleConnections?.()
+        server.closeAllConnections?.()
+      })
+    },
+  }
+}
+
+/**
+ * POST with no `Content-Type` header at all, which `fetch` cannot express.
+ *
+ * @param {number} port
+ * @param {string} path
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function postWithoutContentType(port, path) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'POST' }, (res) => {
+      /** @type {Buffer[]} */
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+      )
+    })
+    req.on('error', reject)
+    req.end('{}')
+  })
+}
+
+test('listenAndResolve reports the port a dynamic bind actually got', async () => {
+  const s = await startServer()
+  try {
+    assert.equal(s.bound.host, '127.0.0.1')
+    assert.ok(s.bound.port > 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('GET / answers with the listener name banner', async () => {
+  const s = await startServer({ name: 'hypaware/otel' })
+  try {
+    const res = await fetch(`${s.origin}/`)
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'hypaware/otel OTLP listener\n')
+  } finally {
+    await s.close()
+  }
+})
+
+test('each signal route answers with its own empty partialSuccess envelope', async () => {
+  const s = await startServer()
+  try {
+    /** @type {[string, string][]} */
+    const cases = [
+      ['/v1/logs', 'rejectedLogRecords'],
+      ['/v1/traces', 'rejectedSpans'],
+      ['/v1/metrics', 'rejectedDataPoints'],
+    ]
+    for (const [route, field] of cases) {
+      const res = await fetch(`${s.origin}${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.headers.get('content-type'), 'application/json')
+      assert.deepEqual(await res.json(), { partialSuccess: { [field]: 0 } })
+    }
+    assert.deepEqual(
+      s.seen.map((req) => req.signal),
+      ['logs', 'traces', 'metrics']
+    )
+  } finally {
+    await s.close()
+  }
+})
+
+test('the handler sees the parsed payload and its decoded byte count', async () => {
+  const s = await startServer()
+  try {
+    const body = JSON.stringify({ resourceLogs: [{ resource: {} }] })
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].signal, 'logs')
+    assert.deepEqual(s.seen[0].data, { resourceLogs: [{ resource: {} }] })
+    assert.equal(s.seen[0].payloadBytes, Buffer.byteLength(body))
+  } finally {
+    await s.close()
+  }
+})
+
+test('an empty body reads as an empty object rather than a parse error', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '',
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(s.seen[0].data, {})
+    assert.equal(s.seen[0].payloadBytes, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a charset parameter on the content type is still application/json', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    })
+    assert.equal(res.status, 200)
+  } finally {
+    await s.close()
+  }
+})
+
+test('protobuf and a missing content type are both refused with 415', async () => {
+  const s = await startServer()
+  try {
+    const proto = await fetch(`${s.origin}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf' },
+      body: 'not json',
+    })
+    assert.equal(proto.status, 415)
+    const protoBody = /** @type {{ code: number, message: string }} */ (await proto.json())
+    assert.equal(protoBody.code, 3)
+    assert.match(protoBody.message, /application\/x-protobuf/)
+
+    // `fetch` always stamps a content type, so the header-less case needs a raw request.
+    const none = await postWithoutContentType(s.bound.port, '/v1/traces')
+    assert.equal(none.status, 415)
+    assert.match(none.body, /'none'/)
+
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('gzip and deflate bodies are decoded before the handler sees them', async () => {
+  const s = await startServer()
+  try {
+    const payload = JSON.stringify({ resourceMetrics: [] })
+    /** @type {[string, Buffer][]} */
+    const cases = [
+      ['gzip', zlib.gzipSync(payload)],
+      ['deflate', zlib.deflateSync(payload)],
+    ]
+    for (const [encoding, compressed] of cases) {
+      const res = await fetch(`${s.origin}/v1/metrics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding },
+        body: compressed,
+      })
+      assert.equal(res.status, 200)
+    }
+    assert.equal(s.seen.length, 2)
+    for (const req of s.seen) {
+      assert.deepEqual(req.data, { resourceMetrics: [] })
+      // The count is of decoded bytes, not of what came off the wire.
+      assert.equal(req.payloadBytes, Buffer.byteLength(payload))
+    }
+  } finally {
+    await s.close()
+  }
+})
+
+test('an unknown content encoding is refused with 415', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'br' },
+      body: '{}',
+    })
+    assert.equal(res.status, 415)
+    const body = /** @type {{ code: number, message: string }} */ (await res.json())
+    assert.equal(body.code, 3)
+    assert.match(body.message, /Content-Encoding: br/)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a malformed JSON body is refused with 400 rather than crashing', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{ not json',
+    })
+    assert.equal(res.status, 400)
+    assert.deepEqual(await res.json(), { code: 3, message: 'Invalid JSON' })
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('an unknown path is 404 and a non-POST method is 405', async () => {
+  const s = await startServer()
+  try {
+    const missing = await fetch(`${s.origin}/v1/nope`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(missing.status, 404)
+    assert.deepEqual(await missing.json(), { code: 5, message: 'Not found' })
+
+    const wrongMethod = await fetch(`${s.origin}/v1/logs`, { method: 'PUT', body: '{}' })
+    assert.equal(wrongMethod.status, 405)
+    assert.deepEqual(await wrongMethod.json(), { code: 12, message: 'Method not allowed' })
+  } finally {
+    await s.close()
+  }
+})
+
+test('a handler failure becomes a 500 carrying its message', async () => {
+  const s = await startServer({
+    onRequest() {
+      throw new Error('persist failed')
+    },
+  })
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(res.status, 500)
+    assert.deepEqual(await res.json(), { code: 13, message: 'persist failed' })
+  } finally {
+    await s.close()
+  }
+})
+
+// @ref LLP 0256#control-route-on-listener [tests]: the reserved `/_hypaware/`
+// prefix is a local control surface on the shared server too, short-circuited
+// before OTLP routing, so the claude listener can host the session-ignore
+// route with the identical shape the gateway proxy serves.
+test('a registered control handler owns the reserved /_hypaware/ prefix, before OTLP routing', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(`${req.method} ${url.pathname}`)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    // All three verbs the session-ignore route serves reach the handler,
+    // including GET, which the OTLP side would have refused with 405.
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      const res = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+        method,
+        ...(method === 'GET' ? {} : { headers: { 'content-type': 'application/json' }, body: '{}' }),
+      })
+      assert.equal(res.status, 200, `${method} reaches the control handler`)
+      assert.deepEqual(await res.json(), { ok: true })
+    }
+    assert.deepEqual(controlPaths, [
+      'GET /_hypaware/ignore/session',
+      'POST /_hypaware/ignore/session',
+      'DELETE /_hypaware/ignore/session',
+    ])
+    assert.equal(s.seen.length, 0, 'a control request never reads as an OTLP export')
+
+    // A look-alike path is NOT a control path, so it still routes as OTLP.
+    const lookAlike = await fetch(`${s.origin}/_hypawarefoo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(lookAlike.status, 404)
+    assert.equal(controlPaths.length, 3, 'the look-alike never reached the control handler')
+  } finally {
+    await s.close()
+  }
+})
+
+test('without a control handler, control paths fall through as unknown OTLP routes', async () => {
+  const s = await startServer()
+  try {
+    const post = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(post.status, 404)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a listener can serve a subset of the signals', async () => {
+  const s = await startServer({ signals: ['logs', 'metrics'] })
+  try {
+    const logs = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(logs.status, 200)
+
+    const traces = await fetch(`${s.origin}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(traces.status, 404)
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})

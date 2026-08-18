@@ -60,6 +60,7 @@ async function runPreset() {
       commands: { register() {} },
       skills: { register() {} },
       agents: { register() {} },
+      query: { registerDataset() {} },
       initPresets: { register(/** @type {any} */ p) { preset = p } },
     }
     await activateClaude(ctx)

@@ -8,6 +8,7 @@
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "permissions": [
+    "network",
     "read_home",
     "write_home",
     "read_state",
@@ -20,6 +21,14 @@
     }
   },
   "contributes": {
+    "sources": [{ "name": "claude-telemetry" }],
+    "datasets": [
+      {
+        "name": "claude_telemetry_events",
+        "source": "claude-telemetry",
+        "summary": "Claude Code behavioral telemetry: one row per event (tool decisions, permission mode changes, hook and MCP health, cost and activity metrics)"
+      }
+    ],
     "client": {
       "name": "claude",
       "skill_dir": ".claude/skills",
@@ -28,6 +37,10 @@
         "format": "json",
         "settings_file": ".claude/settings.json",
         "marker_key": "_hypaware"
+      },
+      "activity_probe": {
+        "dir": ".claude/projects",
+        "file_suffix": ".jsonl"
       },
       "required_upstreams": ["anthropic"],
       "transcript_entrypoints": ["cli", "sdk-cli"],
@@ -64,7 +77,7 @@
     "config_sections": [
       {
         "section": "claude",
-        "summary": "Claude adapter config, including the optional backfill-on-join policy { on_join, window_days }."
+        "summary": "Claude adapter config: the optional backfill-on-join policy { on_join, window_days }, the attach-on-join policy { on_join }, and the telemetry listener address { listen_host, listen_port }."
       }
     ]
   }

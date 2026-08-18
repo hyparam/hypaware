@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
 import {

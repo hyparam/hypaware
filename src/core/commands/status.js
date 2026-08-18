@@ -193,6 +193,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
       ...(c.version ? { version: c.version } : {}),
       ...(c.port ? { port: c.port } : {}),
+      // The attach mode the marker records (`base_url` / `proxy` / `otel`),
+      // so a machine can be seen to be on the third mode without opening
+      // the settings file (LLP 0258's consequence).
+      ...(c.mode ? { mode: c.mode } : {}),
       ...(c.error ? { error: c.error } : {}),
     })),
     // Picked clients grouped by provenance (LLP 0132 #never-silent). Null on
@@ -229,6 +233,23 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         })),
       }
       : null,
+    // Capture health per otel-attached client (LLP 0257 S17). Always an
+    // array so a consumer can pin the key; empty means no configured client
+    // is otel-attached, which keeps the pre-otel payload shape unchanged.
+    // Timestamps follow the null-not-omitted contract: `last_event_at:
+    // null` is the actionable answer ("attached, nothing ever arrived"),
+    // not a missing field.
+    // @ref LLP 0257#status-and-health [implements]: --json carries the machine-readable comparison the text line renders
+    capture_health: report.captureHealth.map((c) => ({
+      client: c.client,
+      source: c.source,
+      last_event_at: c.lastEventAt,
+      last_transcript_activity_at: c.lastTranscriptActivityAt,
+      attached_at: c.attachedAt,
+      listener_started_at: c.listenerStartedAt,
+      gap_seconds: Math.round(c.gapMs / 1000),
+      state: c.state,
+    })),
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -328,35 +349,43 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
- * How much of the daemon line's `error=` a hostile status file may spend.
- * Wider than a label's 120, because unlike a name this carries a real error
- * message - typically an fs error naming a full path - and the clamp exists
- * to stop the line being bloated, not to bound an identifier. Cutting a path
- * short is the one way this cleaning could cost a reader an answer.
+ * How much of an `error` line a hostile file may spend. Wider than a label's
+ * 120, because unlike a name this carries a real error message - typically an
+ * fs or parser error naming a full path - and the clamp exists to stop the
+ * line being bloated, not to bound an identifier. Cutting a path short is the
+ * one way this cleaning could cost a reader an answer.
  */
-const MAX_DAEMON_ERROR_CHARS = 400
+const MAX_ERROR_CHARS = 400
 
 /**
  * A string on its way into the text surface, made safe to print.
  *
- * `renderStatusText` is the last point before a terminal, and several of the
- * strings it interpolates were read back out of `status.json`
- * (`daemon.state`, `daemon.mode`, and - with no runtime attached - every
- * `sources[]` / `sinks[]` entry). That file is a *file*: core cannot assume
- * the daemon that wrote it was this version, this build, or well behaved, so
- * a raw value from it can carry an escape sequence that repaints the
- * operator's screen or a newline that forges a plausible extra status line.
+ * `renderStatusText` is the last point before a terminal, and not everything
+ * it interpolates was written by this build. Several of these strings were
+ * read back out of `status.json` (`daemon.state`, `daemon.mode`, and - with
+ * no runtime attached - every `sources[]` / `sinks[]` entry), and that file
+ * is a *file*: core cannot assume the daemon that wrote it was this version,
+ * this build, or well behaved. The remote-config block prints etags authored
+ * by whatever server the install joined, read back through a local state file
+ * that nothing validates; the client block prints an attach probe's error,
+ * which for a settings file that is not valid JSON is `JSON.parse`'s message
+ * and therefore quotes an excerpt of that file verbatim. Any of them can
+ * carry an escape sequence that repaints the operator's screen or a newline
+ * that forges a plausible extra status line.
  *
- * Cleaning happens *here* rather than in the collector because these values
- * are not display-only: `sources[].name` and `sinks[].instance` are identity
- * keys and part of the `--json` contract, which a consumer escapes for
- * itself. Cleaning at the interpolation closes the terminal path and leaves
- * both intact - including the raw values the provenance lookups below match
- * on.
+ * Cleaning happens *here* rather than in the collector because `--json`
+ * renders the same values for a program, which escapes for itself and must
+ * receive what was actually recorded (LLP 0225): escaping is a render's job,
+ * and only of the render a person reads. That is not merely a display
+ * nicety, either - `sources[].name` and `sinks[].instance` are identity keys
+ * as well as `--json` contract, and cleaning at the interpolation closes the
+ * terminal path while leaving both intact, including the raw values the
+ * provenance lookups below match on.
  *
- * @param {string | undefined} value
+ * @param {unknown} value
  * @param {number} [max]
  * @returns {string}
+ * @ref LLP 0225#decision [implements]: the text surface escapes what a person reads; --json stays byte-exact
  * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: what core reads back out of status.json is cleaned at the last point before render, whichever field it came from
  */
 function printable(value, max) {
@@ -435,11 +464,32 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       state.push(c.configured ? 'configured' : 'not in config')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp attach` that is a documented
-      // no-op and can never change the line (#544).
+      // no-op and can never change the line (#544). Where there is an attach,
+      // the marker's mode rides the attached state (`attached (otel)`), so a
+      // machine that just migrated modes is visibly on the new one from the
+      // surface a human reads, not only under --json (LLP 0258's consequence,
+      // completed by the LLP 0262 migration). Markers that predate modes carry
+      // none and keep the bare word. The mode goes through `printable` because
+      // it is read back off the client's own settings file, which a hand edit
+      // can fill with anything: an unsanitized value here would let a settings
+      // file drive the operator's terminal, which is what LLP 0225 exists to
+      // stop. A value that sanitizes away entirely leaves the bare word.
       // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
-      state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
+      // @ref LLP 0225#one-vocabulary [implements]: a label lifted off disk is stripped before it reaches the terminal
+      const mode = printable(c.mode)
+      state.push(
+        c.attachable === false
+          ? 'attach n/a'
+          : c.attached
+            ? (mode ? `attached (${mode})` : 'attached')
+            : 'not attached'
+      )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
-      if (c.error) stdout.write(`        error: ${c.error}\n`)
+      // The probe's error is not this build's prose: a settings file that is
+      // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
+      // an excerpt of the file back. The client wrote that file, so it is
+      // cleaned on the way into the line.
+      if (c.error) stdout.write(`        error: ${printable(c.error, MAX_ERROR_CHARS)}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -474,6 +524,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       stdout.write(
         `    - ${e.entrypoint}${client}  last seen ${formatEntrypointAge(e.lastSeen)}, ${e.rows} row${e.rows === 1 ? '' : 's'}\n`
       )
+    }
+  }
+
+  // Capture health for otel-attached clients (LLP 0257 S17): the line that
+  // answers "is the telemetry path keeping up with what the client itself is
+  // doing?", which no other line can be read for - `recent clients` above
+  // only knows what WAS captured, and a silent capture gap is precisely rows
+  // that never arrived. Rendered only when a configured client is
+  // otel-attached, so every other install's text surface is unchanged; the
+  // `[capture gap]` tag points at the diagnostics block, which carries the
+  // repair.
+  // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
+  if (report.captureHealth.length > 0) {
+    stdout.write('  capture health:\n')
+    for (const c of report.captureHealth) {
+      const events = c.lastEventAt !== null
+        ? `last event ${formatEntrypointAge(c.lastEventAt)}`
+        : 'no events yet'
+      const transcripts = c.lastTranscriptActivityAt !== null
+        ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
+        : 'no transcript activity'
+      const tag = c.state === 'gap' ? '  [capture gap]' : ''
+      stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
   }
 
@@ -584,16 +657,21 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // show. A never-joined install keeps the V1 status surface.
   const rc = report.remoteConfig
   if (rc && (rc.runningEtag || rc.probation || rc.lastRollback || rc.badEtag)) {
+    // Every value in this block is remote-authored or read back out of a
+    // local state file that nothing validates, and all of it is display-only
+    // here, so all of it is cleaned at the interpolation. An etag is whatever
+    // the joined server put in the header; a `reason` and a timestamp are
+    // this build's own vocabulary only if this build wrote the file.
     stdout.write('  remote config:\n')
-    if (rc.runningEtag) stdout.write(`    running etag:  ${rc.runningEtag}\n`)
+    if (rc.runningEtag) stdout.write(`    running etag:  ${printable(rc.runningEtag)}\n`)
     if (rc.probation) {
-      stdout.write(`    probation:     ${rc.probation.etag} until ${rc.probation.until}\n`)
+      stdout.write(`    probation:     ${printable(rc.probation.etag)} until ${printable(rc.probation.until)}\n`)
     }
     if (rc.lastRollback) {
-      stdout.write(`    last rollback: ${rc.lastRollback.etag} at ${rc.lastRollback.at} (${rc.lastRollback.reason})\n`)
+      stdout.write(`    last rollback: ${printable(rc.lastRollback.etag)} at ${printable(rc.lastRollback.at)} (${printable(rc.lastRollback.reason)})\n`)
     }
     if (rc.badEtag) {
-      stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+      stdout.write(`    bad etag:      ${printable(rc.badEtag.etag)} (${printable(rc.badEtag.reason)})\n`)
     }
   }
 
@@ -753,7 +831,7 @@ function describeDaemon(daemon) {
   if (daemon.state) parts.push(`state=${printable(daemon.state)}`)
   if (daemon.pid) parts.push(`pid=${daemon.pid}`)
   if (daemon.mode) parts.push(`mode=${printable(daemon.mode)}`)
-  if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_DAEMON_ERROR_CHARS)}`)
+  if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_ERROR_CHARS)}`)
   return parts.join(', ')
 }
 
