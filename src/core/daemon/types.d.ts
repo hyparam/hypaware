@@ -98,6 +98,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_telemetry_stale'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
@@ -106,6 +107,7 @@ export type StatusDiagnosticKind =
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
+  | 'capture_gap'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -223,8 +225,55 @@ export interface ClientAttachReport {
   version?: string
   /** Local gateway port the adapter routes through, when recorded. */
   port?: string
+  /** Attach mode recorded in the marker (`base_url` / `proxy` / `otel`), when present. */
+  mode?: string
+  /** ISO timestamp the marker records the attach at, when present. */
+  attachedAt?: string
+  /**
+   * Port the marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` sends telemetry
+   * to, when the marker carries one. Distinct from `port` above (the
+   * gateway's): in `otel` mode this is the only address capture depends on,
+   * and it is what `client_telemetry_stale` compares against the listener's
+   * live bind.
+   */
+  telemetryPort?: number
   /** Probe error string, when the file was unreadable. */
   error?: string
+}
+
+/**
+ * One otel-attached client's capture health: what its own file trail says it
+ * did (`lastTranscriptActivityAt`, the newest activity-probe mtime) held
+ * against what the telemetry path actually captured (`lastEventAt`, from the
+ * listener source's status.json details). `state` is `gap` when activity ran
+ * past the capture baseline by more than the threshold; the paired
+ * `capture_gap` diagnostic carries the severity and repair
+ * (LLP 0257#status-and-health).
+ */
+export interface CaptureHealthReport {
+  /** Client name (`claude`). */
+  client: string
+  /** The plugin that owns the client and its listener source. */
+  plugin: string
+  /** The listener source's snapshot name in status.json, or null when no daemon recorded one. */
+  source: string | null
+  /** Last telemetry event the listener saw, or null when none is recorded. */
+  lastEventAt: string | null
+  /** Newest activity-probe file mtime, or null when the trail is empty or unprobed. */
+  lastTranscriptActivityAt: string | null
+  /** The attach timestamp the marker records, or null when unreadable. */
+  attachedAt: string | null
+  /**
+   * When the live listener started, or null when no daemon is running. The
+   * third baseline the gap is measured from: `lastEventAt` is in-process
+   * state, so a restart republishes it as null however long capture has been
+   * healthy, and without this the gap would be measured from an attach that
+   * can be weeks old.
+   */
+  listenerStartedAt: string | null
+  /** Milliseconds of activity past the capture baseline (0 when none). */
+  gapMs: number
+  state: 'ok' | 'gap'
 }
 
 /** Service-level daemon state surfaced by `hyp status`. */
@@ -366,6 +415,16 @@ export interface HypAwareStatusReport {
    * and reads no cache, so this is the only place the answer can come from.
    */
   recentEntrypoints: RecentEntrypoint[]
+  /**
+   * Capture health for every otel-attached client (LLP 0257#status-and-health,
+   * the RFC 0262 open-question-1 duty): last event seen on the telemetry path
+   * vs the client's own last activity. Empty when no configured client is
+   * otel-attached, so the pre-otel surface is unchanged. Like
+   * `recentEntrypoints` this reads status.json without a liveness gate: a
+   * dead daemon's stale `lastEventAt` is exactly the evidence a capture gap
+   * is made of.
+   */
+  captureHealth: CaptureHealthReport[]
   /**
    * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
    * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP

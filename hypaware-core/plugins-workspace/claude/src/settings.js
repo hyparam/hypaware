@@ -12,6 +12,7 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
+import { CLAUDE_OTEL_MIN_VERSION, CLAUDE_UPDATE_HINT, isBelowClaudeVersion } from './claude_version.js'
 
 /**
  * Claude Code settings.json attach writer, keyed on the `_hypaware`
@@ -36,6 +37,13 @@ import { markActionRefused } from '../../../../src/core/config/action_refusal.js
  * rebuilt before attach could write into it. Attach repairs rather than
  * refuses, and the marker is what makes the repair reversible and
  * reportable instead of destructive. See LLP 0163.
+ *
+ * Three modes share all of that machinery unchanged. `base_url` repoints
+ * `ANTHROPIC_BASE_URL` at the gateway, `proxy` sets `HTTPS_PROXY` plus a
+ * CA, and `otel` turns on Claude Code's own telemetry export and routes
+ * no traffic at all. Switching between them is the same key release in
+ * every direction (see `releaseUnmanagedKeys`), so the marker stays the
+ * whole undo record whichever mode wrote it.
  */
 
 /**
@@ -108,6 +116,96 @@ const PROXY_MODE_ENV_KEYS = ['HTTPS_PROXY', 'NODE_EXTRA_CA_CERTS']
 export const MODE_PROXY = 'proxy'
 /** @type {'base_url'} */
 export const MODE_BASE_URL = 'base_url'
+/** @type {'otel'} */
+export const MODE_OTEL = 'otel'
+
+/**
+ * The env block `otel` mode writes, in order.
+ *
+ * The list *is* the decision, which is why it is spelled out here rather than
+ * assembled from flags: it is the exported contract between attach, the
+ * listener that receives what these flags turn on, and the spool sweep. Note
+ * what is absent - no `ANTHROPIC_BASE_URL`, no `HTTPS_PROXY`, no
+ * `NODE_EXTRA_CA_CERTS` - which is what leaves the endpoint first-party and
+ * Remote Control working with no override keys at all.
+ *
+ * Unlike the base-URL mode's additions these are take-over keys, handled like
+ * the proxy keys: a user who already points Claude Code at their own collector
+ * has that value backed up into `prev_env` and restored on detach, rather than
+ * being skipped (which would leave attach reporting success while the events
+ * went somewhere else).
+ *
+ * @ref LLP 0258#env-keys [implements]: exactly these keys, and only these
+ * @param {{ telemetryPort: number, spoolDir: string }} args
+ * @returns {{ key: string, value: string }[]}
+ */
+export function otelModeEnv({ telemetryPort, spoolDir }) {
+  return [
+    { key: 'CLAUDE_CODE_ENABLE_TELEMETRY', value: '1' },
+    { key: 'OTEL_LOGS_EXPORTER', value: 'otlp' },
+    { key: 'OTEL_METRICS_EXPORTER', value: 'otlp' },
+    { key: 'OTEL_EXPORTER_OTLP_PROTOCOL', value: 'http/json' },
+    { key: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: `http://127.0.0.1:${telemetryPort}` },
+    { key: 'OTEL_LOG_USER_PROMPTS', value: '1' },
+    { key: 'OTEL_LOG_ASSISTANT_RESPONSES', value: '1' },
+    { key: 'OTEL_LOG_TOOL_DETAILS', value: '1' },
+    { key: 'OTEL_LOG_RAW_API_BODIES', value: `file:${spoolDir}` },
+  ]
+}
+
+/**
+ * The OTLP env keys that OUTRANK the ones {@link otelModeEnv} writes.
+ *
+ * In the OTLP environment-variable contract a per-signal key beats the generic
+ * one, so `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` decides where log records go no
+ * matter what `OTEL_EXPORTER_OTLP_ENDPOINT` says. Attach deliberately does not
+ * manage these (LLP 0258 #env-keys is "exactly these keys, and only these"),
+ * which leaves one shape that has to be said out loud rather than discovered:
+ * a user already exporting to their own collector through a per-signal key
+ * gets `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_ASSISTANT_RESPONSES` turned on by
+ * this attach, and their prompts and assistant responses start flowing THERE,
+ * while HypAware reports `attached (otel)` and captures nothing.
+ *
+ * `OTEL_EXPORTER_OTLP_HEADERS` is in the list for the same reason from the
+ * other side: it is the key that carries a collector's credentials, and it
+ * would now ride requests aimed at our listener.
+ */
+const OTEL_PER_SIGNAL_OVERRIDE_KEYS = [
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+]
+
+/**
+ * Warn for each per-signal OTLP key left standing in the settings `env` block
+ * after an `otel` attach.
+ *
+ * A warning, not a refusal: attach has no way to see a key exported from the
+ * user's shell, so refusing on the half it CAN see would buy a false sense of
+ * completeness. The values are never echoed - an endpoint or a headers value
+ * is exactly where a collector token lives, and this string is printed, logged
+ * and serialised into `--json`.
+ *
+ * @param {Record<string, unknown>} env the live `env` block, after the write
+ * @returns {string[]}
+ */
+function perSignalOverrideWarnings(env) {
+  /** @type {string[]} */
+  const out = []
+  for (const key of OTEL_PER_SIGNAL_OVERRIDE_KEYS) {
+    const value = env[key]
+    if (value === undefined || value === null || value === '') continue
+    out.push(
+      `env.${key} is set and outranks the endpoint hypaware just wrote; ` +
+      'Claude Code will export there instead, including the prompt and response ' +
+      'text this attach turns on. Remove it, or point it at the same local ' +
+      'listener, then re-run hyp attach claude'
+    )
+  }
+  return out
+}
 
 export class ClaudeSettingsError extends Error {
   /**
@@ -153,12 +251,34 @@ export async function attach(opts) {
     binPath = 'hyp',
     mode = MODE_BASE_URL,
     caCertPath,
+    telemetryPort,
+    spoolDir,
+    claudeVersion,
   } = opts
   validatePort(port)
   validateVersion(version)
   validateStateFile(stateFile)
-  if (mode !== MODE_PROXY && mode !== MODE_BASE_URL) {
+  if (mode !== MODE_PROXY && mode !== MODE_BASE_URL && mode !== MODE_OTEL) {
     throw new ClaudeSettingsError(`unknown attach mode: ${String(mode)}`, { code: 'INVALID_MODE' })
+  }
+  if (mode === MODE_OTEL) {
+    // Refused *before the settings file is even read*, which is the whole
+    // content of "leaves any existing attach untouched": a machine on the old
+    // client keeps whatever attach it already had, rather than being moved to
+    // a mode that captures nothing. There is deliberately no fallback to proxy
+    // or base-URL mode here - one attach mode per client - so the refusal is
+    // an error the caller reports, not a quiet downgrade.
+    // @ref LLP 0258#version-floor [implements]: below the floor attach refuses the switch and prints the upgrade hint
+    if (isBelowClaudeVersion(claudeVersion, CLAUDE_OTEL_MIN_VERSION)) {
+      throw markActionRefused(new ClaudeSettingsError(
+        `Claude Code ${String(claudeVersion)} is older than ${CLAUDE_OTEL_MIN_VERSION}, ` +
+        'which is the first release that exports the telemetry HypAware captures; ' +
+        `run '${CLAUDE_UPDATE_HINT}' and attach again`,
+        { code: 'VERSION_FLOOR' }
+      ))
+    }
+    validateTelemetryPort(telemetryPort)
+    validateSpoolDir(spoolDir)
   }
   // Proxy mode routes *all* of Claude Code's HTTPS through the gateway, so an
   // attach that lands without a working local CA does not degrade to
@@ -191,6 +311,22 @@ export async function attach(opts) {
 
   const { value, mtimeMs } = await readSettings(settingsPath)
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
+
+  // What the marker said before this run rewrites it. A proxy attach leaves
+  // residue no settings write reaches (the launchd environment, the keychain
+  // trust), and by the time the caller could re-read the marker this write has
+  // already replaced it, so the prior mode is reported on the result. Only the
+  // three known modes are reported: a legacy marker without one predates modes
+  // entirely and has no residue to unwind.
+  // @ref LLP 0262#migration [implements]: the prior mode is what tells the adapter a proxy attach is being migrated
+  /** @type {'proxy' | 'base_url' | 'otel' | undefined} */
+  let priorMode
+  if (
+    priorMarker &&
+    (priorMarker.mode === MODE_PROXY || priorMarker.mode === MODE_BASE_URL || priorMarker.mode === MODE_OTEL)
+  ) {
+    priorMode = priorMarker.mode
+  }
 
   // A backup an earlier run already recorded at some path. Read before anything
   // is displaced, because it decides what this run is allowed to claim: a prior
@@ -373,6 +509,35 @@ export async function attach(opts) {
     managedEnv.HTTPS_PROXY = `http://127.0.0.1:${port}`
     managedEnv.NODE_EXTRA_CA_CERTS = /** @type {string} */ (caCertPath)
     for (const [key, next] of Object.entries(managedEnv)) env[key] = next
+  } else if (mode === MODE_OTEL) {
+    // Claude Code talks to Anthropic directly and exports its own telemetry to
+    // us, so nothing here routes traffic: the endpoint stays first party and
+    // the Remote Control predicate holds without a single override key.
+    // @ref LLP 0258#env-keys [implements]
+    // @ref LLP 0258#settings-env [implements]: the settings `env` block is the only surface attach writes
+    const additions = otelModeEnv({
+      telemetryPort: /** @type {number} */ (telemetryPort),
+      spoolDir: /** @type {string} */ (spoolDir),
+    })
+    for (const { key } of additions) {
+      const prior = priorValueFor(key)
+      if (prior.value !== undefined) prevEnv[key] = prior.value
+      if (prior.carriedForward || prior.value === undefined) continue
+      // A pre-existing OTEL key is almost always a user's own collector, and
+      // taking it over silently would send their telemetry here instead. The
+      // value is backed up and restored on detach either way, but only the run
+      // that displaced it has anything new to say. The value itself is not
+      // echoed: an endpoint or a headers value is exactly where a collector
+      // token ends up, and this string is printed and logged.
+      warnings.push(
+        `env.${key} was already set; hypaware now manages it and hyp detach restores it`
+      )
+    }
+    for (const { key, value } of additions) {
+      managedEnv[key] = value
+      env[key] = value
+    }
+    warnings.push(...perSignalOverrideWarnings(env))
   } else {
     // Undo the defaults Claude Code flips because the gateway URL is not
     // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
@@ -432,6 +597,12 @@ export async function attach(opts) {
     ...(mode === MODE_BASE_URL && prevBaseUrl !== undefined
       ? { prev_base_url: prevBaseUrl }
       : {}),
+    // The one thing about an `otel` attach that is not derivable from the
+    // managed keys: detach and `hyp purge` have to empty a directory neither
+    // of them computed, and the env value that names it is gone by the time
+    // they run.
+    // @ref LLP 0258#marker-and-spool [implements]: the marker records the spool directory
+    ...(mode === MODE_OTEL ? { spool_dir: spoolDir } : {}),
     ...(Object.keys(prevEnv).length > 0 ? { prev_env: prevEnv } : {}),
     ...(Object.keys(prevMalformed).length > 0 ? { prev_malformed: prevMalformed } : {}),
   }
@@ -440,16 +611,26 @@ export async function attach(opts) {
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  const reportedPrev = mode === MODE_PROXY ? prevEnv.HTTPS_PROXY : prevBaseUrl
+  if (priorMode !== undefined) result.priorMode = priorMode
+  // Each mode reports the key it actually took over. Reporting a displaced
+  // base URL from a mode that never touched `ANTHROPIC_BASE_URL` would be the
+  // first thing a user checked when their own value turned out to still be
+  // there.
+  const reportedPrev = mode === MODE_PROXY
+    ? prevEnv.HTTPS_PROXY
+    : mode === MODE_OTEL
+      ? prevEnv.OTEL_EXPORTER_OTLP_ENDPOINT
+      : prevBaseUrl
   if (reportedPrev !== undefined) {
     const shown = typeof reportedPrev === 'string' ? reportedPrev : String(reportedPrev)
     // A display field, not the backup: the marker above already holds the true
     // value, and this one is printed and serialised into `prev_value`. In proxy
-    // mode it is a `HTTPS_PROXY` that routinely carries `user:pass@`, so the
-    // userinfo comes off the copy the user and any `--json` consumer see. Base
-    // URLs go through unchanged: `ANTHROPIC_BASE_URL` carries no userinfo, and
-    // the value is the whole point of the notice.
-    result.prevValue = mode === MODE_PROXY ? redactUrlUserinfo(shown) : shown
+    // mode it is a `HTTPS_PROXY` that routinely carries `user:pass@`, and in
+    // `otel` mode a collector endpoint that can carry the same, so the userinfo
+    // comes off the copy the user and any `--json` consumer see. Base URLs go
+    // through unchanged: `ANTHROPIC_BASE_URL` carries no userinfo, and the
+    // value is the whole point of the notice.
+    result.prevValue = mode === MODE_BASE_URL ? shown : redactUrlUserinfo(shown)
   }
   // Only what *this* run displaced. A re-attach carries the prior backup on the
   // marker but has nothing new to tell the user about, so it warns about
@@ -787,6 +968,51 @@ function validateVersion(version) {
     throw new ClaudeSettingsError('version must be a non-empty string', {
       code: 'INVALID_VERSION',
     })
+  }
+}
+
+/**
+ * The listener port `otel` mode points Claude Code at. A separate validator
+ * from {@link validatePort} so the error names the option the caller passed:
+ * two ports reach `attach()` in this mode, and "invalid port" would not say
+ * which one.
+ *
+ * @param {unknown} telemetryPort
+ */
+function validateTelemetryPort(telemetryPort) {
+  if (
+    typeof telemetryPort !== 'number' ||
+    !Number.isInteger(telemetryPort) ||
+    telemetryPort < 1 ||
+    telemetryPort > 65535
+  ) {
+    throw new ClaudeSettingsError(
+      `otel-mode attach requires the telemetry listener port, got '${String(telemetryPort)}'`,
+      { code: 'INVALID_TELEMETRY_PORT' }
+    )
+  }
+}
+
+/**
+ * Absolute, because the value goes into `OTEL_LOG_RAW_API_BODIES` and Claude
+ * Code resolves it against *its own* working directory. A relative path there
+ * would scatter raw request bodies through every repo the user works in,
+ * outside the HypAware home that `hyp purge` and detach sweep.
+ *
+ * @ref LLP 0253#spool-location [constrained-by]: the spool lives under the HypAware home
+ * @param {unknown} spoolDir
+ */
+function validateSpoolDir(spoolDir) {
+  if (typeof spoolDir !== 'string' || spoolDir.length === 0) {
+    throw new ClaudeSettingsError('otel-mode attach requires the body spool directory', {
+      code: 'INVALID_SPOOL_DIR',
+    })
+  }
+  if (!path.isAbsolute(spoolDir)) {
+    throw new ClaudeSettingsError(
+      `spoolDir must be an absolute path, got '${spoolDir}'`,
+      { code: 'INVALID_SPOOL_DIR' }
+    )
   }
 }
 

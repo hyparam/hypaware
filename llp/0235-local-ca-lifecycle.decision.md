@@ -9,6 +9,9 @@
 **Superseded-by (in part):** LLP 0237 (#client-scoped-trust), LLP 0238
 (#detach-removes-the-ca, #ca-name-constraints mint-from-routing-table,
 #ca-lifecycle one-year validity)
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the `claude` client's
+attach no longer depends on the CA; the CA lifecycle stands for any client
+still routed through the proxy)
 
 > The machine-local certificate authority is generated in-process with no
 > `openssl` shell-out and no new dependency, constrained to the hosts it

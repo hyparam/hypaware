@@ -3,46 +3,73 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
 
+import { isControlPath } from '../control/session_ignore.js'
+
 /**
- * @import { OtlpReceiveHandler, OtlpSignal } from './types.js'
+ * @import { OtlpJsonServerOptions, OtlpSignal } from '../../../src/core/otlp/types.js'
  */
 
 const JSON_CT = { 'Content-Type': 'application/json' }
 
-const SIGNAL_ROUTES = /** @type {const} */ ({
+/** Path to signal, the OTLP/HTTP standard routes. */
+const SIGNAL_ROUTES = /** @type {Record<string, OtlpSignal>} */ ({
   '/v1/logs': 'logs',
   '/v1/traces': 'traces',
   '/v1/metrics': 'metrics',
 })
 
+const ALL_SIGNALS = /** @type {readonly OtlpSignal[]} */ (['logs', 'traces', 'metrics'])
+
+/** The success envelope OTLP requires per signal: nothing was rejected. */
 const EMPTY_PARTIAL_SUCCESS = {
   logs: { partialSuccess: { rejectedLogRecords: 0 } },
   traces: { partialSuccess: { rejectedSpans: 0 } },
   metrics: { partialSuccess: { rejectedDataPoints: 0 } },
 }
 
+// @ref LLP 0257#registration [implements]: one OTLP http/json server, hosted by more than one plugin; payload interpretation stays behind the handler
 /**
- * Create the OTLP/HTTP listener. The handler is invoked once per
- * decoded request with `{ signal, data, payloadBytes }`. Errors thrown
- * by the handler bubble up as HTTP 500; the caller (the source's
- * `start`) is responsible for wrapping that path in an `otel.receive`
- * span and translating exception types to `error_kind` attributes.
+ * Create an OTLP/HTTP listener. The handler is invoked once per decoded
+ * request with `{ signal, data, payloadBytes }`. Errors thrown by the
+ * handler bubble up as HTTP 500; the caller (the source's `start`) is
+ * responsible for wrapping that path in a receive span and translating
+ * exception types to `error_kind` attributes.
  *
- * Only OTLP/JSON is accepted in this pass: an OTLP/protobuf decoder
- * chain was left out of V1 and can be added later without changing
- * the request handler shape.
+ * Only OTLP/JSON is accepted: an OTLP/protobuf decoder chain was left
+ * out of V1 and can be added later without changing the handler shape.
  *
- * @param {OtlpReceiveHandler} handler
+ * Everything this server knows is transport: routing, content type,
+ * content encoding, and the `partialSuccess` envelope. It never reads
+ * inside `data`, so a second plugin can host a listener with entirely
+ * different payload semantics.
+ *
+ * @param {OtlpJsonServerOptions} options
  * @returns {http.Server}
  */
-export function createOtlpServer(handler) {
+export function createOtlpJsonServer(options) {
+  const { name, handler } = options
+  const served = new Set(options.signals ?? ALL_SIGNALS)
+
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
     const route = url.pathname
 
+    // The reserved `/_hypaware/` prefix is a LOCAL control surface, exactly
+    // as it is on the gateway proxy: short-circuited before any OTLP
+    // routing, so a control request is never read as an export and an
+    // OTLP path can never shadow a control route. Hosts that register no
+    // handler keep the old behavior (the paths fall through and 404 as
+    // unknown OTLP routes below).
+    // @ref LLP 0256#control-route-on-listener [implements]: the listener serves
+    // the same control surface the proxy serves, through the same handler
+    if (isControlPath(route) && typeof options.onControlRequest === 'function') {
+      options.onControlRequest(req, res, url)
+      return
+    }
+
     if (req.method === 'GET' && route === '/') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
-      res.end('hypaware/otel OTLP listener\n')
+      res.end(`${name} OTLP listener\n`)
       return
     }
 
@@ -51,10 +78,8 @@ export function createOtlpServer(handler) {
       return
     }
 
-    const signal = /** @type {OtlpSignal | undefined} */ (
-      /** @type {Record<string, OtlpSignal>} */ (SIGNAL_ROUTES)[route]
-    )
-    if (!signal) {
+    const signal = SIGNAL_ROUTES[route]
+    if (!signal || !served.has(signal)) {
       respondJsonError(res, 404, 5, 'Not found')
       return
     }
@@ -125,15 +150,17 @@ function respondJsonError(res, httpStatus, code, message) {
 
 /**
  * Listen on `host:port` and resolve with the actually bound `{ host, port }`.
- * Wraps the awkward `server.listen` callback / `address()` shape so the
- * source's `start` reads as a straight-line coroutine.
+ * Wraps the awkward `server.listen` callback / `address()` shape so a
+ * source's `start` reads as a straight-line coroutine, and so a listener
+ * asking for port `0` learns the port it actually got.
  *
  * @param {http.Server} server
  * @param {string} host
  * @param {number} port
+ * @param {string} [name] listener name, used only in the failure message
  * @returns {Promise<{ host: string, port: number }>}
  */
-export function listenAndResolve(server, host, port) {
+export function listenAndResolve(server, host, port, name = 'hypaware') {
   return new Promise((resolve, reject) => {
     /** @param {Error} err */
     function onError(err) {
@@ -146,7 +173,7 @@ export function listenAndResolve(server, host, port) {
       if (addr && typeof addr === 'object') {
         resolve({ host: addr.address, port: addr.port })
       } else {
-        reject(new Error('hypaware/otel: server.address() returned no AddressInfo'))
+        reject(new Error(`${name}: server.address() returned no AddressInfo`))
       }
     }
     server.once('error', onError)

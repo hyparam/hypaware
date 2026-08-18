@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
  * `opt-out confirmed`, and then the review discusses the machine's most
  * sensitive content believing it is not being recorded. The control route holds
  * the id as an opaque token and answers `ignored: true` for whatever it was
- * handed (`ai-gateway/src/control.js`), so nothing downstream can catch a
+ * handed (`src/core/control/session_ignore.js`), so nothing downstream can catch a
  * wrong id. The correctness of the whole step rests on which id the embedded
  * script sends, which is a property of a markdown code block that no other
  * test covers.
