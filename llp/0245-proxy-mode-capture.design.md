@@ -5,8 +5,8 @@
 **Systems:** Gateway, Sources, Config, Plugins, Privacy, Core, Daemon
 **Generated-by:** neutral
 **Related:** LLP 0231, LLP 0232, LLP 0233, LLP 0234, LLP 0235, LLP 0236,
-LLP 0237, LLP 0238, LLP 0239, LLP 0246, LLP 0247, LLP 0044, LLP 0045,
-LLP 0114, LLP 0192, LLP 0206
+LLP 0237, LLP 0238, LLP 0239, LLP 0242, LLP 0243, LLP 0244, LLP 0246,
+LLP 0247, LLP 0044, LLP 0045, LLP 0114, LLP 0192, LLP 0206
 
 > Technical design for the proxy-mode capture stack the accepted RFC
 > LLP 0231 asked for: Claude Code routed through the gateway with
@@ -28,7 +28,8 @@ is the implementation design that binds those decisions to the tree.
 
 The design is realized on `master` by three commits: `fa701a7e` (#782, the
 transport, aperture, CA and attach), `d0f7c4ad` (#792, the status and trust
-reporting surface), and the rollout work covered separately by LLP 0251.
+reporting surface), and `04330abb` (#794, the LLP 0242-0244 rollout that
+turns proxy mode on).
 File paths and function names below are verified against that tree; the
 tests named in section 7 exist and gate it. What this document adds to the
 corpus is the request-level design of record: the one place the whole
@@ -37,7 +38,9 @@ above.
 
 This change set deliberately excludes who *turns proxy mode on*. Fresh
 install composition and the existing-install migration are LLP 0242's
-problem and are designed in LLP 0251, which depends on this change set.
+problem, settled by LLP 0243 (the picker row composes `proxy_mode`) and
+LLP 0244 (attach offers the migration), and already landed on `master`.
+Their own design of record belongs to that change set, not this one.
 
 ## 1. Data flow, end to end {#data-flow}
 
@@ -152,10 +155,13 @@ The CA lives in core, not in the gateway plugin, because `hyp detach` and
   configures it separately (LLP 0234).
 - `shouldRecordProxyExchange(upstream, pathname)`: the recording anchor is
   `recordPrefix ?? prefix`, and an anchor of `/` or empty records nothing;
-  failing closed is the default. Note the fallback: an upstream with no
-  `record_prefix` records under its routing prefix, so section 3's
-  `source.js` merge is what keeps a routing `path_prefix` of `/` from
-  reading as record-everything. The routing matcher is deliberately not reused: the
+  failing closed is the default, so a routing prefix of `/` can never read
+  as record-everything. Note the fallback: an upstream with no
+  `record_prefix` records under its routing prefix, which is why the
+  `source.js` merge below matters. The `hyp init` preset writes
+  `path_prefix = "/"`, so without the merge the anchor was `/`, the
+  fail-closed guard suppressed every request, and the default install
+  recorded nothing at all. The routing matcher is deliberately not reused: the
   Anthropic route matcher accepts an `sk-ant-` bearer alone, which under a
   proxy is true of every request to the host and measurably reopened the
   aperture (LLP 0234 #recording-is-opt-in-per-path).
@@ -165,13 +171,15 @@ The CA lives in core, not in the gateway plugin, because `hyp detach` and
 
 `hypaware-core/plugins-workspace/ai-gateway/src/source.js` merges each
 adapter preset's declared `path_prefix` (and `provider`) onto the merged
-upstream entry as `record_prefix`, because operator routing config wins
-over presets and a routing `path_prefix` of `/` must never read as
-record-everything; without this the default install recorded nothing at
-all (LLP 0234). It also owns the status surface: `proxy_mode`,
-`ca_fingerprint`, `ca_not_after`, `ca_cert_path`, `ca_permitted_hosts`,
-intercepted hosts, and `proxy_mode_error` when CA preparation failed while
-the gateway kept reverse-proxying.
+upstream entry as `record_prefix`. Operator config still wins the *routing*
+question, but the record anchor belongs to the adapter that registered the
+preset: an operator writing `path_prefix = "/"` is saying "route everything
+on this host here", not "record everything on this host", and the
+fail-closed guard turns that into recording nothing at all on a default
+install (LLP 0234). It also owns the gateway's own status details:
+`proxy_mode`, `ca_fingerprint`, `ca_not_after`, `ca_cert_path`,
+`ca_permitted_hosts`, `intercept_hosts`, and `proxy_mode_error` when CA
+preparation failed while the gateway kept reverse-proxying.
 
 `hypaware-core/plugins-workspace/ai-gateway/src/config.js` reads the
 switch: `proxy_mode` is on only when the config field is literally `true`
@@ -252,13 +260,24 @@ delete a different install's key material.
 
 ## 5. Status surface {#status}
 
-`src/core/commands/status.js` and `src/core/daemon/types.d.ts`
-(`ProxyTrustReport`) report: gateway `proxy_mode`, CA fingerprint, expiry,
-cert path, permitted and intercepted hosts, `proxy_mode_error`, keychain
-trust state, and whether `NODE_USE_SYSTEM_CA` is live in the launchd
-environment (`launchctl getenv`). "The dialog was cancelled last month" is
-diagnosable without re-running attach (LLP 0237), and the aperture is
-readable without grepping a boot log (LLP 0233).
+Two surfaces, and they carry different things.
+
+`hyp status` reports the trust half: `src/core/commands/status.js` renders
+the `proxy trust:` block from `ProxyTrustReport`
+(`src/core/daemon/types.d.ts`), which is exactly three facts: the CA
+fingerprint, keychain trust state, and whether `NODE_USE_SYSTEM_CA` is live
+in the launchd environment (`launchctl getenv`). Trust and launchd state are
+tri-state, because "the probe could not run" is not the claim "not trusted".
+"The dialog was cancelled last month" is diagnosable without re-running
+attach (LLP 0237).
+
+The aperture half lives in the gateway source's own status details
+(section 3): `proxy_mode`, `ca_not_after`, `ca_cert_path`,
+`ca_permitted_hosts`, `intercept_hosts` and `proxy_mode_error`, readable
+without grepping a boot log (LLP 0233). Note that `hyp status --json` maps
+each source to name, plugin and state only and drops the details block, so
+those fields are read from the daemon status file
+(`hyp daemon status --json`), not from `hyp status`.
 
 ## 6. Failure modes {#failure-modes}
 
