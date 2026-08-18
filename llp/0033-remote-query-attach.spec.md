@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-23
 **Related:** LLP 0003, LLP 0009, LLP 0015, LLP 0025, LLP 0031, LLP 0034; hypaware-server LLP 0006, LLP 0010 (out of tree, design authority)
+**Extended-by:** [LLP 0264](./0264-query-status-has-no-remote-form.decision.md)
+(#flag-compat states the local-cache-under-`--remote` hard error for
+`--refresh`; it also covers `hyp query status`, which had been accepting the
+flag and reporting the local cache with exit 0)
 
 > The **client consumer half** of remote attach: how a local `hyp` (and the AI
 > clients on a developer's machine) reach a HypAware server's data. The
