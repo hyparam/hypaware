@@ -116,9 +116,14 @@ an already-ended stream never emits `close` at all, so the asker seeds
 its spent flag from the stream's own `readableEnded` and a second
 question on a spent stdin settles like the first. This covers the
 numbered prompt. The file's other readline prompts (the overwrite
-confirm, the gate's numbered fallback, the backfill consent) still call
-`rl.question` directly and still hang at EOF; closing that class is a
-separate change.
+confirm, the gate's numbered fallback, the backfill consent) called
+`rl.question` directly and hung at EOF; they now read through the same
+asker, coalescing its EOF `null` into the empty line rather than
+branching on it, so each lands on the default its own question prints
+and no EOF answer can drift from the advertised one. The wizard's fork
+screen (`src/core/cli/wizard/fork.js`) is the one prompt outside this
+file still asking through `rl.question`, and closing that is a separate
+change.
 This flips the polarity of the
 prompt LLP 0188 #never-silent quoted ("check any to keep local-only");
 everything behind the prompt - the store schema, editor semantics over

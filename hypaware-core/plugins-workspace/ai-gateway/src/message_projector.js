@@ -22,8 +22,10 @@ const DATASET_NAME = 'ai_gateway_messages'
  * of which adapter projector produced the messages (projector-defined
  * fields map onto these named columns directly). `schema_version` 7 added
  * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
- * the additions are nullable, so old partitions read them as null and no
- * partition-label bump is needed.
+ * the additions are nullable and no partition-label bump is needed. An old
+ * partition physically lacks them; `withSchemaColumns` in `dataset.js` is the
+ * only reason they stay addressable at all, and the exact value a read of one
+ * yields depends on the read path (LLP 0015#multi-partition-union).
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */

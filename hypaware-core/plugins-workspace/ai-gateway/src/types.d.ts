@@ -1,4 +1,4 @@
-import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
   AiGatewayExchangeProjector,
@@ -176,6 +176,12 @@ export interface ProxyOptions {
 export interface StartedProxy {
   host: string
   port: number
+  /**
+   * The listener itself: a test seam for injecting sockets whose peer
+   * address a loopback connect cannot produce. Production callers use only
+   * `host`, `port`, and `stop`.
+   */
+  server: Server
   stopped: Promise<void>
   stop(): Promise<void>
 }

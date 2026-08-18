@@ -102,8 +102,28 @@ export async function* alignRows(rows, columns) {
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded: projecting an absent column reads as null, never throws. Because
- * a sub-source now emits exactly the columns it is asked for (see
+ * forwarded, which adds no failure the merged stream did not already have, and
+ * an absent column reads as `undefined` rather than `null` or a throw: every
+ * row is padded out to the scan's advertised column list by `alignRows` below,
+ * so a column a partition physically lacks is still a real cell that resolves
+ * to `undefined` (LLP 0241 §alignment). One consequence is worth stating,
+ * because it is the thing a maintainer gets wrong: `undefined` is outside
+ * `SqlPrimitive` and `JSON.stringify` drops it, so a padded column renders as
+ * an absent key even though the row object owns it. `Object.keys(row).length`
+ * over a star therefore counts the advertised columns, not the physical ones,
+ * and is not a way to discover what a partition holds. What no longer varies is
+ * which ROW path the caller took: reading `resolved`, invoking the cell, and
+ * evaluating the column in a `WHERE`, `ORDER BY`, `GROUP BY`, `DISTINCT` or an
+ * aggregate all agree, where a short row made the last group throw
+ * `ColumnNotFoundError` on the first partition lacking the column. The
+ * `scanColumn` hook below is a DIFFERENT path and padding does not touch it: it
+ * forwards each partition's chunks unchanged, so an absent column's value there
+ * is whatever the partition streams, and a wrapper above the union normalizes
+ * those holes if it wants them uniform (ai-gateway's `withSchemaColumns` maps
+ * them to `null`). LLP 0241 left that `null`/`undefined` split between the two
+ * paths unsettled on purpose. `test/core/union-source.test.js` pins these.
+ *
+ * Because a sub-source now emits exactly the columns it is asked for (see
  * `parquet-source.js`), forwarding `columns` also determines what the engine
  * gets to re-filter on: it relies on squirreling folding the WHERE columns
  * into the projection it hands to `scan()`, so the predicate's columns are
