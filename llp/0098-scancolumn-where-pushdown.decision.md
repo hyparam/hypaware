@@ -12,6 +12,10 @@
 > flags, so a filtered `COUNT` keeps the streaming fast path instead of
 > falling back to per-row materialization.
 
+> **Extended by [LLP 0266](./0266-native-prepared-batches-through-query-sources.decision.md).**
+> The same storage, union, schema, and heap wrappers now preserve Squirreling's
+> schema-addressed prepared batches when their semantics are transparent.
+
 ## Context
 
 LLP 0055 lit the engine's streaming-aggregate fast path by implementing

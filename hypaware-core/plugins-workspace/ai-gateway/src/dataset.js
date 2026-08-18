@@ -10,7 +10,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from '
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -120,6 +120,7 @@ export async function refreshPartition() {
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
+ * @returns {Promise<ScannableDataSource>}
  */
 export async function createDataSource(partitions, ctx) {
   const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
@@ -137,7 +138,7 @@ export async function createDataSource(partitions, ctx) {
     tablePaths.add(p.path)
   }
 
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
@@ -169,12 +170,12 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * (LLP 0015#multi-partition-union).
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
- * @param {AsyncDataSource} source
- * @returns {AsyncDataSource}
+ * @param {ScannableDataSource} source
+ * @returns {ScannableDataSource}
  */
 function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  /** @type {AsyncDataSource} */
+  /** @type {ScannableDataSource} */
   const wrapped = {
     columns,
     numRows: source.numRows,
@@ -234,6 +235,20 @@ function withSchemaColumns(source) {
           }
         },
       }
+    }
+  }
+  // Native batches are transparent only when the physical prepared schema
+  // already covers the full declared schema. A drifted source stays on the
+  // row/column paths above, which own its absent-column semantics.
+  // @ref LLP 0266#schema-drift [implements]: prepared batches never invent a value for a declared-but-absent field
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    const fieldsByName = new Map(source.schema.fields.map((field) => [field.name, field]))
+    if (columns.every((column) => fieldsByName.has(column))) {
+      wrapped.schema = {
+        fields: columns.map((column) => /** @type {NonNullable<ReturnType<typeof fieldsByName.get>>} */ (fieldsByName.get(column))),
+      }
+      wrapped.prepareScan = (request) => prepareScan.call(source, request)
     }
   }
   return wrapped

@@ -167,6 +167,45 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
 })
 
+// @ref LLP 0266#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
+test('the prepared native-batch path stays lit through the budget decoration', async () => {
+  let preparedCalls = 0
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false }],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    numRows: 4,
+    schema,
+    scan() {
+      throw new Error('legacy row scan should not run')
+    },
+    prepareScan(request) {
+      preparedCalls++
+      assert.deepEqual(request.columns.map((demand) => demand.field), [7])
+      return {
+        schema,
+        residual: {},
+        properties: { exactRows: 4, maxRows: 4 },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: 4 },
+            columns: [{ type: 'typed', values: new Float64Array([4, 3, 2, 1]), length: 4 }],
+          }
+        },
+      }
+    },
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT MIN(a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 1)
+  assert.equal(preparedCalls, 1)
+})
+
 test('transient scan garbage does not trip the budget; only retained growth refuses', async () => {
   // The guard confirms a crossing with a forced GC before refusing (LLP
   // 0097#confirm-with-gc). Each chunk allocates ~25MB, holds it long

@@ -10,6 +10,7 @@ import { appendRowsToPartition, appendRowsToSourceTable } from '../../src/core/c
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import {
+  AI_GATEWAY_SCHEMA_COLUMNS,
   aiGatewayDatasetRegistration,
   createDataSource,
   DATASET_NAME,
@@ -17,8 +18,9 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
- * @import { ColumnSpec, QueryScope } from '../../hypaware-plugin-kernel-types.js'
- * @import { AsyncDataSource, ExprNode, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ColumnSpec, QueryScope, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
+ * @import { AsyncDataSource, ExprNode, RelationSchema, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /** @param {string} prefix */
@@ -271,6 +273,7 @@ test('ai-gateway createDataSource advertises declared schema columns absent from
     const scope = { limit: 1000 }
     const partitions = await discoverParts({ cacheDir: cacheRoot, scope, config: { version: 2 } })
     const source = await createDataSource(partitions, { scope, storage })
+    assert.equal(source.prepareScan, undefined, 'schema drift stays on the padding-aware row and column paths')
 
     // The declared v7 columns are advertised even though the partition lacks them.
     for (const col of ['git_remote', 'head_sha', 'repo_root']) {
@@ -288,6 +291,60 @@ test('ai-gateway createDataSource advertises declared schema columns absent from
     assert.equal(seen[0].id, 1)
     assert.equal(seen[0].git_remote ?? null, null, 'absent column stays addressable and reads as nullish')
     assert.equal(seen[0].repo_root ?? null, null)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0266#schema-drift [tests]: a complete declared schema forwards native batches, while the drifted test above does not
+test('ai-gateway createDataSource preserves prepared scans when the physical schema is complete', async () => {
+  const cacheRoot = await makeTmpDir('prepared-schema')
+  try {
+    const columns = AI_GATEWAY_SCHEMA_COLUMNS.map((column) => column.name)
+    let preparedCalls = 0
+    /** @type {RelationSchema} */
+    const schema = {
+      fields: columns.map((name, index) => ({
+        id: index + 1,
+        name,
+        dataType: { type: 'unknown' },
+        nullable: true,
+      })),
+    }
+    /** @type {ScannableDataSource} */
+    const physical = {
+      columns,
+      numRows: 1,
+      schema,
+      scan() {
+        return { appliedWhere: false, appliedLimitOffset: false, async *rows() {} }
+      },
+      prepareScan(request) {
+        preparedCalls++
+        const requested = request.columns.map((demand) => schema.fields.find((field) => field.id === demand.field))
+        assert.ok(requested.every(Boolean))
+        return {
+          schema: { fields: /** @type {NonNullable<(typeof requested)[number]>[]} */ (requested) },
+          residual: {},
+          properties: { exactRows: 0, maxRows: 0 },
+          async *batches() {},
+        }
+      },
+    }
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      cacheRoot,
+      dataSourceForTable: async () => physical,
+    }))
+    /** @type {QueryScope} */
+    const scope = { limit: 1000 }
+    const source = await createDataSource([
+      { dataset: DATASET_NAME, partition: {}, tablePath: path.join(cacheRoot, 'complete') },
+    ], { scope, storage })
+
+    assert.equal(typeof source.prepareScan, 'function')
+    assert.deepEqual(source.schema?.fields.map((field) => field.name), columns)
+    source.prepareScan?.({ columns: [{ field: 1, phase: 1, purpose: 'output', mode: 'deferred' }] })
+    assert.equal(preparedCalls, 1)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

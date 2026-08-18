@@ -16,11 +16,11 @@ import {
 } from './visibility.js'
 
 /**
- * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncDataSource } from 'squirreling'
+ * @import { AsyncDataSource, PrepareScan } from 'squirreling'
  */
 
 /**
@@ -150,12 +150,23 @@ function resolveForcedGc() {
  * @returns {AsyncDataSource}
  */
 function withHeapBudget(source, guard) {
+  if (!source.scan) {
+    const schema = /** @type {NonNullable<AsyncDataSource['schema']>} */ (source.schema)
+    const prepareScan = /** @type {NonNullable<AsyncDataSource['prepareScan']>} */ (source.prepareScan)
+    return {
+      numRows: source.numRows,
+      columns: source.columns,
+      schema,
+      prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
+    }
+  }
+  const scan = source.scan
   /** @type {AsyncDataSource} */
   const bounded = {
     numRows: source.numRows,
-    columns: source.columns,
+    columns: source.columns ?? source.schema?.fields.map((field) => field.name) ?? [],
     scan(options) {
-      const inner = source.scan(options)
+      const inner = scan(options)
       return {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: inner.appliedLimitOffset,
@@ -171,6 +182,11 @@ function withHeapBudget(source, guard) {
         },
       }
     },
+  }
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    bounded.schema = source.schema
+    bounded.prepareScan = budgetedPrepareScan((request) => prepareScan.call(source, request), guard)
   }
   if (typeof source.scanColumn === 'function') {
     const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
@@ -190,6 +206,31 @@ function withHeapBudget(source, guard) {
     }
   }
   return bounded
+}
+
+/**
+ * Preserve a prepared source through the heap-budget decoration and sample
+ * retained growth at every native batch boundary.
+ *
+ * @param {PrepareScan} prepareScan
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {PrepareScan}
+ */
+function budgetedPrepareScan(prepareScan, guard) {
+  return function prepareWithBudget(request) {
+    const inner = prepareScan(request)
+    return {
+      schema: inner.schema,
+      residual: inner.residual,
+      properties: inner.properties,
+      async *batches(options = {}) {
+        for await (const batch of inner.batches(options)) {
+          guard.check('native_batch')
+          yield batch
+        }
+      },
+    }
+  }
 }
 
 /**
@@ -319,14 +360,18 @@ export async function executeQuerySql(args) {
           let table = source
           if (!includeLocalOnly) {
             const contentColumns = dataset.localOnlyContentColumns ?? []
-            const governable = source.columns.includes('cwd') ||
-              contentColumns.some((c) => source.columns.includes(c))
+            const sourceColumns = source.columns ?? source.schema?.fields.map((field) => field.name) ?? []
+            const governable = sourceColumns.includes('cwd') ||
+              contentColumns.some((c) => sourceColumns.includes(c))
             if (governable) {
               const vis = getVisibility()
               localOnly.callerClass = vis.callerClass
               if (!callerSeesEverything(vis.callerRank)) {
+                if (!source.scan || !source.columns) {
+                  throw new Error(`Dataset "${name}" must provide scan() to enforce local-only visibility`)
+                }
                 localOnly.filtered = true
-                table = withLocalOnlyVisibility(source, {
+                table = withLocalOnlyVisibility(/** @type {ScannableDataSource} */ (source), {
                   resolver: vis.resolver,
                   callerRank: vis.callerRank,
                   contentColumns,

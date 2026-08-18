@@ -79,9 +79,9 @@
     "hyparquet": "1.28.2",
     "hyparquet-compressors": "1.1.1",
     "hypgrep": "0.5.1",
-    "icebird": "0.8.22",
+    "icebird": "0.8.23",
     "marked": "18.0.9",
-    "squirreling": "0.15.3"
+    "squirreling": "0.16.1"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.16.6",

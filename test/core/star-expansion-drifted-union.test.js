@@ -31,6 +31,7 @@ import {
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { AsyncDataSource, AsyncRow, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
@@ -58,7 +59,7 @@ const REMOTE = 'git@example.com:acme/app.git'
  * - `drifted`: TWO partitions, one with `git_remote` and one without.
  *
  * @param {'lone' | 'drifted'} shape
- * @returns {Promise<{ cacheRoot: string, source: AsyncDataSource }>}
+ * @returns {Promise<{ cacheRoot: string, source: ScannableDataSource }>}
  */
 async function stageFixture(shape) {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), `hyp-star-${shape}-`))
@@ -82,7 +83,7 @@ async function stageFixture(shape) {
 
 /**
  * @param {'lone' | 'drifted'} shape
- * @param {(source: AsyncDataSource) => Promise<void>} body
+ * @param {(source: ScannableDataSource) => Promise<void>} body
  */
 async function withFixture(shape, body) {
   const { cacheRoot, source } = await stageFixture(shape)
@@ -97,7 +98,7 @@ async function withFixture(shape, body) {
  * Run a SELECT the way `hyp query sql` does, ordered by `id` so partition
  * scan order cannot make an assertion flap.
  *
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {string} query
  * @returns {Promise<Record<string, unknown>[]>}
  */
@@ -208,7 +209,7 @@ test('a clause above the scan reads a column some partition lacks without throwi
  *
  * @param {string[]} columns
  * @param {Record<string, SqlPrimitive>[]} objects
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 function narrowSource(columns, objects) {
   return {
