@@ -223,6 +223,14 @@ export interface ClientAttachReport {
   version?: string
   /** Local gateway port the adapter routes through, when recorded. */
   port?: string
+  /**
+   * Attach mode recorded in the marker (`proxy` or `base_url`), when the
+   * adapter recorded one. Absent for a marker written before modes existed
+   * and for probe formats that carry no marker object. Read it as evidence
+   * of *which* attach happened: `attached` alone cannot tell a proxy attach
+   * from the base-URL attach LLP 0244 migrates away from.
+   */
+  mode?: string
   /** Probe error string, when the file was unreadable. */
   error?: string
 }

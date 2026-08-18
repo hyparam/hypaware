@@ -214,7 +214,7 @@ test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-'))
   const settingsPath = path.join(tmp, '.claude', 'settings.json')
   await fs.mkdir(path.dirname(settingsPath), { recursive: true })
-  await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388 } }))
+  await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388, mode: 'proxy' } }))
 
   const descriptor = /** @type {ClientDescriptor} */ ({
     plugin: '@hypaware/claude',
@@ -227,6 +227,8 @@ test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
     },
   })
 
+  // The mode comes back with the version and the port: a marker alone cannot
+  // tell a proxy attach from the base-URL attach LLP 0244 migrates away from.
   assert.deepEqual(
     await probeClientAttachFromDescriptor({ descriptor, homeDir: tmp }),
     {
@@ -234,6 +236,20 @@ test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
       settingsPath,
       version: '2.0.0',
       port: '4388',
+      mode: 'proxy',
+    }
+  )
+
+  // A marker written before modes existed reports none, rather than guessing.
+  await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388 } }))
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({ descriptor, homeDir: tmp }),
+    {
+      attached: true,
+      settingsPath,
+      version: '2.0.0',
+      port: '4388',
+      mode: undefined,
     }
   )
 })

@@ -1501,38 +1501,21 @@ export function resolveSingleSourceEnablement(descriptor) {
 }
 
 /**
- * Wait for the proxy CA before the finale attaches clients, when the config
- * that will govern the freshly installed daemon runs the gateway in proxy
- * mode. Adapters pick their mode by whether the CA file exists (LLP 0232
- * #proxy-attach-preflight) and the daemon mints it asynchronously on gateway
- * start, so attaching without waiting races the mint and silently lands
- * every client back on base-URL mode. Bounded, and a timeout degrades to a
- * warning: base-URL attach still captures, and a re-run of `hyp attach`
- * repairs the mode.
+ * Whether the gateway that will govern this machine runs in proxy mode.
  *
  * "Will govern" is the effective view, not the just-written local file: on a
  * fleet-joined machine the central layer names the gateway and the LLP 0031
  * merge drops the local entry, so a local `proxy_mode: true` is dead and
- * waiting on it could only time out. When the central layer names the
- * gateway, its own `proxy_mode` value decides the wait instead.
+ * reading it would answer for a config nothing runs. When the central layer
+ * names the gateway, its own `proxy_mode` value is the answer instead.
+ *
  * @ref LLP 0243#composed-default [implements]: a fresh proxy-mode install must attach in proxy mode, not lose the race to the CA mint
  * @ref LLP 0244#central-managed [constrained-by]: the central layer owning the gateway block decides the mode, locally written keys prove nothing
  *
- * @param {{
- *   config: HypAwareV2Config,
- *   env: NodeJS.ProcessEnv,
- *   stderr: { write(chunk: string): unknown },
- *   waitForCaFn?: (args: {
- *     stateRoot: string,
- *     timeoutMs?: number,
- *     sleep?: (ms: number) => Promise<void>,
- *     now?: () => number,
- *   }) => Promise<{ ready: boolean, certPath?: string }>,
- *   timeoutMs?: number,
- * }} args
- * @returns {Promise<{ waited: boolean, ready: boolean }>}
+ * @param {{ config: HypAwareV2Config, env: NodeJS.ProcessEnv }} args
+ * @returns {Promise<boolean>}
  */
-export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForCaFn, timeoutMs }) {
+export async function governingGatewayProxyMode({ config, env }) {
   const stateRoot = defaultStateRoot(env)
 
   /** @type {PluginConfigInstance | undefined} */
@@ -1553,7 +1536,35 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 
   const governing = centralGateway
     ?? (config.plugins ?? []).find((p) => p.name === GATEWAY_PLUGIN)
-  if (governing?.config?.proxy_mode !== true) return { waited: false, ready: false }
+  return governing?.config?.proxy_mode === true
+}
+
+/**
+ * Wait for the proxy CA before the finale attaches clients, when the config
+ * that will govern the daemon runs the gateway in proxy mode. Adapters pick
+ * their mode by whether the CA file exists (LLP 0232 #proxy-attach-preflight)
+ * and the daemon mints it asynchronously on gateway start, so attaching
+ * without waiting races the mint and silently lands every client back on
+ * base-URL mode. Bounded, and a timeout degrades to a warning: base-URL
+ * attach still captures, and a re-run of `hyp attach` repairs the mode.
+ *
+ * @param {{
+ *   config: HypAwareV2Config,
+ *   env: NodeJS.ProcessEnv,
+ *   stderr: { write(chunk: string): unknown },
+ *   waitForCaFn?: (args: {
+ *     stateRoot: string,
+ *     timeoutMs?: number,
+ *     sleep?: (ms: number) => Promise<void>,
+ *     now?: () => number,
+ *   }) => Promise<{ ready: boolean, certPath?: string }>,
+ *   timeoutMs?: number,
+ * }} args
+ * @returns {Promise<{ waited: boolean, ready: boolean }>}
+ */
+export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForCaFn, timeoutMs }) {
+  const stateRoot = defaultStateRoot(env)
+  if (!(await governingGatewayProxyMode({ config, env }))) return { waited: false, ready: false }
 
   const waitFn = waitForCaFn ?? waitForLocalCa
   const caWait = await waitFn({
@@ -1578,8 +1589,9 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  * Exported for the wizard orchestrator (LLP 0135 #finale), which wraps
  * it with the team-pathway skips: `finale.skipDaemonInstall` skips only
  * the install step (the restart still runs so the just-written local
- * config takes effect), and `skipAttachClients` names picked clients the
- * join lane already attached.
+ * config takes effect, and moves ahead of attach when that config puts the
+ * gateway in proxy mode), and `skipAttachClients` names picked clients the
+ * join lane already attached in the mode this install uses.
  *
  * @param {{
  *   finale: PickerFinaleActions,
@@ -1602,6 +1614,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   skipAttachClients?: Set<string>,
  *   progress?: string,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
+ *   restartDaemonFn?: (options: { homeDir?: string }) => Promise<void>,
  *   waitForCaFn?: (args: {
  *     stateRoot: string,
  *     timeoutMs?: number,
@@ -1623,6 +1636,12 @@ export async function runPickerFinale(args) {
   if (args.progress) stdout.write(`${args.progress}\n`)
   const homeDir = env.HOME ?? ''
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
+  // The finale restarts the daemon exactly once, so that the config written
+  // just before it takes effect. `willRestart` records that the restart is
+  // coming; `restartedEarly` records that it has already been spent by the
+  // proxy-readiness step below, which moves it rather than adding one.
+  const willRestart = finale.skipDaemon !== true && finale.skipDaemonRestart !== true && !dryRun
+  let restartedEarly = false
 
   // The attach/start cutoff: backfill imports history strictly before
   // this instant so it never overlaps with live gateway capture, which
@@ -1715,16 +1734,31 @@ export async function runPickerFinale(args) {
   }
 
   if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
-    // Skipped when no daemon was installed (the join lane restarts only
-    // after attach, so no CA can appear before it) and on dry runs; the
-    // wait-or-skip decision itself lives in the helper.
-    if (!dryRun && !skipInstall) {
-      await waitForProxyCaBeforeAttach({
-        config,
-        env,
-        stderr,
-        ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
-      })
+    // Proxy attach preflights on the CA file (LLP 0232
+    // #proxy-attach-preflight), and only a daemon running the governing
+    // proxy-mode config mints one. An install just above started such a
+    // daemon, so the wait alone is enough. A *skipped* install means the
+    // daemon predates the config this run wrote - the upgrade-on-an-enrolled
+    // machine shape - and the restart that would put proxy mode on the wire
+    // sat at the end of the finale, after the only chance to attach. Bring
+    // that restart forward instead of adding one: the tail restart below
+    // stands down, backfill still runs against the `backfillUntil` cutoff
+    // taken before any of this, and the ordering matches the fresh-install
+    // path, where the install starts the daemon before attach too.
+    // @ref LLP 0243#composed-default [implements]: an install whose gateway runs in proxy mode attaches in proxy mode, whether or not this run installed the daemon
+    if (!dryRun) {
+      if (skipInstall && willRestart && await governingGatewayProxyMode({ config, env })) {
+        await restartFinaleDaemon({ homeDir, stderr, summary, ...(args.restartDaemonFn ? { restartDaemonFn: args.restartDaemonFn } : {}) })
+        restartedEarly = true
+      }
+      if (!skipInstall || restartedEarly) {
+        await waitForProxyCaBeforeAttach({
+          config,
+          env,
+          stderr,
+          ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
+        })
+      }
     }
     /** @type {AiGatewayCapability} */
     const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
@@ -1877,22 +1911,47 @@ export async function runPickerFinale(args) {
     writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
   }
 
-  if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
-    try {
-      const { restartServiceDaemon } = await import('../daemon/install.js')
-      await restartServiceDaemon({ ...(homeDir ? { homeDir } : {}) })
-      summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      stderr.write(`daemon restart failed: ${message}\n`)
-      summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
-    }
+  if (willRestart && !restartedEarly) {
+    await restartFinaleDaemon({ homeDir, stderr, summary, ...(args.restartDaemonFn ? { restartDaemonFn: args.restartDaemonFn } : {}) })
   } else if (dryRun && !finale.skipDaemon) {
     summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
     stdout.write(`(dry-run) Would restart the daemon\n`)
   }
 
   return summary
+}
+
+/**
+ * The finale's one daemon restart, wherever in the lane it falls. A failure
+ * is reported and recorded, never thrown: the config is written and the
+ * clients are attached either way, and `hyp daemon restart` is the repair.
+ *
+ * Injectable for the same reason the install seam is: the real service-manager
+ * call refuses to spawn launchd or systemd under the test runner (LLP 0181),
+ * so the ordering this function participates in would otherwise be untestable.
+ *
+ * @param {{
+ *   homeDir: string,
+ *   stderr: { write(chunk: string): unknown },
+ *   summary: FinaleSummary,
+ *   restartDaemonFn?: (options: { homeDir?: string }) => Promise<void>,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function restartFinaleDaemon({ homeDir, stderr, summary, restartDaemonFn }) {
+  try {
+    const options = { ...(homeDir ? { homeDir } : {}) }
+    if (restartDaemonFn) await restartDaemonFn(options)
+    else {
+      const { restartServiceDaemon } = await import('../daemon/install.js')
+      await restartServiceDaemon(options)
+    }
+    summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    stderr.write(`daemon restart failed: ${message}\n`)
+    summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
+  }
 }
 
 /**

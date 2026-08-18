@@ -999,6 +999,7 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
+      ...(probe.mode !== undefined ? { mode: probe.mode } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     // Deliberately ungated by `attachable`, unlike the two derived-state
@@ -1590,9 +1591,15 @@ function readRetention(config) {
  * "not attached" off a path the manifest never named is the one answer a
  * probe must never give: it looks identical to a correct negative.
  *
+ * The marker's `mode` comes back beside its version and port. Two attaches
+ * that both leave a marker are not the same attach: a `base_url` marker on a
+ * proxy-mode install is a stale attach still waiting to be migrated, and a
+ * caller that can only see `attached: true` reads it as finished.
+ *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
+ * @ref LLP 0244 [implements]: a base-URL attach on a proxy-capable install is a distinct state, so the probe reports the mode rather than a bare attached flag
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
- * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
+ * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
@@ -1622,6 +1629,7 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         settingsPath,
         version: typeof markerObj.version === 'string' ? markerObj.version : undefined,
         port: typeof markerObj.port === 'number' ? String(markerObj.port) : undefined,
+        mode: typeof markerObj.mode === 'string' ? markerObj.mode : undefined,
       }
     }
 
