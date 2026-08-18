@@ -245,8 +245,10 @@ export async function dispatch(argv, opts = {}) {
   //
   // @ref LLP 0265#help-verb [implements]: `help <command>` is rewritten to that command's `--help`, never silently answered with the top-level table
   const typedArgv = argv
+  let helpVerb = false
   if (argv.length > 1 && argv[0] === 'help' && !argv[1].startsWith('-')) {
     argv = [...argv.slice(1), '--help']
+    helpVerb = true
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
@@ -495,8 +497,16 @@ export async function dispatch(argv, opts = {}) {
           // help flag renders registry-backed help (group table when the
           // command has subcommands, usage otherwise) instead of running
           // the command, so each command body stays help-free.
+          //
+          // `helpVerb` is the `hyp help <command...>` spelling. It appends
+          // `--help` to the end of argv, so any token the user wrote after the
+          // command name (`hyp help attach claude`) pushes the flag out of
+          // position 0 and past this test. Asking for help would then *run the
+          // command* with a stray flag, which a lenient parser accepts: `hyp
+          // help purge <path>` must never reach `runPurge`.
           // @ref LLP 0009#central-help-interception [implements]: help renders inside command.run so it stays in command analytics
-          if (isHelpFlag(matched.rest[0])) {
+          // @ref LLP 0265#help-verb [implements]: the rewritten `hyp help <command...>` lands here, whatever else the user wrote after the command name
+          if (helpVerb || isHelpFlag(matched.rest[0])) {
             const children = listGroupChildren(registry, matched.command.name)
             if (children.length > 0) {
               renderGroupHelp({ stdout, group: matched.command.name, groupCommand: matched.command, children })

@@ -137,6 +137,46 @@ test('hyp help <group> <subcommand> renders the leaf command help', async () => 
   assert.match(stdout.text(), /^hyp daemon install - /)
 })
 
+test('hyp help <command> <positional> renders help and never runs the command', async () => {
+  // The rewrite appends `--help` to the *end* of argv, so a token after the
+  // command name pushes the flag past the leading-flag test the central
+  // interception used to make. Asking for help would then run the handler with
+  // a stray flag, which a lenient parser accepts: `hyp help purge <path>` must
+  // not reach `runPurge`.
+  const registry = createCommandRegistry()
+  let ran = 0
+  registry.register({
+    name: 'spy',
+    summary: 'Spy command',
+    usage: 'hyp spy [target]',
+    run: async () => {
+      ran += 1
+      return 0
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['help', 'spy', 'target'], { stdout, stderr, registry, kernel })
+
+  assert.equal(ran, 0, 'asking for help ran the command')
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /^hyp spy - Spy command/)
+})
+
+test('hyp help <core command> <positional> renders that command help', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['help', 'attach', 'claude'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /^hyp attach - /)
+  assert.equal(stderr.text(), '', `help emitted a diagnostic: ${stderr.text()}`)
+})
+
 test('hyp help <unknown> reports the argv the user typed, not the rewritten one', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
   const stdout = makeBuf()
