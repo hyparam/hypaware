@@ -193,6 +193,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
       ...(c.version ? { version: c.version } : {}),
       ...(c.port ? { port: c.port } : {}),
+      // The attach mode the marker records (`base_url` / `proxy` / `otel`),
+      // so a machine can be seen to be on the third mode without opening
+      // the settings file (LLP 0258's consequence).
+      ...(c.mode ? { mode: c.mode } : {}),
       ...(c.error ? { error: c.error } : {}),
     })),
     // Picked clients grouped by provenance (LLP 0132 #never-silent). Null on
@@ -210,6 +214,23 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       client_name: e.clientName,
       last_seen: e.lastSeen,
       rows: e.rows,
+    })),
+    // Capture health per otel-attached client (LLP 0257 S17). Always an
+    // array so a consumer can pin the key; empty means no configured client
+    // is otel-attached, which keeps the pre-otel payload shape unchanged.
+    // Timestamps follow the null-not-omitted contract: `last_event_at:
+    // null` is the actionable answer ("attached, nothing ever arrived"),
+    // not a missing field.
+    // @ref LLP 0257#status-and-health [implements]: --json carries the machine-readable comparison the text line renders
+    capture_health: report.captureHealth.map((c) => ({
+      client: c.client,
+      source: c.source,
+      last_event_at: c.lastEventAt,
+      last_transcript_activity_at: c.lastTranscriptActivityAt,
+      attached_at: c.attachedAt,
+      listener_started_at: c.listenerStartedAt,
+      gap_seconds: Math.round(c.gapMs / 1000),
+      state: c.state,
     })),
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
@@ -417,9 +438,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       state.push(c.configured ? 'configured' : 'not in config')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp attach` that is a documented
-      // no-op and can never change the line (#544).
+      // no-op and can never change the line (#544). Where there is an attach,
+      // the marker's mode rides the attached state (`attached (otel)`), so a
+      // machine that just migrated modes is visibly on the new one from the
+      // surface a human reads, not only under --json (LLP 0258's consequence,
+      // completed by the LLP 0262 migration). Markers that predate modes carry
+      // none and keep the bare word. The mode goes through `printable` because
+      // it is read back off the client's own settings file, which a hand edit
+      // can fill with anything: an unsanitized value here would let a settings
+      // file drive the operator's terminal, which is what LLP 0225 exists to
+      // stop. A value that sanitizes away entirely leaves the bare word.
       // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
-      state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
+      // @ref LLP 0225#one-vocabulary [implements]: a label lifted off disk is stripped before it reaches the terminal
+      const mode = printable(c.mode)
+      state.push(
+        c.attachable === false
+          ? 'attach n/a'
+          : c.attached
+            ? (mode ? `attached (${mode})` : 'attached')
+            : 'not attached'
+      )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.error) stdout.write(`        error: ${c.error}\n`)
     }
@@ -456,6 +494,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       stdout.write(
         `    - ${e.entrypoint}${client}  last seen ${formatEntrypointAge(e.lastSeen)}, ${e.rows} row${e.rows === 1 ? '' : 's'}\n`
       )
+    }
+  }
+
+  // Capture health for otel-attached clients (LLP 0257 S17): the line that
+  // answers "is the telemetry path keeping up with what the client itself is
+  // doing?", which no other line can be read for - `recent clients` above
+  // only knows what WAS captured, and a silent capture gap is precisely rows
+  // that never arrived. Rendered only when a configured client is
+  // otel-attached, so every other install's text surface is unchanged; the
+  // `[capture gap]` tag points at the diagnostics block, which carries the
+  // repair.
+  // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
+  if (report.captureHealth.length > 0) {
+    stdout.write('  capture health:\n')
+    for (const c of report.captureHealth) {
+      const events = c.lastEventAt !== null
+        ? `last event ${formatEntrypointAge(c.lastEventAt)}`
+        : 'no events yet'
+      const transcripts = c.lastTranscriptActivityAt !== null
+        ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
+        : 'no transcript activity'
+      const tag = c.state === 'gap' ? '  [capture gap]' : ''
+      stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
   }
 

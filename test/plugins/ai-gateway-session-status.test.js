@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import {

@@ -86,11 +86,12 @@ curated HypAware registry.
   with no repo breadcrumb.
 <!-- @ref LLP 0212#routing-moves-to-reference [implements]: the retired hypaware-ignore skill's job, minus the second implementation of the control call -->
 - Stop recording *this conversation* - `hyp session ignore` drops this session's
-  exchanges at the gateway; `hyp session unignore` resumes, and `hyp session
-  status` reports which it is right now. Each resolves the session id itself
-  (Claude and Codex) and fails closed rather than guessing. The opt-out is
-  in-memory: a gateway restart drops it, and a fork (`claude --fork-session`,
-  `codex fork`) mints a new id it no longer covers.
+  exchanges at every local recorder (the gateway, and the Claude telemetry
+  listener when one is running); `hyp session unignore` resumes, and
+  `hyp session status` reports which it is right now. Each resolves the
+  session id itself (Claude and Codex) and fails closed rather than guessing.
+  The opt-out is in-memory: a daemon restart drops it, and a fork
+  (`claude --fork-session`, `codex fork`) mints a new id it no longer covers.
 - Decide what happens in new folders - by default they sync with no
   question; `hyp policy folders ask` asks once per new folder instead, and
   `hyp policy folders sync` returns to the default. It gates the question
