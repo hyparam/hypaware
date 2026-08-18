@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from 'node:path'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
@@ -216,7 +217,9 @@ function parsePluginInstallArgs(argv) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('plugin list', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
@@ -272,11 +275,9 @@ export async function runPluginList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginInfo(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin info <plugin>\n')
-    return 2
-  }
-  const name = argv[0]
+  const parsed = parseCoreCommandArgv('plugin info', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.plugin)
   const stateDir = pluginStateDir(ctx)
   const lock = await loadLock(stateDir)
   const entry = lock.plugins[name]
@@ -305,7 +306,9 @@ export async function runPluginInfo(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginOutdated(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('plugin outdated', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
   const entries = await listInstalledPlugins(stateDir)
   const outdated = entries.filter((e) => e.update?.available === true)
@@ -425,11 +428,9 @@ function parsePluginUpdateArgs(argv) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginRemove(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin remove <plugin>\n')
-    return 2
-  }
-  const name = argv[0]
+  const parsed = parseCoreCommandArgv('plugin remove', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.plugin)
   const stateDir = pluginStateDir(ctx)
   const result = await removePlugin({ name, stateDir })
   if (!result.ok) {

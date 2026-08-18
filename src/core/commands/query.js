@@ -3,6 +3,7 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 
@@ -21,11 +22,9 @@ import { useColor } from '../cli/stdio.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const dataset = argv[0]
-  if (!dataset) {
-    ctx.stderr.write('usage: hyp query schema <dataset>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
   return withSpan(
     'query.resolve_tables',
     {
@@ -48,16 +47,6 @@ export async function runQuerySchema(argv, ctx) {
   )
 }
 
-const QUERY_STATUS_USAGE = 'usage: hyp query status'
-
-/**
- * `status` has no parameters of its own: the empty schema is what makes the
- * codec reject unknown flags and stray positionals instead of ignoring them.
- *
- * @type {VerbInputSchema}
- */
-const QUERY_STATUS_SCHEMA = { type: 'object', properties: {} }
-
 /**
  * Report this machine's local cache. There is no remote form: the server
  * owns its own registration state and never exposes it through this
@@ -78,7 +67,7 @@ const QUERY_STATUS_SCHEMA = { type: 'object', properties: {} }
 export async function runQueryStatus(argv, ctx) {
   if (argv.some((arg) => arg === '--remote' || arg.startsWith('--remote='))) {
     ctx.stderr.write(
-      "hyp query status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
+      "hyp cache status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
     )
     ctx.stderr.write(
       "  to see what a remote host holds, probe it: hyp query sql 'select 1 from <dataset> limit 1' --remote <target>\n"
@@ -91,18 +80,8 @@ export async function runQueryStatus(argv, ctx) {
   // `--format json`, a bare `prod`) that a silent ignore would answer with
   // the same well-formed local inventory the refusal exists to withhold.
   // @ref LLP 0273#asymmetry [implements]: a wrong-host answer is self-consistent, so a mistyped flag has to fail loudly too
-  const parsed = parseCommandArgv(argv, QUERY_STATUS_SCHEMA)
-  if ('help' in parsed) {
-    ctx.stdout.write(`${QUERY_STATUS_USAGE}\n`)
-    return 0
-  }
-  if (!parsed.ok) {
-    ctx.stderr.write(
-      `hyp query status: ${parsed.error} - status takes no arguments and always reports this machine's local cache\n`
-    )
-    ctx.stderr.write(`${QUERY_STATUS_USAGE}\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('cache status', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
@@ -288,7 +267,9 @@ export async function runQueryOverview(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryRefresh(argv, ctx) {
-  const target = argv[0]
+  const parsed = parseCoreCommandArgv('cache refresh', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const target = /** @type {string | undefined} */ (parsed.params.dataset)
   const datasets = ctx.query.listDatasets()
   const filtered = target ? datasets.filter((d) => d.name === target) : datasets
   if (target && filtered.length === 0) {

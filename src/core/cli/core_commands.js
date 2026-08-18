@@ -3,6 +3,7 @@
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
 import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
 import { makeGroupCommand } from './group_help.js'
@@ -94,7 +95,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       bootProfile: 'none',
       summary: 'Check capture, clients, storage, and health',
-      usage: 'hyp status [--json]',
+      usage: coreUsage('status'),
       help: [
         'The entry point for "is it working?". Reports the config path, daemon',
         'state, active plugins, sources, sinks, per-client attach state, cache',
@@ -154,7 +155,7 @@ function buildCoreCommands(registry) {
     {
       name: 'query schema',
       summary: 'Print the schema for a dataset',
-      usage: 'hyp query schema <dataset>',
+      usage: coreUsage('query schema'),
       run: runQuerySchema,
     },
     {
@@ -163,7 +164,7 @@ function buildCoreCommands(registry) {
       category: 'additional',
       audience: 'operator',
       summary: 'Show cache freshness and dataset registration state',
-      usage: 'hyp cache status',
+      usage: coreUsage('cache status'),
       run: runQueryStatus,
     },
     {
@@ -172,7 +173,7 @@ function buildCoreCommands(registry) {
       category: 'additional',
       audience: 'operator',
       summary: 'Force a cache refresh for a dataset',
-      usage: 'hyp cache refresh [dataset]',
+      usage: coreUsage('cache refresh'),
       run: runQueryRefresh,
     },
     {
@@ -195,7 +196,7 @@ function buildCoreCommands(registry) {
       name: 'client history providers',
       aliases: ['backfill list'],
       summary: 'List registered backfill providers',
-      usage: 'hyp client history providers [--json]',
+      usage: coreUsage('client history providers'),
       run: runBackfillList,
     },
     {
@@ -221,19 +222,19 @@ function buildCoreCommands(registry) {
     {
       name: 'plugin list',
       summary: 'List active (bundled) and installed plugins',
-      usage: 'hyp plugin list [--json]',
+      usage: coreUsage('plugin list'),
       run: runPluginList,
     },
     {
       name: 'plugin info',
       summary: 'Show details for an installed plugin',
-      usage: 'hyp plugin info <plugin>',
+      usage: coreUsage('plugin info'),
       run: runPluginInfo,
     },
     {
       name: 'plugin outdated',
       summary: 'List plugins with updates available',
-      usage: 'hyp plugin outdated [--json]',
+      usage: coreUsage('plugin outdated'),
       run: runPluginOutdated,
     },
     {
@@ -245,7 +246,7 @@ function buildCoreCommands(registry) {
     {
       name: 'plugin remove',
       summary: 'Remove an installed plugin',
-      usage: 'hyp plugin remove <plugin>',
+      usage: coreUsage('plugin remove'),
       run: runPluginRemove,
     },
     {
@@ -315,7 +316,7 @@ function buildCoreCommands(registry) {
       category: 'explore-share',
       audience: 'everyday',
       summary: 'Ask an AI client about recorded activity',
-      usage: 'hyp ask ["question"] [--list]',
+      usage: coreUsage('ask'),
       help: [
         'With no argument, offers a short list of questions worth asking of what',
         'HypAware has recorded, and starts an attached client on the one you',
@@ -583,7 +584,7 @@ function buildCoreCommands(registry) {
       name: 'daemon uninstall',
       bootProfile: 'none',
       summary: 'Uninstall the persistent user service and detach its clients (keeps config, recordings, logs)',
-      usage: 'hyp daemon uninstall',
+      usage: coreUsage('daemon uninstall'),
       help: [
         'Removes the launchd / systemd service, then detaches every attached',
         'client so none is left pointing at a gateway port that no longer',
@@ -602,28 +603,28 @@ function buildCoreCommands(registry) {
       name: 'daemon start',
       bootProfile: 'none',
       summary: 'Start the installed daemon service',
-      usage: 'hyp daemon start',
+      usage: coreUsage('daemon start'),
       run: runDaemonStart,
     },
     {
       name: 'daemon status',
       bootProfile: 'none',
       summary: 'Print the running daemon’s health snapshot',
-      usage: 'hyp daemon status [--json]',
+      usage: coreUsage('daemon status'),
       run: runDaemonStatus,
     },
     {
       name: 'daemon stop',
       bootProfile: 'none',
       summary: 'Signal the running daemon to shut down',
-      usage: 'hyp daemon stop',
+      usage: coreUsage('daemon stop'),
       run: runDaemonStop,
     },
     {
       name: 'daemon restart',
       bootProfile: 'none',
       summary: 'Stop the daemon (and direct the operator to relaunch)',
-      usage: 'hyp daemon restart',
+      usage: coreUsage('daemon restart'),
       run: runDaemonRestart,
     },
     {
@@ -676,13 +677,13 @@ function buildCoreCommands(registry) {
     {
       name: 'remote add',
       summary: 'Register a remote MCP query target in local config',
-      usage: 'hyp remote add <name> <url>',
+      usage: coreUsage('remote add'),
       run: runRemoteAdd,
     },
     {
       name: 'remote login',
       summary: 'Store the query-scoped token for a remote target (0600)',
-      usage: 'hyp remote login <name> [--token-file <path>] [--no-forward] [--no-daemon]',
+      usage: coreUsage('remote login'),
       help: [
         'Browser sign-in by default; --token-file/stdin for a static token,',
         '--org <name> to select an org, --no-browser to print the URL,',
@@ -695,13 +696,13 @@ function buildCoreCommands(registry) {
     {
       name: 'remote list',
       summary: 'List remote targets and token status (never the token)',
-      usage: 'hyp remote list [--json]',
+      usage: coreUsage('remote list'),
       run: runRemoteList,
     },
     {
       name: 'remote remove',
       summary: 'Remove a remote target and its stored token',
-      usage: 'hyp remote remove <name>',
+      usage: coreUsage('remote remove'),
       run: runRemoteRemove,
     },
     // @ref LLP 0155#not-verbs [constrained-by]: report subcommands stay REST commands, never ctx.verbs; MCP report tools are the server's to register
@@ -726,7 +727,7 @@ function buildCoreCommands(registry) {
       // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
       name: 'report render',
       summary: 'Build the static HTML site for a local reports tree (no server involved)',
-      usage: 'hyp report render [<dir>] [--no-refresh-assets]',
+      usage: coreUsage('report render'),
       help: [
         'Renders every top-level <slug>.md (plus its optional <slug>/ section',
         'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
@@ -743,7 +744,7 @@ function buildCoreCommands(registry) {
     {
       name: 'report publish',
       summary: "Publish a report (single .html/.md file, or a folder bundle) to the org's reports plane",
-      usage: 'hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
+      usage: coreUsage('report publish'),
       help: [
         'A file publishes a single document; a folder publishes a bundle (its',
         'root must contain report.html or report.md, built with the system',
@@ -757,19 +758,19 @@ function buildCoreCommands(registry) {
     {
       name: 'report list',
       summary: "List the org's published reports (newest first)",
-      usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+      usage: coreUsage('report list'),
       run: runReportList,
     },
     {
       name: 'report get',
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
-      usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+      usage: coreUsage('report get'),
       run: runReportGet,
     },
     {
       name: 'report delete',
       summary: "Delete a published report from the org's reports plane (destructive)",
-      usage: 'hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]',
+      usage: coreUsage('report delete'),
       help: 'Org-wide and permanent: the report disappears for every member.\nPrompts on a TTY; pass --yes to delete non-interactively.',
       run: runReportDelete,
     },
@@ -779,7 +780,7 @@ function buildCoreCommands(registry) {
       audience: 'operator',
       bootProfile: 'none',
       summary: 'Print version and environment info',
-      usage: 'hyp version',
+      usage: coreUsage('version'),
       run: runVersion,
     },
     {
