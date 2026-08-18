@@ -470,7 +470,14 @@ function sessionFacts(event) {
  * @param {ClaudeTelemetryEvent} event
  */
 function mergeSessionFacts(facts, event) {
-  facts.clientVersion ??= stringAttr(event, 'app.version')
+  // Event first, resource second: Claude Code 2.1.233 put the version on
+  // every event as `app.version` and 2.1.235 puts it only on the export's
+  // resource as `service.version`, so reading both keeps one code path
+  // correct across the drift instead of trading one version floor for the
+  // other.
+  // @ref LLP 0262#field-parity-r1 [implements]: `client_version` is a column
+  // the OTEL path owes parity on, whichever place the client reports it
+  facts.clientVersion ??= stringAttr(event, 'app.version') ?? resourceAttr(event, 'service.version')
   facts.entrypoint ??= stringAttr(event, 'app.entrypoint')
   facts.userId ??= stringAttr(event, 'user.account_uuid')
   facts.organizationId ??= stringAttr(event, 'organization.id')
@@ -490,6 +497,18 @@ function mergeSessionFacts(facts, event) {
   if (event.timestamp && (facts.startedAt === undefined || event.timestamp < facts.startedAt)) {
     facts.startedAt = event.timestamp
   }
+}
+
+/**
+ * A string fact off the export's resource rather than the event itself.
+ *
+ * @param {ClaudeTelemetryEvent} event
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function resourceAttr(event, key) {
+  const value = event.resource?.[key]
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /**
