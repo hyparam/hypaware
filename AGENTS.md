@@ -74,6 +74,14 @@ actually shipped in V1.
 - Do not treat the hermetic smokes as the only release gate. They run with a
   temp `HYP_HOME` and `HYP_DEV_TELEMETRY=1`, which is useful for deterministic
   regression checks but does not prove installed-daemon behavior.
+- Use `scripts/sandbox/hyp-sandbox` to exercise install methods (`npx`,
+  `npm install -g`, `hyp init`, `hyp join`/`leave`, attach, daemon install)
+  without touching your own install. It redirects `HOME`, `HYP_HOME`, and the
+  npm global prefix into a throwaway root, and puts mock `launchctl` /
+  `security` / `systemctl` first on `PATH` so those calls never reach your real
+  launchd domain or login keychain (both are per-uid, so a temp `HOME` alone
+  does not sandbox them). See
+  [`scripts/sandbox/README.md`](scripts/sandbox/README.md).
 
 ## Smoke Test Model
 

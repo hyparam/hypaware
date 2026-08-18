@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+#
+# hyp-sandbox - run HypAware installs against a throwaway HOME.
+#
+# Redirects HOME, HYP_HOME, and the npm global prefix into a sandbox root,
+# and puts mock `launchctl` / `security` / `systemctl` first on PATH so a
+# real `hyp daemon install` or `hyp attach claude` never reaches the login
+# session's launchd domain or the login keychain. See README.md.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHIM="$SCRIPT_DIR/lib/shim.js"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+ROOT="${HYP_SANDBOX_ROOT:-$HOME/.hyp-sandbox}"
+SPAWN=0
+TRUST_REFUSE=0
+VERBOSE=0
+
+usage() {
+  cat <<'EOF'
+usage: hyp-sandbox [options] <command> [args...]
+
+commands:
+  shell                 open a subshell inside the sandbox
+  run <cmd> [args...]   run one command inside the sandbox
+  hyp [args...]         run the workspace build's CLI inside the sandbox
+  info                  print the sandbox env and what is installed in it
+  calls [n]             show the last n intercepted launchctl/security calls
+  state                 dump the mock launchd + keychain state
+  seed-config [port]    write a minimal config (gateway + claude + codex)
+  port <n>              rewrite the sandbox config's gateway listen port
+  reset                 delete the sandbox root (asks first)
+  path                  print the sandbox root
+
+options:
+  --root <dir>          sandbox root (default: $HYP_SANDBOX_ROOT or ~/.hyp-sandbox)
+  --spawn               mock launchctl really starts the plist's program
+  --refuse-trust        `security add-trusted-cert` acts like a cancelled dialog
+  --verbose             echo every intercepted call to stderr
+
+examples:
+  hyp-sandbox run npm install -g /path/to/hypaware-1.23.0.tgz
+  hyp-sandbox run hyp init
+  hyp-sandbox --spawn run hyp daemon install
+  hyp-sandbox calls 20
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    --root=*) ROOT="${1#*=}"; shift ;;
+    --spawn) SPAWN=1; shift ;;
+    --refuse-trust) TRUST_REFUSE=1; shift ;;
+    --verbose) VERBOSE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then usage; exit 64; fi
+
+CMD="$1"; shift
+
+# Absolute, so a relative --root cannot follow the sandboxed HOME around.
+mkdir -p "$ROOT"
+ROOT="$(cd "$ROOT" && pwd)"
+
+SANDBOX_HOME="$ROOT/home"
+SANDBOX_HYP_HOME="$SANDBOX_HOME/.hyp"
+SANDBOX_BIN="$ROOT/bin"
+NPM_PREFIX="$ROOT/npm-global"
+
+provision() {
+  mkdir -p \
+    "$SANDBOX_HYP_HOME" \
+    "$SANDBOX_HOME/Library/LaunchAgents" \
+    "$SANDBOX_HOME/Library/Keychains" \
+    "$SANDBOX_HOME/.config/systemd/user" \
+    "$SANDBOX_BIN" \
+    "$NPM_PREFIX/bin" \
+    "$ROOT/npm-cache" \
+    "$ROOT/state"
+
+  for tool in launchctl security systemctl; do
+    cat > "$SANDBOX_BIN/$tool" <<EOF
+#!/usr/bin/env bash
+exec node "$SHIM" $tool "\$@"
+EOF
+    chmod +x "$SANDBOX_BIN/$tool"
+  done
+
+  # Redirect the npm global prefix through the sandbox HOME's .npmrc rather
+  # than npm_config_* env vars: npm marks prefix and cache "protected" when
+  # they come from the environment, and `npm config get prefix` then fails -
+  # which is exactly the call `hyp`'s own global-install path makes.
+  if [[ ! -f "$SANDBOX_HOME/.npmrc" ]]; then
+    cat > "$SANDBOX_HOME/.npmrc" <<EOF
+prefix=$NPM_PREFIX
+cache=$ROOT/npm-cache
+EOF
+  fi
+}
+
+sandbox_env() {
+  # Prepend the shim dir and the sandbox npm prefix; keep the rest of PATH so
+  # node, npm, git, and openssl still resolve.
+  env \
+    HOME="$SANDBOX_HOME" \
+    HYP_HOME="$SANDBOX_HYP_HOME" \
+    HYP_SANDBOX=1 \
+    HYP_SANDBOX_ROOT="$ROOT" \
+    HYP_SANDBOX_SPAWN="$SPAWN" \
+    HYP_SANDBOX_TRUST_REFUSE="$TRUST_REFUSE" \
+    HYP_SANDBOX_VERBOSE="$VERBOSE" \
+    PATH="$SANDBOX_BIN:$NPM_PREFIX/bin:$PATH" \
+    "$@"
+}
+
+case "$CMD" in
+  path)
+    echo "$ROOT"
+    ;;
+
+  reset)
+    if [[ ! -d "$ROOT" ]]; then echo "nothing to reset at $ROOT"; exit 0; fi
+    echo "about to delete: $ROOT"
+    du -sh "$ROOT" 2>/dev/null || true
+    read -r -p "delete it? [y/N] " reply
+    if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
+      rm -rf "$ROOT"
+      echo "deleted $ROOT"
+    else
+      echo "kept $ROOT"
+    fi
+    ;;
+
+  info)
+    provision
+    echo "sandbox root : $ROOT"
+    echo "HOME         : $SANDBOX_HOME"
+    echo "HYP_HOME     : $SANDBOX_HYP_HOME"
+    echo "npm prefix   : $NPM_PREFIX"
+    echo "shims        : $SANDBOX_BIN (launchctl, security, systemctl)"
+    echo "spawn mode   : $SPAWN (1 = mock launchctl really starts the daemon)"
+    echo
+    # Non-login, non-rc bash: a login shell would re-run /etc/profile and
+    # path_helper, which rebuilds PATH and drops the shims out of first place.
+    echo "resolved inside the sandbox:"
+    sandbox_env bash --noprofile --norc -c '
+      hyp_path="$(command -v hyp || true)"
+      echo "  hyp        : ${hyp_path:-(not installed in the sandbox)}"
+      case "$hyp_path" in
+        "$HYP_SANDBOX_ROOT"/*) ;;
+        "") ;;
+        *) echo "               ^ outside the sandbox prefix: this is a hyp from your real PATH" ;;
+      esac
+      echo "  launchctl  : $(command -v launchctl)  (want: $HYP_SANDBOX_ROOT/bin/launchctl)"
+      echo "  security   : $(command -v security)  (want: $HYP_SANDBOX_ROOT/bin/security)"
+      echo "  node       : $(command -v node) ($(node -v))"'
+    echo
+    echo "sandbox HOME contents:"
+    find "$SANDBOX_HOME" -maxdepth 2 -mindepth 1 -not -path '*/.hyp/*' | sed "s|$SANDBOX_HOME|  ~|"
+    ;;
+
+  calls)
+    LIMIT="${1:-30}"
+    CALLS="$ROOT/state/calls.jsonl"
+    if [[ ! -f "$CALLS" ]]; then echo "no intercepted calls yet ($CALLS)"; exit 0; fi
+    tail -n "$LIMIT" "$CALLS" | node -e '
+      let buf = ""
+      process.stdin.on("data", (c) => { buf += c })
+      process.stdin.on("end", () => {
+        for (const line of buf.split("\n").filter(Boolean)) {
+          const e = JSON.parse(line)
+          const note = e.note ? `  # ${e.note}` : ""
+          console.log(`${e.ts}  exit ${String(e.exit).padStart(3)}  ${e.tool} ${e.args.join(" ")}${note}`)
+        }
+      })
+    '
+    ;;
+
+  state)
+    for f in launchd keychain systemd; do
+      p="$ROOT/state/$f.json"
+      echo "--- $f"
+      if [[ -f "$p" ]]; then cat "$p"; else echo "(empty)"; fi
+    done
+    ;;
+
+  central)
+    provision
+    SUB="${1:-status}"; shift || true
+    CENTRAL_PID="$ROOT/state/central.pid"
+    CENTRAL_LOG="$ROOT/state/central.log"
+    FLEET_CONFIG="$ROOT/state/fleet-config.json"
+    CENTRAL_PORT="${CENTRAL_PORT:-18700}"
+    case "$SUB" in
+      start)
+        if [[ -f "$CENTRAL_PID" ]] && kill -0 "$(cat "$CENTRAL_PID")" 2>/dev/null; then
+          echo "fake central already running (pid $(cat "$CENTRAL_PID")) on http://127.0.0.1:$CENTRAL_PORT"
+          exit 0
+        fi
+        if [[ ! -f "$FLEET_CONFIG" ]]; then
+          cat > "$FLEET_CONFIG" <<EOF
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "@hypaware/ai-gateway",
+      "config": {
+        "listen": "127.0.0.1:18621",
+        "proxy_mode": true,
+        "upstreams": [
+          { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/" }
+        ]
+      }
+    },
+    { "name": "@hypaware/claude" },
+    { "name": "@hypaware/codex" },
+    { "name": "@hypaware/central" }
+  ],
+  "sinks": {
+    "central": {
+      "plugin": "@hypaware/central",
+      "config": {
+        "url": "http://127.0.0.1:$CENTRAL_PORT",
+        "identity": {},
+        "poll_interval_seconds": 10
+      }
+    }
+  }
+}
+EOF
+          echo "seeded fleet config $FLEET_CONFIG (proxy_mode: true)"
+        fi
+        node "$SCRIPT_DIR/lib/fake_central.js" \
+          --port "$CENTRAL_PORT" --config "$FLEET_CONFIG" --log "$CENTRAL_LOG" \
+          >> "$CENTRAL_LOG" 2>&1 &
+        echo $! > "$CENTRAL_PID"
+        sleep 1
+        echo "fake central: http://127.0.0.1:$CENTRAL_PORT  (pid $(cat "$CENTRAL_PID"))"
+        echo "fleet config: $FLEET_CONFIG"
+        ;;
+      stop)
+        if [[ -f "$CENTRAL_PID" ]]; then
+          kill "$(cat "$CENTRAL_PID")" 2>/dev/null || true
+          rm -f "$CENTRAL_PID"
+          echo "stopped fake central"
+        else
+          echo "fake central not running"
+        fi
+        ;;
+      status)
+        if [[ -f "$CENTRAL_PID" ]] && kill -0 "$(cat "$CENTRAL_PID")" 2>/dev/null; then
+          echo "running (pid $(cat "$CENTRAL_PID")) on http://127.0.0.1:$CENTRAL_PORT"
+          curl -s "http://127.0.0.1:$CENTRAL_PORT/_sandbox/counts" && echo
+        else
+          echo "not running"
+        fi
+        ;;
+      log)
+        tail -n "${1:-30}" "$CENTRAL_LOG"
+        ;;
+      config)
+        echo "$FLEET_CONFIG"
+        ;;
+      *)
+        echo "usage: hyp-sandbox central start|stop|status|log [n]|config" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+
+  seed-config)
+    provision
+    SEED_PORT="${1:-18621}"
+    CONFIG="$SANDBOX_HYP_HOME/hypaware-config.json"
+    cat > "$CONFIG" <<EOF
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "@hypaware/ai-gateway",
+      "config": {
+        "listen": "127.0.0.1:$SEED_PORT",
+        "upstreams": [
+          { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/" }
+        ]
+      }
+    },
+    { "name": "@hypaware/claude" },
+    { "name": "@hypaware/codex" }
+  ]
+}
+EOF
+    echo "wrote $CONFIG (gateway on 127.0.0.1:$SEED_PORT, clear of your live daemon's 18521)"
+    ;;
+
+  port)
+    NEW_PORT="${1:?usage: hyp-sandbox port <n>}"
+    CONFIG="$SANDBOX_HYP_HOME/hypaware-config.json"
+    if [[ ! -f "$CONFIG" ]]; then echo "no sandbox config yet at $CONFIG"; exit 1; fi
+    node -e '
+      const fs = require("node:fs")
+      const [file, port] = process.argv.slice(1)
+      const config = JSON.parse(fs.readFileSync(file, "utf8"))
+      let changed = 0
+      const walk = (node) => {
+        if (!node || typeof node !== "object") return
+        for (const [key, value] of Object.entries(node)) {
+          if (key === "listen" && typeof value === "string" && /:\d+$/.test(value)) {
+            node[key] = value.replace(/:\d+$/, `:${port}`)
+            changed += 1
+          } else walk(value)
+        }
+      }
+      walk(config)
+      fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`)
+      console.log(`rewrote ${changed} listen value(s) to port ${port} in ${file}`)
+      if (changed === 0) console.log("no listen key found - the gateway will use its 18521 default and clash with your live daemon")
+    ' "$CONFIG" "$NEW_PORT"
+    ;;
+
+  shell)
+    provision
+    echo "entering sandbox: HOME=$SANDBOX_HOME  HYP_HOME=$SANDBOX_HYP_HOME"
+    echo "launchctl/security are mocks. 'exit' to leave."
+    # Deliberately a bare bash: your own shell rc (and macOS path_helper in a
+    # login shell) rebuilds PATH and would push the shims out of first place.
+    sandbox_env bash --noprofile --norc -i
+    ;;
+
+  hyp)
+    provision
+    sandbox_env node "$REPO_ROOT/bin/hypaware.js" "$@"
+    ;;
+
+  run)
+    provision
+    if [[ $# -eq 0 ]]; then echo "usage: hyp-sandbox run <cmd> [args...]" >&2; exit 64; fi
+    sandbox_env "$@"
+    ;;
+
+  *)
+    echo "unknown command: $CMD" >&2
+    usage
+    exit 64
+    ;;
+esac
