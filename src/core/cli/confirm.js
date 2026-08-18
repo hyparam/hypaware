@@ -3,6 +3,7 @@
 import process from 'node:process'
 import readline from 'node:readline/promises'
 
+import { askLineOnce } from './line_asker.js'
 import { isTty } from './stdio.js'
 
 /**
@@ -17,18 +18,28 @@ import { isTty } from './stdio.js'
  * Anything other than `y`/`yes` is a no: the default has to be the safe
  * one for a verb nobody can undo.
  *
+ * That includes a terminal that stops being able to answer. `rl.question`
+ * leaves its promise permanently unsettled at EOF, so a ctrl+D or a
+ * dropped session hung the irreversible verb on its own confirmation
+ * instead of declining it. `askLineOnce` settles that case as `null`,
+ * read here as the empty line the `[y/N]` already treats as a no - so
+ * the EOF answer is the printed default, and cannot drift from it.
+ *
+ * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
+ *
  * @param {CommandRunContext} ctx
  * @param {string} question rendered verbatim, including its `[y/N]` suffix
  * @returns {Promise<boolean>}
  */
 export async function askYesNo(ctx, question) {
+  const input = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
   const rl = readline.createInterface({
-    input: /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin),
+    input,
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr)),
   })
   try {
-    const answer = await rl.question(question)
-    return /^y(es)?$/i.test(answer.trim())
+    const answer = await askLineOnce(rl, input, question)
+    return /^y(es)?$/i.test((answer ?? '').trim())
   } finally {
     rl.close()
   }

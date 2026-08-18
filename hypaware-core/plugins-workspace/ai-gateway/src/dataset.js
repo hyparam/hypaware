@@ -504,6 +504,52 @@ async function dedupeByPartId(rows, ctx) {
   return fresh
 }
 
+/**
+ * Pre-write `part_id` dedupe for a LIVE producer that is not the proxy
+ * recorder: the OTEL telemetry listener of `@hypaware/claude`. Same
+ * membership question the backfill materializer asks, with the same two
+ * seeds (committed partitions plus the spool), but restricted to the
+ * keys of the batch in hand so a per-exchange call stays O(batch).
+ *
+ * Folding the spool in is safe here and required: the rows being tested
+ * have NOT been spooled yet, so a spool hit means another producer
+ * (the proxy, or a backfill run) already wrote this part. That is the
+ * whole overlap story of the migration window. The hazard note on
+ * `scanSpooledPartIds` applies to the FLUSH path only, which passes
+ * rows that are themselves the spool.
+ *
+ * Best-effort with respect to storage, like every other dedupe here: a
+ * stub without the read surface lets every row through.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: a third producer writes the
+ *   same dataset and its overlap with the proxy and backfill producers collapses
+ *   on `part_id` before the write, not after
+ * @param {Record<string, unknown>[]} rows
+ * @param {QueryStorageService | undefined} storage
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function dedupeStoredPartIds(rows, storage) {
+  if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+  /** @type {Set<string>} */
+  const batchKeys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) batchKeys.add(key)
+  }
+  const seen = await scanExistingPartIds(storage, batchKeys)
+  await scanSpooledPartIds(storage, seen, batchKeys)
+  /** @type {Record<string, unknown>[]} */
+  const fresh = []
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) { fresh.push(row); continue }
+    if (seen.has(key)) continue
+    seen.add(key)
+    fresh.push(row)
+  }
+  return fresh
+}
+
 /** @param {Record<string, unknown>} row */
 function isFallbackRow(row) {
   const attrs = row?.attributes
@@ -718,16 +764,24 @@ async function scanExistingPartIds(storage, restrictTo) {
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *
+ * `restrictTo`, when supplied, keeps only the keys of the batch in hand
+ * (the live-producer caller, `dedupeStoredPartIds`); backfill omits it
+ * because its per-run memo legitimately needs every spooled key.
+ *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
  * @returns {Promise<void>}
  */
-async function scanSpooledPartIds(storage, seen) {
+async function scanSpooledPartIds(storage, seen, restrictTo) {
   if (!canScanSpooledRows(storage)) return
+  if (restrictTo && restrictTo.size === 0) return
   try {
     for await (const row of storage.readSpooledRows(DATASET_NAME, ['part_id', 'message_id', 'part_index'])) {
       const key = partIdKey(row)
-      if (key !== undefined) seen.add(key)
+      if (key === undefined) continue
+      if (restrictTo && !restrictTo.has(key)) continue
+      seen.add(key)
     }
   } catch {
     // Spool unreadable mid-scan: keep whatever we folded in already.

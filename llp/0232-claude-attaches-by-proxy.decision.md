@@ -17,6 +17,9 @@ no-plaintext-traffic-worth-capturing rationale alone); LLP 0259
 and "base-URL mode otherwise"; 0259 settles it in favour of the fallback,
 which is what was built, and requires the CLI caller to name the downgrade
 whenever config asked for a proxy)
+**Superseded-by (in part):** LLP 0262, LLP 0258 (accepted 2026-08-17; attaching the `claude` client writes a telemetry `env` block instead of
+`HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`; #mode-migration and the `prev_env`
+undo record are what the third mode reuses unchanged)
 
 > Attach stops writing `env.ANTHROPIC_BASE_URL` and writes `env.HTTPS_PROXY`
 > plus `env.NODE_EXTRA_CA_CERTS` instead. The endpoint stays
