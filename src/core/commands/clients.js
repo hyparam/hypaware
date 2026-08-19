@@ -211,7 +211,9 @@ async function runClientLifecycle(action, argv, ctx) {
             // before that write and reads "not enabled ... add <plugin> to
             // <config>": printing it under the first line contradicts it and
             // instructs an edit that has already been made. The guided message
-            // is for the paths that never wrote anything.
+            // is for the paths that never wrote anything, which includes a
+            // write that itself failed: there the guided remedy is still true
+            // and is the only line naming the config path.
             // @ref LLP 0174#prompt [implements]: each step reports its own
             //   failure, so a step that reported one is not re-reported as the
             //   pre-write refusal
@@ -418,12 +420,17 @@ async function runClientLifecycle(action, argv, ctx) {
               // offer, the whole point of the accept path that just ran, is
               // never made.
               //
-              // Reached with the settings already at the live port rather than
-              // freshly written, which changes nothing either tail depends on:
-              // the re-arm's precondition is a successful attach (idempotent
-              // over its own output by construction, so "already correct" is
-              // the same fact as "just written"), and the offer's is that this
-              // invocation enabled the adapter.
+              // Reached with the settings already in place rather than freshly
+              // written, which changes nothing either tail depends on: the
+              // re-arm's precondition is an explicit `hyp attach` that
+              // succeeded (LLP 0186 scopes it to the manual re-run, not to a
+              // write having happened), and the offer's is that this
+              // invocation enabled the adapter. With a live endpoint the
+              // marker was validated against it, so "already correct" is the
+              // same fact as "just written"; with no live endpoint to compare
+              // against, a present marker is a no-op success by the pre-#277
+              // rule above, and this is still the explicit re-run the re-arm
+              // is scoped to.
               // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: the explicit re-run re-arms, including on the daemon-managed install where the settings need no rewrite
               rearmRefusedAttachMarker({ name, ctx, dryRun: false })
               // @ref LLP 0174#prompt [implements]: step 4's backfill consent
@@ -705,10 +712,13 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
  * and no restart to undo.
  *
  * `reported` distinguishes the two ways this can answer "not activated".
- * Every early return and the decline are the caller's own refusal to report,
- * unchanged. The two failures below `enableClientAdapter` are not: each has
- * already written a message describing the state it actually left on disk, so
- * the caller's pre-write guided error would contradict it.
+ * Every early return, the decline, and a failed config write leave the disk
+ * exactly as the caller's pre-write guided error describes it, so that error
+ * is still the right thing to print: `reported` stays false. The failures
+ * *after* the write landed (a failed `restart`/`wait` step, and an
+ * incomplete in-process activation) have already described the state they
+ * left on disk, which that same guided error would deny: `reported` is true
+ * there, and the caller prints nothing more.
  *
  * @ref LLP 0174#bootstrap-floor [implements]: no local config file at all
  * skips the prompt outright and falls through to the caller's existing
@@ -808,7 +818,15 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   })
   if (!result.ok) {
     reportEnableFailure({ name, result, ctx })
-    return { activated: false, reported: true }
+    // Only a failure *below* the write owns the caller's message. Its report
+    // describes state that now exists on disk ("the config change already
+    // persists"), which the caller's pre-write guided error would deny. A
+    // failed write is the other shape {@link reportEnableFailure} documents:
+    // it changed nothing, so that guided error is still true, and it is the
+    // only line that names the config path and the manual remedy. Suppressing
+    // it there would leave "the config write failed; nothing changed" with no
+    // next step.
+    return { activated: false, reported: (result.failedStep ?? 'write') !== 'write' }
   }
 
   // The write and (if a daemon is installed) the restart already landed; what
