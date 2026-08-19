@@ -360,11 +360,13 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
   stays a login item until it is removed, and the variable stays session-wide
   for other Node programs to read too. `launchctl setenv` reaches
   processes launched after it, so a terminal app that was already running
-  must be fully quit and reopened. `hyp client detach <client>` unsets the
-  variable and removes the agent, as do `hyp client detach <client> --purge` and
-  `hyp daemon uninstall`; `hyp client attach claude` unwinds it when it migrates a
-  previously proxied machine; and `hyp status` shows whether the variable is
-  currently live.
+  must be fully quit and reopened. `hyp client detach <client> --purge` and
+  `hyp daemon uninstall` clear both unconditionally, and `hyp client attach claude`
+  unwinds them when it migrates a previously proxied machine. A plain
+  `hyp client detach <client>` only clears them while that client's attach marker still
+  records a proxy attach, so on a machine already migrated to another attach
+  mode it is not the command that removes the leftover. `hyp status` shows
+  whether the variable is currently live.
 - **Only the hosts a registered upstream names are decrypted.** Every other
   host the client talks to is tunnelled through without being decrypted.
 - **What gets recorded does not change.** Only the recorded API paths are

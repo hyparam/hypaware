@@ -69,22 +69,42 @@ outside the provider set HypAware's client adapters intercept (today
 `api.anthropic.com`, `api.openai.com`, `chatgpt.com`). All IP addresses are
 excluded.
 
-**Where it is trusted.** Nothing installs this CA into a system trust store
-any more. A proxied client trusts it through that client's own settings, and
-you decide anything wider yourself. Earlier releases attached Claude Code by
-proxy and did add the CA to your macOS **login keychain** as a user-domain
-trusted root (macOS raised its own password dialog for it); if you ran one of
-those, that trust setting is still on your account until you remove it, and
-`hyp status` says so. It never needed admin rights, and the machine-wide
-system keychain and other user accounts were never modified.
+**Where it is trusted.** Trust stays file-scoped to the proxied client's own
+settings: nothing HypAware runs installs the CA into an OS trust store,
+including your login keychain, and anything wider is your own decision.
+Earlier releases attached Claude Code by proxy and did install it into your
+**login keychain** as a user-domain trusted root, because that client's
+Remote Control transport trusted only the keychain and nothing else. That
+changed your account's certificate trust settings, which is why macOS itself
+raised the password dialog: an application running as you that consults the
+login keychain will accept certificates this CA signs, for those hosts.
+Declining the dialog was supported and capture kept working without it, with
+only Remote Control's inbound channel lost. The change never needed admin
+rights, and the machine-wide system keychain and other user accounts were
+never modified. If you ran one of those releases, that trust setting is
+still on your account until you remove it.
+
+**What else an earlier macOS attach left behind.** The keychain root only
+took effect if `NODE_USE_SYSTEM_CA=1` was in the environment before Claude
+Code started, so that attach also ran `launchctl setenv NODE_USE_SYSTEM_CA 1`
+and installed a LaunchAgent at
+`~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist` that
+re-runs that one command at each login. What it runs is `/bin/launchctl`
+itself, once, which sets the variable and exits: there is no resident
+process, no HypAware code in it, and nothing is sent anywhere. No attach
+writes either one today. On a machine that ran one of those releases it is
+still a login item, and still a session-wide variable that other Node
+programs will also read.
 
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
-permitted to vouch for, whether the login keychain still trusts it, and
-whether the historic launchd variable is live. `hyp client detach claude` deliberately leaves
-the CA and any trust from an earlier release in place, because a detach is
-not a statement about the certificate and no attach re-creates the grant;
-`hyp client detach claude --purge` and `hyp daemon uninstall` remove the CA and its
-keychain trust.
+permitted to vouch for, whether the keychain still trusts it, and whether
+the launchd variable is live. `hyp client detach claude --purge` and `hyp daemon
+uninstall` remove the CA, its keychain trust, the launchd variable, and the
+login agent. A plain `hyp client detach claude` leaves the CA and any trust an
+earlier release was granted in place, because a detach is not a statement
+about the certificate and no attach re-creates the grant; it clears the
+launchd variable and its agent only while that client's attach marker still
+records a proxy attach.
 
 ## Where it goes
 
