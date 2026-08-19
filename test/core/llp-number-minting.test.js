@@ -301,10 +301,31 @@ test('a merge base that cannot be found is unknown, not an empty base', t => {
   assert.equal(minted.base, 'refs/remotes/origin/master')
   assert.equal(minted.mergeBase, null)
   assert.deepEqual([...minted.numbers], [])
+})
+
+// The other half of the same repo: `mintedNumbers` reports the unknown honestly,
+// and `check` has to act on it. An unrelated history leaves the gate with no
+// scope at all, and a scope of nothing checked nothing, so exiting 0 there is a
+// pass the gate never earned. That is the failure mode the partial-scan refusal
+// above exists to prevent, so the answer here is the same one: refuse.
+test('the check refuses a branch with no common ancestor instead of passing it', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0100-a.spec.md')
+  commit(repo, 'the corpus')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '--orphan', 'unrelated'])
+  writeDoc(repo, 'llp/0100-b.spec.md')
+  commit(repo, 'a history with no common ancestor, minting a number it cannot verify')
+
+  // The scan itself is fine: 0100 really is claimed twice across the refs.
+  assert.deepEqual(collisions(refFilesFromGit(repo, mergeableRefs(repo))).map(c => c.number), [100])
+
   /** @type {string[]} */
   const err = []
-  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 0)
-  assert.match(err.join(''), /no common ancestor/)
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 2)
+  const report = err.join('')
+  assert.match(report, /no common ancestor with refs\/remotes\/origin\/master/)
+  assert.match(report, /refuses/)
 })
 
 // One document is carried by every branch cut since it landed, which on this

@@ -308,7 +308,9 @@ export function scanRefFiles(repoRoot) {
  * A merge base that cannot be found (a truncated clone, an unrelated history)
  * means the answer is unknown, reported as a null `mergeBase`. Treating it as an
  * empty base instead would count the whole corpus at HEAD as newly minted and
- * blame this branch for every collision already settled in it.
+ * blame this branch for every collision already settled in it. An empty number
+ * set carries no such distinction, so callers that gate on the result have to
+ * read `mergeBase` too: `run` refuses rather than passing on a null one.
  *
  * @param {string} repoRoot
  * @returns {{ base: string | null, mergeBase: string | null, numbers: Set<number> }}
@@ -444,13 +446,20 @@ export function run(argv, repoRoot, write, writeError) {
     return 0
   }
   const minted = mintedNumbers(repoRoot)
-  if (minted.base === null) {
-    writeError('no default branch to compare against, so nothing is minted here\n')
-    return 0
-  }
-  if (minted.mergeBase === null) {
-    writeError(`no common ancestor with ${minted.base}, so what this branch mints cannot be told from what it inherited\n`)
-    return 0
+  // No scope is not an empty scope. When the branch cannot be told apart from
+  // what it inherited, the gate checked nothing, and reporting that as a pass is
+  // the silent-pass failure the partial-scan refusal above already rules out. So
+  // it refuses on the same terms: exit 2 says "cannot answer", distinct from the
+  // exit 1 that says "answered, and a number collides". The base-less case is
+  // unreachable from here (`partialScan` refuses `NO_BASE_REF` first) and is kept
+  // refusing anyway, so that the two predicates drifting apart cannot reopen the
+  // hole.
+  if (minted.base === null || minted.mergeBase === null) {
+    const unknown = minted.base === null
+      ? 'there is no default branch to compare against'
+      : `there is no common ancestor with ${minted.base}`
+    writeError(`${unknown}, so what this branch mints cannot be told from what it inherited. The check would pass without looking, so it refuses instead. Fetch the default branch's history, or run it where the shared history is.\n`)
+    return 2
   }
   const superseded = supersededRefs(repoRoot)
   const rivals = new Map([...refFiles].filter(([ref]) => !superseded.has(ref)))
