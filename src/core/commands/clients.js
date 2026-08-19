@@ -913,9 +913,9 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * remains the working fallback.
  *
  * The question names the config write and the restart, and says where the CA
- * is trusted. It no longer promises a macOS trust dialog: nothing in the tree
- * calls `installCaTrust` since the claude attach went otel-only, so a yes
- * mints the CA and stops there.
+ * is trusted. It no longer promises a macOS trust dialog: no production path
+ * calls the trust-store writer since the claude attach went otel-only, so a
+ * yes mints the CA and stops there.
  *
  * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write and the restart
  * @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports instead of prompting
@@ -925,7 +925,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  */
 async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   // A dry run changes nothing and promises nothing, so it says nothing.
-  // `hyp attach all` never prompts mid-run either (same posture as
+  // `hyp client attach all` never prompts mid-run either (same posture as
   // maybeInteractiveEnableAttach above), but it does not return here: it
   // falls through to the one-line pointer below, because LLP 0244
   // #non-interactive owes every non-migrating attach shape the line naming

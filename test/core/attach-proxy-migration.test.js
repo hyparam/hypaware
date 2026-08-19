@@ -304,7 +304,7 @@ test('centrally-managed gateway: no question even on a TTY, the fleet note inste
     const code = await runAttach([PROXY_CLIENT], ctx)
     assert.equal(code, 0, stderr.text())
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
-    assert.match(stderr.text(), /centrally managed; enable proxy_mode in the fleet config/)
+    assert.match(stderr.text(), /centrally managed; enable proxy_mode in the central config/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
   })
 })
