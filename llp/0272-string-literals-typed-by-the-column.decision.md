@@ -171,6 +171,10 @@ reintroduce the silent empty result through the front door.
 
 ## Not settled here: relations the registry cannot name {#not-settled-derived}
 
+**Extended-by: LLP 0280**, which closes the CTE and derived-table half of this
+section (an inner select that can be read end to end now supplies its column
+list) and records why the unqualified correlated half is not a coercion defect.
+
 A bound is typed from a **dataset schema**, so a select whose `FROM` is a CTE or
 a derived table gets no coercion at all:
 `with c as (select * from ai_gateway_messages) select * from c where ts >= '...'`
