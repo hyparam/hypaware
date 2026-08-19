@@ -120,6 +120,14 @@ export interface PendingInfo {
 }
 
 export interface CacheSpool {
+  /**
+   * Write one batch into the table's spool, to be committed by a later
+   * `flushTable`. All-or-nothing as far as the caller is concerned: it
+   * resolves once the record is in the spool, and rejects only when the
+   * record is not there and no flush will find it. That is what lets a
+   * caller treat a rejection as "nothing landed" and replay the rows
+   * without writing them twice.
+   */
   append(
     tablePath: string,
     columns: readonly ColumnSpec[],

@@ -9,6 +9,7 @@ import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheSpool, FlushResult } from '../../../src/core/cache/types.js'
  */
@@ -91,11 +92,34 @@ export function createCacheSpool(args) {
         const dir = spoolDir(tablePath)
         await fs.mkdir(dir, { recursive: true })
         const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a')
+        // An append either lands in the spool or it does not, and the
+        // outcome says which. Callers read a rejection as "nothing landed"
+        // and act on it - the AI gateway source rolls its projector dedupe
+        // journal back so the conversation replays those messages on its
+        // next exchange - so a rejection that left the record behind
+        // commits the rows twice, and a rejection over a durable record
+        // does it for a fault that cost nothing. Both halves of that are
+        // handled here rather than by asking every caller to reason about
+        // which syscall failed (issues #879, #924).
         try {
-          await handle.writeFile(line, 'utf8')
-          await handle.sync()
+          const startSize = (await handle.stat()).size
+          try {
+            await handle.writeFile(line, 'utf8')
+            await handle.sync()
+          } catch (err) {
+            // `writeFile` can fail with a prefix of the line already in the
+            // file; that remnant has no trailing newline, so leaving it
+            // would also swallow the NEXT record into one malformed line.
+            await discardTail(handle, startSize, bytesWritten)
+            throw err
+          }
         } finally {
-          await handle.close()
+          // Past the sync the record is durable, and closing the handle
+          // cannot un-write it. A close failure is a descriptor problem
+          // with nothing the caller can do about it, so it never decides
+          // the outcome: on the failure path above the original error
+          // stays the one that propagates.
+          await handle.close().catch(() => undefined)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
@@ -289,6 +313,36 @@ function* rowsFromSpoolLine(line) {
     if (row && typeof row === 'object' && !Array.isArray(row)) {
       yield /** @type {Record<string, unknown>} */ (row)
     }
+  }
+}
+
+/**
+ * Roll a failed append off the tail of the active spool file, so a
+ * rejected `append` really does mean "the record is not in the spool".
+ *
+ * Best effort by nature: the device that just refused a write or an fsync
+ * may refuse the truncate too, and there is nothing better to do about
+ * that than leave the tail alone and let the flush reader's malformed-line
+ * handling absorb it.
+ *
+ * The size guard keeps the truncate to bytes this append could have
+ * written. `append` holds the per-table write lock, so nothing in THIS
+ * process can have appended behind us; a file grown past what one line
+ * could produce means another process shares the spool, and discarding
+ * its rows to tidy ours would be the worse trade.
+ *
+ * @param {FileHandle} handle
+ * @param {number} startSize
+ * @param {number} maxBytes
+ */
+async function discardTail(handle, startSize, maxBytes) {
+  try {
+    const { size } = await handle.stat()
+    if (size <= startSize || size > startSize + maxBytes) return
+    await handle.truncate(startSize)
+    await handle.sync()
+  } catch {
+    /* the write path is already failing; the tail stays as it is */
   }
 }
 
