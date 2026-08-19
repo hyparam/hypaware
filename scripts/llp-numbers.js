@@ -9,7 +9,8 @@
 // conflict because their slugs differed (issue #907).
 //
 //   node scripts/llp-numbers.js next     the next free number, four digits
-//   node scripts/llp-numbers.js check    exit 1 if this branch mints a taken number
+//   node scripts/llp-numbers.js check    exit 1 if this branch mints a taken number,
+//                                        exit 2 if the scan cannot answer at all
 //   node scripts/llp-numbers.js survey   every collision across every ref
 //
 // @ref LLP 0156#renumber [implements]: a fresh number sits above the highest claimed anywhere, including branches without an open PR
