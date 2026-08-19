@@ -528,7 +528,7 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   // against the static provider list rather than the configured subset
   // (LLP 0238#full-provider-constraints), and its file is what a proxy-mode
   // attach preflights on: with an IP-only upstream set, taking the idle path
-  // here leaves `hyp attach claude` failing `no local CA at ...; start the
+  // here leaves `hyp client attach claude` failing `no local CA at ...; start the
   // daemon with proxy mode enabled before attaching` while proxy mode is
   // enabled, which is a dead end. An install that names *nothing* is genuinely
   // idle and still returns here.

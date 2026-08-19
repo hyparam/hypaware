@@ -764,7 +764,7 @@ test('interceptsHost refuses an IP-literal authority so its tunnel stays blind',
 // whose upstreams are *all* IP literals fell through to the "nothing to
 // terminate" idle path and minted no CA at all. The CA file is what a
 // proxy-mode attach preflights on (LLP 0232#proxy-attach-preflight), so that
-// turned "this one upstream is not captured" into `hyp attach claude` failing
+// turned "this one upstream is not captured" into `hyp client attach claude` failing
 // with `no local CA at ...; start the daemon with proxy mode enabled` while
 // proxy mode was enabled. The static provider list is minted regardless of the
 // configured subset (LLP 0238), so there was never a reason to skip it here.
