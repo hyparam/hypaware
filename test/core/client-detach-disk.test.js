@@ -1181,3 +1181,46 @@ test('#886: a DAMAGED proxy marker still has its proxy keys reversed', async () 
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// The same false-provenance claim, one case over: `recordDamaged` is true for a
+// damaged marker in ANY mode (`mode` is itself one of the fields that routes a
+// marker to the legacy branch as damaged), so a corrupted base-URL marker beside
+// the user's own corporate bundle still reported it as HypAware residue. Only a
+// proxy attach ever writes `HTTPS_PROXY` / `NODE_EXTRA_CA_CERTS`, and `mode`
+// survived to say this was not one.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#886: a DAMAGED base-URL marker leaves the user own proxy env alone and unreported', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        // The user's own corporate settings, beside a base-URL attach that
+        // could not have written either.
+        NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem',
+        HTTPS_PROXY: 'http://proxy.corp.example:3128',
+      },
+      // `mode` survived; the `managed` undo record did not.
+      _hypaware: { version: '0.2.0', port: 4123, mode: 'base_url' },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: CLAUDE_DESCRIPTOR,
+      homeDir: home,
+      platform: 'linux',
+    })
+    assert.equal(result.changed, true)
+    assert.equal(result.removed, 'http://127.0.0.1:4123')
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.NODE_EXTRA_CA_CERTS, '/etc/corp/ca.pem')
+    assert.equal(parsed.env.HTTPS_PROXY, 'http://proxy.corp.example:3128')
+    // The damaged record is still reported (it is genuinely unreadable), but
+    // never as a claim about these two keys.
+    assert.doesNotMatch(String(result.warning ?? ''), /NODE_EXTRA_CA_CERTS/)
+    assert.doesNotMatch(String(result.warning ?? ''), /HTTPS_PROXY/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

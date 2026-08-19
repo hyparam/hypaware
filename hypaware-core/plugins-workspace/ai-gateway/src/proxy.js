@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { parseListen } from './config.js'
 import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
@@ -167,6 +168,20 @@ export function interceptsHost(upstreams, host, port = 443) {
   // The hostname is lower-cased because a client may send any case and
   // `baseUrl.hostname` is already normalised.
   const wanted = host.toLowerCase()
+  // An IP-literal authority is never intercepted, however the routing table
+  // reads. The local CA carries `dNSName` entries only and excludes the whole
+  // IP space (LLP 0235#ca-name-constraints), so terminating such a tunnel ends
+  // in a leaf mint that refuses the host - after the `200 Connection
+  // Established` has already gone out, which kills the client's egress rather
+  // than only its capture. `prepareInterception` drops an IP-literal upstream
+  // from the CA host list, but the compiled routing table still carries it (it
+  // is a real upstream in reverse-proxy mode), so the decision has to be made
+  // here as well. This is what makes that skip's promise true: such an upstream
+  // is tunnelled blind and unrecorded, exactly as an unconfigured host is. It
+  // also covers an install upgraded from a build that did mint the IP into its
+  // CA, where the host set alone would still say yes.
+  // @ref LLP 0275#ip-literals-are-refused [implements]: an IP-literal CONNECT is tunnelled, never terminated
+  if (isIpLiteralHost(wanted)) return false
   return upstreams.some((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
 }
 

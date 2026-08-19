@@ -731,3 +731,31 @@ test('an IP-literal upstream is skipped, loudly, without breaking the rest', asy
   assert.equal(warned.level, 'warn')
   assert.deepEqual(warned.attrs.hosts, ['10.0.0.5'])
 })
+
+// The skip in `prepareInterception` only shapes the CA host list. The compiled
+// routing table still holds the IP-literal upstream (it is a real upstream in
+// reverse-proxy mode), so without a matching refusal here a `CONNECT 10.0.0.5:443`
+// was still terminated: the 200 went out, `secureContextFor` threw from the leaf
+// mint, and the socket died. That is the client's egress, not just its capture,
+// and it is the opposite of the "tunnelled blind and unrecorded" the warning and
+// LLP 0275 both promise.
+// @ref LLP 0275#ip-literals-are-refused [tests]
+test('interceptsHost refuses an IP-literal authority so its tunnel stays blind', () => {
+  const upstreams = compileUpstreams([
+    { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages' },
+    { name: 'local-llm', base_url: 'https://10.0.0.5/v1', path_prefix: '/v1/chat/completions' },
+    { name: 'local-v6', base_url: 'https://[fd00::1]/v1', path_prefix: '/v1/embeddings' },
+  ])
+  // The DNS-named upstream is unaffected.
+  assert.equal(interceptsHost(upstreams, 'api.anthropic.com', 443), true)
+  // The IP-literal ones are tunnelled, however the routing table reads.
+  assert.equal(interceptsHost(upstreams, '10.0.0.5', 443), false)
+  assert.equal(interceptsHost(upstreams, 'fd00::1', 443), false)
+  assert.equal(interceptsHost(upstreams, '[fd00::1]', 443), false)
+  // A host that merely looks numeric is still a DNS name and still intercepted
+  // when an upstream names it.
+  const nip = compileUpstreams([
+    { name: 'nip', base_url: 'https://10.0.0.5.nip.io/v1', path_prefix: '/v1' },
+  ])
+  assert.equal(interceptsHost(nip, '10.0.0.5.nip.io', 443), true)
+})
