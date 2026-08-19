@@ -1,7 +1,7 @@
 // @ts-check
 
 import { Attr, withSpan } from '../observability/index.js'
-import { collectHypAwareStatus } from '../daemon/status.js'
+import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -215,6 +215,24 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       last_seen: e.lastSeen,
       rows: e.rows,
     })),
+    // What the daemon's last maintenance tick deliberately left fragmented
+    // (LLP 0228). Null until a daemon has reported a tick: absent is "no tick
+    // has said", which is not "nothing is frozen".
+    maintenance: report.maintenance
+      ? {
+        tick_at: report.maintenance.tickAt,
+        partitions_visited: report.maintenance.partitionsVisited,
+        skipped_total: report.maintenance.skippedTotal,
+        reasons: report.maintenance.reasons,
+        skipped: report.maintenance.partitions.map((p) => ({
+          dataset: p.dataset,
+          partition: p.partition,
+          reason: p.reason,
+          ...(p.dataFiles !== undefined ? { data_files: p.dataFiles } : {}),
+          ...(p.failedAt ? { failed_at: p.failedAt } : {}),
+        })),
+      }
+      : null,
     // Capture health per otel-attached client (LLP 0257 S17). Always an
     // array so a consumer can pin the key; empty means no configured client
     // is otel-attached, which keeps the pre-otel payload shape unchanged.
@@ -587,6 +605,36 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
+  }
+
+  // Partitions the daemon's last maintenance tick deliberately left
+  // fragmented (LLP 0228). Rendered only when there are some, like every
+  // other conditional block here, so an ordinary install's text surface is
+  // unchanged. `formatEntrypointAge` is the file's coarse-age formatter (it
+  // is named for its first caller): the question is "is this tick's answer
+  // hours or weeks old?", not the exact instant.
+  // @ref LLP 0228#status-file-is-the-surface [implements]: hyp status is where an operator who never runs `hyp query maintain` finds a frozen partition
+  if (report.maintenance && report.maintenance.skippedTotal > 0) {
+    const m = report.maintenance
+    const breakdown = describeMaintenanceSkipReasons(m.reasons)
+    stdout.write('  maintenance:\n')
+    stdout.write(
+      `    ${m.skippedTotal} of ${m.partitionsVisited} partitions left fragmented, as of the tick ${formatEntrypointAge(m.tickAt)} (${breakdown})\n`
+    )
+    for (const p of m.partitions) {
+      // The count is the one the recorded rewrite ran over, not the live one:
+      // the sentence is about that rewrite, and `hyp query maintain` draws the
+      // same distinction.
+      const detail =
+        p.reason === 'compaction_attempt_failed'
+          ? (p.failedAt ? `  the retry failed at ${p.failedAt}` : '')
+          : (p.dataFiles !== undefined ? `  the last rewrite of ${p.dataFiles} files reduced nothing` : '')
+      stdout.write(`    - ${p.dataset}/${p.partition}  [${p.reason}]${detail}\n`)
+    }
+    const unnamed = m.skippedTotal - m.partitions.length
+    if (unnamed > 0) {
+      stdout.write(`    ... and ${unnamed} more (hyp query maintain --dry-run lists them all)\n`)
+    }
   }
 
   // Local entries the central layer overrides (LLP 0031): dropped at
