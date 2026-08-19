@@ -123,10 +123,17 @@ export interface CacheSpool {
   /**
    * Write one batch into the table's spool, to be committed by a later
    * `flushTable`. All-or-nothing as far as the caller is concerned: it
-   * resolves once the record is in the spool, and rejects only when the
-   * record is not there and no flush will find it. That is what lets a
-   * caller treat a rejection as "nothing landed" and replay the rows
-   * without writing them twice.
+   * resolves once the record is in the spool, and rejects when the record
+   * is not there and no flush will find it. That is what lets a caller
+   * treat a rejection as "nothing landed" and replay the rows without
+   * writing them twice.
+   *
+   * The rollback behind that is best effort, so the guarantee is not
+   * absolute: a torn write whose tail cannot be read back, and a spool
+   * file another process appended to between this append's size probe and
+   * its rollback, can both reject with bytes still in the file. A caller
+   * that must not double-write under a failing device or a shared spool
+   * still needs its own identity check.
    */
   append(
     tablePath: string,

@@ -116,8 +116,16 @@ export function createCacheSpool(args) {
             // `writeFile` can fail with a prefix of the line already in the
             // file; that remnant has no trailing newline, so leaving it
             // would also swallow the NEXT record into one malformed line.
-            await discardTail(handle, startSize, line)
-            throw err
+            const retained = await discardTail(handle, startSize, line)
+            // The rollback can find the whole line already written and be
+            // refused the truncate that would take it back: an fsync and an
+            // ftruncate can fail on the same device. The record is complete
+            // and newline-terminated, so the next flush commits it, and
+            // rejecting here would tell the caller to replay rows that
+            // landed, which is the double commit this path exists to
+            // prevent. Same reasoning as the close failure below: an error
+            // that cannot un-write the record does not decide the outcome.
+            if (!retained) throw err
           }
         } finally {
           // Past the sync the record is durable, and closing the handle
@@ -335,35 +343,50 @@ function* rowsFromSpoolLine(line) {
  * append could have produced; comparing the content does, and discarding
  * another writer's durable rows to tidy up ours would be the worse trade.
  *
+ * The content check narrows the cross-process hazard, it does not close
+ * it: reading the tail and truncating it are two syscalls, so a foreign
+ * record appended in between still sits inside the range this truncate
+ * drops, and a torn prefix that lands BEFORE a foreign line takes that
+ * line down with it whatever the rollback does. Closing those needs an
+ * advisory lock over `active.jsonl`, which the spool does not have.
+ *
  * Best effort past that: the device that just refused a write or an fsync
- * may refuse the truncate too. When it does the remnant gets a closing
+ * may refuse the truncate too. When it does a torn remnant gets a closing
  * newline instead, which is the difference between this failed append
  * costing its own rows and costing the next record as well.
  *
  * @param {FileHandle} handle
  * @param {number} startSize
  * @param {string} line
+ * @returns {Promise<boolean>} true when the rollback left the whole record
+ *   in the spool intact, so a later flush will commit it and the append
+ *   must not be reported as failed
  */
 async function discardTail(handle, startSize, line) {
   try {
     const { size } = await handle.stat()
     const written = size - startSize
     const expected = Buffer.from(line, 'utf8')
-    if (written <= 0 || written > expected.length) return
+    if (written <= 0 || written > expected.length) return false
     const tail = Buffer.alloc(written)
     const { bytesRead } = await handle.read(tail, 0, written, startSize)
-    if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return
+    if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return false
     try {
       await handle.truncate(startSize)
     } catch {
+      // A whole line is already terminated and already committable: there
+      // is nothing to repair, and nothing for the caller to replay.
+      if (written === expected.length) return true
       // Terminate the remnant so the flush reader drops that line alone
       // instead of concatenating it with whatever is appended next.
       await handle.writeFile('\n', 'utf8')
-      return
+      return false
     }
     await handle.sync()
+    return false
   } catch {
     /* the write path is already failing; the tail stays as it is */
+    return false
   }
 }
 

@@ -232,3 +232,31 @@ test('an append whose rollback truncate is refused still spares the next record'
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('an append whose whole record survives a refused rollback is reported as written', async () => {
+  const cacheRoot = await makeTmpDir('retained')
+  // The write lands in full and only `sync()` fails, so the rollback has a
+  // complete, newline-terminated line to take back - and the same device
+  // refuses the truncate. The record is committable either way, so the one
+  // outcome that costs anything is telling the caller it was lost.
+  const restore = interceptActiveFile((handle) => {
+    handle.sync = async () => { throw failWith('sync') }
+    handle.truncate = async () => { throw failWith('truncate') }
+  })
+  try {
+    const { spool, committed } = spoolWithCommitLog(cacheRoot)
+    const tablePath = path.join(cacheRoot, 'datasets', 'test_data', 'source=claude')
+
+    const result = await spool.append(tablePath, COLUMNS, [{ id: 1 }])
+    assert.ok(result.bytesWritten > 0)
+    restore()
+
+    // Exactly one copy: a rejection here would have the caller replay the
+    // batch on top of the one the flush is about to commit.
+    await spool.flushTable(tablePath, { reason: 'test' })
+    assert.deepEqual(committed.map((row) => row.id), [1])
+  } finally {
+    restore()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
