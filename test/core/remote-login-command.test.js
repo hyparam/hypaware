@@ -534,6 +534,20 @@ test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')))
 })
 
+// The codec accepts `--flag=true` for a boolean, so the gate blessed
+// `--no-forward=true` while `argv.includes('--no-forward')` did not see it:
+// the opt-out was dropped in silence and the machine enrolled for forwarding.
+test('--no-forward=true is the same opt-out as the bare flag (LLP 0063 D3)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-forward=true'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /signed in for queries only/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+})
+
 test('login to a different server than the one this machine is enrolled to is rejected before the browser (LLP 0063 D4)', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({

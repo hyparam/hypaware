@@ -202,6 +202,29 @@ test('publish forwards an explicit --org (the admin-token form)', async (t) => {
   assert.equal(calls[0].url.searchParams.get('org'), 'acme')
 })
 
+// `--org` was the last argv reader left in the file. `valueFlag()` drops a
+// dash-leading value, so the gate blessed `--org -acme` and the request went
+// out with no org at all; and `valueFlag()` reads the FIRST occurrence while
+// the codec validates the LAST, so a repeated flag validated one org and sent
+// another.
+test('publish forwards a dash-leading --org rather than dropping it', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-6', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p', '--org', '-acme'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('org'), '-acme')
+})
+
+test('publish sends the --org the gate validated when the flag repeats', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-7', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p', '--org', 'a', '--org', 'b'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('org'), 'b')
+})
+
 // The gate accepts any string for --title, so a title whose first character
 // is '-' is valid input. Reading it back with `valueFlag()` dropped it and
 // published untitled, exit 0, with nothing on stderr to say so.

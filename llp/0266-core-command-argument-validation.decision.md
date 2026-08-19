@@ -28,7 +28,7 @@ parsing without becoming a verb. Roughly half the core set already did:
 commands.
 
 The other half did not, and read argv by hand. Measured on `master` at
-a14246d9, sixteen visible core commands accepted a token they had no meaning
+a14246d9, eighteen visible core commands and the `report` subcommands accepted a token they had no meaning
 for:
 
 - `version`, `query status`, `daemon stop`, `daemon restart` ignored every
@@ -126,7 +126,7 @@ by the parameterized test, not by the table.
 ## Consequences {#consequences}
 
 - A misspelled flag now fails the same way everywhere, so a script can rely on
-  exit 2. This is a behaviour change for the sixteen commands listed above: an
+  exit 2. This is a behaviour change for the commands listed above: an
   invocation that used to be silently accepted now exits 2.
 - Documentation that named a flag a command only ever ignored is now wrong in a
   way that fails. The shipped query skills and the `hypaware-analyst` agent told
