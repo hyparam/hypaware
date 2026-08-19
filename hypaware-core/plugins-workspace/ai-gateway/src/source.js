@@ -307,10 +307,19 @@ async function launchListener(ctx, state, liveState) {
     // late. Issue #879.
     /** @type {(() => void)[]} */
     const journal = []
+    // Set the moment the append resolves. The catch below covers the
+    // bookkeeping after the write too (entrypoint activity, counters,
+    // logging), and rolling back there would un-mark messages that DID
+    // land: unlike the OTEL writer this path has no `part_id` dedupe in
+    // front of it, and the flush-time `dedupeByPartId` only runs for
+    // fallback-identity batches, so the replay of a native-identity
+    // conversation would commit a second copy of every one of them.
+    let appended = false
     try {
       const messageRows = await projector.projectExchange(row, { journal })
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        appended = true
         liveState.rowsWritten += messageRows.length
         // Recorded only after the append resolves: "recent clients" in
         // `hyp status` must mean rows that landed, not rows that were
@@ -338,7 +347,7 @@ async function launchListener(ctx, state, liveState) {
         ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
       })
     } catch (err) {
-      rollbackAiGatewayStateJournal(journal)
+      if (!appended) rollbackAiGatewayStateJournal(journal)
       const message = err instanceof Error ? err.message : String(err)
       liveState.lastError = message
       sourcesLog.error('aigw.exchange_write_failed', {

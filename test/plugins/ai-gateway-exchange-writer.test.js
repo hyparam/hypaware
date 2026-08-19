@@ -173,3 +173,30 @@ test('a rolled-back exchange still dedupes normally once it has landed', async (
   assert.deepEqual(third, { rowsWritten: 0, rowsSkipped: 0 })
   assert.equal(storage.appended.length, 2)
 })
+
+/**
+ * The same loss as #879, one step earlier: row expansion marks each message
+ * seen as it walks the caller's projection content, so a throw partway
+ * through leaves the earlier messages of the batch marked while nothing was
+ * written. Expansion has to be inside the rollback's reach, not in front of
+ * it.
+ */
+test('a throw during row expansion leaves the dedupe as it was', async () => {
+  const storage = makeStorage()
+  const api = createAiGatewayApi(createGatewayState(), { storage: /** @type {any} */ (storage) })
+
+  const poisoned = projection('s1')
+  Object.defineProperty(poisoned.messages[1], 'content', {
+    enumerable: true,
+    get() { throw new Error('unreadable content') },
+  })
+  await assert.rejects(
+    () => api.recordProjectedExchange(/** @type {any} */ (poisoned)),
+    /unreadable content/
+  )
+  assert.equal(storage.appended.length, 0)
+
+  const retry = await api.recordProjectedExchange(/** @type {any} */ (projection('s1')))
+  assert.deepEqual(retry, { rowsWritten: 2, rowsSkipped: 0 })
+  assert.deepEqual(storage.appended.map((r) => r.part_id), ['uuid-user#0', 'uuid-asst#0'])
+})

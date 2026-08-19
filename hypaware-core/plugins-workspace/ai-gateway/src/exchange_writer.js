@@ -62,14 +62,18 @@ export function createProjectedExchangeWriter(opts) {
     async record(projection, recordOpts = {}) {
       /** @type {(() => void)[]} */
       const journal = []
-      const rows = aiGatewayRowsFromProjectedExchange(projection, {
-        ...(gatewayId ? { gatewayId } : {}),
-        ...(recordOpts.gatewayAttributes ? { gatewayAttributes: recordOpts.gatewayAttributes } : {}),
-        state,
-        journal,
-      })
-      if (rows.length === 0) return { rowsWritten: 0, rowsSkipped: 0 }
+      // Expansion is INSIDE the try: it marks messages seen as it walks
+      // caller-supplied projection content, so a throw partway through
+      // would otherwise leave those marks standing with no rows written -
+      // issue #879 again, one step earlier.
       try {
+        const rows = aiGatewayRowsFromProjectedExchange(projection, {
+          ...(gatewayId ? { gatewayId } : {}),
+          ...(recordOpts.gatewayAttributes ? { gatewayAttributes: recordOpts.gatewayAttributes } : {}),
+          state,
+          journal,
+        })
+        if (rows.length === 0) return { rowsWritten: 0, rowsSkipped: 0 }
         const fresh = await dedupeStoredPartIds(rows, storage)
         if (fresh.length > 0) {
           if (tablePath === undefined) tablePath = aiGatewayTablePath(storage)

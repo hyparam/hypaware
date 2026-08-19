@@ -799,6 +799,20 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
  * `previous_message_id` tail), pushing the undo onto `journal` when the
  * caller asked for one.
  *
+ * The chain undo is CONDITIONAL on this message still being the tail. One
+ * conversation state is shared by every in-flight exchange of a listener
+ * (the proxy fires `onExchangeFinished` into an unserialized pending set,
+ * and `projectExchange` awaits before it expands), so a later exchange can
+ * have chained further turns onto the same thread by the time this rollback
+ * runs. Unwinding the thread from under those turns would strand them: they
+ * stay in `chain.seen`, so nothing re-chains them, and the tail settles on
+ * a message from before them - every later row's `previous_message_id` then
+ * skips a turn, and a fallback `message_id`, which hashes the tail, stops
+ * matching what a re-projection rebuilds. Rolling back the exchange that is
+ * still the tail (the sequential case, and the last-in-first-out order this
+ * journal replays in) restores the chain exactly; anything else is left
+ * alone, which costs at worst a re-projected row and never a broken thread.
+ *
  * @param {{ seen: Set<string>, last: string | undefined }} chain
  * @param {string} messageId
  * @param {(() => void)[] | undefined} journal
@@ -810,6 +824,7 @@ function chainMessageId(chain, messageId, journal) {
   chain.seen.add(messageId)
   chain.last = messageId
   journal?.push(() => {
+    if (chain.last !== messageId) return
     chain.seen.delete(messageId)
     chain.last = previousLast
   })
