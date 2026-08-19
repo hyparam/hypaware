@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
 import { defaultOverwriteConfirmFactory, derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
@@ -1347,6 +1347,114 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
   assert.deepEqual(
     gateway.config.upstreams.map((/** @type {any} */ u) => u.name).sort(),
     ['openai']
+  )
+})
+
+// --- the non-TTY numbered fallback over a seeded menu (LLP 0274) ---
+
+/**
+ * A stdout that answers each readline prompt as it is printed, the way a
+ * user types one line per screen. Both the gate (`select [1, b back]: `)
+ * and the menu (`select (e.g. ...): `) end their prompt with `: `, so the
+ * script is consumed in screen order.
+ *
+ * @param {PassThrough} input
+ * @param {string[]} answers
+ */
+function scriptedStdout(input, answers) {
+  let value = ''
+  return {
+    /** @param {string} chunk */
+    write(chunk) {
+      const text = String(chunk)
+      value += text
+      if (/select (\(|\[)[^\n]*: $/.test(text)) {
+        const answer = answers.shift()
+        if (answer !== undefined) input.write(answer)
+        if (answers.length === 0) input.end()
+      }
+      return true
+    },
+    text() { return value },
+  }
+}
+
+// The seeded checkboxes have to survive the non-TTY path, because on it the
+// bare enter is the whole answer. `resolvePickSeeding` pre-checks the rows
+// the config on disk already collects (LLP 0183 #seed-from-config); the
+// numbered fallback renders that state and keeps it only for a question
+// that says so. Without the opt-in the menu printed bare labels and a bare
+// enter returned nothing, so a reconfigure that walked gate -> menu ->
+// enter rewrote the config to collect nothing, with the overwrite confirm
+// defaulting to yes.
+// @ref LLP 0274#pick-menu [tests]:
+test('runWizardPick: the numbered menu keeps the seeded rows on a bare enter', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel' },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const input = new PassThrough()
+  // Screen one is the defaults gate: option 2 is "Select what to record".
+  // Screen two is the menu, answered with a bare enter.
+  const stdout = scriptedStdout(input, ['2\n', '\n'])
+
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), stdin: input, env: hermeticEnv(tmp), catalog,
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+
+  assert.deepEqual(
+    [...result.sourcesPicked].sort(),
+    ['claude', 'otel'],
+    'a bare enter keeps the seeded rows instead of collecting nothing'
+  )
+  const text = stdout.text()
+  assert.match(text, /\[x\] Claude Code/, 'the menu renders the seeded row as checked')
+  assert.match(text, /\[x\] OpenTelemetry/, 'the menu renders the seeded row as checked')
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ entry) => entry.name)
+  assert.ok(names.includes('@hypaware/claude'), 'the rewritten config still collects claude')
+  assert.ok(names.includes('@hypaware/otel'), 'the rewritten config still collects otel')
+})
+
+// The other half of the opt-in: a menu with nothing checked has no state to
+// keep, so it stays the historical question. That matters most for the
+// dropped terminal - a menu that claimed a default would answer an
+// unanswerable question with the empty selection and carry the wizard into
+// the daemon install collecting nothing, which is the cancel LLP 0190
+// #eof-everywhere put here.
+// @ref LLP 0274#pick-menu [tests]:
+test('runWizardPick: a dropped terminal at a menu with nothing checked still cancels', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const input = new PassThrough()
+  input.end()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  // Nothing detected, nothing configured, nothing locked: no gate, so the
+  // menu is the first screen and every box arrives clear.
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr, stdin: input, env: hermeticEnv(tmp), catalog,
+    detect: async () => new Set(),
+  }))
+
+  assert.equal(result.cancelled, true)
+  assert.equal(result.configPath, '')
+  assert.doesNotMatch(stdout.text(), /\[x\]|\[ \]/, 'no checked state is rendered when there is none')
+  await assert.rejects(
+    fs.access(path.join(tmp, '.hyp', 'hypaware-config.json')),
+    'a cancelled run writes no config'
   )
 })
 

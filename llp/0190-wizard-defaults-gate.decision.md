@@ -7,6 +7,7 @@
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
 **Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting)
+**Extended-by:** [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md) (#sync-gate below: the `enterKeepsChecked` opt-in widens from "the sync menu" to any menu that arrives with a checked state, so the wizard pick menu sets it too; that section's line "the pick menus keep the historical semantics untouched" is corrected for that menu, and `runPickerWalkthrough` is untouched)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
 > and the prompt flow of [LLP 0135 §pick](./0135-install-experience-overhaul.design.md).
@@ -91,6 +92,15 @@ ask plus one re-ask - so no input can hold a scripted run at the
 prompt; and readline's `close` resolves the pending ask instead of
 leaving it unsettled, which is the EOF hang `rl.question` has always
 had and the loop turned into a crash.
+
+> **Corrected by [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md):**
+> "the pick menus keep the historical semantics untouched" holds for
+> `runPickerWalkthrough`, and held for the wizard pick menu when this was
+> written, where the boxes were a detection hint. LLP 0183 later made them
+> the read-back of the config on disk, so a bare enter discarded the user's
+> own recorded answer and the run rewrote the config from it: the same
+> invisible-default defect this paragraph is about. That menu now sets the
+> flag whenever a box is checked, and only then.
 
 Where the fallback lands when it runs out of answers is the question's
 *stated* default, never a different one. A spent budget takes what a
