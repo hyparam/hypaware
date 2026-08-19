@@ -507,6 +507,7 @@ export async function run({ harness, expect }) {
         decision,
         source,
         cost_usd,
+        cwd,
         event_timestamp,
         JSON_VALUE(attributes, '$.from_mode') as from_mode,
         JSON_VALUE(attributes, '$.to_mode') as to_mode,
@@ -540,6 +541,15 @@ export async function run({ harness, expect }) {
         `events: the ${row.event_name} row carries the session id and a timestamp`,
         row,
         (v) => v.session_id === sessionId && typeof v.event_timestamp === 'string' && v.event_timestamp.length > 0,
+      )
+      // Without this the export seam has no key to withhold a local-only
+      // directory's behavioral rows on, and they forward to a fleet server.
+      // @ref LLP 0070#derive [tests]: every behavioral row carries the cwd its
+      //   ingest verdict was resolved from
+      expect.that(
+        `events: the ${row.event_name} row carries the cwd the hook recorded`,
+        row.cwd,
+        (v) => v === harness.tmpDir,
       )
     }
     const toolDecision = eventRows.find((/** @type {any} */ r) => r.event_name === 'tool_decision')

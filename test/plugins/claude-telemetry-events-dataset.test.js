@@ -269,7 +269,7 @@ test('the registration names the dataset, its owner, its signal, and its timesta
   assert.equal(registration.localOnlyContentColumns, undefined)
   assert.deepEqual(
     registration.schema.columns.map((c) => c.name),
-    ['event_name', 'event_timestamp', 'session_id', 'tool_name', 'decision', 'source', 'cost_usd', 'attributes']
+    ['event_name', 'event_timestamp', 'session_id', 'tool_name', 'decision', 'source', 'cost_usd', 'cwd', 'attributes']
   )
 })
 

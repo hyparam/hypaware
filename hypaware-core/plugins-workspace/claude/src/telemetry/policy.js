@@ -50,6 +50,10 @@ export function resolveSessionUsagePolicy({ record, resolver }) {
  *
  * `local-only` is kept, exactly as the proxy projector keeps it: that class is
  * enforced at the export and query seams (LLP 0070), not by refusing to record.
+ * Both of those seams key on the row's own `cwd`, so keeping the event here
+ * only holds up because the behavioral row is stamped with the cwd this
+ * verdict was resolved from (LLP 0266); before it was, `local-only` had
+ * nothing downstream to enforce it and the rows forwarded (issue #878).
  *
  * An event that names NO session is kept, for the same reason the per-session
  * opt-out keeps it: a folder policy is resolved through a session's cwd, and
