@@ -56,7 +56,7 @@ user for a rewrite HypAware made itself, in the one place a user has no way to
 check the claim.
 
 The window is reachable whenever two scoped runs write the same shared
-destination in turn, which is an ordinary sequence: `hyp attach claude-desktop`
+destination in turn, which is an ordinary sequence: `hyp client attach claude-desktop`
 after a `--client all` install, or two reconciler passes over two clients that
 share a directory.
 
@@ -114,9 +114,9 @@ record, rather than against the one record the candidate loop is carrying.
   client-scoped run that keeps a shared destination because another client still
   contributes it does not copy the current bytes there, so the copy ages while
   its source moves on. That is a question about what a scoped run *is* (making it
-  copy every destination it keeps would have `hyp attach claude` install
+  copy every destination it keeps would have `hyp client attach claude` install
   contributions nobody asked it to install), not about what the ledger proves,
-  and it is untouched here. The manual refresh exists: `hyp skills install`
+  and it is untouched here. The manual refresh exists: `hyp client skills install`
   defaults to `--client all`, and an explicit attach of the contributing client
   plans the destination.
 

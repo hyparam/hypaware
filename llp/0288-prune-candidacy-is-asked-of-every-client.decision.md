@@ -33,7 +33,7 @@ one client's live contribution must not read as another's retired copy.
 The implementation asked that of `planned`, the plan of the run that is
 executing. Every install path is client-scoped: the reconciler's attach always
 passes `clients: [client]` (`action_attach.js` `attachedAssetOptions`), and
-`hyp skills install --client <name>` does the same by hand. So "for any client"
+`hyp client skills install --client <name>` does the same by hand. So "for any client"
 was in practice "for any client this run was asked about", which under a scope
 of one is "for this client".
 
@@ -109,9 +109,9 @@ more" rather than "this pass was not asked to install it".
 - **A kept destination is still not refreshed by the run that keeps it**, which
   LLP 0284 #open-questions already recorded and this does not change. A scoped
   run that keeps a shared path because another client contributes it does not
-  copy the current bytes there. Making it copy would have `hyp attach claude`
+  copy the current bytes there. Making it copy would have `hyp client attach claude`
   install contributions nobody asked it to install, which is a question about
-  what a scoped run is. The manual refresh is unchanged: `hyp skills install`
+  what a scoped run is. The manual refresh is unchanged: `hyp client skills install`
   defaults to `--client all`.
 
 - **A client that is contributed to but never attached still holds a path

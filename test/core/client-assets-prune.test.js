@@ -59,7 +59,7 @@ async function writeSkillSource(root, name, body) {
 }
 
 /**
- * Run `hyp skills install` with exactly `skills` (and `agents`) registered.
+ * Run `hyp client skills install` with exactly `skills` (and `agents`) registered.
  *
  * `clients` defaults to `['claude']`; a test that needs two clients sharing one
  * physical directory names them explicitly. `client` scopes the run itself
