@@ -422,3 +422,31 @@ test('deferWrite answers and states the split, but hands the store write back to
   await result.commit()
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [{ source: 'a', class: 'local-only' }])
 })
+
+// The deferred commit runs after this run's config is on disk, with the
+// new-folder lane's held write, the configure phase, and the finale still
+// owed. A throw there would abandon the run half-done, so it warns and
+// leaves the standing store alone, exactly as the new-folder lane's
+// deferred write does.
+// @ref LLP 0279#one-commit-point [tests]:
+test('a deferred store write that fails warns instead of aborting the run', async () => {
+  const { env, stateDir } = await makeHome()
+  const { prompt } = capturingPrompt(['b'])
+  const { confirm } = capturingConfirm('customize')
+  const stderr = makeBuf()
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout: makeBuf(), stderr, env,
+    candidates: [descriptor('a'), descriptor('b')],
+    deferWrite: true,
+    prompt,
+    confirm,
+  }))
+  // A directory where the file belongs makes the deferred write fail.
+  await fs.mkdir(clientSyncListPath(stateDir), { recursive: true })
+
+  assert.ok(result.commit)
+  await result.commit()
+  assert.match(stderr.text(), /could not record the sync answers/)
+  assert.match(stderr.text(), /the previous sync scope stands/)
+})

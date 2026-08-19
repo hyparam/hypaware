@@ -89,9 +89,15 @@ one to write; a pass that never reaches the lanes clears them, so a back
 through the fork onto a solo local run cannot carry an earlier pass's
 answers forward.
 
-A deferred new-folder write that *fails* warns and leaves the previous
-mode standing, exactly as the inline one did; its `commit` resolves to the
-mode actually left in force, which is what the run's finish log records.
+A deferred write that *fails* warns and leaves the previous state
+standing. For the new-folder lane that is exactly what the inline write
+did, and its `commit` resolves to the mode actually left in force, which
+is what the run's finish log records. The sync lane's deferred `commit`
+takes the same contract even though its inline write throws: by the time
+it runs, the config is on disk and the run still owes the new-folder
+lane's write, the configure phase, and the finale, so a throw there would
+abandon the run half-done. The inline write runs before anything has been
+committed and keeps throwing.
 
 <a id="standing-answer"></a>**Accepting a default never retires a standing
 answer.** LLP 0201's accept takes each lane's *stated* default. For the

@@ -444,9 +444,13 @@ export async function runInitWizard(opts) {
         // A pass that re-answers the lanes replaces their held writes, and
         // a pass that never reaches them (a back through the fork onto a
         // solo local run) must not carry the previous pass's answers
-        // forward.
+        // forward. `sourcesOptedOut` goes with them: it is what the finish
+        // log reports, and now that the write is held rather than made on
+        // the spot, an abandoned pass's opt-outs were never recorded
+        // anywhere.
         syncCommit = undefined
         folderCommit = undefined
+        sourcesOptedOut = []
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
         // then states its own positions - exactly as a failed join's retry

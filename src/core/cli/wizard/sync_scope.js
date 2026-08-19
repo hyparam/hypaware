@@ -118,7 +118,25 @@ export async function runWizardSyncScope(opts) {
     ...kept,
     ...optedOut.map((source) => ({ source, class: /** @type {'local-only'} */ ('local-only') })),
   ]
-  const commit = async () => { await writeClientSyncEntries({ stateDir, entries }) }
+  const write = async () => { await writeClientSyncEntries({ stateDir, entries }) }
+  // The deferred form of the write runs after this run's config is already
+  // on disk. A throw there would abort everything the commit point still
+  // owes the run - the new-folder lane's held write, the configure phase,
+  // the finale - so it warns and leaves the standing store alone instead.
+  // That is the contract the new-folder lane's write already has. The
+  // inline form runs before anything has been committed, so it still
+  // throws and the run dies with nothing written.
+  const commit = async () => {
+    try {
+      await write()
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      opts.stderr.write(
+        `warning: could not record the sync answers (${detail}); ` +
+        "the previous sync scope stands - set it later with 'hyp policy client <name> sync|local-only'\n"
+      )
+    }
+  }
   // Under `deferWrite` the store write is handed back instead of made here
   // (LLP 0279 #one-commit-point). The lane still states the split it just
   // settled - that statement belongs to the screen the user answered - but
@@ -127,7 +145,7 @@ export async function runWizardSyncScope(opts) {
   // itself a signal (LLP 0188 #migration), so stamping it on a run the
   // user then abandons is not the inert half-write it looks like.
   // @ref LLP 0279#one-commit-point [implements]: the store write is handed back rather than made the moment the lane is answered
-  if (!opts.deferWrite) await commit()
+  if (!opts.deferWrite) await write()
   if (optedOut.length > 0) {
     opts.stdout.write(
       `Keeping local-only: ${optedOut.join(' · ')}. Change later with 'hyp policy client <name> sync|local-only'.\n`
