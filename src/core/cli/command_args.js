@@ -23,7 +23,7 @@ import { parseCommandArgv } from './verb_codec.js'
  * hand. `core_commands.js` reads `usage` from here.
  *
  * @type {Record<string, CoreCommandArgSpec>}
- * @ref LLP 0266#usage-agreement [implements]: usage line and parser schema are one declaration, so neither can advertise a flag the other rejects
+ * @ref LLP 0293#usage-agreement [implements]: usage line and parser schema are one declaration, so neither can advertise a flag the other rejects
  */
 export const CORE_COMMAND_ARGS = {
   'version': {
@@ -33,6 +33,17 @@ export const CORE_COMMAND_ARGS = {
   'status': {
     usage: 'hyp status [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
+  },
+  'client status': {
+    usage: 'hyp client status [client] [--json]',
+    schema: {
+      type: 'object',
+      properties: {
+        client: { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+      positional: ['client'],
+    },
   },
   'ask': {
     usage: 'hyp ask ["question"] [--list]',
@@ -259,7 +270,7 @@ export function coreUsage(name) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {{ ok: true, params: Record<string, unknown> } | { ok: false, code: number }}
- * @ref LLP 0266#one-contract [implements]: one refusal, written once, so a misspelled flag cannot mean exit 2 on one command and a different output mode on the next
+ * @ref LLP 0293#one-contract [implements]: one refusal, written once, so a misspelled flag cannot mean exit 2 on one command and a different output mode on the next
  */
 export function parseCoreCommandArgv(name, argv, ctx) {
   const spec = CORE_COMMAND_ARGS[name]

@@ -17,7 +17,7 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
  * the command does not know is a usage error (exit 2) that names the token,
  * never a silently different output mode.
  *
- * @ref LLP 0266#one-contract [tests]: every visible core command rejects an unknown flag with exit 2
+ * @ref LLP 0293#one-contract [tests]: every visible core command rejects an unknown flag with exit 2
  */
 
 const UNKNOWN_FLAG = '--definitely-not-a-real-flag'
@@ -52,9 +52,15 @@ function makeBuf() {
 function visibleCoreCommands() {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
-  return registry
+  const commands = registry
     .list()
     .filter((cmd) => !cmd.hidden)
+  return commands
+    // A core-owned group shell can exist solely to host plugin leaves. With no
+    // plugin booted it has no core operation or argv contract to exercise;
+    // dispatch correctly reports the inactive plugin instead. Concrete core
+    // groups still stay in this gate because they have registered children.
+    .filter((cmd) => cmd.group !== true || commands.some((child) => child.name.startsWith(`${cmd.name} `)))
     .map((cmd) => cmd.name)
     .sort()
 }
@@ -166,7 +172,7 @@ test('a short flag in a trailing positional slot refuses rather than binding as 
  * `CORE_COMMAND_ARGS` entry, so this proves the entry is internally honest
  * rather than that two copies happen to agree today.
  *
- * @ref LLP 0266#usage-agreement [tests]: registered usage and parser schema name the same flags
+ * @ref LLP 0293#usage-agreement [tests]: registered usage and parser schema name the same flags
  */
 
 /** @param {string} usage */

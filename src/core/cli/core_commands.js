@@ -386,7 +386,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       bootProfile: 'none',
       summary: 'Show configured, attached, and recently active AI clients',
-      usage: 'hyp client status [client] [--json]',
+      usage: coreUsage('client status'),
       run: runClientStatus,
     },
     {

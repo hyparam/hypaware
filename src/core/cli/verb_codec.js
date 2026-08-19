@@ -155,7 +155,7 @@ export function argvToParams(inputSchema, argv, opts = {}) {
       // otherwise binds as a positional value: `hyp query refresh -f` means
       // the dataset named '-f'. Verbs keep the lenient reading (a greedy SQL
       // string carries '-1' and friends); the core command set opts in.
-      // @ref LLP 0266#one-contract [implements]: an unknown short flag refuses like an unknown long one instead of becoming a value
+      // @ref LLP 0293#one-contract [implements]: an unknown short flag refuses like an unknown long one instead of becoming a value
       if (opts.strictShortFlags && token.length > 1 && token.startsWith('-')) {
         return { ok: false, error: `unknown flag ${token}` }
       }
@@ -209,7 +209,7 @@ export function argvToParams(inputSchema, argv, opts = {}) {
   // remote called ''. The hand-written `if (!name)` guards this schema replaced
   // refused it; `required` alone tests only `!== undefined`, so it did not.
   // The MCP path below keeps the plain test: there a JSON `""` is explicit.
-  // @ref LLP 0266#one-contract [implements]: an empty required positional is unusable input, so it is a usage error like any other
+  // @ref LLP 0293#one-contract [implements]: an empty required positional is unusable input, so it is a usage error like any other
   const missing = requiredMissing(inputSchema, params, true)
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
@@ -231,7 +231,7 @@ export function argvToParams(inputSchema, argv, opts = {}) {
  * never opts in: a greedy SQL positional carries tokens like `-1`.
  *
  * @type {{ strictShortFlags: true }}
- * @ref LLP 0266#one-contract [implements]: D1's short-flag rule reaches the commands that parse through the codec directly, not only the ones in the table
+ * @ref LLP 0293#one-contract [implements]: D1's short-flag rule reaches the commands that parse through the codec directly, not only the ones in the table
  */
 export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
 

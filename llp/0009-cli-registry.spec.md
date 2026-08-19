@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0003, LLP 0015
-**Extended-by:** LLP 0267 (#d1: top-level help reads the manifest while group help reads the registry, so the two are compared rather than assumed to agree), LLP 0266 (a registration's `usage` line and its parser are one declaration, and every visible core command refuses input it does not know with exit 2)
+**Extended-by:** LLP 0267 (#d1: top-level help reads the manifest while group help reads the registry, so the two are compared rather than assumed to agree), LLP 0293 (a registration's `usage` line and its parser are one declaration, and every visible core command refuses input it does not know with exit 2)
 
 > Command registration, dispatch, and help. Decomposed from
 > `hypaware-design.md` (CLI Registry).

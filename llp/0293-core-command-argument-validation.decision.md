@@ -1,4 +1,4 @@
-# LLP 0266: Core commands share one argument-validation contract
+# LLP 0293: Core commands share one argument-validation contract
 
 **Type:** Decision
 **Status:** Accepted
