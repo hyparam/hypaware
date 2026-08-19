@@ -543,3 +543,59 @@ test('a routing key and a headers key get their own sentences', async (t) => {
   assert.match(routing, /outranks/)
   assert.doesNotMatch(headers, /outranks/)
 })
+
+// A per-signal key outranks only its own signal, and attach turns on two
+// exporters. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` takes the token and cost
+// counters; the prompts and responses ride the log records and keep arriving.
+// Telling that user their prompt and response text went to a foreign collector
+// is a false alarm, and a scary one.
+// @ref LLP 0271#the-key-list [tests]
+test('a metrics-only key does not claim the prompt text went with it', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT/)
+  assert.match(warnings[0], /metrics/)
+  assert.doesNotMatch(warnings[0], /prompt/)
+
+  const logs = await rig()
+  t.after(() => logs.cleanup())
+  const logsResult = await otelAttach(logs, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const logsWarnings = (logsResult.changed && logsResult.warnings) || []
+  assert.equal(logsWarnings.length, 1)
+  assert.match(logsWarnings[0], /log records/)
+  assert.match(logsWarnings[0], /prompt and response text/)
+})
+
+// `hyp status` promises repair lines you can act on, and attach's warning is
+// read the same way. A headers value names no destination, so "point it at the
+// same local listener" is not a repair for it - and for the hazard it actually
+// carries, a collector credential handed to a listener that never asked for
+// it, re-pointing is not a repair at all.
+// @ref LLP 0271#the-key-list [tests]
+test('a headers key is not told to point itself at the local listener', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /Unset it/)
+  assert.doesNotMatch(warnings[0], /point it at/)
+
+  // The routing keys keep the option, because they do name a destination.
+  const routing = await rig()
+  t.after(() => routing.cleanup())
+  const routingResult = await otelAttach(routing, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const routingWarnings = (routingResult.changed && routingResult.warnings) || []
+  assert.match(routingWarnings[0], /point it at the same local listener/)
+})

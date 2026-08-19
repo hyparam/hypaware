@@ -12,7 +12,11 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
-import { isOtlpHeadersOverride, perSignalOtlpOverrides } from '../../../../src/core/config/otlp_precedence.js'
+import {
+  isOtlpHeadersOverride,
+  otlpOverrideSignal,
+  perSignalOtlpOverrides,
+} from '../../../../src/core/config/otlp_precedence.js'
 import { CLAUDE_OTEL_MIN_VERSION, CLAUDE_UPDATE_HINT, isBelowClaudeVersion } from './claude_version.js'
 
 /**
@@ -201,22 +205,39 @@ function perSignalOverrideWarnings(env, processEnv) {
     const where = inSettings.has(key)
       ? `env.${key} is set in the claude settings file`
       : `${key} is exported in this shell's environment`
-    const fix = inSettings.has(key)
-      ? 'Remove it from the settings env block, or point it at the same local listener'
-      : 'Unset it in the shell profile or launchd entry that exports it, or point it at the same local listener'
+    const removal = inSettings.has(key)
+      ? 'Remove it from the settings env block'
+      : 'Unset it in the shell profile or launchd entry that exports it'
+    // "Point it at the same local listener" is a repair only for a key that
+    // names a destination. A headers value names none, and for the hazard it
+    // actually carries - a collector credential handed to a listener that
+    // never asked for it - re-pointing is not a repair at all, so the only
+    // thing to offer is to stop exporting it.
+    const fix = isOtlpHeadersOverride(key)
+      ? removal
+      : removal + ', or point it at the same local listener'
     // A headers key routes nothing, so the redirect sentence would be false of
     // it. Its hazard runs the other way (LLP 0271 #the-key-list): it carries a
     // collector's credential, and this attach is about to make Claude Code
     // send it to a loopback listener. Saying "your telemetry goes elsewhere"
     // to someone whose telemetry arrives fine is the false alarm that gets the
     // true warnings skipped.
+    //
+    // The routing sentence names its signal for the same reason one list over:
+    // a metrics key takes the token and cost counters and leaves every prompt
+    // arriving, so claiming the prompts went with them is the false alarm in
+    // its other form.
+    const signal = otlpOverrideSignal(key)
     const harm = isOtlpHeadersOverride(key)
       ? 'Claude Code will attach it to every OTLP request it sends to the local ' +
         'listener hypaware just pointed it at, handing that listener whatever ' +
         'collector credential the value carries. '
       : 'It outranks the telemetry settings hypaware just wrote, so Claude Code ' +
-        'will export there instead - or nowhere at all, if the value is empty - ' +
-        'including the prompt and response text this attach turns on. '
+        'will send its ' +
+        (signal === 'metrics'
+          ? 'token and cost metrics'
+          : 'log records, and the prompt and response text this attach turns on with them,') +
+        ' there instead - or nowhere at all, if the value is empty. '
     out.push(
       `${where}. ` + harm + fix + ', then re-run hyp client attach claude ' +
       'and start a fresh claude session'

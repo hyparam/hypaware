@@ -10,7 +10,11 @@ import { readClientActionStatus } from '../config/action_reconciler.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
-import { isOtlpHeadersOverride, perSignalOtlpOverrides } from '../config/otlp_precedence.js'
+import {
+  isOtlpHeadersOverride,
+  otlpOverrideSignal,
+  perSignalOtlpOverrides,
+} from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
@@ -1590,15 +1594,31 @@ export async function collectHypAwareStatus(opts = {}) {
         const names = routingOverrides.join(', ')
         const many = routingOverrides.length > 1
         const them = many ? 'them' : 'it'
+        // What is lost, named by signal. Attach turns on two exporters and a
+        // per-signal key only outranks its own: a shell exporting nothing but
+        // `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to a Prometheus collector - an
+        // ordinary setup - loses the token and cost counters while every
+        // prompt and response still reaches the listener. Telling that user on
+        // every `hyp status` run that none of their telemetry is captured is
+        // the same standing false alarm the headers split just below exists to
+        // avoid, one list entry over.
+        const signals = new Set(routingOverrides.map(otlpOverrideSignal))
+        const lost = signals.has('logs') && signals.has('metrics')
+          ? 'none of it is captured'
+          : signals.has('logs')
+            ? 'none of its log records are captured, the prompt and response text ' +
+              'this attach turns on included (its metrics are unaffected)'
+            : 'none of its token and cost metrics are captured (its log records, ' +
+              'and the prompt and response text with them, are unaffected)'
         diagnostics.push({
           severity: 'warning',
           kind: 'client_telemetry_env_override',
           message:
             names + (many ? ' are' : ' is') + " set in this shell's environment and " +
-            (many ? 'outrank' : 'outranks') + ' the telemetry endpoint ' + clientName +
-            ' was attached to - a ' + clientName + ' session launched from a shell carrying ' +
-            them + ' exports its telemetry there instead, or nowhere at all if the value is ' +
-            'empty, and none of it is captured',
+            (many ? 'outrank' : 'outranks') + ' the telemetry settings ' + clientName +
+            ' was attached with - a ' + clientName + ' session launched from a shell carrying ' +
+            them + ' sends that traffic somewhere else, or nowhere at all if the value is ' +
+            'empty, and ' + lost,
           // One `unset` with space-separated names, not the comma-joined list
           // in the message: `unset A, B` exits 0 in bash and unsets only `B`,
           // so a comma here would hand the user a repair that reports success

@@ -92,3 +92,25 @@ export function perSignalOtlpOverrides(env) {
 export function isOtlpHeadersOverride(key) {
   return key.endsWith('_HEADERS')
 }
+
+/**
+ * The signal a key from {@link OTLP_PER_SIGNAL_OVERRIDE_KEYS} governs, or
+ * `undefined` for the general key that governs both.
+ *
+ * Naming the signal is what keeps the warning true. Attach turns on the logs
+ * and the metrics exporter, and the two carry different things: the log
+ * records hold the prompt, response and tool text, the metrics hold the token
+ * and cost counters. A user exporting only `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+ * to their own collector - an ordinary setup - loses the counters and keeps
+ * every prompt, so a line telling them nothing at all is captured is the same
+ * standing false alarm the headers split exists to avoid, one list entry over.
+ *
+ * @ref LLP 0271#the-key-list [implements]: the list covers exactly the two signals attach turns on, and a warning names the one it is about
+ * @param {string} key
+ * @returns {'logs' | 'metrics' | undefined}
+ */
+export function otlpOverrideSignal(key) {
+  if (key.includes('_LOGS_')) return 'logs'
+  if (key.includes('_METRICS_')) return 'metrics'
+  return undefined
+}

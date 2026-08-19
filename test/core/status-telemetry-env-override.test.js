@@ -261,9 +261,51 @@ test('a headers key is reported as a credential leak, not as lost capture', asyn
   }
 })
 
+// The false alarm one list entry over from the headers one. A per-signal key
+// outranks only its own signal, and attach turns on two exporters: a shell
+// exporting nothing but `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to a collector -
+// an ordinary setup - loses the token and cost counters while every prompt and
+// response still reaches the listener. A blanket "none of it is captured" on
+// every `hyp status` run is exactly what teaches a user to skip the line.
+// @ref LLP 0271#the-key-list [tests]
+test('a single-signal override names the signal instead of claiming total loss', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const home = await makeClientHome()
+  try {
+    writeDaemon(stateRoot)
+    const metricsOnly = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://collector.corp:4318',
+    }))
+    const metrics = metricsOnly.diagnostics.find((d) => d.kind === 'client_telemetry_env_override')
+    assert.ok(metrics, 'expected a client_telemetry_env_override diagnostic')
+    assert.match(metrics.message, /metrics are captured/)
+    assert.doesNotMatch(metrics.message, /none of it is captured/)
+
+    const logsOnly = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318',
+    }))
+    const logs = logsOnly.diagnostics.find((d) => d.kind === 'client_telemetry_env_override')
+    assert.ok(logs, 'expected a client_telemetry_env_override diagnostic')
+    assert.match(logs.message, /log records are captured/)
+    assert.doesNotMatch(logs.message, /none of it is captured/)
+
+    // Both signals overridden is the one case where the blanket claim is true.
+    const both = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: '',
+    }))
+    const all = both.diagnostics.find((d) => d.kind === 'client_telemetry_env_override')
+    assert.ok(all, 'expected a client_telemetry_env_override diagnostic')
+    assert.match(all.message, /none of it is captured/)
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
 // Both hazards at once are two findings, because they have two different
 // consequences and two different sentences. The routing one must keep its
-// "none of it is captured" claim; the headers one must not acquire it.
+// lost-capture claim, scoped to the signal it is about; the headers one must
+// not acquire it.
 test('a routing key and a headers key are reported apart', async () => {
   const { hypHome, stateRoot } = await makeHome()
   const home = await makeClientHome()
@@ -278,9 +320,9 @@ test('a routing key and a headers key are reported apart', async () => {
     const routing = found.find((d) => d.message.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
     const headers = found.find((d) => d.message.includes('OTEL_EXPORTER_OTLP_HEADERS'))
     assert.ok(routing && headers)
-    assert.match(routing.message, /none of it is captured/)
+    assert.match(routing.message, /log records are captured/)
     assert.doesNotMatch(routing.message, /OTEL_EXPORTER_OTLP_HEADERS/)
-    assert.doesNotMatch(headers.message, /none of it is captured/)
+    assert.doesNotMatch(headers.message, /is captured/)
   } finally {
     await cleanup(hypHome, home)
   }

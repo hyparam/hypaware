@@ -108,6 +108,15 @@ carry a collector's credential, and it would now ride requests aimed at a
 loopback listener that never asked for it. The per-signal ones outrank the
 general one, so all three belong.
 
+**A warning names the signal it is about.** The same false-alarm argument that
+splits the headers keys off applies one entry over: a per-signal key outranks
+only its own signal, and the two carry different things. A shell exporting
+nothing but `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to a collector, an ordinary
+setup, loses the token and cost counters while every prompt and response still
+reaches the listener, so a blanket "none of it is captured" is false for that
+user on every `hyp status` run. Both surfaces name the signal, and only an
+override of both signals gets the blanket claim.
+
 **Traces are deliberately absent.** Attach turns on the logs and metrics
 exporters and nothing else (LLP 0258 #env-keys), so
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` redirects nothing HypAware captures.
