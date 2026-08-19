@@ -297,11 +297,21 @@ function extractRefs(relPath, text) {
 }
 
 /**
+ * The index, not the working tree, is what `git ls-files` answers from, so a
+ * tracked path can be absent from disk while a rename or a rebase is half
+ * applied. That is a transient state of the developer's tree and not a hygiene
+ * result, so it is filtered out here: reading it would throw ENOENT at module
+ * load and the gate would report nothing at all rather than report that the
+ * annotations are fine.
+ *
  * @returns {string[]} repo-relative paths of the tracked files worth scanning
  */
 function trackedFiles() {
   const out = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
-  return out.split('\0').filter(f => f !== '' && SCANNED_EXTENSIONS.has(path.extname(f)))
+  return out
+    .split('\0')
+    .filter(f => f !== '' && SCANNED_EXTENSIONS.has(path.extname(f)))
+    .filter(f => fs.existsSync(path.join(REPO_ROOT, f)))
 }
 
 /**
