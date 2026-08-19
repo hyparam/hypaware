@@ -333,27 +333,29 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
   `~/.hyp/hypaware/tls`, readable only by you, and name-constrained so it
   cannot vouch for any host outside the provider set HypAware intercepts.
   Trust stays file-scoped to the proxied client's own settings: nothing
-  installs it into a system trust store, and anything wider is your own
-  decision. Earlier releases attached Claude Code by proxy and did add the
-  CA to the macOS **login keychain** as a user-domain trusted root, for a
-  transport that trusts only the keychain; macOS raised its own password
-  dialog for that, it never needed admin rights, and the machine-wide system
-  keychain was never touched. If you ran one of those releases, that trust
-  setting is still on your account until you remove it. `hyp status` shows
+  installs it into any OS trust store, including your login keychain, and
+  anything wider is your own decision. Earlier releases attached Claude
+  Code by proxy and did add the CA to the macOS **login keychain** as a
+  user-domain trusted root, for a transport that trusts only the keychain;
+  macOS raised its own password dialog for that, it never needed admin
+  rights, and the machine-wide system keychain was never touched. If you
+  ran one of those releases, that trust setting is still on your account
+  until you remove it. `hyp status` shows
   the fingerprint, every host the CA is permitted to vouch for, and whether
   the login keychain still trusts it. `hyp detach <client>` leaves the CA
   and any trust an earlier release was granted in place, because a detach is
   not a statement about the certificate and no attach re-creates the grant;
   `hyp detach <client> --purge` and `hyp daemon uninstall` remove both.
-- **On macOS, a proxy attach also leaves a login-session variable behind.**
-  Bun picks its trust store before any settings file is read, so a keychain
-  root only counts if `NODE_USE_SYSTEM_CA=1` is already in the process
-  environment. The attach that trusted the CA therefore ran `launchctl
-  setenv NODE_USE_SYSTEM_CA 1` and installed a small LaunchAgent,
+- **On macOS, an earlier proxy attach also left a login-session variable
+  behind.** Bun picks its trust store before any settings file is read, so a
+  keychain root only counts if `NODE_USE_SYSTEM_CA=1` is already in the
+  process environment. The attach that trusted the CA therefore ran
+  `launchctl setenv NODE_USE_SYSTEM_CA 1` and installed a small LaunchAgent,
   `~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist`,
-  whose only job is to re-run that command at each login. It stays a login
-  item on your machine until it is removed, and it is a session-wide
-  variable that other Node programs read too. `launchctl setenv` reaches
+  whose only job is to re-run that command at each login. No attach writes
+  either one today; on a machine that ran one of those releases the agent
+  stays a login item until it is removed, and the variable stays session-wide
+  for other Node programs to read too. `launchctl setenv` reaches
   processes launched after it, so a terminal app that was already running
   must be fully quit and reopened. `hyp detach <client>` unsets the
   variable and removes the agent, as do `hyp detach <client> --purge` and
