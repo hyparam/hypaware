@@ -1,4 +1,4 @@
-# LLP 0282: `is_sidechain` is three-valued, and the Claude live producers never write `false`
+# LLP 0285: `is_sidechain` is three-valued, and the Claude live producers never write `false`
 
 **Type:** Issue
 **Status:** Draft
