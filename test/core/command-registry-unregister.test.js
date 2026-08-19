@@ -144,7 +144,11 @@ test('unregister retracts a core verb command projected before the kernel booted
   assert.ok(registry.get('query sql'))
   assert.ok(runtime.verbs.getByTool('query_sql'))
 
-  runtime.verbs.unregister('query sql')
+  // Reached exactly the way a host reaches it: `VerbRegistry.unregister`
+  // is optional in the published contract, so the caller feature-detects
+  // rather than assumes. The assertions below still prove the call ran.
+  assert.equal(typeof runtime.verbs.unregister, 'function')
+  runtime.verbs.unregister?.('query sql')
 
   assert.equal(runtime.verbs.getByTool('query_sql'), undefined)
   assert.equal(registry.get('query sql'), undefined)

@@ -140,6 +140,24 @@ test('a verb registry without a command registry unregisters cleanly', () => {
   assert.equal(verbs.getByTool('demo_verb'), undefined)
 })
 
+test('a command registry that predates unregister degrades, never throws', () => {
+  // `CommandRegistry.unregister` is optional in the published contract, so
+  // an injected registry may not have it. Retraction has to tolerate that
+  // (a throw here takes daemon boot down) while still releasing the verb.
+  /** @type {any} */
+  const legacy = createCommandRegistry()
+  delete legacy.unregister
+  const verbs = createVerbRegistry({ commandRegistry: legacy })
+  verbs.register(makeVerb())
+  assert.ok(legacy.get('demo verb'))
+  assert.doesNotThrow(() => verbs.unregister('demo verb'))
+  assert.equal(verbs.get('demo verb'), undefined)
+  assert.equal(verbs.getByTool('demo_verb'), undefined)
+  // The stale CLI command is the one thing left behind, which is exactly
+  // what the warn on that branch reports.
+  assert.ok(legacy.get('demo verb'))
+})
+
 test('unregister retracts a projection a different registry made over the same command registry', () => {
   // A runtime re-created over a shared command registry: the second
   // registry's own projection is skipped because the name is taken, but

@@ -24,6 +24,7 @@
  *   match: (argv: string[]) => { command: CommandRegistration, prefixLength: number, rest: string[] } | undefined,
  *   has: (name: string) => boolean,
  *   size: () => number,
+ *   unregister: (name: string) => void,
  * }}
  * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */

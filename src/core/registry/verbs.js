@@ -1,6 +1,7 @@
 // @ts-check
 
 import { isVerbProjection, verbToCommand } from '../cli/verb_command.js'
+import { Attr, getLogger } from '../observability/index.js'
 
 /**
  * @import { CommandRegistry, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -16,7 +17,7 @@ import { isVerbProjection, verbToCommand } from '../cli/verb_command.js'
  * core change.
  *
  * @param {{ commandRegistry?: CommandRegistry }} [opts]
- * @returns {VerbRegistry}
+ * @returns {VerbRegistry & { unregister: (name: string) => void }}
  * @ref LLP 0034#tool-exposure-emergent [implements]: no central tool gate; the surface is exactly the verbs active plugins register
  */
 export function createVerbRegistry(opts = {}) {
@@ -146,11 +147,37 @@ function commandAlreadyRegistered(registry, name) {
  * `has`: the verb is still released from both maps, the stale CLI command
  * is the only thing left behind.
  *
+ * Both tolerated branches warn. The caller's prescribed success check is
+ * `getByTool`, which the map deletion already satisfies, so a half
+ * retraction reads as a win while `hyp <verb>` keeps routing at the run
+ * closure of the verb the host just displaced. That is the silent
+ * local-cache regression LLP 0264 §verb warns about, so it has to name
+ * itself in the logs rather than only show up as a wrong answer.
+ *
  * @param {CommandRegistry | undefined} registry
  * @param {string} name
  */
 function retractCommand(registry, name) {
-  if (!registry || typeof registry.unregister !== 'function') return
-  if (!isVerbProjection(registry.get(name))) return
+  if (!registry) return
+  if (typeof registry.unregister !== 'function') {
+    getLogger('verb-registry').warn('verb.retract.unsupported', {
+      [Attr.OPERATION]: 'verb.unregister',
+      [Attr.STATUS]: 'degraded',
+      [Attr.ERROR_KIND]: 'registry_without_unregister',
+      verb_name: name,
+    })
+    return
+  }
+  const command = registry.get(name)
+  if (command === undefined) return
+  if (!isVerbProjection(command)) {
+    getLogger('verb-registry').warn('verb.retract.not_a_projection', {
+      [Attr.OPERATION]: 'verb.unregister',
+      [Attr.STATUS]: 'degraded',
+      [Attr.ERROR_KIND]: 'command_not_verb_projection',
+      verb_name: name,
+    })
+    return
+  }
   registry.unregister(name)
 }
