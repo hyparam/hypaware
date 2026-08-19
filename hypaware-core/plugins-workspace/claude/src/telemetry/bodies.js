@@ -52,7 +52,10 @@ const GAP_BLOCK_TYPES = new Set([
  *
  * A file that fails to parse is deleted immediately and counted: the
  * same session is recoverable from transcript backfill, and an
- * undeleted body is a raw prompt sitting on disk.
+ * undeleted body is a raw prompt sitting on disk. Its size is reported
+ * alongside the count, because a deletion the caller cannot size leaves
+ * the published `spool_bytes` gauge high until the next sweep restates
+ * it - reporting bytes for content that is already off the disk.
  * @ref LLP 0252#project-then-delete [implements]: an unprojectable body is
  *   deleted and counted, not retried forever
  *
@@ -64,6 +67,7 @@ const GAP_BLOCK_TYPES = new Set([
  *   consumedBytes: number,
  *   missing: number,
  *   unparseable: number,
+ *   unparseableBytes: number,
  *   refused: string[],
  * }>}
  */
@@ -75,6 +79,7 @@ export async function loadSpooledBodies(events, opts) {
   let consumedBytes = 0
   let missing = 0
   let unparseable = 0
+  let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
 
@@ -103,7 +108,26 @@ export async function loadSpooledBodies(events, opts) {
     const body = parseMaybeJson(raw.toString('utf8'))
     if (!isPlainObject(body)) {
       unparseable += 1
-      await fs.rm(file, { force: true }).catch(() => {})
+      try {
+        // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
+        // for a path that is already gone, and the bytes below are only ours to
+        // report if this call is the one that took the file off the disk. Two
+        // reads of the same `body_ref` can be in flight at once (the handler is
+        // not serialized, so an exporter retry overlaps the original it is
+        // retrying), and a forced remove would let both subtract those bytes.
+        await fs.unlink(file)
+        // Sized only once the file is gone: one that is still there (EPERM, a
+        // read-only spool) is still spooled, so subtracting its bytes would
+        // publish a spool smaller than the one the next sweep finds.
+        // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
+        //   the spool's current size, so a deletion only the reader can see has
+        //   to be sized for the caller
+        unparseableBytes += raw.length
+      } catch {
+        // Already gone, or not removable at all: either way this batch has no
+        // byte movement to report, and the content is recoverable from
+        // transcript backfill.
+      }
       continue
     }
     bodies.set(ref, {
@@ -115,7 +139,7 @@ export async function loadSpooledBodies(events, opts) {
     consumedBytes += raw.length
   }
 
-  return { bodies, consumedFiles, consumedBytes, missing, unparseable, refused }
+  return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }
 }
 
 /**
