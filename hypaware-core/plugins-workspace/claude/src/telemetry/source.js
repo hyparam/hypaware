@@ -15,7 +15,7 @@ import {
   claudeTelemetryEventRows,
   claudeTelemetryTablePath,
 } from './events_dataset.js'
-import { projectClaudeTelemetryEvents } from './projection.js'
+import { projectClaudeTelemetryEvents, restoreUnclaimedUsage } from './projection.js'
 import {
   DEFAULT_SPOOL_MAX_BYTES,
   claudeBodySpoolDir,
@@ -693,12 +693,10 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           // `attributes.usage` and no `claude.cost_usd` - a permanent hole in
           // exactly the batch that already failed once. Put back only what this
           // batch consumed: entries it newly remembered are left alone, so an
-          // `api_request` whose response has not arrived yet still waits here.
-          // @ref LLP 0257#failure-modes [implements]: S18 - a retried batch is
-          //   re-projected from the same inputs, so its inputs have to survive
-          for (const [requestId, usage] of usageBeforeProjection) {
-            if (!usageByRequestId.has(requestId)) usageByRequestId.set(requestId, usage)
-          }
+          // `api_request` whose response has not arrived yet still waits here,
+          // and the restore re-applies the index cap, which the snapshot would
+          // otherwise reopen for as long as the outage lasts.
+          restoreUnclaimedUsage(usageByRequestId, usageBeforeProjection)
           state.lastError = err instanceof Error ? err.message : String(err)
           span.setAttribute('error_kind', 'dataset_write')
           span.setAttribute('row_count', rowsWritten)

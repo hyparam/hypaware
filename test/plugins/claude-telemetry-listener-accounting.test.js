@@ -150,8 +150,6 @@ async function startListener(opts = {}) {
 // the retry of that batch re-projected against a drained index. The rows landed
 // with no `attributes.usage` and no `claude.cost_usd`, permanently, in exactly
 // the batch that had already failed once.
-// @ref LLP 0257#failure-modes [tests]: S18 - a retried batch is re-projected
-//   from the same inputs, so its inputs have to survive the failure
 test('usage from an earlier batch survives a failed write and lands on the retry', async () => {
   /** @type {any[]} */
   const seen = []
