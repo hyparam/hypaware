@@ -648,6 +648,10 @@ async function goldenPickerConfig(hypHome) {
           { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
           { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
         ],
+        // No `proxy_mode`: no bundled picker row declares proxy attach since
+        // the claude client went otel-only, so the wizard composes a gateway
+        // that mints no CA.
+        // @ref LLP 0262#requirements [tests]: R5 - a composed claude install needs no CA and no keychain trust
       },
     },
     {

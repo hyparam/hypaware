@@ -87,6 +87,11 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
     assert.ok(text.includes(`ca fingerprint: ${ca.fingerprint}`), 'the fingerprint is on the text surface')
     assert.match(text, /login keychain: trusted\n/)
     assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA=1 set\n/)
+    // Both are residue on an otel-attached machine: nothing installs them any
+    // more, so the block names the one command that acts on what it reports.
+    assert.match(text, /note: {11}only proxy_mode capture uses this CA/)
+    assert.match(text, /hyp client detach claude --purge/)
+    assert.doesNotMatch(text, /hyp client attach claude/)
 
     const json = renderStatusJson({
       report,
@@ -192,8 +197,11 @@ test('a permitted host carrying terminal control bytes cannot repaint hyp status
 
 // The state this exists for: the dialog was cancelled, or a re-mint stranded
 // the trust. Capture keeps working, so nothing else in the report degrades and
-// only this line can say so.
-test('a CA the keychain does not trust is stated, with the repair, on both surfaces', async () => {
+// only this line can say so. Since LLP 0262 no attach installs either
+// mechanism, so neither line may name `hyp client attach claude` as the repair: the
+// only command that acts on what this block reports is the purge.
+// @ref LLP 0262#migration [tests]: the trust block names the purge, never an attach that would not touch the keychain
+test('a CA the keychain does not trust is stated, without an attach that cannot fix it', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
     const ca = await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
@@ -206,8 +214,10 @@ test('a CA the keychain does not trust is stated, with the repair, on both surfa
 
     const text = renderText(report, path.join(stateRoot, 'cache'))
     assert.ok(text.includes(`ca fingerprint: ${ca.fingerprint}`))
-    assert.match(text, /login keychain: not trusted - .*hyp client attach claude/)
-    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set - .*hyp client attach claude/)
+    assert.match(text, /login keychain: not trusted\n/)
+    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set\n/)
+    assert.doesNotMatch(text, /hyp client attach claude/, 'attach installs neither mechanism now')
+    assert.match(text, /hyp client detach claude --purge/)
     // The report is still healthy: capture works without keychain trust
     // (LLP 0237#attach-anyway-on-refusal), which is exactly why the line has
     // to exist.

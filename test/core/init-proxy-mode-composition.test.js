@@ -18,8 +18,14 @@ import { compileConfig } from '../../hypaware-core/plugins-workspace/ai-gateway/
 import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
 
 /**
- * @ref LLP 0262#injection [tests]: Claude's sanctioned OTEL attach does not
- * require gateway proxy mode, so no picker combination silently mints a CA.
+ * LLP 0243's composition rule is unchanged: a picker row that declares
+ * `compose.gateway_proxy_mode` turns the composed gateway into a proxy-mode
+ * gateway. What changed with LLP 0262 is who declares it. The claude row
+ * dropped the flag when its attach became otel-only, and no bundled row
+ * carries it now, so no config-writing install path mints a CA the install
+ * will never present.
+ *
+ * @ref LLP 0262#injection [tests]: Claude's sanctioned OTEL attach does not require gateway proxy mode, so no picker combination silently mints a CA
  */
 
 /** @returns {Promise<Map<string, PickerDescriptor>>} */
@@ -58,8 +64,41 @@ test('the picker fold leaves gateway proxy mode off for every client combination
     ['hermes'],
   ]) {
     const slice = gatewaySlice(compose(/** @type {PickerSource[]} */ (sources)))
+    assert.ok(!('proxy_mode' in slice), `picker(${sources.join('+')}) writes no proxy_mode key`)
     assert.equal(compileConfig(slice).proxyMode, false, `picker(${sources.join('+')})`)
   }
+})
+
+// The rule itself, still generic for any client captured by the proxy: a row
+// that declares the flag composes the key, which is the half of LLP 0243 that
+// LLP 0262 leaves standing.
+// @ref LLP 0243#composed-default [tests]: a declaring row still turns the composed gateway into a proxy-mode gateway
+test('a picker row that declares gateway_proxy_mode still composes the key', async () => {
+  const descriptors = await realPickerDescriptors()
+  /** @type {any} */
+  const proxyRow = {
+    id: 'proxyclient',
+    label: 'Proxy Client',
+    plugin: '@acme/proxy-client',
+    compose: {
+      plugin: { name: '@acme/proxy-client' },
+      requires_gateway: true,
+      gateway_proxy_mode: true,
+    },
+  }
+  const withRow = new Map(descriptors)
+  withRow.set('proxyclient', proxyRow)
+
+  const composed = composePickerConfig({
+    sources: /** @type {PickerSource[]} */ (/** @type {unknown} */ (['proxyclient'])),
+    descriptors: withRow,
+    exportChoice: 'local-parquet',
+    retentionDays: 30,
+    hypHome: '/home/tester/.hyp',
+  })
+  const slice = gatewaySlice(composed)
+  assert.equal(slice.proxy_mode, true)
+  assert.equal(compileConfig(slice).proxyMode, true)
 })
 
 test('the claude-and-otel-local preset omits proxy_mode', async () => {

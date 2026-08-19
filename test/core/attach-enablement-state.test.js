@@ -279,6 +279,9 @@ test('a registered client still attaches unchanged', async () => {
     const { ctx, stderr } = makeCtx({ home, registered: ['claude'] })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 0, stderr.text())
+    // Silent: the claude row stopped declaring proxy attach with LLP 0262, so
+    // the LLP 0244 migration pointer no longer rides along, and an attach that
+    // enables nothing has nothing to say on stderr.
     assert.equal(stderr.text(), '')
   })
 })

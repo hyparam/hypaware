@@ -901,6 +901,13 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * config write is still the repair the gateway's own stale-CA warning asks
  * for.
  *
+ * No bundled picker row declares `gateway_proxy_mode` since LLP 0262: the
+ * `claude` row was the only one, and dropped it when its attach became
+ * otel-only. The rule stays generic for any client still captured by the
+ * proxy (LLP 0243's composition rule is unchanged); what it must never do is
+ * fire for a client whose attach repoints no base URL, because every clause
+ * of the question below would then be false.
+ *
  * Never throws into the attach: the caller downgrades any escape to a
  * warning, because base-URL attach is what this install already does and
  * remains the working fallback.

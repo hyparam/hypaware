@@ -157,10 +157,14 @@ export async function run({ harness, expect }) {
       }
     )
     expect.that('dispatch: hyp client attach claude exited 0', attachCode, (v) => v === 0)
+    // Silent stderr: the claude row stopped declaring proxy attach when the
+    // client went otel-only, so there is no migration to point a scripted
+    // attach at, and the LLP 0244 pointer is gone with it.
+    // @ref LLP 0262#migration [tests]: an otel attach offers no proxy-mode switch, in any shape
     expect.that(
-      'stderr: hyp client attach had no errors',
+      'stderr: hyp client attach had no errors and no proxy-mode note',
       attachStderr.text(),
-      (v) => typeof v === 'string' && v.length === 0
+      (v) => v === ''
     )
     expect.that(
       'stdout: hyp client attach printed the settings path',

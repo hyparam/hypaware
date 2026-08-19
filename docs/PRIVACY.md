@@ -69,17 +69,14 @@ outside the provider set HypAware's client adapters intercept (today
 `api.anthropic.com`, `api.openai.com`, `chatgpt.com`). All IP addresses are
 excluded.
 
-**Where it is trusted.** On macOS, attach installs the CA into your **login
-keychain** as a user-domain trusted root, because Claude Code's Remote
-Control transport trusts only the keychain and nothing else. This does
-change your account's certificate trust settings, which is why macOS itself
-raises the password dialog: an application running as you that consults the
-login keychain will accept certificates this CA signs, for those hosts.
-Declining the dialog is supported and capture keeps working without it, with
-only Remote Control's inbound channel lost. The change never needs admin
-rights, and the machine-wide system keychain and other user accounts are
-never modified. On other platforms the CA is trusted only by Claude Code,
-through that client's own settings.
+**Where it is trusted.** Nothing installs this CA into a system trust store
+any more. A proxied client trusts it through that client's own settings, and
+you decide anything wider yourself. Earlier releases attached Claude Code by
+proxy and did add the CA to your macOS **login keychain** as a user-domain
+trusted root (macOS raised its own password dialog for it); if you ran one of
+those, that trust setting is still on your account until you remove it, and
+`hyp status` says so. It never needed admin rights, and the machine-wide
+system keychain and other user accounts were never modified.
 
 **What else macOS attach leaves behind.** The keychain root only takes
 effect if `NODE_USE_SYSTEM_CA=1` is in the environment before Claude Code
