@@ -1,4 +1,4 @@
-# LLP 0265: `hyp query status` has no remote form
+# LLP 0273: `hyp query status` has no remote form
 
 **Type:** Decision
 **Status:** Accepted
@@ -95,8 +95,10 @@ caller's actual question ("what does that host have?") has somewhere to go.
   asymmetry is itself a hazard for agents reading skill docs, so both
   `hypaware-query` SKILL.md copies state the old behavior explicitly rather
   than only the new rule.
-- The `hyp query status` usage string is unchanged: the flag was never
-  documented as supported, so there is nothing to withdraw.
+- The `hyp query status` usage string is unchanged, but the `hyp query`
+  group help is not: it told the reader that `status` "ignore[s] --remote",
+  which this change makes false. The help now names the refusal, so the CLI
+  does not document the behavior it immediately contradicts.
 - The rule now has two named instances (`--refresh`, `status`). A third should
   extend this doc's list rather than re-deriving the principle.
 
