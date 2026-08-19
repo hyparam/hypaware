@@ -5,6 +5,7 @@
 **Systems:** Onboarding, CLI, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
+**Extended-by:** [LLP 0276](./0276-hidden-rows-stay-off-the-sync-gate.decision.md) (§hidden-rows below: "absent from the interactive menu and from the defaults gate" widens to every wizard screen - the sync gate's locked rows go through the same display filter; §consequences' "the sync/opt-out menu is unchanged" is superseded, having been written before the locked rows were added to that gate)
 **Related:** LLP 0130 (#picker-block: the manifest-sourced row contract this extends), LLP 0012 (#source-kinds: the raw proxy source class), LLP 0183 (#seed-from-config: the read-back this has to stay compatible with), LLP 0192 (#fail-closed: what the ids are load-bearing for), LLP 0190 (#pick-gate: the two screens a hidden row must stay out of)
 
 > Extends [LLP 0130 §picker-block](./0130-declarative-picker-descriptors.decision.md#picker-block)
@@ -122,6 +123,12 @@ against LLP 0192's deferred decision.
   them, they simply do not render.
 - The sync/opt-out menu is unchanged. It governs data classes already on
   disk, which exist whether or not a row was ever offered.
+
+  > **Superseded-by: [LLP 0276](./0276-hidden-rows-stay-off-the-sync-gate.decision.md).**
+  > True of the opt-out *candidates*, which have always been locked-filtered,
+  > but not of the gate: PR #629 had already given the sync lane a locked-row
+  > header, and after this doc those rows are exactly the hidden ones. They
+  > now go through `visiblePickerDescriptors` too.
 
 ## References
 
