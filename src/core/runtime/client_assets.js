@@ -374,7 +374,7 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
   // So the digests are indexed by dest and asked as a set. This adds no
   // evidence the ledger did not already hold and re-records none - a path with
   // no recorded digest at all still fails the gate, exactly as before.
-  // @ref LLP 0278#digests-are-per-path [implements]: the evidence gate matches
+  // @ref LLP 0284#digests-are-per-path [implements]: the evidence gate matches
   //   the bytes against every digest recorded for that path, not only against
   //   the record whose client this pass happens to be walking.
   /** @type {Map<string, Set<string>>} */

@@ -1,4 +1,4 @@
-# LLP 0278: a recorded digest is evidence about a path, not about one client's record of it
+# LLP 0284: a recorded digest is evidence about a path, not about one client's record of it
 
 **Type:** Decision
 **Status:** Accepted
