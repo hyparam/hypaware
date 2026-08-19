@@ -25,6 +25,12 @@ export function createVerbRegistry(opts = {}) {
   const byName = new Map()
   /** @type {Map<string, VerbRegistration>} */
   const byTool = new Map()
+  // Verb names whose CLI command *this* registry projected. `register`
+  // skips projection when a command already occupies the name, so the
+  // set is what tells retraction apart from deleting somebody else's
+  // command of the same name.
+  /** @type {Set<string>} */
+  const projected = new Set()
 
   return {
     register(verb) {
@@ -42,7 +48,22 @@ export function createVerbRegistry(opts = {}) {
       // a verb whose name a command already occupies) must not double-register.
       if (commandRegistry && !commandAlreadyRegistered(commandRegistry, verb.name)) {
         commandRegistry.register(verbToCommand(verb))
+        projected.add(verb.name)
       }
+    },
+    // Release a claimed verb name: both maps, plus the CLI command the
+    // registration projected (and only that one). By-name, idempotent,
+    // and a no-op on an unknown name, because the caller that needs it
+    // feature-detects it at daemon boot and re-checks `getByTool` after:
+    // a throw here would take boot down, and a half-removal would leave
+    // the tool slot held and the caller silently degraded.
+    // @ref LLP 0264#verb [implements]: a server host displaces the kernel-shipped twin by taking the name back, so archive-backed grep_search keeps the tool slot
+    unregister(name) {
+      const verb = byName.get(name)
+      if (!verb) return
+      byName.delete(name)
+      if (byTool.get(verb.tool) === verb) byTool.delete(verb.tool)
+      if (projected.delete(name)) retractCommand(commandRegistry, name)
     },
     get(name) {
       return byName.get(name)
@@ -113,4 +134,17 @@ function validateVerb(verb) {
 function commandAlreadyRegistered(registry, name) {
   if (typeof registry.has === 'function') return registry.has(name)
   return registry.get(name) !== undefined
+}
+
+/**
+ * Retract a projected command. Tolerates a command registry that predates
+ * `unregister`, the same way {@link commandAlreadyRegistered} tolerates one
+ * without `has`: the verb is still released from both maps, the stale CLI
+ * command is the only thing left behind.
+ *
+ * @param {CommandRegistry | undefined} registry
+ * @param {string} name
+ */
+function retractCommand(registry, name) {
+  if (registry && typeof registry.unregister === 'function') registry.unregister(name)
 }

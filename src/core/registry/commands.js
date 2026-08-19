@@ -76,6 +76,30 @@ export function createCommandRegistry() {
   }
 
   /**
+   * Release a registered command name. Accepts whatever `get` accepts
+   * (the primary name or one of its aliases) and removes the command
+   * along with **every** alias pointing at it: an alias left behind
+   * would keep the name unclaimable and route argv at a command that is
+   * no longer registered.
+   *
+   * By-name, idempotent, and total on an unknown name, because the one
+   * caller that needs it is `VerbRegistry.unregister` retracting the CLI
+   * command a verb projected, and that call must never be the thing that
+   * takes daemon boot down.
+   *
+   * @param {string} name
+   * @ref LLP 0264#verb [implements]: a verb name claimed on two surfaces has to be releasable on both
+   */
+  function unregister(name) {
+    const primary = byName.has(name) ? name : aliasIndex.get(name)
+    if (primary === undefined || !byName.has(primary)) return
+    byName.delete(primary)
+    for (const [alias, target] of aliasIndex) {
+      if (target === primary) aliasIndex.delete(alias)
+    }
+  }
+
+  /**
    * Describe a command *group* (`graph`, `query`) without registering a
    * command for it. A core group gets its header and paragraph from the
    * bare command `makeGroupCommand` builds; a plugin namespace has no bare
@@ -153,5 +177,5 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, registerGroup, get, getGroup, list, has, size, match }
+  return { register, registerGroup, unregister, get, getGroup, list, has, size, match }
 }

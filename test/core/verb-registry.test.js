@@ -75,3 +75,67 @@ test('validation rejects malformed verbs', () => {
   assert.throws(() => verbs.register(makeVerb({ operation: undefined })), /operation\(\) is required/)
   assert.throws(() => verbs.register(makeVerb({ exposure: 'nonsense' })), /unknown exposure/)
 })
+
+// --- unregister: releasing a claimed name -----------------------------------
+
+test('unregister frees both the name map and the tool map', () => {
+  const verbs = createVerbRegistry({ commandRegistry: createCommandRegistry() })
+  verbs.register(makeVerb())
+  verbs.unregister('demo verb')
+  assert.equal(verbs.get('demo verb'), undefined)
+  // The tool slot is the part the server re-checks before registering its
+  // own implementation: a partial removal would degrade it silently.
+  assert.equal(verbs.getByTool('demo_verb'), undefined)
+  assert.deepEqual(verbs.list().map((v) => v.name), [])
+})
+
+test('a name released by unregister can be claimed again', () => {
+  const commands = createCommandRegistry()
+  const verbs = createVerbRegistry({ commandRegistry: commands })
+  verbs.register(makeVerb())
+  verbs.unregister('demo verb')
+  assert.doesNotThrow(() => verbs.register(makeVerb({ summary: 'the replacement' })))
+  assert.equal(verbs.get('demo verb')?.summary, 'the replacement')
+  // The replacement's command projects too: retraction left the name free.
+  assert.equal(commands.get('demo verb')?.summary, 'the replacement')
+})
+
+test('unregister of an unknown name is a no-op, never a throw', () => {
+  const verbs = createVerbRegistry({ commandRegistry: createCommandRegistry() })
+  verbs.register(makeVerb())
+  assert.doesNotThrow(() => verbs.unregister('no such verb'))
+  // Idempotent: the second removal of a real name is a no-op too.
+  verbs.unregister('demo verb')
+  assert.doesNotThrow(() => verbs.unregister('demo verb'))
+  assert.equal(verbs.get('demo verb'), undefined)
+})
+
+test('unregister retracts the CLI command the registration projected', () => {
+  const commands = createCommandRegistry()
+  const verbs = createVerbRegistry({ commandRegistry: commands })
+  verbs.register(makeVerb())
+  assert.ok(commands.get('demo verb'))
+  verbs.unregister('demo verb')
+  assert.equal(commands.get('demo verb'), undefined)
+  assert.equal(commands.has('demo verb'), false)
+  assert.deepEqual(commands.list().map((c) => c.name), [])
+})
+
+test('unregister leaves a same-named command the registration did not project', () => {
+  const commands = createCommandRegistry()
+  commands.register({ name: 'demo verb', summary: 'pre-existing', usage: 'u', run: async () => 0 })
+  const verbs = createVerbRegistry({ commandRegistry: commands })
+  verbs.register(makeVerb())
+  verbs.unregister('demo verb')
+  assert.equal(verbs.get('demo verb'), undefined)
+  // Projection was skipped for this verb, so retraction must not delete
+  // somebody else's command of the same name.
+  assert.equal(commands.get('demo verb')?.summary, 'pre-existing')
+})
+
+test('a verb registry without a command registry unregisters cleanly', () => {
+  const verbs = createVerbRegistry()
+  verbs.register(makeVerb())
+  assert.doesNotThrow(() => verbs.unregister('demo verb'))
+  assert.equal(verbs.getByTool('demo_verb'), undefined)
+})
