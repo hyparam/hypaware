@@ -50,10 +50,14 @@ shipped on the next sink tick: the one outcome
 **Behavioral rows carry `cwd`. The seam that enforces `local-only` does not
 move.**
 
-- **A nullable `cwd` column** joins `CLAUDE_TELEMETRY_EVENT_COLUMNS`, appended
-  last so the change is additive under
+- **A nullable `cwd` column** joins `CLAUDE_TELEMETRY_EVENT_COLUMNS`, placed
+  with the other typed columns ahead of the `attributes` catch-all. The change
+  is additive under
   [LLP 0029](./0029-additive-cache-schema-evolution.decision.md): existing
-  tables evolve in place and pre-existing rows read `null`.
+  tables evolve in place and pre-existing rows read `null`. Position in the
+  list is presentational, not structural - `mergeFieldIdsFromTable` reconciles
+  by column *name*, so `attributes` keeps its field id and files written before
+  the evolution are still read correctly.
 - **The listener stamps it at ingest** from `pickLatestMatching(records)`,
   the same SessionStart hook record `applyUsagePolicy` resolved that session's
   verdict from. A row is therefore stamped with the cwd it was judged by, and
@@ -96,10 +100,25 @@ provenance, and these prove it with `cwd`.
 
 ## Consequences {#consequences}
 
-- Rows written before this change carry `null` `cwd` and are treated `full`.
-  They are not reclassified: [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals)
-  already says already-passed history is not recalled, and a backfill would
-  have to invent provenance the rows never had.
+- **Rows written before this change carry `null` `cwd` and are treated
+  `full`.** This is a real residual exposure, not a no-op: a machine that
+  accumulated behavioral rows under a `local-only` directory and then enrols
+  will forward that backlog on its first sink tick, because a sink with no
+  durable watermark exports from the beginning. They are still not
+  reclassified. [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals)
+  says already-passed history is not recalled, and a stamping backfill cannot
+  be made honest: the SessionStart hook records are the only source of the
+  `session_id`→`cwd` mapping and that store is deliberately bounded and
+  compacted (`SESSION_CONTEXT_MAX_BYTES` / `SESSION_CONTEXT_MAX_RECORDS`), so
+  it holds a recent tail, not history. A backfill over it would stamp some
+  rows, leave the rest `null`, and read as though the whole table had been
+  audited. The remedy for an operator who needs those rows gone is
+  `hyp purge --session <id>`, which selects on `session_id` (a column these
+  rows do carry) rather than on `cwd`. Note that the directory form,
+  `hyp purge <dir>`, does **not** reach them: `src/core/cache/purge.js` matches
+  the subtree against each row's `cwd`, and theirs is null. Both belong in the
+  release notes, alongside the pre-first-sync privacy review
+  (`hypaware-privacy`).
 - The forwarded payload gains a `cwd` field for this signal, matching the
   field the message signal has always carried.
 - `test/plugins/claude-telemetry-local-only-export.test.js` pins the

@@ -115,8 +115,14 @@ test('a row carries the cwd its ingest verdict was resolved from', () => {
   assert.equal(attrs.cwd, undefined, 'cwd is a typed column, not an attribute the event carried')
 })
 
-test('with no cwd lookup the rows still build, with a null cwd', () => {
-  const rows = claudeTelemetryEventRows([event('tool_decision', LOCAL_ONLY_SESSION, { tool_name: 'Read' })])
+test('a session the lookup holds no record for stamps a null cwd', () => {
+  // Unreachable from the listener: an unknown session is `undetermined` at
+  // the ingest gate and its events are withheld before any row is built.
+  // Pinned anyway because null is the fail-open value at both seams.
+  const rows = claudeTelemetryEventRows(
+    [event('tool_decision', LOCAL_ONLY_SESSION, { tool_name: 'Read' })],
+    { cwdFor: () => undefined }
+  )
   assert.equal(rows.length, 1)
   assert.equal(rows[0].cwd, null)
 })

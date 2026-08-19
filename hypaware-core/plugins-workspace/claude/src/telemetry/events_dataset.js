@@ -89,17 +89,21 @@ export function claudeTelemetryTablePath(storage) {
  *
  * `cwdFor` resolves a session id to the directory the SessionStart hook
  * recorded for it, the same lookup the ingest policy gate decided on. It is
- * optional only so the row shape stays testable in isolation; the listener
- * always supplies it, and a caller that omits it writes rows the export seam
- * treats as `full`.
+ * required rather than optional: a caller that omits it writes rows with a
+ * null `cwd`, which both the export and query seams read as `full`, which is
+ * precisely the leak issue #878 was. Putting it in the signature puts that
+ * mistake in front of the type checker instead of leaving it silent. It may
+ * still answer `undefined` for a session it holds no record for; those events
+ * are withheld at ingest as undetermined, so the listener never reaches here
+ * with one.
  *
  * @ref LLP 0257#failure-modes [implements]: an unrecognized event name is
  *   recorded with its attributes, not discarded
  * @param {ClaudeTelemetryEvent[]} events
- * @param {{ cwdFor?: (sessionId: string) => string | undefined }} [opts]
+ * @param {{ cwdFor: (sessionId: string) => string | undefined }} opts
  * @returns {Record<string, unknown>[]}
  */
-export function claudeTelemetryEventRows(events, opts = {}) {
+export function claudeTelemetryEventRows(events, opts) {
   /** @type {Record<string, unknown>[]} */
   const rows = []
   for (const event of events) {
