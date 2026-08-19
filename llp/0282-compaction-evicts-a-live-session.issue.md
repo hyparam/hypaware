@@ -31,19 +31,21 @@ keep.shift()
 
 Both steps drop by position in an append-only file, so "oldest line" is what
 goes. A session that fires the hook once at `SessionStart` and then reads
-files for an hour has exactly one line, and it sits at the front. A neighbour
-firing `PostToolUse` on every Bash call writes hundreds. At the size the hook
-writes (roughly 400 bytes a record), the effective 512 KiB cap is about 1,300
-hook events, which a Bash-heavy agent reaches in hours, and a mature install
-sits pinned at the cap permanently.
+files for an hour has one or two lines, and they sit at the front. A neighbour
+firing `PostToolUse` on every Bash call writes hundreds. Note the hook writes
+*two* records per event inside a git repo (`hook_command.js` appends a minimal
+cwd-only record first, then an enriched one once the git subprocesses return),
+so at the sizes the hook writes (roughly 300 bytes minimal and 500 enriched)
+the effective 512 KiB cap is about 650 hook events, which a Bash-heavy agent
+reaches in hours, and a mature install sits pinned at the cap permanently.
 
 ## Why
 
 The writer's contract is "keep the file bounded", and position is the only
 ordering an append-only JSONL file offers for free. Nothing in the writer
 knows that the reader's question is per `session_id`, so the one record that
-answers a live session's question is indistinguishable from 1,299 repeats of
-a noisy one.
+answers a live session's question is indistinguishable from the twelve hundred
+odd repeats of a noisy one that fill the cap alongside it.
 
 The consequence is severe because of what the reader is for. Per LLP
 0254 #policy-inline, the hook record is where the ingest path gets `cwd`, and

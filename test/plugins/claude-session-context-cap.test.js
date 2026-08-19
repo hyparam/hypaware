@@ -67,15 +67,20 @@ test('a caller cannot compact wider than the read window', async () => {
 test('the writer keeps no record the reader cannot see', async () => {
   const env = await stageEnv()
   try {
-    // The gap the writer cap alone leaves open: a file bigger than the read
-    // tail but under the module cap is never compacted, so its oldest lines
-    // sit on disk outside every reader's window.
-    const staged = filler(Math.floor((READABLE_WINDOW + SESSION_CONTEXT_MAX_BYTES) / 2))
+    // Stage past the readable window itself, not into the gap between the two
+    // constants. Today those are the same staging: the read tail is half the
+    // module cap, so a file just over the window is also under the cap, which
+    // is exactly the gap the writer cap alone leaves open (never compacted, so
+    // its oldest lines sit on disk outside every reader's window). If the read
+    // window is later widened to meet or pass the writer cap that gap closes,
+    // and staging off `READABLE_WINDOW` keeps exercising the invariant instead
+    // of asserting a precondition that can no longer be satisfied.
+    const staged = filler(READABLE_WINDOW + Math.floor(READABLE_WINDOW / 8))
     await fs.writeFile(env.stateFile, staged, 'utf8')
     const before = await fs.stat(env.stateFile)
     assert.ok(
-      before.size > READABLE_WINDOW && before.size < SESSION_CONTEXT_MAX_BYTES,
-      'precondition: the file sits between the read window and the module cap'
+      before.size > READABLE_WINDOW,
+      'precondition: the file starts out past the readable window'
     )
 
     await appendSessionContext(env.stateFile, record('sess-live', '/workspace/live', 9999))

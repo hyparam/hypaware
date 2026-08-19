@@ -202,9 +202,10 @@ async function readTail(filePath, maxBytes) {
 /**
  * The writer may never keep more of the file than a reader will look at.
  *
- * `appendSessionContext` takes a per-call compaction cap, but the read side
- * has no matching seam: `createSessionContextReader` (the reader the live
- * projector and the telemetry listener use) tail-reads at
+ * `appendSessionContext` takes a per-call compaction cap, and so does
+ * `readSessionContext`, but the reader every production path actually goes
+ * through has no matching seam: `createSessionContextReader` (the live
+ * projector, the backfill, and the telemetry listener) tail-reads at
  * `SESSION_CONTEXT_READ_TAIL_BYTES` and takes no options. So a file kept above
  * that tail carries records no reader ever sees, which is indistinguishable
  * from the hook never having recorded them.
@@ -220,6 +221,14 @@ async function readTail(filePath, maxBytes) {
  * cap, so bytes between the two are retained-but-invisible and dropping them
  * costs no reader anything; if the read window is later widened to follow the
  * writer cap, this `Math.min` reverts to the writer cap on its own.
+ *
+ * Note the narrowing is one-way on upgrade. No production caller passes
+ * `maxBytes`, so the effective cap drops from `SESSION_CONTEXT_MAX_BYTES` to
+ * the read tail, and the first hook append on an install whose file already
+ * sits between the two rewrites it down permanently. Nothing reachable is
+ * lost, because no reader could see those bytes before either, but the
+ * invariant is closed by dropping the unreadable bytes rather than by
+ * widening the window that would have made them readable.
  *
  * @ref LLP 0254#policy-inline [constrained-by]: the hook's cwd is what the
  *   ingest verdict is resolved from, so the writer may not retain a record
