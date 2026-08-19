@@ -202,6 +202,29 @@ export interface PluginClientManifest {
    * attachable but never launchable.
    */
   launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, for the
+   * `hyp status` capture-health comparison (LLP 0257#status-and-health):
+   * the newest matching mtime under `dir` is the client's last activity,
+   * which status holds against the telemetry the daemon actually
+   * captured. Declared here rather than in a core table for the same
+   * reason as `attach_probe`: the path is the client's business, and
+   * core must be able to read it without importing plugin code.
+   */
+  activity_probe?: PluginActivityProbeManifest
+}
+
+/**
+ * A client-written directory core may stat (never parse) to answer
+ * "when was this client last active?". Same home-relative contract as
+ * `attach_probe.settings_file`: relative to `$HOME`, first segment
+ * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
+ */
+export interface PluginActivityProbeManifest {
+  /** Directory of activity files, RELATIVE to the user's home (e.g. `.claude/projects`). */
+  dir: string
+  /** Only files ending in this suffix count (e.g. `.jsonl`); absent means every file. */
+  file_suffix?: string
 }
 
 /**
@@ -1729,6 +1752,22 @@ export interface AiGatewayCapability {
    * LLP 0024.
    */
   registerSettlementEnricher(enricher: AiGatewaySettlementEnricher): void
+  /**
+   * Record one already-projected exchange into `ai_gateway_messages`.
+   *
+   * For a LIVE producer that does not sit on the wire: it holds a
+   * finished `AiGatewayProjectedExchange` and hands it to the dataset's
+   * owner rather than learning the table path, the column list, and the
+   * `part_id` dedupe rules. The proxy recorder does not use this (it
+   * already owns the projector chain); the Claude OTEL telemetry
+   * listener does. Rows whose `part_id` another producer already stored
+   * are skipped, which is what makes producer overlap harmless. See
+   * LLP 0252 #projection-unchanged.
+   */
+  recordProjectedExchange(
+    exchange: AiGatewayProjectedExchange,
+    opts?: AiGatewayRecordOptions,
+  ): Promise<AiGatewayRecordResult>
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -1742,6 +1781,24 @@ export interface AiGatewayCapability {
    * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
+}
+
+/** Options for `AiGatewayCapability.recordProjectedExchange`. */
+export interface AiGatewayRecordOptions {
+  /**
+   * Producer provenance merged under every emitted row's `attributes`,
+   * the same slot the backfill materializer fills with
+   * `{ gateway: { source: 'backfill' } }`.
+   */
+  gatewayAttributes?: JsonObject
+}
+
+/** Outcome of one `recordProjectedExchange` call. */
+export interface AiGatewayRecordResult {
+  /** Rows appended to the dataset. */
+  rowsWritten: number
+  /** Rows dropped because another producer already stored that `part_id`. */
+  rowsSkipped: number
 }
 
 /**

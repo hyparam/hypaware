@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import test from 'node:test'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import {
   compileUpstreams,
   forwardHeaders,

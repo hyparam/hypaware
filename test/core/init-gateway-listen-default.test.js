@@ -110,6 +110,7 @@ test('the claude-and-otel-local preset leaves the gateway listen unset so the fi
       commands: { register() {} },
       skills: { register() {} },
       agents: { register() {} },
+      query: { registerDataset() {} },
       initPresets: { register(/** @type {any} */ p) { preset = p } },
     }
     await activateClaude(ctx)

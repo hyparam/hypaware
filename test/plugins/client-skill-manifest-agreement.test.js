@@ -55,6 +55,8 @@ async function registeredSkills(client) {
     agents: { register: noop },
     commands: { register: noop },
     backfills: { register: noop },
+    sources: { register: noop },
+    query: { registerDataset: noop },
     configRegistry: { registerSection: noop },
     initPresets: { register: noop },
     paths: { stateDir: '/tmp/hyp-test-state' },

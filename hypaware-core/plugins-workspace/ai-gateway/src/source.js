@@ -16,7 +16,7 @@ import {
 } from '../../../../src/core/tls/ca.js'
 
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
-import { createControlHandler } from './control.js'
+import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'

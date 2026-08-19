@@ -15,3 +15,10 @@ types/
 
 # Donor/reference codebase kept out of the active HypAware repo
 collectivus/
+
+# Tool transcripts: install, test, and typecheck output redirected to a file
+# while working. Never source, and nothing else in the toolchain objects to one
+# (they are outside the package `files` allowlist and touch no code path), so a
+# `git add -A` used to be enough to commit one. `test/core/repo-scratch-hygiene.test.js`
+# holds the other half of this: no `.log` is tracked.
+*.log
