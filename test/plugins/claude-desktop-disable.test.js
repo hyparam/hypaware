@@ -38,7 +38,7 @@ test('disable is idempotent when the retired managed plist is absent', async () 
   assert.match(bufs.stdout(), /already disabled/)
 })
 
-// @ref LLP 0295#existing-installs [tests]: recovery removes only the exact retired plist, then asks for an app restart
+// @ref LLP 0296#existing-installs [tests]: recovery removes only the exact retired plist, then asks for an app restart
 test('disable removes the managed plist and flushes preferences', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-disable-'))
   const plist = path.join(dir, 'managed.plist')
@@ -110,7 +110,7 @@ test('disable reports a failed sudo removal and does not flush preferences', asy
 // than be dropped: dropping it removes the only surface that tells an
 // affected user their app is still redirected, on exactly the machines that
 // need it (LLP 0268 makes the same argument for a command's `hidden`).
-// @ref LLP 0295#status-surface [tests]: a malformed retirement block is refused, never silently dropped
+// @ref LLP 0296#status-surface [tests]: a malformed retirement block is refused, never silently dropped
 test('a malformed retired block is refused, not dropped', async () => {
   const base = {
     schema_version: 1,

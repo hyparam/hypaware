@@ -52,7 +52,7 @@ function gatewayCapability(adapters) {
 
 // This used to be the witness for LLP 0180#decision: Claude Desktop was an
 // adapterless client contribution, recorded as `noAdapter` rather than
-// printed as a failed attach. With its picker row deleted (LLP 0295
+// printed as a failed attach. With its picker row deleted (LLP 0296
 // #kill-switch) it is no longer derivable as a pick at all, so the stronger
 // statement holds and is what gets pinned: the explicit `--source` path,
 // which LLP 0202#hidden-rows guarantees would still compose a merely HIDDEN
@@ -61,7 +61,7 @@ function gatewayCapability(adapters) {
 // LLP 0180's noAdapter lane keeps its implementation and its sibling tests
 // below; it simply has no bundled adapterless client left to exercise it.
 // Restore a witness here if one is ever added.
-// @ref LLP 0295#kill-switch [tests]: `--source claude-desktop` derives no client and attaches nothing
+// @ref LLP 0296#kill-switch [tests]: `--source claude-desktop` derives no client and attaches nothing
 test('naming claude-desktop as an explicit source derives no client and attaches nothing', async () => {
   const env = await tmpEnv('hypaware-attach-noadapter-')
   const stdout = makeBuf()

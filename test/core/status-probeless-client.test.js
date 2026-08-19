@@ -111,7 +111,7 @@ test('the gate stops at attach state: client_attach_missing still fires for a pr
   // Probe-less is still NOT what gates this prompt. What gates it now is
   // RETIREMENT, which is a different property: claude-desktop happens to be
   // both, so it is the wrong witness for "probe-less still warns" and is
-  // excluded here rather than asserted (LLP 0295#status-surface). The
+  // excluded here rather than asserted (LLP 0296#status-surface). The
   // exception #544 pinned survives for any probe-less client with a live
   // route; if one is ever added, assert it here.
   assert.equal(

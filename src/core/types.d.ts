@@ -38,7 +38,7 @@ export interface ClientDescriptor {
    * Set when this client's capture route is withdrawn, from
    * `contributes.client.retired`. Read by `hyp status`, which skips the
    * setup-completeness prompt for a retired client and reports its
-   * `residuePath` instead (LLP 0295#status-surface).
+   * `residuePath` instead (LLP 0296#status-surface).
    */
   retired?: ClientRetiredDescriptor
   /**
@@ -89,7 +89,7 @@ export interface PickerDescriptor {
 /**
  * A withdrawn capture route, folded from
  * `contributes.client.retired`. The client keeps its identity so its
- * transcript entrypoints stay claimed (LLP 0295#attribution-stub); this
+ * transcript entrypoints stay claimed (LLP 0296#attribution-stub); this
  * only tells the status surface not to ask the user to finish a setup
  * that no longer exists.
  */

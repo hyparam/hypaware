@@ -5,7 +5,7 @@
 **Systems:** Plugins, Onboarding, CLI
 **Author:** Kenny / Claude
 **Date:** 2026-08-14
-**Superseded-by:** [LLP 0295](./0295-claude-desktop-gateway-capture-disabled.issue.md) (Desktop setup is retired outright, so the consent flow, the configure-phase re-run, and the #repair-surface prompt this doc tunes all cease to exist; kept as the record of why they were shaped that way)
+**Superseded-by:** [LLP 0296](./0296-claude-desktop-gateway-capture-retired.issue.md) (Desktop setup is retired outright, so the consent flow, the configure-phase re-run, and the #repair-surface prompt this doc tunes all cease to exist; kept as the record of why they were shaped that way)
 **Related:** [LLP 0139](./0139-desktop-picker-consent.decision.md) (the consent design this amends), [LLP 0011](./0011-setup-and-onboarding.decision.md) (§autodetect-vs-default: the seeding rule this narrows), [LLP 0131](./0131-configure-phase.decision.md) (the configure phase whose re-run this scopes), [LLP 0190](./0190-wizard-defaults-gate.decision.md) (the defaults gates that now label these rows)
 
 > Amends [LLP 0139 §informed-consent](./0139-desktop-picker-consent.decision.md#informed-consent)
@@ -120,7 +120,7 @@ action, not by observing the plist. Giving the client a plist-reading
 attach probe, so a *finished* setup quiets the warning by observation,
 is the named follow-up; it is orthogonal to everything above.
 
-> **Withdrawn by [LLP 0295 #status-surface](./0295-claude-desktop-gateway-capture-disabled.issue.md#status-surface).**
+> **Withdrawn by [LLP 0296 #status-surface](./0296-claude-desktop-gateway-capture-retired.issue.md#status-surface).**
 > Desktop capture is retired, so there is no finished setup to observe and
 > the prompt points at nothing to complete. The follow-up is also the wrong
 > mechanism: `attachProbe` is the attach-eligibility gate in

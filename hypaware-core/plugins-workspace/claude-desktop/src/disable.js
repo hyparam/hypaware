@@ -13,7 +13,7 @@ import process from 'node:process'
  * manifest's `contributes.client.retired.residue_path` must agree with it so
  * `hyp status` can report the residue without booting this plugin.
  *
- * @ref LLP 0295#status-surface [implements]: the residue path is declared once here and mirrored in the manifest
+ * @ref LLP 0296#status-surface [implements]: the residue path is declared once here and mirrored in the manifest
  */
 export const MANAGED_PLIST_PATH = '/Library/Managed Preferences/com.anthropic.claudefordesktop.plist'
 
@@ -33,10 +33,24 @@ function shellQuote(value) {
  * This is deliberately attended: the file is root-owned, and a daemon must
  * never raise an unexpected sudo prompt during boot.
  *
- * @ref LLP 0295#existing-installs [implements]: recovery removes only the exact managed plist and leaves unrelated Claude state untouched
+ * @ref LLP 0296#existing-installs [implements]: recovery removes only the exact managed plist and leaves unrelated Claude state untouched
+ * The spawn seam declares only what this module calls, not `typeof
+ * spawnSync`. The real function carries five overloads keyed on its options
+ * shape, so naming it here makes every test double satisfy all five to be
+ * assignable, which is friction for a seam that only ever runs
+ * `(cmd, args, { stdio })` and only ever reads `status`.
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
- * @param {{ managedPlistPath?: string, platform?: string, spawnSyncImpl?: typeof spawnSync }} [opts]
+ * @param {{
+ *   managedPlistPath?: string,
+ *   platform?: string,
+ *   spawnSyncImpl?: (
+ *     command: string,
+ *     args: readonly string[],
+ *     options: { stdio: 'inherit' | 'ignore' }
+ *   ) => { status: number | null },
+ * }} [opts]
  * @returns {Promise<number>}
  */
 export async function runDisable(argv, cmdCtx, opts = {}) {

@@ -1421,7 +1421,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // a plist-reading probe); until that lands, an unclearable prompt beats the
     // only alternative, which is no surface at all.
     // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
-    // A retired client (LLP 0295) is `configured && !attached` forever: its
+    // A retired client (LLP 0296) is `configured && !attached` forever: its
     // route is withdrawn, so no attach will ever happen and no marker will
     // ever be written. Running the incomplete-setup prompt over it would
     // print an unclearable warning on every `hyp status`, whose repair is a
@@ -1433,7 +1433,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // What is still actionable is residue: a file an older release left
     // behind that still changes the app. That warns only while the file
     // exists, so it is closable, and its repair genuinely clears it.
-    // @ref LLP 0295#status-surface [implements]: a retired client reports removable residue, never incomplete setup
+    // @ref LLP 0296#status-surface [implements]: a retired client reports removable residue, never incomplete setup
     if (descriptor.retired) {
       const residue = descriptor.retired.residuePath
       const repairCommand = descriptor.retired.repairCommand
@@ -1463,7 +1463,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // `configure_command`.
       //
       // claude-desktop was the motivating case and is no longer one: it is
-      // retired, so it never reaches this branch at all (LLP 0295
+      // retired, so it never reaches this branch at all (LLP 0296
       // #status-surface). The fallback stays because the rule is about any
       // adapterless client, and the bundled set may gain another.
       // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach

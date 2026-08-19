@@ -25,8 +25,8 @@ export { MANAGED_PLIST_PATH } from './disable.js'
  * Desktop does not exist; `hyp status` surfaces the command only when the
  * managed plist is actually on disk.
  *
- * @ref LLP 0295#kill-switch [implements]: nothing here registers a picker row, a gateway, a credential, or a visible command
- * @ref LLP 0295#attribution-stub [constrained-by]: the plugin survives to keep the transcript-entrypoint gate closed, not to capture
+ * @ref LLP 0296#kill-switch [implements]: nothing here registers a picker row, a gateway, a credential, or a visible command
+ * @ref LLP 0296#attribution-stub [constrained-by]: the plugin survives to keep the transcript-entrypoint gate closed, not to capture
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {

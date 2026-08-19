@@ -150,7 +150,7 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 90)
 })
 
-// @ref LLP 0295#kill-switch [tests]: app detection cannot put the disabled Desktop route back in the menu
+// @ref LLP 0296#kill-switch [tests]: app detection cannot put the disabled Desktop route back in the menu
 test('runWizardPick: detected claude-desktop stays absent from the menu', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -179,15 +179,15 @@ test('runWizardPick: the defaults gate omits a detected needs_setup row, and acc
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
-// Claude Desktop has no picker row at all any more (LLP 0295#kill-switch),
+// Claude Desktop has no picker row at all any more (LLP 0296#kill-switch),
 // so a machine an older release configured cannot re-pick it, and cannot be
 // silently repaired either: the gateway and credential plugins it composed
 // are indistinguishable from an explicitly chosen raw Anthropic source, so
-// reconfigure carries them rather than guessing (LLP 0295#existing-installs).
+// reconfigure carries them rather than guessing (LLP 0296#existing-installs).
 // The `@hypaware/claude-desktop` stub is carried for the same reason plus a
 // stronger one: dropping it un-claims Desktop's transcript entrypoints, and
 // the backfill gate fails OPEN on an unclaimed entrypoint.
-// @ref LLP 0295#attribution-stub [tests]: a reconfigure keeps the stub that keeps the transcript gate closed
+// @ref LLP 0296#attribution-stub [tests]: a reconfigure keeps the stub that keeps the transcript gate closed
 test('runWizardPick: reconfiguring an old Desktop-only config offers no Desktop row and keeps the stub', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -240,7 +240,7 @@ test('runWizardPick: a fresh pick reports nothing as previously configured', asy
 // LLP 0202 #hidden-rows guarantees a merely *hidden* row still composes on
 // `--source`, so hiding could never have been the kill switch. Deleting the
 // row is.
-// @ref LLP 0295#kill-switch [tests]: no seeding path can compose the retired Desktop route
+// @ref LLP 0296#kill-switch [tests]: no seeding path can compose the retired Desktop route
 test('runWizardPick: a seeded claude-desktop id composes nothing at all', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -763,7 +763,7 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.clientDescriptors
   )
   // `claude-desktop` left this set when its picker row was deleted
-  // (LLP 0295#kill-switch). Its client contribution still exists - the
+  // (LLP 0296#kill-switch). Its client contribution still exists - the
   // attribution stub keeps it - but no row derives it any more, which is
   // the intended shape: nothing a user can pick attaches Claude Desktop.
   assert.deepEqual([...derived].sort(), ['claude', 'codex', 'openclaw'])

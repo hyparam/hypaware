@@ -110,7 +110,7 @@ test('a corrupt marker fails open (absent, no diagnostic, no degrade) - LLP 0101
   // `residueExists` is the same hazard one level out: a retired client's
   // residue path is a system location no `homeDir` override reaches, so a
   // developer whose Mac still carries the old Desktop plist would see this
-  // list hold one warning (LLP 0295#status-surface).
+  // list hold one warning (LLP 0296#status-surface).
   const report = await collectHypAwareStatus({
     env: env(hypHome),
     homeDir: hypHome,

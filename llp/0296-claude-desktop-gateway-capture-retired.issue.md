@@ -1,4 +1,4 @@
-# LLP 0295: Remove Claude Desktop gateway capture
+# LLP 0296: Retire Claude Desktop gateway capture
 
 **Type:** Issue
 **Status:** Active

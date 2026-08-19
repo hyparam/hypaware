@@ -552,7 +552,7 @@ export interface CollectStatusOptions {
   /** Launchd user-environment probe (tests, and any caller that must not shell out). */
   isLaunchdEnvSet?: () => Promise<boolean>
   /**
-   * Retired-client residue probe (LLP 0295#status-surface). Injectable for
+   * Retired-client residue probe (LLP 0296#status-surface). Injectable for
    * the same reason `isCaTrusted` is: the path it reads is a system
    * location outside any `homeDir` override, so a test that asserts an
    * exact diagnostic list would otherwise depend on the developer's own

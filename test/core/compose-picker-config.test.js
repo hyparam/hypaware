@@ -289,11 +289,11 @@ test('no bundled plugin manifest fails validation', async () => {
 })
 
 // Claude Desktop composes nothing because it contributes no picker row at
-// all (LLP 0295#kill-switch). Asserting the id is absent from the catalog is
+// all (LLP 0296#kill-switch). Asserting the id is absent from the catalog is
 // the load-bearing check: `hidden: true` would have left `--source
 // claude-desktop` composing the full gateway route, since LLP 0202
 // #hidden-rows guarantees exactly that for a hidden row.
-// @ref LLP 0295#kill-switch [tests]: no picker id reaches the retired Desktop route
+// @ref LLP 0296#kill-switch [tests]: no picker id reaches the retired Desktop route
 test('claude-desktop is not a picker source and composes nothing', async () => {
   const d = await realPickerDescriptors()
   assert.equal(d.has('claude-desktop'), false, 'the row is deleted, not hidden')
@@ -312,7 +312,7 @@ test('claude-desktop is not a picker source and composes nothing', async () => {
 // claimed; only the picker row is gone. Pinned because deleting the whole
 // manifest looks like the same change and is not: the backfill gate fails
 // OPEN on an unclaimed entrypoint.
-// @ref LLP 0295#attribution-stub [tests]: the client contribution outlives the picker row
+// @ref LLP 0296#attribution-stub [tests]: the client contribution outlives the picker row
 test('claude-desktop still contributes a client, with its transcript entrypoints', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])

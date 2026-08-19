@@ -215,7 +215,7 @@ export function validateManifest(value) {
  *
  * @param {unknown} client
  * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
- * @ref LLP 0295#status-surface [implements]: the retirement block is refused rather than silently dropped, because dropping it removes the recovery surface
+ * @ref LLP 0296#status-surface [implements]: the retirement block is refused rather than silently dropped, because dropping it removes the recovery surface
  */
 function validateClientRetired(client) {
   if (!isPlainObject(client)) return { ok: true }

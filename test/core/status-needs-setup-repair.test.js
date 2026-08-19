@@ -9,7 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
-// The status surface for a RETIRED client (LLP 0295). This file used to pin
+// The status surface for a RETIRED client (LLP 0296). This file used to pin
 // the opposite: `client_attach_missing` firing for claude-desktop with its
 // `configure_command` as the repair, which was the one place a declined
 // Desktop setup got pointed at its finish command (LLP 0224 #repair-surface).
@@ -24,7 +24,7 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 // left behind is still on disk, because that is the one condition the user
 // can act on and the repair genuinely clears.
 //
-// @ref LLP 0295#status-surface [tests]: a retired client reports removable residue, never incomplete setup
+// @ref LLP 0296#status-surface [tests]: a retired client reports removable residue, never incomplete setup
 // @ref LLP 0139#repair-must-be-runnable [tests]: the repair printed is a command that runs
 
 async function makeHome() {

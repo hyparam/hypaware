@@ -102,10 +102,10 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
 }
 
 // Claude Desktop has no picker row to disclose anything about: the route is
-// deleted, not hidden behind a summary that explains itself (LLP 0295
+// deleted, not hidden behind a summary that explains itself (LLP 0296
 // #kill-switch). There is nothing to disclose because there is nothing a
 // user can tick.
-// @ref LLP 0295#kill-switch [tests]: the plugin contributes no picker row at all
+// @ref LLP 0296#kill-switch [tests]: the plugin contributes no picker row at all
 test('claude-desktop contributes no picker row', async () => {
   const { loaded, failed } = await loadManifests([path.join(WORKSPACE, 'claude-desktop')])
   assert.equal(failed.length, 0, failed.map((f) => f.message).join('; '))

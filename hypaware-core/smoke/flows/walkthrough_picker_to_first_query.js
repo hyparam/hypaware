@@ -460,7 +460,7 @@ export async function run({ harness, expect }) {
     )
     // 7 bundled picker rows: claude, codex, openclaw, hermes,
     // raw-anthropic, raw-openai, otel. claude-desktop left the set when its
-    // route was retired (LLP 0295#kill-switch); it contributes a client for
+    // route was retired (LLP 0296#kill-switch); it contributes a client for
     // transcript attribution but no row.
     expect.that(
       'traces: wizard.pick.start span emitted with sources_available=7',

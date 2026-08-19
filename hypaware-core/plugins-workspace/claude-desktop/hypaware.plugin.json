@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Attribution stub for Claude Desktop. Gateway capture is removed because it changed the app's account context (LLP 0295). This plugin claims Desktop's transcript entrypoints so the Claude Code backfill does not import Desktop sessions as its own, and carries one hidden recovery command for Macs an older release configured.",
+  "description": "Attribution stub for Claude Desktop. Gateway capture is removed because it changed the app's account context (LLP 0296). This plugin claims Desktop's transcript entrypoints so the Claude Code backfill does not import Desktop sessions as its own, and carries one hidden recovery command for Macs an older release configured.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -14,7 +14,7 @@
       "agent_dir": ".claude/agents",
       "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"],
       "retired": {
-        "reason": "Gateway capture changed Claude Desktop's account context (LLP 0295).",
+        "reason": "Gateway capture changed Claude Desktop's account context (LLP 0296).",
         "residue_path": "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist",
         "repair_command": "client claude-desktop disable"
       }

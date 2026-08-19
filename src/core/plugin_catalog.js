@@ -94,7 +94,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           // `repair_command` ride together or not at all: a residue nobody
           // can clear is a warning with no repair, which is the shape LLP
           // 0139#repair-must-be-runnable exists to prevent.
-          // @ref LLP 0295#status-surface [implements]: the retirement and its clearable residue are manifest data, read without booting the plugin
+          // @ref LLP 0296#status-surface [implements]: the retirement and its clearable residue are manifest data, read without booting the plugin
           const retired = client.retired
           if (retired && typeof retired.reason === 'string' && retired.reason.length > 0) {
             const residuePath = retired.residue_path

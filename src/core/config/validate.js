@@ -708,7 +708,7 @@ export function diagnoseV1Config(config, ctx = {}) {
     // route, and on a retired client each one states something untrue and
     // prescribes a repair that cannot help: the config that still lists the
     // plugin is an old install's residue, not a misconfiguration.
-    // @ref LLP 0295#status-surface [implements]: a retired client is excluded from the live-route wiring diagnostics
+    // @ref LLP 0296#status-surface [implements]: a retired client is excluded from the live-route wiring diagnostics
     if (descriptor.retired) continue
 
     if (gatewayConfig === undefined) {

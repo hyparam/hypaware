@@ -1079,7 +1079,7 @@ test('ctx.commands.run dispatches a registered command with the same exit code a
   assert.equal(seamErr.text(), 'seamtarget err\n')
 })
 
-// @ref LLP 0295#kill-switch [tests]: the retired command spellings are gone, the recovery one still reaches dispatch from an old config
+// @ref LLP 0296#kill-switch [tests]: the retired command spellings are gone, the recovery one still reaches dispatch from an old config
 test('ctx.commands.run reaches recovery but not the retired spellings for an old config', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-activate-'))
   await fs.writeFile(
