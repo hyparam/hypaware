@@ -48,12 +48,49 @@ export async function runQuerySchema(argv, ctx) {
 }
 
 /**
+ * Report this machine's local cache. There is no remote form: the server
+ * owns its own registration state and never exposes it through this
+ * command, so `--remote` is refused rather than ignored.
+ *
+ * The refusal matters more here than it does for `--refresh`. A rejected
+ * refresh is obvious (nothing happened), but a silently-ignored `--remote`
+ * on `status` prints a plausible, server-shaped inventory of the *wrong*
+ * host, with nothing on stderr and a zero exit. Callers asking "what does
+ * the server have" have been observed to read the local answer as the
+ * server's and carry on.
+ *
+ * @ref LLP 0273#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
+ * @ref LLP 0273#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 export async function runQueryStatus(argv, ctx) {
+  if (argv.some((arg) => arg === '--remote' || arg.startsWith('--remote='))) {
+    ctx.stderr.write(
+      "hyp query status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
+    )
+    ctx.stderr.write(
+      "  to see what a remote host holds, probe it: hyp query sql 'select 1 from <dataset> limit 1' --remote <target>\n"
+    )
+    return 2
+  }
+  // Everything else goes through the shared core-command gate, for the same
+  // reason the spelled-out `--remote` is refused above: `status` takes no
+  // arguments, so anything else here is a near miss (`--remot prod`, `-r prod`,
+  // `--format json`, a bare `prod`) that a silent ignore would answer with the
+  // same well-formed local inventory the refusal exists to withhold.
+  // @ref LLP 0273#asymmetry [implements]: a wrong-host answer is self-consistent, so a mistyped flag has to fail loudly too
   const parsed = parseCoreCommandArgv('query status', argv, ctx)
-  if (!parsed.ok) return parsed.code
+  if (!parsed.ok) {
+    // The shared refusal already named the offending token and the usage
+    // line; this says why no token would have been accepted.
+    if (parsed.code === 2) {
+      ctx.stderr.write(
+        "  status takes no arguments and always reports this machine's local cache\n"
+      )
+    }
+    return parsed.code
+  }
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
