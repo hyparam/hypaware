@@ -1957,12 +1957,19 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * "non-macOS platforms skip this entirely"), and with no CA on disk proxy
  * mode was never on, so there is nothing to be trusted or untrusted.
  *
- * The two probes shell out, so each is caught independently: a probe that
+ * The two probes shell out, so each is settled independently: a probe that
  * could not run reports `null` (unknown), never `false`, because "the
  * dialog was cancelled" and "`security` did not run" are different answers
- * and only the first is actionable. The fingerprint is computed locally from
- * the DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
- * not surfaced, so neither needs bounding.
+ * and only the first is actionable. "Did not run" covers one case a try/catch
+ * cannot reach on its own: a probe that never returns. Both probes therefore
+ * spawn on a deadline (`TRUST_PROBE_TIMEOUT_MS`) and reject when it passes,
+ * and they are started concurrently so the worst case is one deadline rather
+ * than the sum of both. An offline or captive-portal host, where macOS trust
+ * evaluation can sit on a revocation fetch indefinitely, then still gets a
+ * rendered report with these lines unknown instead of a `hyp status` that
+ * never prints. The fingerprint is computed locally from the DER and is
+ * `[0-9A-F:]` by construction, and probe stderr is deliberately not surfaced,
+ * so neither of those needs sanitizing.
  *
  * The permitted host set travels with the fingerprint because the grant is
  * wider than any one install uses: the CA is constrained to the whole static

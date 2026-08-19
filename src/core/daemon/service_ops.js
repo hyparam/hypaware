@@ -32,6 +32,30 @@ export class ServiceOpError extends Error {
 }
 
 /**
+ * Error raised when a bounded service command passed its deadline and was
+ * killed. A distinct name so a caller can tell "the probe did not answer"
+ * apart from "the probe answered no": only the second is a fact about the
+ * machine.
+ */
+export class ServiceCommandTimeoutError extends ServiceOpError {
+  /**
+   * @param {string} message
+   */
+  constructor(message) {
+    super(message)
+    this.name = 'ServiceCommandTimeoutError'
+  }
+}
+
+/**
+ * How long a read-only status probe waits for a service command before it
+ * gives up. Long enough for a cold `security verify-cert` (keychain open,
+ * trust evaluation) on a healthy machine, short enough that the offline or
+ * captive-portal host it exists for still gets a report.
+ */
+export const SERVICE_PROBE_TIMEOUT_MS = 5000
+
+/**
  * Error raised when the test-runner guard refuses to spawn a service
  * manager. A distinct name so a caller (or a test) can tell "we declined
  * to touch the host" apart from "the service manager said no".
@@ -141,7 +165,8 @@ function serviceManagerSpawnRefusal(bin, args) {
  * killed and the promise rejects with {@link ServiceCommandTimeoutError};
  * `SIGKILL` rather than `SIGTERM` because the case worth bounding is a
  * process blocked on a GUI keychain prompt, which is exactly the state that
- * ignores a polite signal.
+ * ignores a polite signal. Only a bounded caller is ever killed, so that
+ * signal can never interrupt a half-applied mutation.
  *
  * @param {string} bin
  * @param {string[]} args
@@ -165,7 +190,15 @@ export function runServiceCommand(bin, args, opts = {}) {
     if (timeoutMs !== undefined) {
       timer = setTimeout(function() {
         timedOut = true
+        // Settle on the deadline itself, not on the kill's own `close`. A
+        // child that leaves a grandchild holding the inherited pipe never
+        // emits one, and waiting for it would reinstate the unbounded wait
+        // this timer exists to remove. Detaching the three handles is what
+        // lets the calling process exit while such a child winds down.
         proc.kill('SIGKILL')
+        proc.stdout.destroy()
+        proc.stderr.destroy()
+        proc.unref()
         reject(new ServiceCommandTimeoutError(
           `'${[bin, ...args].join(' ')}' did not finish within ${timeoutMs}ms and was killed`
         ))
