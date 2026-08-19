@@ -88,6 +88,16 @@ output this change exists to prevent.
 The message names the alternative rather than only the prohibition, so the
 caller's actual question ("what does that host have?") has somewhere to go.
 
+Naming one flag is not enough on its own. `status` takes no arguments at
+all, so every other unrecognized token (`--remot prod`, `-r prod`,
+`--format json`, a bare `prod`) reaches the same wrong-host answer under a
+silent ignore, and a typo on the very flag this document tells agents not to
+use is the likeliest way to type one. The rest of argv therefore goes through
+the shared command codec (`parseCommandArgv`), which rejects unknown flags
+and stray positionals with exit 2, so the spelled-out `--remote` refusal is a
+better message on a path that already fails rather than the only path that
+fails.
+
 ## Consequences
 
 - **This is a behavior change on an existing accepted invocation.** A stale

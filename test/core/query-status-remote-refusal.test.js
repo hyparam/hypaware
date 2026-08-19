@@ -64,6 +64,39 @@ test('query status refuses the --remote=<target> spelling too', async () => {
   assert.match(stderr.value, /--remote is not supported/)
 })
 
+test('query status refuses the bare --remote default-target sentinel', async () => {
+  const { stdout, stderr, ctx } = ctxFor()
+  const code = await runQueryStatus(['--remote'], ctx)
+
+  assert.equal(code, 2)
+  assert.equal(stdout.value, '')
+  assert.match(stderr.value, /--remote is not supported/)
+})
+
+// A typo on the flag the skill docs now tell agents to avoid must not land
+// on the answer the refusal exists to withhold: `status` takes no arguments,
+// so anything it does not recognize fails loudly rather than printing a
+// well-formed inventory of the wrong host.
+for (const argv of [['--remot', 'prod'], ['-r', 'prod'], ['--format', 'json'], ['hyperparam']]) {
+  test(`query status refuses the near miss \`${argv.join(' ')}\``, async () => {
+    const { stdout, stderr, ctx } = ctxFor()
+    const code = await runQueryStatus(argv, ctx)
+
+    assert.equal(code, 2, 'an unrecognized argument is a usage error, not a local answer')
+    assert.equal(stdout.value, '', 'no local inventory may be printed for an argument status does not take')
+    assert.match(stderr.value, /takes no arguments/)
+  })
+}
+
+test('query status renders usage for --help without touching the cache', async () => {
+  const { stdout, stderr, ctx } = ctxFor()
+  const code = await runQueryStatus(['--help'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.value, /usage: hyp query status/)
+  assert.equal(stderr.value, '')
+})
+
 test('query status still runs with no args', async () => {
   const { stderr, ctx } = ctxFor()
   const code = await runQueryStatus([], ctx)
