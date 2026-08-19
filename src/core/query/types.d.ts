@@ -175,3 +175,21 @@ export interface OverviewNotice {
   kind: 'local-only' | 'freshness'
   line: string
 }
+
+/**
+ * How a select resolves a column reference to a declared TIMESTAMP, for the
+ * LLP 0272 literal rewrite. `agreed` answers an unqualified reference (the
+ * names every named base table in scope types the same way); `byRelation`
+ * answers a qualified one, keyed by lower-cased table name and alias.
+ * `bound` holds every relation this select binds including the ones whose
+ * schema the registry cannot supply (a CTE, a derived table, a table
+ * function), so a qualifier resolved through `outer` can be stopped here
+ * rather than borrowing an enclosing relation's types.
+ */
+export interface TimestampScope {
+  agreed: Set<string>
+  byRelation: Map<string, Set<string>>
+  bound: Set<string>
+  /** The enclosing select's scope, for a correlated reference; absent at the top level. */
+  outer?: TimestampScope
+}

@@ -93,7 +93,28 @@ timestamp literal means.
   column's name and not its type, and typing that one from the dataset would
   compare a string cell to a `Date` - the same silently-empty answer, pointed
   the other way. An unqualified reference falls back to the names every base
-  table in scope agrees on.
+  table in scope agrees on, which is a strictly narrower answer: when two
+  in-scope datasets type every shared name differently there is nothing to
+  agree on, and the qualified path still answers on its own.
+- The qualifier resolves **outward**. A correlated reference from inside an
+  `EXISTS`/`IN`/scalar subquery (`... where exists (select 1 from n o where
+  m.ts >= '...')`) names a relation of the enclosing select, so the walk
+  continues into the enclosing scope. It stops at the first relation the inner
+  select binds, schema or not: an inner alias that shadows an enclosing one
+  keeps its own columns rather than borrowing types it does not have. A
+  relation in `FROM` or `JOIN` cannot see the enclosing select at all and is
+  given no view of it.
+- A call whose result **carries an argument's type** is looked through to that
+  argument, so a bound written on the call is a bound on the column underneath:
+  `having max(ts) >= '...'` types exactly as `ts >= '...'` does. This is not a
+  corner: `HAVING` almost always holds an aggregate rather than a bare
+  reference, and `max(message_created_at)` is the idiom `docs/ACCEPTANCE.md`
+  itself uses, so leaving it out would have left the release gate reading a
+  healthy capture as empty. Argument *positions* are declared per function
+  (`min_by(value, key)` takes only `value`'s type, `date_trunc(unit, date)`
+  only `date`'s), because typing a literal from the wrong argument returns
+  wrong rows. Calls that change the type (`epoch`, `extract`, `date_diff`,
+  `cast`, the string functions) carry nothing.
 - Every clause of the select, not only `WHERE`: the comparison is false for
   every row wherever it sits, so `select case when ts > '...' then 1 end`,
   `HAVING`, `JOIN ... ON`, `GROUP BY` and `ORDER BY` are rewritten alike.
@@ -140,11 +161,13 @@ reintroduce the silent empty result through the front door.
   (rows inside the bound return; rows outside stay out; a bound far outside
   the data returns everything or nothing rather than zero either way), across
   every implicated operator, plus the NULL exclusions, the `STRING`-column
-  non-coercion, and the refusal.
+  non-coercion, the refusal, the type-carrying calls (and the calls that carry
+  nothing), and the qualified and correlated resolutions over two datasets that
+  type the same names differently.
 - Nothing about LLP 0222 changes. The converter is still icebird's, still the
   only one, and still sees exactly the AST shapes it already handled.
 
-<a id="not-settled"></a>
+<a id="not-settled-derived"></a>
 
 ## Not settled here: relations the registry cannot name {#not-settled-derived}
 
@@ -157,6 +180,16 @@ aliases, and expressions), which is column inference the engine already owns and
 does not export. The shape the issue reported (a bound directly on a dataset)
 is fixed; this residual is named here so the next reader does not read #860 as
 fully closed.
+
+An **unqualified** correlated reference is the same residual seen from the other
+side. Resolving `... where exists (select 1 from n where ts >= '...')`, where
+`ts` belongs to the enclosing select and not to `n`, needs the inner relations'
+full column *lists* to know the name is not theirs, and a derived table or CTE
+in that inner `FROM` cannot supply one. The outward walk therefore runs on
+qualified references only, which is how a correlated reference is nearly always
+written.
+
+<a id="not-settled"></a>
 
 ## Not settled here: coercion for other types {#not-settled}
 

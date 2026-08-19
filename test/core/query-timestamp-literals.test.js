@@ -19,7 +19,7 @@ import {
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { AsyncDataSource } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, SqlPrimitive } from 'squirreling/src/types.js'
  * @import { ColumnSpec, DatasetSchema } from '../../hypaware-plugin-kernel-types.js'
  */
 
@@ -315,4 +315,164 @@ test('a comparison outside WHERE is typed too', async () => {
     storage,
   })
   assert.deepEqual(rows.rows.map((row) => Number(row.recent)), [0, 0, 1, 1])
+})
+
+// --- calls that carry a column's type ----------------------------------------
+
+/**
+ * A registry over two real parquet partitions, so a scope can hold relations
+ * that disagree about a column's type and a correlated reference has somewhere
+ * to resolve to.
+ *
+ * @param {{ name: string, columns: ColumnSpec[], rows: Record<string, SqlPrimitive>[] }[]} specs
+ */
+function registryForDatasets(specs) {
+  const datasets = specs.map((spec) => ({
+    name: spec.name,
+    schema: { columns: spec.columns },
+    discoverPartitions: async () => [],
+    /** @returns {Promise<AsyncDataSource>} */
+    createDataSource: async () => parquetSourceFromRows(spec.columns, spec.rows, { rowGroupSize: 2 }),
+  }))
+  return /** @type {any} */ ({
+    getDataset: (/** @type {string} */ asked) => datasets.find((dataset) => dataset.name === asked),
+    listDatasets: () => datasets,
+  })
+}
+
+/** A second dataset that types the same two column names STRING, so nothing in scope agrees. */
+/** @type {ColumnSpec[]} */
+const NODE_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'message_created_at', type: 'STRING', nullable: false },
+  { name: 'seen_at', type: 'STRING', nullable: true },
+]
+
+const NODE_ROWS = [
+  { id: 3, message_created_at: 'n3', seen_at: null },
+  { id: 4, message_created_at: 'n4', seen_at: null },
+]
+
+function registryForBoth() {
+  return registryForDatasets([
+    { name: 'ai_gateway_messages', columns: COLUMNS, rows: ROWS },
+    { name: 'node', columns: NODE_COLUMNS, rows: NODE_ROWS },
+  ])
+}
+
+// `HAVING` almost always holds an aggregate rather than a bare column, and
+// docs/ACCEPTANCE.md's own idiom is `max(message_created_at)`. A call whose
+// result carries the column's type compares a Date to a string exactly as the
+// bare column did, so the bound has to reach through it.
+// @ref LLP 0272#scope [tests]: a bound on a type-preserving call is a bound on the column under it
+test('a bound on a call that carries the column type selects the rows it names', async () => {
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // rows: 2026-08-17T09:00:00Z, 08-18T20:59:59Z, 08-18T21:00:00Z, 08-18T22:01:39Z
+    ["SELECT id FROM ai_gateway_messages GROUP BY id HAVING max(message_created_at) >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    ["SELECT id FROM ai_gateway_messages GROUP BY id HAVING min(message_created_at) < '2026-08-18T21:00:00Z' ORDER BY id", [1, 2]],
+    ["SELECT id FROM ai_gateway_messages WHERE coalesce(seen_at, message_created_at) >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    ["SELECT id FROM ai_gateway_messages WHERE date_trunc('day', message_created_at) = '2026-08-18' ORDER BY id", [2, 3, 4]],
+    ["SELECT id FROM ai_gateway_messages WHERE greatest(seen_at, message_created_at) >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+  ]
+  /** @type {string[]} */
+  const wrong = []
+  for (const [query, expected] of cases) {
+    const got = await ids(query)
+    if (got.join(',') !== expected.join(',')) {
+      wrong.push(`${query} -> got [${got.join(',')}], SQL says [${expected.join(',')}]`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+})
+
+// The other direction: a call whose result is not the column's type must not
+// pull the coercion through it, and a call that types from one argument only
+// must not type from the others. Both would coerce against the wrong column,
+// which returns wrong rows rather than none.
+test('a call that does not carry the column type leaves the literal alone', () => {
+  const registry = registryForMessages()
+  /** @type {[string, string][]} */
+  const cases = [
+    // EPOCH returns a number, not the column's type
+    ["SELECT id FROM ai_gateway_messages WHERE epoch(message_created_at) >= '2026-08-18'", 'where'],
+    // DATE_TRUNC's first argument is the unit, and MIN_BY takes only its first
+    // argument's type, so the timestamp in the key position types nothing
+    ["SELECT id FROM ai_gateway_messages GROUP BY id HAVING min_by(id, message_created_at) >= '2026-08-18'", 'having'],
+    // a function nobody declared type-preserving
+    ["SELECT id FROM ai_gateway_messages WHERE upper(message_created_at) >= '2026-08-18'", 'where'],
+  ]
+  for (const [sql, clause] of cases) {
+    const rewritten = whereOfRewritten(sql, registry)
+    assert.equal(rewritten[clause].right.type, 'literal', sql)
+  }
+  // ...while the same call with the column in the type-carrying position is typed
+  const typed = whereOfRewritten(
+    "SELECT id FROM ai_gateway_messages GROUP BY id HAVING min_by(message_created_at, id) >= '2026-08-18T21:00:00Z'",
+    registry
+  )
+  assert.equal(typed.having.right.type, 'cast')
+})
+
+// --- scopes whose relations disagree, and correlated references --------------
+
+// Two in-scope datasets that type every shared name differently leave nothing
+// for an unqualified reference to agree on. That must not disable the
+// qualified path: `m.message_created_at` names one relation and one type, and
+// skipping it returns zero rows on matching data, which is issue #860 again.
+test('a qualified reference is typed even when the in-scope datasets agree on nothing', async () => {
+  const registry = registryForBoth()
+  const sql =
+    'SELECT m.id FROM ai_gateway_messages m JOIN node o ON m.id = o.id ' +
+    "WHERE m.message_created_at >= '2026-08-18T21:00:00Z' ORDER BY m.id"
+  assert.equal(whereOfRewritten(sql, registry).where.right.type, 'cast')
+  const out = await executeQuerySql({ query: sql, registry, storage })
+  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
+  // and the STRING side of the same scope keeps its string comparison
+  const other = whereOfRewritten(
+    "SELECT m.id FROM ai_gateway_messages m JOIN node o ON m.id = o.id WHERE o.message_created_at >= 'n4'",
+    registry
+  )
+  assert.equal(other.where.right.type, 'literal')
+})
+
+// A correlated reference resolves outward, so a bound written on the enclosing
+// select's column from inside an EXISTS is a bound on a TIMESTAMP column. The
+// inner FROM cannot name it, and leaving it a string is the silent empty
+// result again.
+// @ref LLP 0272#scope [tests]: a qualified reference resolves through its qualifier, outward
+test('a correlated reference into the enclosing select is typed', async () => {
+  const registry = registryForBoth()
+  const sql =
+    'SELECT m.id FROM ai_gateway_messages m WHERE EXISTS (' +
+    "SELECT 1 FROM node o WHERE o.id = m.id AND m.message_created_at >= '2026-08-18T21:00:00Z') ORDER BY m.id"
+  assert.equal(whereOfRewritten(sql, registry).where.subquery.where.right.right.type, 'cast')
+  const out = await executeQuerySql({ query: sql, registry, storage })
+  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
+})
+
+// The outward walk stops at the first relation the inner select binds, schema
+// or not. An inner alias that shadows an enclosing one must keep its own
+// (unknown) columns rather than borrow the enclosing relation's types.
+test('an inner alias does not borrow an enclosing relation that shares its name', () => {
+  const registry = registryForBoth()
+  const rewritten = whereOfRewritten(
+    'SELECT m.id FROM ai_gateway_messages m WHERE EXISTS (' +
+    "SELECT 1 FROM (SELECT id, 'n' AS message_created_at FROM node) m WHERE m.message_created_at >= '2026-08-18')",
+    registry
+  )
+  assert.equal(rewritten.where.subquery.where.right.type, 'literal')
+})
+
+// A relation in FROM or JOIN resolves entirely against its own tables: SQL
+// gives it no view of the enclosing select, so it must not inherit one here
+// either.
+test('a derived table in FROM does not see the enclosing select scope', () => {
+  const registry = registryForBoth()
+  const rewritten = whereOfRewritten(
+    'SELECT s.id FROM ai_gateway_messages m JOIN (' +
+    "SELECT id FROM node WHERE m.message_created_at >= '2026-08-18T21:00:00Z') s ON m.id = s.id",
+    registry
+  )
+  assert.equal(rewritten.joins[0].subquery.query.where.right.type, 'literal')
 })
