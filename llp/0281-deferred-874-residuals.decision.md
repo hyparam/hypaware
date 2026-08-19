@@ -69,14 +69,40 @@ records no answer takes the first-run path - straight through to
 `runWizardFork`, no summary screen - exactly as a missing one does.
 
 The gate cannot re-read the config itself without duplicating the layer
-merge, so the claim travels on the report it already collects:
-`HypAwareStatusReport.configRecordsAnswer`, set by `collectHypAwareStatus`
-from the **effective** (merged) config. Effective rather than local is the
-load-bearing choice: a machine carried entirely by its central layer *is*
-set up, the fleet having answered on its behalf, and dropping it to the first-run
-path would re-ask questions whose answers the org owns (LLP 0129
-§join-before-picker). What changes is only the machine whose config exists
-because a side-channel writer created it.
+resolution, so the claim travels on the report it already collects:
+`HypAwareStatusReport.configRecordsAnswer`, set by `collectHypAwareStatus`.
+
+**Each layer answers on its own terms, not off the merge.** The local layer
+answers when it records a pick answer at all (LLP 0277 §answer-less) - the
+same discriminator the pick lane reads, so the gate and the lane cannot
+classify one file two ways. The central layer answers when it carries capture
+of its own: a machine whose fleet configured its sources *is* set up, the
+fleet having answered on its behalf, and dropping it to the first-run path
+would re-ask questions whose answers the org owns (LLP 0129
+§join-before-picker).
+
+The bare `@hypaware/central` **enrollment seed is not that answer.** `hyp join`
+and the enrolling `hyp remote login` write
+`plugins: [{ name: '@hypaware/central' }]` plus the central sink so the machine
+can reach its server at all; that is on disk before anyone has been asked
+anything, and reading it as an answer is the same file-existence proxy this
+decision is removing. So a central layer naming only the enrollment plugin
+records no answer.
+
+Reading the **merged** config instead cannot express either half, and gets both
+wrong in the direction that matters:
+
+- it hides the enrollment seed among the plugins, so
+  `hyp remote add` → `hyp remote login` → `hyp init` - the documented team
+  order, and the whole point of this half of the decision - would still front
+  the returning summary;
+- `mergeConfigLayers` sets `plugins` on the effective config only when the
+  merged list is non-empty, so a joined machine's deliberate `plugins: []`
+  record-nothing pick would come back as "no answer" and re-open onboarding on
+  it, which LLP 0277 §answer-less forbids.
+
+What changes is only the machine whose config exists because a writer that
+never asked the pick question created it.
 
 `managed` is still read before the early return, on this branch for the same
 reason as the invalid-config branch: the caller locks the org's rows off it,

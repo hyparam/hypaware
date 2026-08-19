@@ -10,6 +10,10 @@ import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 
+/**
+ * @import { HypAwareV2Config } from '../../hypaware-plugin-kernel-types.js'
+ */
+
 // `configRecordsAnswer` is the claim the returning gate reads: does anything
 // on this machine record an answer to onboarding's pick question, or does the
 // config file merely exist because a side-channel writer created it? The pick
@@ -75,21 +79,75 @@ test('no config at all records no answer', async () => {
   assert.equal(report.configRecordsAnswer, false)
 })
 
-// Read off the *effective* config, not the local layer: a machine carried
-// entirely by its central layer is set up, the fleet having answered on its
+/**
+ * The central layer as `hyp join` / the enrolling `hyp remote login` write it.
+ *
+ * @param {string} hypHome
+ * @param {HypAwareV2Config} seed
+ */
+async function writeCentralSeed(hypHome, seed) {
+  const seedPath = centralSeedPath(path.join(hypHome, 'hypaware'))
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify(seed) + '\n')
+}
+
+// A central layer *carrying capture* is the fleet answering on the machine's
 // behalf, so the gate must still front the summary there.
 test('a central layer answers for a machine whose local layer does not', async () => {
   const hypHome = await makeHome()
-  const stateRoot = path.join(hypHome, 'hypaware')
-  const seedPath = centralSeedPath(stateRoot)
-  await fs.mkdir(path.dirname(seedPath), { recursive: true })
-  await fs.writeFile(seedPath, JSON.stringify({
+  await writeCentralSeed(hypHome, {
     version: 2,
     plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/ai-gateway' }],
-  }) + '\n')
+  })
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     query: { remotes: { team: { url: 'https://example.invalid' } } },
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.layered?.hasCentral, true)
+  assert.equal(report.configRecordsAnswer, true)
+})
+
+// The documented team order in full: `hyp remote add` then an *enrolling*
+// `hyp remote login`, which writes the central seed (`enrollCentralSink`)
+// before the first `hyp init`. That seed names `@hypaware/central` and the
+// central sink so the machine can reach its server; nobody has been asked
+// anything. Reading the merged config here would find a `plugins` array and
+// call it an answer, leaving the returning gate exactly where LLP 0277
+// §consequences found it.
+test('an enrolled machine that has not run init yet records no pick answer', async () => {
+  const hypHome = await makeHome()
+  await writeCentralSeed(hypHome, {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    query: { remotes: { team: { url: 'https://example.invalid' } } },
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.layered?.hasCentral, true, 'enrolled')
+  assert.equal(report.configExists, true, 'and configured enough to boot')
+  assert.equal(report.configRecordsAnswer, false, 'but the enrollment seed answers nothing')
+})
+
+// `mergeConfigLayers` sets `plugins` on the effective config only when the
+// merged list is non-empty, so a joined machine's deliberate record-nothing
+// pick vanishes from the merge. Read from the local layer it survives, and
+// onboarding does not re-open on a deliberately emptied install
+// (LLP 0277 #answer-less).
+test('an empty plugins array survives beside a central layer that adds none', async () => {
+  const hypHome = await makeHome()
+  await writeCentralSeed(hypHome, {
+    version: 2,
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [],
   }) + '\n')
 
   const report = await collectHypAwareStatus({ env: env(hypHome) })

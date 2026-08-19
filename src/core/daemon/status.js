@@ -60,6 +60,14 @@ import {
  */
 
 /**
+ * The plugin the enrollment seed names. `hyp join` and the enrolling
+ * `hyp remote login` write `plugins: [{ name: '@hypaware/central' }]` plus the
+ * central sink so the machine can reach its server; it records no capture
+ * choice, so a central layer naming only it has answered nothing.
+ */
+const CENTRAL_ENROLLMENT_PLUGIN = '@hypaware/central'
+
+/**
  * Path to the daemon status file. Written by the daemon at each
  * lifecycle transition so a parallel `hyp daemon status --json` call
  * sees a consistent snapshot without having to walk the kernel.
@@ -942,13 +950,29 @@ export async function collectHypAwareStatus(opts = {}) {
   const configExists = config !== null
 
   // The stronger claim behind `configExists`: does anything on this machine
-  // record an *answer* to onboarding's pick question, or does the file merely
-  // exist because a side-channel writer created it (`hyp remote add` before
-  // the first `hyp init`, the documented team order)? Read off the effective
-  // config, so a machine carried entirely by its central layer still counts
-  // as answered - the fleet gave the answer on its behalf.
+  // record an *answer* to onboarding's pick question, or does the config merely
+  // exist because a writer that never asked one created it (`hyp remote add`
+  // and the enrolling `hyp remote login` before the first `hyp init`, the
+  // documented team order)?
+  //
+  // Each layer is read on its own terms, not off the merge. The local layer
+  // answers when it records a pick answer at all, the same discriminator the
+  // pick lane reads, so the two lanes cannot classify one file two ways. The
+  // central layer answers when it carries capture of its own: a machine whose
+  // fleet configured its sources is set up, the fleet having answered on its
+  // behalf (LLP 0129 #join-before-picker). `@hypaware/central` on its own is
+  // not that answer - it is the enrollment seed `hyp remote login` and
+  // `hyp join` write to reach the server at all, and it is on disk before
+  // anyone has been asked anything.
+  //
+  // The merged config cannot express either half: it hides the enrollment seed
+  // among the plugins, and it drops a local `plugins: []` whenever the merged
+  // list comes out empty (`mergeConfigLayers` only sets the key when it is
+  // non-empty), turning a deliberate record-nothing pick back into "no answer".
   // @ref LLP 0281#returning-gate [implements]: the report carries the answer-keyed claim the returning gate needs, not only file existence
-  const configRecordsAnswer = config !== null && configRecordsPickAnswer(config)
+  const centralAnswersPick = [...centralPluginNames].some((name) => name !== CENTRAL_ENROLLMENT_PLUGIN)
+  const configRecordsAnswer =
+    (localConfig !== null && configRecordsPickAnswer(localConfig)) || centralAnswersPick
 
   // A local layer that is present but does not parse: `activePlugins` is then
   // empty (or central-only) because the file could not be read, not because
