@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a centrally managed deployment, and contributes the hyp setup wizard's Claude Desktop picker row.",
+  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a centrally managed deployment. Its picker row is hidden (LLP 0297): Claude Desktop is never offered during onboarding, and is set up only by explicitly running 'hyp client claude-desktop install'.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -26,6 +26,7 @@
         "label": "Claude Desktop",
         "summary": "Records Claude Desktop conversations and starts a local gateway listener. Needs Claude sign-in and admin approval; setup asks before changing anything.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
+        "hidden": true,
         "needs_setup": true,
         "configure_command": "client claude-desktop install",
         "compose": {

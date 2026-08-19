@@ -22,6 +22,7 @@ import {
   derivePickedClients,
   loadPickerCatalog,
   orderPickerDescriptors,
+  readsBackFromOwnPlugins,
   resolveHypHome,
   ridersInDefaultSet,
   visiblePickerDescriptors,
@@ -50,6 +51,11 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * a reconfigure's carried row is not re-asked. Saying so on the gate is
  * what keeps "record all of these" from reading as if enter alone
  * finished the job.
+ *
+ * No BUNDLED row reaches it today: `claude-desktop` was the only one and is
+ * now hidden (LLP 0297). `needs_setup` remains a kernel contract any plugin
+ * may declare, so the suffix stays and is tested against a descriptor whose
+ * `hidden` flag is cleared.
  */
 export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
 
@@ -204,10 +210,11 @@ export async function resolvePickSeeding(opts) {
   //   - `detected` never carries. On a first run the seed is a DETECTION
   //     result, and carrying off that would compose a source the user was
   //     never shown and cannot uncheck, purely because a probe found it -
-  //     exactly what LLP 0011 #autodetect-vs-default forbids. No bundled
-  //     hidden row declares a `detect` probe today, but `hidden` is a
-  //     kernel-contract field any plugin can set beside one, so the gate is
-  //     stated rather than assumed.
+  //     exactly what LLP 0011 #autodetect-vs-default forbids. `hidden` and
+  //     `detect` do co-occur (`claude-desktop` keeps its `/Applications`
+  //     probe), and today `detectedSeed` also drops every `needs_setup` row
+  //     before the seed is built, so nothing reaches this tier twice over -
+  //     the gate is stated rather than left resting on that coincidence.
   //   - `selection` always carries, without the "nothing visible seeded"
   //     test. A re-entry's seed is the selection a previous pass already
   //     confirmed, and nothing derives a hidden id into it: read-back never
@@ -216,12 +223,29 @@ export async function resolvePickSeeding(opts) {
   //     rule against a seed that now also holds the visible rows the user
   //     just added would drop the row, so `back` then `enter` would delete
   //     the very upstream the carry exists to preserve.
+  //
+  // The "nothing visible seeded" test is the derivative-read-back rule's
+  // proxy, and it is only sound for a row whose read-back IS derivative.
+  // `claude-desktop` is hidden too (LLP 0297) and is not: it reads back off
+  // `@hypaware/claude-account` + `@hypaware/claude-desktop`, which nothing
+  // else composes, so a config naming them recorded a real decision - the
+  // sudo'd plist write `hyp client claude-desktop install` performs. Under
+  // the bare test it would be dropped by any reconfigure that also seeded a
+  // visible row (every install that captures anything else), silently
+  // un-composing a working Desktop setup and leaving no route back: the
+  // command that would repair it is contributed by the plugin the rewrite
+  // just removed from `plugins[]`. So a config-seeded hidden row also
+  // carries when it reads back off plugins of its own.
   // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
   // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
-  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+  // @ref LLP 0297#carry-through [implements]: a hidden row with a non-derivative read-back carries off the config seed whatever else is checked
+  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id))
   const seededVisible = visibleList.some((d) => seed.has(d.id))
-  const carries = seedOrigin === 'selection' || (seedOrigin === 'config' && !seededVisible)
-  const carried = carries ? seededHidden : []
+  const carried = seedOrigin === 'selection'
+    ? seededHidden.map((d) => d.id)
+    : seedOrigin === 'config'
+      ? seededHidden.filter((d) => !seededVisible || readsBackFromOwnPlugins(d)).map((d) => d.id)
+      : []
 
   return {
     descriptors,

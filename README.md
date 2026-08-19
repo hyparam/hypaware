@@ -398,11 +398,24 @@ history it backfills (`~/.codex/sessions/**`). Rows from either surface land
 in `ai_gateway_messages`; the `entrypoint` column carries Codex's
 `originator`, which is what tells a Desktop session from a terminal one.
 
-**Claude Desktop does need its own setup** (`hyp client claude-desktop install`).
-That is a difference between the vendors, not a gap in Codex support: Claude
-Desktop exposes no user-writable settings file to amend, so HypAware
-configures it through a root-owned managed-preferences plist and it delegates
-inference to its embedded CLI (rows arrive as `client_name = 'claude'` with
+**Claude Desktop does need its own setup** (`hyp client claude-desktop install`),
+and `hyp init` will not offer it: Claude Desktop is the one client whose setup
+takes a browser sign-in and a `sudo` prompt to place a root-owned
+managed-preferences plist, which is not something a first-run checklist should
+ask for (LLP 0297). It is opt-in, macOS-only, and always explicit: enable the
+plugins in `~/.hyp/hypaware-config.json`, then run the install. See
+[the CLI reference](./docs/CLI_REFERENCE.md#claude-desktop-commands) for the
+exact `plugins[]` entries.
+
+```sh
+hyp client claude-desktop install
+hyp client claude-desktop verify
+```
+
+The vendor difference is why the shape is different, not a gap in Codex
+support: Claude Desktop exposes no user-writable settings file to amend, so
+HypAware configures it through that plist, and it delegates inference to its
+embedded CLI (rows arrive as `client_name = 'claude'` with
 `entrypoint = 'claude-desktop-3p'`).
 
 What HypAware does **not** do for Codex Desktop: it never parses the app's

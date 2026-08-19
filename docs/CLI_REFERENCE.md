@@ -578,6 +578,37 @@ Plugin: `@hypaware/claude-desktop`. These commands require macOS where noted,
 an active local gateway capability, and the Claude account credential
 capability.
 
+`hyp init` does not offer Claude Desktop (LLP 0297): its setup is a browser
+sign-in plus a `sudo` write to a root-owned system file, which is not
+something a first-run checklist should ask for. The plugin is not activated by
+default either, so these commands register only once the config names it - on
+a config that does not, `hyp` reports which plugin owns the command and how to
+add it. The whole set Desktop capture needs is:
+
+```json
+{
+  "plugins": [
+    { "name": "@hypaware/ai-gateway", "config": { "upstreams": [
+      { "name": "anthropic", "base_url": "https://api.anthropic.com",
+        "path_prefix": "/v1/messages", "provider": "anthropic" }
+    ] } },
+    { "name": "@hypaware/claude-account", "config": { "mode": "subscription" } },
+    { "name": "@hypaware/claude-desktop" }
+  ]
+}
+```
+
+`@hypaware/claude-account` is not optional: it provides the
+`hypaware.anthropic-credential` capability `@hypaware/claude-desktop`
+requires, and without it the adapter fails activation and its commands never
+register. Merge those entries into the `plugins[]` already in
+`~/.hyp/hypaware-config.json`, restart the daemon, then run:
+
+```sh
+hyp client claude-desktop install
+hyp client claude-desktop verify
+```
+
 ```text
 hyp client claude-desktop <subcommand> [args...]
 ```

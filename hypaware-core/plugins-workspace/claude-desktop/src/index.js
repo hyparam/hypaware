@@ -42,8 +42,13 @@ export const configSection = {
  * findings in LLP 0133 identify the managed-preferences plist
  * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
  * real local surface, so the manifest also declares `contributes.client`
- * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130) for the
- * `hyp init` wizard's `needs_setup` row. This does not reinstate generic
+ * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130). That
+ * picker row is `hidden` (LLP 0297): onboarding never offers Claude Desktop,
+ * because every route to a working Desktop capture runs through the sudo'd
+ * plist write below, and a wizard checkbox is the wrong place to ask for it.
+ * The row survives hidden so `hyp init --source claude-desktop`, the
+ * reconfigure read-back, and the dataset-owner map keep working. This does
+ * not reinstate generic
  * attach-on-join (LLP 0044): the plugin registers no runtime `ctx.clients`
  * adapter, so the generic reconciler's `desired()` (`action_attach.js`) stays
  * inert for `claude-desktop` and the plist is placed only via the explicit
