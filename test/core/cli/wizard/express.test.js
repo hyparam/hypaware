@@ -169,3 +169,20 @@ test('narrateAcceptedGate prints the gate title and its items verbatim, led by a
   // arrive back to back with no prompts between them.
   assert.equal(stdout.text(), '\nHypAware will record:\n  Claude Code\n  Codex\n')
 })
+
+// Accepting takes each lane's stated default, and the new-folder lane's
+// default on a re-run is the answer already in force (LLP 0279
+// #standing-answer). The one line the fast path is guaranteed to read has
+// to name that, not the shipped default it is not about to apply.
+// @ref LLP 0279#standing-answer [tests]:
+test('the accept row names the standing new-folder answer, not the shipped default', async () => {
+  const { env } = await makeHome()
+  const { confirm, state } = capturingConfirm('defaults')
+
+  await runWizardExpressGate(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env, enrolled: true, rows: ROWS, folderAsk: 'ask', confirm,
+  }))
+
+  assert.match(state.question.options[0].summary, /new folders keep asking/)
+  assert.doesNotMatch(state.question.options[0].summary, /new folders sync too/)
+})

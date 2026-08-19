@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
-**Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting)
+**Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting), [LLP 0279](./0279-lane-answers-commit-with-the-config.decision.md) (#commit-point's carve-out for the sync lane's store write is withdrawn: both question lanes' policy writes now ride the commit point too)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
 > and the prompt flow of [LLP 0135 §pick](./0135-install-experience-overhaul.design.md).
@@ -234,7 +234,14 @@ the team pathway, narrates the enrolled state per #abort-narration. The
 sync lane's `client-sync.json` write still precedes the commit; a store
 entry for a source whose config never lands is inert and errs toward
 under-sync, which LLP 0188 #migration already names as the safe
-direction. On a scripted run (`--yes`, presets) no lane runs between pick
+direction.
+**Extended-by:** [LLP 0279 §one-commit-point](./0279-lane-answers-commit-with-the-config.decision.md#one-commit-point)
+withdraws that last sentence: the store is an editor (a re-run can *remove*
+an opt-out), its absence is itself LLP 0188 #migration's marker, and the
+new-folder lane that arrived later inherited the same shape without the
+argument. Both question lanes now defer their writes to the commit point,
+and a refusal names the answers it dropped alongside the config.
+On a scripted run (`--yes`, presets) no lane runs between pick
 and the commit, so its ordering is unchanged; direct `runWizardPick`
 callers without `deferWrite` keep the inline write.
 

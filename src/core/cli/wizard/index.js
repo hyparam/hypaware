@@ -24,6 +24,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { readFolderAskModeSafe } from '../../usage-policy/folder_ask.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   buildWalkthroughClientDescriptorMap,
@@ -166,6 +167,22 @@ export async function runInitWizard(opts) {
    * @type {FolderAskMode | undefined}
    */
   let folderAsk
+  /**
+   * The question lanes' policy writes, held until the config commit
+   * (LLP 0279 #one-commit-point). Each lane answers, states its answer,
+   * and hands its write back; the orchestrator runs them once the config
+   * this run composed is on disk, so an abandoned run leaves every store
+   * as it found it. Re-assigned, never appended: a back through the lanes
+   * re-answers them, and only the last answer is the one to write.
+   *
+   * Both commits resolve to what the write actually left in force rather
+   * than to the answer, so a write that fails is reported as the state
+   * that stands and not as the one it could not keep.
+   * @type {(() => Promise<string[]>) | undefined}
+   */
+  let syncCommit
+  /** @type {(() => Promise<FolderAskMode>) | undefined} */
+  let folderCommit
   /**
    * Did this pass through the lanes accept the express gate (LLP 0201)?
    * Re-answered on every pass, so stepping back to the fork and forward
@@ -392,6 +409,14 @@ export async function runInitWizard(opts) {
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
           const expressFn = opts.express ?? runWizardExpressGate
+          // The standing new-folder answer, so the gate's one line of
+          // consequence names what accepting leaves in force rather than
+          // the shipped default (LLP 0279 #standing-answer). Read here and
+          // not in the lane: the gate has to state it before the lane
+          // runs, and the safe read never throws.
+          const standingFolderAsk = await readFolderAskModeSafe({
+            stateDir: readObservabilityEnv(opts.env).stateDir,
+          })
           const choice = await expressFn({
             stdout: opts.stdout,
             stderr: opts.stderr,
@@ -399,6 +424,7 @@ export async function runInitWizard(opts) {
             env: opts.env,
             rows,
             enrolled: enrolled(),
+            folderAsk: standingFolderAsk,
             // The fork is always behind this question.
             allowBack: true,
             ...(opts.confirm ? { confirm: opts.confirm } : {}),
@@ -420,6 +446,18 @@ export async function runInitWizard(opts) {
       backFromPick = false
 
       atPick: while (true) {
+        // A pass that re-answers the lanes replaces their held writes, and
+        // a pass that never reaches them (a back through the fork onto a
+        // solo local run) must not carry the previous pass's answers
+        // forward. `sourcesOptedOut` and `folderAsk` go with them: they are
+        // what the finish log reports, and now that the writes are held
+        // rather than made on the spot, an abandoned pass's answers were
+        // never recorded anywhere - so carrying them forward would report a
+        // policy this machine was never put under.
+        syncCommit = undefined
+        folderCommit = undefined
+        sourcesOptedOut = []
+        folderAsk = undefined
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
         // then states its own positions - exactly as a failed join's retry
@@ -558,6 +596,10 @@ export async function runInitWizard(opts) {
               ...(express ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
               allowBack: true,
+              // The store write commits below with the config, so a
+              // declined overwrite leaves this run's opt-outs unwritten
+              // too (LLP 0279 #one-commit-point).
+              deferWrite: true,
             })
             if (syncScope.back) continue atPick
             if (syncScope.cancelled) {
@@ -568,6 +610,7 @@ export async function runInitWizard(opts) {
               return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
             }
             sourcesOptedOut = syncScope.optedOut
+            syncCommit = syncScope.commit
 
             const folderFn = opts.folderAsk ?? runWizardFolderAsk
             const folders = await folderFn({
@@ -580,6 +623,9 @@ export async function runInitWizard(opts) {
               ...(express ? { autoAccept: true } : {}),
               // The sync lane is always behind this one.
               allowBack: true,
+              // As above: the preference lands with the config or not at
+              // all (LLP 0279 #one-commit-point).
+              deferWrite: true,
             })
             // One screen back is the sync lane only when the sync lane was
             // a screen. On a fully fleet-managed machine (nothing left to
@@ -601,6 +647,7 @@ export async function runInitWizard(opts) {
               return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
             }
             folderAsk = folders.mode
+            folderCommit = folders.commit
             break atSync
           }
         }
@@ -633,10 +680,40 @@ export async function runInitWizard(opts) {
       config: picked.config,
     })
     if (!committed.ok) {
+      // The lanes stated their answers on screen and the refusal message
+      // only speaks for the config, so the run says the rest of the answer
+      // set went with it. Naming only the lanes that actually asked: a sync
+      // lane with nothing left to opt out of made a statement and handed
+      // back no commit, and an express pass narrated the standing state on
+      // both lanes rather than taking an answer, so it has no answer to
+      // have lost.
+      // @ref LLP 0279#one-commit-point [implements]: a refusal reports the held policy writes it also dropped
+      const held = express
+        ? []
+        : [...(syncCommit ? ['sync'] : []), ...(folderCommit ? ['new-folder'] : [])]
+      if (held.length > 0) {
+        opts.stderr.write(
+          held.length > 1
+            ? `hyp init: the ${held.join(' and ')} answers from this run were not recorded either\n`
+            : `hyp init: the ${held[0]} answer from this run was not recorded either\n`
+        )
+      }
       if (joined) await narrateEnrolledAbort(opts)
       return { exitCode: 1, ...(pathway ? { pathway } : {}) }
     }
   }
+
+  // The question lanes' policy stores land here, with the config they
+  // belong to: they hold this run's answers, and this run's answers are
+  // either all recorded or none of them are (LLP 0279 #one-commit-point).
+  // Both commits resolve to what they left in force rather than to the
+  // answer, so a write that failed is reported by the finish log as the
+  // state that stands. That is the signal that separates a recorded
+  // opt-out from one whose warning scrolled past under the configure
+  // phase, so it must not claim the answer landed.
+  // @ref LLP 0279#one-commit-point [implements]: the lanes' policy writes run once the config commits, never before
+  if (syncCommit) sourcesOptedOut = await syncCommit()
+  if (folderCommit) folderAsk = await folderCommit()
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when
   // `picks` is set, so threading it through keeps the rule in one place.

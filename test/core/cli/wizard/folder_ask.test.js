@@ -167,3 +167,64 @@ test('an unwritable preference warns and leaves the previous mode standing', asy
 test('the two options are exactly sync and ask', () => {
   assert.deepEqual(FOLDER_ASK_OPTIONS.map((o) => o.value), ['sync', 'ask'])
 })
+
+// Accepting the express gate takes each lane's *stated* default (LLP 0201
+// #gate), and this lane's stated default on a re-run is the standing
+// answer, not the shipped one: the asked path already defaults to it.
+// @ref LLP 0279#standing-answer [tests]:
+test('the express path keeps a standing ask instead of resetting it to sync', async () => {
+  const { env, stateDir } = await makeHome()
+  await writeFolderAskMode({ stateDir, mode: 'ask' })
+  const stdout = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  assert.deepEqual(result, { mode: 'ask' })
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'the standing preference survives the express gate')
+  assert.match(stdout.text(), /^ {2}Asking about each one; change later with hyp policy folders sync$/m)
+})
+
+// The lanes' writes ride the config commit (LLP 0279 #one-commit-point):
+// with `deferWrite` the lane answers and states its answer, and hands the
+// caller the write to run once the config it belongs to is on disk.
+// @ref LLP 0279#one-commit-point [tests]:
+test('deferWrite answers and states the answer, but hands the write back to the caller', async () => {
+  const { env, stateDir } = await makeHome()
+  await writeFolderAskMode({ stateDir, mode: 'ask' })
+  const stdout = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    deferWrite: true,
+    confirm: async () => 'sync',
+  }))
+
+  assert.equal(result.mode, 'sync')
+  assert.ok(result.commit, 'the write comes back as a commit for the caller to run')
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'nothing is written until the caller commits')
+  assert.match(stdout.text(), /New folders will sync without asking/)
+
+  assert.equal(await result.commit(), 'sync')
+  assert.equal(await readFolderAskMode({ stateDir }), 'sync')
+})
+
+test('a deferred write that fails warns and reports the mode still in force', async () => {
+  const { env, stateDir } = await makeHome()
+  const stderr = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout: makeBuf(), stderr, env,
+    deferWrite: true,
+    confirm: async () => 'ask',
+  }))
+  // A directory where the file belongs makes the deferred write fail.
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+
+  assert.ok(result.commit)
+  assert.equal(await result.commit(), 'sync', 'the mode already in force is what is reported')
+  assert.match(stderr.text(), /could not record the new-folder answer/)
+})

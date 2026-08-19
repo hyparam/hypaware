@@ -66,9 +66,18 @@ export async function runWizardExpressGate(opts) {
           // side-effect disclosure lives here as well as on the pick gate
           // it stands in for (LLP 0190 #pick-gate). One line: what
           // accepting does to the machine, plus the folder policy that
-          // rides with it.
+          // rides with it - the *standing* one, because accepting takes
+          // each lane's stated default and the new-folder lane's default
+          // on a re-run is the answer already in force (LLP 0279
+          // #standing-answer). Promising "new folders sync too" to a
+          // machine whose answer is `ask`, and then keeping `ask`, would
+          // make the one line the fast path reads the one line it cannot
+          // trust.
+          // @ref LLP 0279#standing-answer [implements]: the accept row names the standing new-folder answer, not the shipped default
           summary: opts.enrolled
-            ? 'Configures each to record through HypAware; new folders sync too.'
+            ? opts.folderAsk === 'ask'
+              ? 'Configures each to record through HypAware; new folders keep asking.'
+              : 'Configures each to record through HypAware; new folders sync too.'
             : 'Configures each to record through HypAware.',
         },
         {

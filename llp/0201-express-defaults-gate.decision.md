@@ -5,6 +5,7 @@
 **Systems:** Onboarding, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
+**Extended-by:** [LLP 0279](./0279-lane-answers-commit-with-the-config.decision.md) (#standing-answer: "each lane's stated default" is the standing answer where a lane has one, so accepting cannot retire a set `hyp policy folders ask`)
 **Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this collapses), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges)
 
 > Extends [LLP 0190](./0190-wizard-defaults-gate.decision.md). Each lane
