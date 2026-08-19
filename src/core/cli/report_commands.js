@@ -21,7 +21,7 @@ import {
   resolveAccessJwt,
 } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
-import { positionals, valueFlag } from './remote_commands.js'
+import { positionals } from './remote_commands.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -186,7 +186,7 @@ export async function runReportPublish(argv, ctx) {
     body = await fs.readFile(source)
   }
 
-  const resolved = resolveReportsTarget(argv, ctx, 'report publish')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report publish')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -242,7 +242,7 @@ export async function runReportPublish(argv, ctx) {
 export async function runReportList(argv, ctx) {
   const gate = parseCoreCommandArgv('report list', argv, ctx)
   if (!gate.ok) return gate.code
-  const resolved = resolveReportsTarget(argv, ctx, 'report list')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -304,12 +304,12 @@ export async function runReportGet(argv, ctx) {
     ctx.stderr.write('usage: hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]\n')
     return 2
   }
-  const outputArg = valueFlag(argv, '--output')
-  if (outputArg.present && !outputArg.value) {
-    ctx.stderr.write('hyp report get: --output expects a file path\n')
-    return 2
-  }
-  const resolved = resolveReportsTarget(argv, ctx, 'report get')
+  // The last raw-argv read in this file, for the same reason as the rest:
+  // `valueFlag()` takes the FIRST occurrence while the codec keeps the LAST,
+  // so `--output a --output b` validated b and wrote the bytes to a, exit 0.
+  // The gate refuses `--output` with no value before this line runs.
+  const output = /** @type {string | undefined} */ (gate.params.output)
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report get')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -333,14 +333,14 @@ export async function runReportGet(argv, ctx) {
     return 1
   }
   const bytes = Buffer.from(await response.arrayBuffer())
-  if (outputArg.value) {
+  if (output) {
     try {
-      await fs.writeFile(outputArg.value, bytes)
+      await fs.writeFile(output, bytes)
     } catch (err) {
       ctx.stderr.write(`hyp report get: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
-    ctx.stderr.write(`saved ${bytes.length} bytes to ${outputArg.value}\n`)
+    ctx.stderr.write(`saved ${bytes.length} bytes to ${output}\n`)
     return 0
   }
   // Artifacts can be binary (images, fonts); the kernel WriteStream type is
@@ -369,7 +369,7 @@ export async function runReportDelete(argv, ctx) {
     ctx.stderr.write('usage: hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]\n')
     return 2
   }
-  const resolved = resolveReportsTarget(argv, ctx, 'report delete')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report delete')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -418,18 +418,25 @@ export async function runReportDelete(argv, ctx) {
  * built-in). Reports are server-only, so unlike queries there is no local
  * fallback to select away from.
  *
- * @param {string[]} argv
+ * Reads the gate's parsed params, never argv, for the reason `applyOrgParam()`
+ * does: `valueFlag()` takes the FIRST occurrence while the codec keeps the
+ * LAST, so `--remote a --remote b` validated 'b' and then sent the request,
+ * with b's credential resolved, to a. The target picks the *server*, so on
+ * `report delete` that is a destructive call against a scope the gate never
+ * blessed. The old `present && !value` guard is not lost: the gate refuses
+ * `--remote` with no value ahead of this function, and a dash-leading target
+ * now reaches the registry lookup and gets named in the refusal.
+ *
+ * @param {Record<string, unknown>} params the gate's parsed params
  * @param {CommandRunContext} ctx
  * @param {string} cmd for error prefixes, e.g. `report list`
  * @returns {{ target: string, endpoint: string, identityBase: string | undefined } | { error: string }}
  * @ref LLP 0155#target [implements]: target defaults like bare --remote; the endpoint derives from the one registered URL
+ * @ref LLP 0266#one-contract [implements]: a token the gate validated is the token the command acts on
  */
-function resolveReportsTarget(argv, ctx, cmd) {
-  const remoteArg = valueFlag(argv, '--remote')
-  if (remoteArg.present && !remoteArg.value) {
-    return { error: `hyp ${cmd}: --remote expects a target name (omit it to use the default target)` }
-  }
-  const target = remoteArg.value ?? effectiveDefaultRemote(ctx.config)
+function resolveReportsTarget(params, ctx, cmd) {
+  const remote = params.remote
+  const target = remote !== undefined ? String(remote) : effectiveDefaultRemote(ctx.config)
   const entry = effectiveRemotes(ctx.config)[target]
   if (!entry) {
     return { error: `hyp ${cmd}: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'` }

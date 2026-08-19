@@ -305,6 +305,34 @@ test('an unknown remote target is rejected before any network call', async (t) =
   assert.match(err.join(''), /unknown remote target 'staging'/)
 })
 
+// The target selects which server the credential and the request go to, so
+// reading it out of raw argv rather than the gate is the same class as the
+// `--org` repeat: `valueFlag()` takes the FIRST occurrence, the codec keeps
+// the LAST, so the gate validated one server and the call went to another.
+// On `report delete` that is a destructive call against an unblessed scope.
+test('list resolves the --remote the gate validated when the flag repeats', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports: [] } }))
+  const { ctx } = ctxWith({ HYP_REMOTE_TOKEN_BACKUP: 'tok-backup' })
+  ctx.config.query.remotes.backup = { url: 'https://backup.internal' }
+  const code = await runReportList(['--remote', 'prod', '--remote', 'backup'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url.origin, 'https://backup.internal')
+  assert.equal(calls[0].headers.authorization, 'Bearer tok-backup')
+})
+
+// A dash-leading target is a token the gate blessed, so it must reach the
+// registry lookup and be named in the refusal, not be dropped into a generic
+// "expects a target name" that never says which token was rejected.
+test('list names a dash-leading --remote in the refusal', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports: [] } }))
+  const { ctx, err } = ctxWith()
+  const code = await runReportList(['--remote', '-staging'], ctx)
+  assert.equal(code, 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /unknown remote target '-staging'/)
+})
+
 test('a 401 on an env-override token explains that re-login cannot fix it', async (t) => {
   stubServer(t, () => ({ status: 401, json: { error: 'unauthorized' } }))
   const { ctx, err } = ctxWith()
@@ -337,6 +365,23 @@ test('get fetches a named artifact and saves it with --output', async (t) => {
   assert.equal(await fs.readFile(outFile, 'utf8'), 'binary-ish')
   assert.equal(out.join(''), '')
   assert.match(err.join(''), /saved 10 bytes/)
+})
+
+// `valueFlag()` takes the FIRST occurrence of a flag; the codec keeps the LAST.
+// So the gate validated one path and the bytes landed at another, exit 0 with
+// `saved N bytes to <the other file>` on stderr. Same class as the `--org`
+// repeat above.
+test('get writes to the --output the gate validated when the flag repeats', async (t) => {
+  const body = new TextEncoder().encode('binary-ish')
+  stubServer(t, () => ({ status: 200, body }))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-out-'))
+  const first = path.join(dir, 'first.png')
+  const last = path.join(dir, 'last.png')
+  const { ctx } = ctxWith()
+  const code = await runReportGet(['k', 'p', 'rpt-1', '--output', first, '--output', last], ctx)
+  assert.equal(code, 0)
+  assert.equal(await fs.readFile(last, 'utf8'), 'binary-ish')
+  await assert.rejects(fs.access(first))
 })
 
 test('get reports an unknown report from the server error body', async (t) => {
