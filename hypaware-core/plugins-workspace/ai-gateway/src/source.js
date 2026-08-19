@@ -19,7 +19,7 @@ import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
-import { createAiGatewayMessageProjector } from './message_projector.js'
+import { createAiGatewayMessageProjector, rollbackAiGatewayStateJournal } from './message_projector.js'
 import { createChainedAgent, startProxy } from './proxy.js'
 import { createRecorder } from './recorder.js'
 
@@ -299,10 +299,37 @@ async function launchListener(ctx, state, liveState) {
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
+    // Projection marks its messages seen in the listener-lifetime dedup
+    // state while it builds the rows, and the append below can still fail.
+    // A conversation replays its earlier messages on every later exchange,
+    // so leaving those marks in place after a failed write would make this
+    // batch unrecoverable for the life of the listener rather than merely
+    // late. Issue #879.
+    /** @type {(() => void)[]} */
+    const journal = []
+    // Set the moment the append resolves. The catch below covers the
+    // bookkeeping after the write too (entrypoint activity, counters,
+    // logging), and rolling back there would un-mark messages that DID
+    // land: unlike the OTEL writer this path has no `part_id` dedupe in
+    // front of it, and the flush-time `dedupeByPartId` only runs for
+    // fallback-identity batches, so the replay of a native-identity
+    // conversation would commit a second copy of every one of them.
+    //
+    // A rejected append is therefore treated as "nothing landed", which is
+    // true of every failure the spool can report EXCEPT one: `spool.append`
+    // writes the line before it `sync()`s and `close()`s the handle, so an
+    // `EIO`/`ENOSPC` from those last two rejects a record that is already
+    // durable and will still flush. That narrow window is the one case where
+    // this rollback duplicates instead of recovering. It stays a rollback on
+    // purpose: the common failure loses the batch until transcript backfill
+    // finds it, the rare one costs a duplicate part the query layer can be
+    // told about.
+    let appended = false
     try {
-      const messageRows = await projector.projectExchange(row)
+      const messageRows = await projector.projectExchange(row, { journal })
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        appended = true
         liveState.rowsWritten += messageRows.length
         // Recorded only after the append resolves: "recent clients" in
         // `hyp status` must mean rows that landed, not rows that were
@@ -330,6 +357,7 @@ async function launchListener(ctx, state, liveState) {
         ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
       })
     } catch (err) {
+      if (!appended) rollbackAiGatewayStateJournal(journal)
       const message = err instanceof Error ? err.message : String(err)
       liveState.lastError = message
       sourcesLog.error('aigw.exchange_write_failed', {
