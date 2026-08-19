@@ -432,7 +432,7 @@ export async function runReportDelete(argv, ctx) {
  * @param {string} cmd for error prefixes, e.g. `report list`
  * @returns {{ target: string, endpoint: string, identityBase: string | undefined } | { error: string }}
  * @ref LLP 0155#target [implements]: target defaults like bare --remote; the endpoint derives from the one registered URL
- * @ref LLP 0266#one-contract [implements]: a token the gate validated is the token the command acts on
+ * @ref LLP 0293#one-contract [implements]: a token the gate validated is the token the command acts on
  */
 function resolveReportsTarget(params, ctx, cmd) {
   const remote = params.remote
@@ -601,4 +601,3 @@ async function fileExists(p) {
     return false
   }
 }
-
