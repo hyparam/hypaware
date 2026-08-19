@@ -173,7 +173,11 @@ export async function runInitWizard(opts) {
    * this run composed is on disk, so an abandoned run leaves every store
    * as it found it. Re-assigned, never appended: a back through the lanes
    * re-answers them, and only the last answer is the one to write.
-   * @type {(() => Promise<unknown>) | undefined}
+   *
+   * Both commits resolve to what the write actually left in force rather
+   * than to the answer, so a write that fails is reported as the state
+   * that stands and not as the one it could not keep.
+   * @type {(() => Promise<string[]>) | undefined}
    */
   let syncCommit
   /** @type {(() => Promise<FolderAskMode>) | undefined} */
@@ -444,13 +448,15 @@ export async function runInitWizard(opts) {
         // A pass that re-answers the lanes replaces their held writes, and
         // a pass that never reaches them (a back through the fork onto a
         // solo local run) must not carry the previous pass's answers
-        // forward. `sourcesOptedOut` goes with them: it is what the finish
-        // log reports, and now that the write is held rather than made on
-        // the spot, an abandoned pass's opt-outs were never recorded
-        // anywhere.
+        // forward. `sourcesOptedOut` and `folderAsk` go with them: they are
+        // what the finish log reports, and now that the writes are held
+        // rather than made on the spot, an abandoned pass's answers were
+        // never recorded anywhere - so carrying them forward would report a
+        // policy this machine was never put under.
         syncCommit = undefined
         folderCommit = undefined
         sourcesOptedOut = []
+        folderAsk = undefined
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
         // then states its own positions - exactly as a failed join's retry
@@ -651,11 +657,15 @@ export async function runInitWizard(opts) {
     if (!committed.ok) {
       // The lanes stated their answers on screen and the refusal message
       // only speaks for the config, so the run says the rest of the answer
-      // set went with it. Naming the lanes that actually asked, because a
-      // run where the sync lane only made a statement never had a sync
-      // answer to lose.
+      // set went with it. Naming only the lanes that actually asked: a sync
+      // lane with nothing left to opt out of made a statement and handed
+      // back no commit, and an express pass narrated the standing state on
+      // both lanes rather than taking an answer, so it has no answer to
+      // have lost.
       // @ref LLP 0279#one-commit-point [implements]: a refusal reports the held policy writes it also dropped
-      const held = [...(syncCommit ? ['sync'] : []), ...(folderCommit ? ['new-folder'] : [])]
+      const held = express
+        ? []
+        : [...(syncCommit ? ['sync'] : []), ...(folderCommit ? ['new-folder'] : [])]
       if (held.length > 0) {
         opts.stderr.write(
           held.length > 1
@@ -671,11 +681,13 @@ export async function runInitWizard(opts) {
   // The question lanes' policy stores land here, with the config they
   // belong to: they hold this run's answers, and this run's answers are
   // either all recorded or none of them are (LLP 0279 #one-commit-point).
-  // `folderCommit` resolves to the mode actually left in force, so a failed
-  // write reports the standing one rather than the answer it could not
-  // keep.
+  // Both commits resolve to what they left in force rather than to the
+  // answer, so a write that failed is reported by the finish log as the
+  // state that stands. That is the signal that separates a recorded
+  // opt-out from one whose warning scrolled past under the configure
+  // phase, so it must not claim the answer landed.
   // @ref LLP 0279#one-commit-point [implements]: the lanes' policy writes run once the config commits, never before
-  if (syncCommit) await syncCommit()
+  if (syncCommit) sourcesOptedOut = await syncCommit()
   if (folderCommit) folderAsk = await folderCommit()
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when

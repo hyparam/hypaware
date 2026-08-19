@@ -1320,3 +1320,32 @@ test('runInitWizard: a committed run persists both lanes right after the config 
   )
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
 })
+
+// An express pass narrates the standing state on both lanes rather than
+// taking an answer from the user, so a declined overwrite has no lane
+// answer to have dropped and must not claim it does: the message exists to
+// name what the run threw away, and naming something it never held would
+// send the user to `hyp policy` to restore an answer they never gave.
+// @ref LLP 0279#one-commit-point [tests]:
+test('runInitWizard: a declined commit on the express path claims no dropped lane answers', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+
+  const { opts, stderr } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'defaults',
+    pick: async () => enrolledPickResult(configPath),
+    // The real lanes, so their auto-accept arms hand back the real commits.
+    syncScope: runWizardSyncScope,
+    folderAsk: runWizardFolderAsk,
+    confirmOverwrite: async () => false,
+  })
+
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.doesNotMatch(stderr.text(), /answers from this run were not recorded/)
+})

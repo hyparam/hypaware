@@ -126,6 +126,13 @@ export async function runWizardSyncScope(opts) {
   // That is the contract the new-folder lane's write already has. The
   // inline form runs before anything has been committed, so it still
   // throws and the run dies with nothing written.
+  //
+  // It resolves to the opt-outs actually in force, which on a failure is
+  // the set that stood before this run: warning and then reporting the
+  // answer would leave the finish log claiming an opt-out the export seam
+  // will not honour, and that log is the only place the failure is still
+  // visible once the configure phase has scrolled the warning away.
+  /** @returns {Promise<string[]>} */
   const commit = async () => {
     try {
       await write()
@@ -135,7 +142,9 @@ export async function runWizardSyncScope(opts) {
         `warning: could not record the sync answers (${detail}); ` +
         "the previous sync scope stands - set it later with 'hyp policy client <name> sync|local-only'\n"
       )
+      return [...optedOutBefore].sort()
     }
+    return optedOut
   }
   // Under `deferWrite` the store write is handed back instead of made here
   // (LLP 0279 #one-commit-point). The lane still states the split it just

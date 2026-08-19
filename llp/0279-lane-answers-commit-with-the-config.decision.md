@@ -80,14 +80,17 @@ describe the machine, so **a refusal says what else it dropped**: after
 the "keeping existing config at ..." line, the wizard names the held
 answers it did not record ("the sync and new-folder answers from this run
 were not recorded either"), listing only the lanes that actually asked -
-a sync lane that rendered a statement rather than a question had no answer
-to lose.
+a lane that rendered a statement rather than a question had no answer to
+lose, which covers both a sync lane with nothing left to opt out of and an
+express pass, where both lanes narrate the standing state.
 
 The held writes are **re-assigned, never accumulated**. Back navigation
 (LLP 0191 #back-edges) re-runs the lanes, and only the last answer is the
 one to write; a pass that never reaches the lanes clears them, so a back
 through the fork onto a solo local run cannot carry an earlier pass's
-answers forward.
+answers forward. The reported answers (`sourcesOptedOut`, `folderAsk`)
+clear with them: they were only ever true because the write had already
+happened inline, and a held write that never ran leaves nothing to report.
 
 A deferred write that *fails* warns and leaves the previous state
 standing. For the new-folder lane that is exactly what the inline write
@@ -98,6 +101,14 @@ it runs, the config is on disk and the run still owes the new-folder
 lane's write, the configure phase, and the finale, so a throw there would
 abandon the run half-done. The inline write runs before anything has been
 committed and keeps throwing.
+
+Both `commit`s therefore **resolve to what they left in force, never to
+the answer**. A warning emitted at the commit point is followed by the
+configure phase and the finale, so by the end of the run it has scrolled
+away, and the failure is a fail-open one: an opt-out the export seam never
+sees. The finish log is the signal that survives, and it must report the
+opt-out set and the mode that actually stand, not the ones the run asked
+for.
 
 <a id="standing-answer"></a>**Accepting a default never retires a standing
 answer.** LLP 0201's accept takes each lane's *stated* default. For the
@@ -137,9 +148,11 @@ the confirm).
   does.
 - A machine with `hyp policy folders ask` can re-run `hyp init` and take
   the express gate without losing the per-folder question.
-- The finish log's `folder_ask` attribute is now read from the committed
-  write rather than the answer, so a failed write is visible in telemetry
-  as the mode that stands.
+- The finish log's `folder_ask` and `sources_opted_out` attributes are now
+  read from the committed writes rather than the answers, so a failed
+  write is visible in telemetry as the state that stands.
+- A run that abandons a pass through the lanes reports neither: both
+  attributes clear with the held writes they belong to.
 
 ## References
 

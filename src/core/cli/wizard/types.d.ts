@@ -135,11 +135,13 @@ export interface WizardSyncScopeResult {
   /**
    * The store write this lane deferred (`deferWrite`, LLP 0279
    * #one-commit-point), for the caller to run when the run's config
-   * commits. Absent when the lane wrote inline, and absent on every
-   * outcome that writes nothing (cancel, back, corrupt store, no
-   * candidates).
+   * commits. It resolves to the opt-outs actually left in force, which is
+   * the previously standing set when the write fails (the failure warns
+   * rather than throwing, since the run is past its commit point by then).
+   * Absent when the lane wrote inline, and absent on every outcome that
+   * writes nothing (cancel, back, corrupt store, no candidates).
    */
-  commit?: () => Promise<void>
+  commit?: () => Promise<string[]>
 }
 
 /**
