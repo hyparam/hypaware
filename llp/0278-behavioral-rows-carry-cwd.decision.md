@@ -98,6 +98,20 @@ inside a synced transcript. The dataset still declares no
 `localOnlyContentColumns`; that fallback is for rows that cannot prove their
 provenance, and these prove it with `cwd`.
 
+"No further change" means no further *code*; it is not free. `sql.js` wraps a
+dataset only when it is `governable`, which it tests as "carries `cwd` or a
+declared content column", so this dataset was previously unwrapped and every
+read took the scan fast paths. Adding the column makes it governable, and
+`callerSeesEverything` is true only at the top of the lattice, so essentially
+every real caller now goes through `withLocalOnlyVisibility`, which
+deliberately drops `numRows`, `scanColumn`, and limit/offset pushdown. The
+concrete cost: `select count(*) from claude_telemetry_events` stops being
+answered from Iceberg metadata and full-scans what is the highest-row-count
+table in the cache (one row per tool decision, hook execution, and metric data
+point). That is the right trade - a fast wrong answer about a `local-only`
+session is the bug - but it is a trade, and it is paid by every caller, not
+only the ones a `local-only` directory would have filtered.
+
 ## Consequences {#consequences}
 
 - **Rows written before this change carry `null` `cwd` and are treated
@@ -105,20 +119,44 @@ provenance, and these prove it with `cwd`.
   accumulated behavioral rows under a `local-only` directory and then enrols
   will forward that backlog on its first sink tick, because a sink with no
   durable watermark exports from the beginning. They are still not
-  reclassified. [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals)
-  says already-passed history is not recalled, and a stamping backfill cannot
-  be made honest: the SessionStart hook records are the only source of the
-  `session_id`→`cwd` mapping and that store is deliberately bounded and
-  compacted (`SESSION_CONTEXT_MAX_BYTES` / `SESSION_CONTEXT_MAX_RECORDS`), so
-  it holds a recent tail, not history. A backfill over it would stamp some
-  rows, leave the rest `null`, and read as though the whole table had been
-  audited. The remedy for an operator who needs those rows gone is
-  `hyp purge --session <id>`, which selects on `session_id` (a column these
-  rows do carry) rather than on `cwd`. Note that the directory form,
-  `hyp purge <dir>`, does **not** reach them: `src/core/cache/purge.js` matches
-  the subtree against each row's `cwd`, and theirs is null. Both belong in the
-  release notes, alongside the pre-first-sync privacy review
-  (`hypaware-privacy`).
+  reclassified here, but that is a scope call rather than an impossibility,
+  and the distinction matters enough to state plainly.
+
+  A stamping backfill **is** constructible. The obvious source, the
+  SessionStart hook record store, would not carry it: it is deliberately
+  bounded and compacted (`SESSION_CONTEXT_MAX_BYTES` /
+  `SESSION_CONTEXT_MAX_RECORDS`), so it holds a recent tail and a backfill
+  over it would stamp some rows, leave the rest `null`, and read as though
+  the whole table had been audited. But it is not the only source.
+  `ai_gateway_messages` is written by this same listener, for these same
+  sessions, and carries both `session_id` and `cwd` as partition columns
+  (`ai-gateway/src/dataset.js:287`) under ordinary cache retention. A
+  `session_id` join against it would stamp every session that also produced
+  message rows, which is the overwhelming majority of them.
+
+  It is out of scope for this change deliberately: this LLP closes the
+  forward-going leak, and a backfill is a separate migration with its own
+  correctness surface (which sessions it can and cannot reach, what it does
+  with a session whose message rows have aged out or that never produced any,
+  whether it rewrites committed Iceberg files or writes a mapping table).
+  [LLP 0069 non-goal 1](./0069-local-only-dir-selection.spec.md#non-goals)
+  says already-passed history is not recalled, which covers rows that already
+  forwarded; it does not settle the not-yet-enrolled backlog. **Changing that
+  disposition means minting a new request, not editing this one.**
+
+  Until then the remedy is `hyp purge --session <id>`, which selects on
+  `session_id` (a column these rows do carry) rather than on `cwd`. Two
+  caveats have to travel with it or it is not a remedy at all. The directory
+  form, `hyp purge <dir>`, does **not** reach these rows:
+  `src/core/cache/purge.js` matches the subtree against each row's `cwd`, and
+  theirs is null. And the pre-first-sync privacy review
+  (`hypaware-privacy`) does not surface them either: it enumerates directories
+  with `SELECT ... FROM ai_gateway_messages WHERE cwd IS NOT NULL` and then
+  acts by directory marking and `hyp purge <dir>`, so an operator can run the
+  documented review, get a clean report, and still ship the backlog. Nothing
+  currently tells that operator which session ids to name. The same
+  `ai_gateway_messages` join that would drive a backfill is what would produce
+  that list. All of this belongs in the release notes.
 - The forwarded payload gains a `cwd` field for this signal, matching the
   field the message signal has always carried.
 - `test/plugins/claude-telemetry-local-only-export.test.js` pins the

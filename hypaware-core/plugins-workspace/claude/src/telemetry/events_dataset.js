@@ -116,7 +116,7 @@ export function claudeTelemetryEventRows(events, opts) {
 
 /**
  * @param {ClaudeTelemetryEvent} event
- * @param {((sessionId: string) => string | undefined) | undefined} cwdFor
+ * @param {(sessionId: string) => string | undefined} cwdFor
  * @returns {Record<string, unknown>}
  */
 function rowFromEvent(event, cwdFor) {
@@ -154,7 +154,7 @@ function rowFromEvent(event, cwdFor) {
   // @ref LLP 0070#granularity [implements]: the withholding key is per row,
   //   keyed on the row's own cwd, so a session that moves between a synced and
   //   a local-only tree is filtered event by event rather than wholesale
-  const cwd = sessionId !== undefined && cwdFor !== undefined ? stringOf(cwdFor(sessionId)) : undefined
+  const cwd = sessionId !== undefined ? stringOf(cwdFor(sessionId)) : undefined
 
   return {
     event_name: event.name,

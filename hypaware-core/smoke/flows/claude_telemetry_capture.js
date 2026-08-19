@@ -781,6 +781,18 @@ export async function run({ harness, expect }) {
       locRow,
       (v) => v !== undefined && Number(v.metric_value) === 42,
     )
+    // The metrics branch is a second, separate `recordTelemetryEvents` call
+    // site, so the cwd stamp it depends on needs its own assertion: without
+    // one, dropping `records` from that branch leaves per-session cost and
+    // activity counters unstamped, and a null cwd reads `full` at both seams
+    // - issue #878 again, for the metrics half only, with the suite green.
+    // @ref LLP 0278#decision [tests]: the listener stamps cwd on every
+    //   behavioral row, metric data points included
+    expect.that(
+      'events: the metric data points carry the hook cwd too, not just the log events',
+      [costRow, locRow],
+      (v) => v.every((/** @type {any} */ r) => r !== undefined && r.cwd === harness.tmpDir),
+    )
 
     const finalStatus = await /** @type {NonNullable<typeof started.status>} */ (started.status)()
     const finalDetails = /** @type {any} */ (finalStatus.details ?? {})
