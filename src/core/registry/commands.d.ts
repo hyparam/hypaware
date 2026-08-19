@@ -7,6 +7,7 @@ export type {
 export declare function createCommandRegistry(): import('../../../hypaware-plugin-kernel-types.d.ts').CommandRegistry & {
   match(argv: string[]): {
     command: import('../../../hypaware-plugin-kernel-types.d.ts').CommandRegistration
+    invokedName: string
     prefixLength: number
     rest: string[]
   } | undefined

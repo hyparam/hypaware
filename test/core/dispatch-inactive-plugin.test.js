@@ -212,7 +212,7 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   )
   assert.match(
     stderr.text(),
-    /^ {2}repair: @hypaware\/gascity is disabled by the fleet \(central\) config and cannot be enabled locally; ask your fleet admin to enable it$/m
+    /^ {2}repair: @hypaware\/gascity is disabled by the organization \(central\) config and cannot be enabled locally; ask your administrator to enable it$/m
   )
   // Neither the add-entry nor the local-enable advice should appear.
   assert.equal(stderr.text().includes('add {"name"'), false)
@@ -260,4 +260,48 @@ test('a command whose plugin IS active is unaffected (renders group help, no ava
   assert.match(stdout.text(), /usage: hyp gascity <subcommand>/)
   assert.match(stdout.text(), /attach\s+Attach the gascity subscriber/)
   assert.equal(stdout.text().includes('not in the active config'), false)
+})
+
+// `session` is core-registered as a task group (LLP 0248) but every one of its
+// subcommands is contributed by @hypaware/ai-gateway. When that plugin is
+// inactive the group shell still matches, so the miss path is never reached
+// and the user got an empty subcommand table (exit 0) or an `expected one of:`
+// with nothing after it (exit 2) instead of the plugin name and the repair.
+// @ref LLP 0153#unavailable-not-unknown [tests]: a core group emptied by an inactive plugin reports unavailable by every spelling
+test('a core group whose subcommands all come from an inactive plugin reports unavailable, not an empty table', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-empty-group-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/ai-gateway',
+    commands: [
+      { name: 'session ignore', summary: 'Stop recording this session' },
+      { name: 'session status', summary: 'Report this session opt-out state' },
+    ],
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+
+  for (const argv of [['session'], ['session', 'ignore'], ['session', 'zzz-not-a-subcommand'], ['session', '--help']]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(argv, {
+      stdout,
+      stderr,
+      workspaceDir,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    })
+
+    assert.equal(code, 2, `hyp ${argv.join(' ')} exited ${code}`)
+    assert.equal(stdout.text(), '', `hyp ${argv.join(' ')} wrote to stdout`)
+    assert.match(
+      stderr.text(),
+      /^hyp: 'session' is provided by @hypaware\/ai-gateway, which is not in the active config$/m
+    )
+    assert.ok(
+      stderr.text().includes(`  repair: add {"name": "@hypaware/ai-gateway"} to plugins[] in ${configPath}`),
+      `hyp ${argv.join(' ')} omits the repair line`
+    )
+    assert.equal(stderr.text().includes('expected one of: \n'), false)
+  }
 })

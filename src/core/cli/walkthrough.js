@@ -710,7 +710,7 @@ export async function runPickerWalkthrough(opts) {
     ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
   })
   if (!guard.proceed) {
-    opts.stderr.write(`hyp init: ${guard.message}\n`)
+    opts.stderr.write(`hyp setup: ${guard.message}\n`)
     return overwriteAbortedResult({ opts, configPath, config, picks })
   }
   if (guard.backupPath) {
@@ -1520,7 +1520,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
   if (!caWait.ready) {
     stderr.write(
       'warning: the daemon did not mint the proxy CA in time; clients may attach by ' +
-      "base URL. Re-run 'hyp attach <client>' once the daemon is up to switch them.\n"
+      "base URL. Re-run 'hyp client attach <client>' once the daemon is up to switch them.\n"
     )
   }
   return { waited: true, ready: caWait.ready }
@@ -1943,7 +1943,7 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
   stdout.write('These tools still send their requests through the HypAware gateway,\n')
   stdout.write('but this setup no longer collects them, so their requests can start\n')
   stdout.write('failing. Point each one back at its provider with:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -1975,7 +1975,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
   stdout.write('\n')
   stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
   stdout.write('Their requests can start failing until you run:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -2495,7 +2495,7 @@ async function cancelledResult(opts) {
  */
 function writeCancelledNotice(stderr) {
   try {
-    stderr.write('hyp init: cancelled\n')
+    stderr.write('hyp setup: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

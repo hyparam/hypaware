@@ -139,7 +139,7 @@ export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
  * *return* on timeout rather than throwing. A timeout is not an error here for
  * the same reason it is not one there: the caller has a better answer than an
  * exception (attach's own endpoint-resolution ladder, which ends in the
- * `hyp daemon install` / `hyp start` guidance the give-up message names).
+ * `hyp daemon install` / `hyp daemon start` guidance the give-up message names).
  *
  * The probed fact is `resolveLiveGatewayEndpointFromStatus`, which is already
  * liveness-gated on the daemon pid, so a stale `status.json` left by the
@@ -857,7 +857,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     if (attached.length > 0) {
       ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
     } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
+      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -1109,5 +1109,4 @@ async function readLocalConfigRaw(configPath) {
     throw new Error(`local config is not valid JSON: ${configPath}`)
   }
 }
-
 

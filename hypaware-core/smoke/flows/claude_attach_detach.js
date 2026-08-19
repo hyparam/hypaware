@@ -24,7 +24,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * HOME pointed at the same tmp tree so the Claude settings file lives
  * under it. Asserts:
  *
- * - `hyp attach --client claude` patches `~/.claude/settings.json`
+ * - `hyp client attach claude` patches `~/.claude/settings.json`
  *   with the HypAware marker, the LLP 0258 telemetry `env` block
  *   (golden compare against the exact key set), and the managed hook
  *   entries: `session-context` on every managed event, plus the LLP
@@ -38,7 +38,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *   0258 #marker-and-spool).
  * - A `client.attach` span exists with `hyp_plugin=@hypaware/claude`,
  *   `client_name=claude`, `status=ok`, `restored=false`.
- * - `hyp detach --client claude` removes the managed keys and the
+ * - `hyp client detach claude` removes the managed keys and the
  *   settings file matches its pre-attach state byte-for-byte.
  * - A `client.detach` span exists with `status=ok`, `restored=true`.
  *
@@ -143,11 +143,11 @@ export async function run({ harness, expect }) {
     await kernel.sources.start('ai-gateway', runtime.ctx)
     runtime.started = true
 
-    // Drive `hyp attach --client claude` through the dispatcher.
+    // Drive `hyp client attach claude` through the dispatcher.
     const attachStdout = makeBuf()
     const attachStderr = makeBuf()
     const attachCode = await dispatch(
-      ['attach', '--client', 'claude'],
+      ['client', 'attach', 'claude'],
       {
         stdout: attachStdout,
         stderr: attachStderr,
@@ -156,18 +156,14 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp attach --client claude exited 0', attachCode, (v) => v === 0)
-    // A non-TTY attach on a config without proxy_mode carries exactly one
-    // stderr line: the LLP 0244 migration pointer. Anything else is an error.
-    // @ref LLP 0244#non-interactive [tests]: the pointer is the only stderr a scripted attach adds
+    expect.that('dispatch: hyp client attach claude exited 0', attachCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp attach had no errors (only the proxy-mode pointer note)',
+      'stderr: hyp client attach had no errors',
       attachStderr.text(),
-      (v) => typeof v === 'string' &&
-        v === "note: this install attaches claude by base URL; run 'hyp attach claude' in an interactive terminal to switch it to proxy mode\n"
+      (v) => typeof v === 'string' && v.length === 0
     )
     expect.that(
-      'stdout: hyp attach printed the settings path',
+      'stdout: hyp client attach printed the settings path',
       attachStdout.text(),
       (v) => typeof v === 'string' && v.includes('Claude Code attached') && v.includes(settingsPath)
     )
@@ -329,11 +325,11 @@ export async function run({ harness, expect }) {
         hookCommands(v)[0].includes('claude-hook session-context')
     )
 
-    // Drive `hyp detach --client claude` through the dispatcher.
+    // Drive `hyp client detach claude` through the dispatcher.
     const detachStdout = makeBuf()
     const detachStderr = makeBuf()
     const detachCode = await dispatch(
-      ['detach', '--client', 'claude'],
+      ['client', 'detach', 'claude'],
       {
         stdout: detachStdout,
         stderr: detachStderr,
@@ -342,14 +338,14 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp detach --client claude exited 0', detachCode, (v) => v === 0)
+    expect.that('dispatch: hyp client detach claude exited 0', detachCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp detach had no errors',
+      'stderr: hyp client detach had no errors',
       detachStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
     expect.that(
-      'stdout: hyp detach reported the revert (core disk-driven undo, plugin-agnostic prose)',
+      'stdout: hyp client detach reported the revert (core disk-driven undo, plugin-agnostic prose)',
       detachStdout.text(),
       (v) => typeof v === 'string' && v.includes('Detached claude') && v.includes(settingsPath)
     )

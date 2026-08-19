@@ -272,6 +272,23 @@ export interface SessionMutationOutcome {
 }
 
 /**
+ * One recorder's answer for `hyp session status`. Every live recorder that
+ * advertises the shared control route is queried before the command claims
+ * the session is protected. A failed read remains `unknown`; it never turns
+ * into `not_ignored`.
+ */
+export interface SessionStatusOutcome {
+  recorder: string
+  endpoint: string
+  endpoint_source: 'daemon_status' | 'config_listen'
+  endpoint_authenticated: false
+  status: 'ignored' | 'not_ignored' | 'unknown'
+  ignored: boolean | null
+  total: number | null
+  reason: string | null
+}
+
+/**
  * What `hyp session status` reports, in `--json` field order. It carries the
  * PROVENANCE of both inputs alongside the answer (`session_id_source` /
  * `session_id_evidence`, `endpoint_source`) because an `ignored: true` rests on
@@ -313,6 +330,7 @@ export interface SessionStatusReport {
   endpoint: string | null
   endpoint_source: 'daemon_status' | 'config_listen' | null
   reason: string | null
+  recorders: SessionStatusOutcome[]
 }
 
 export interface AiGatewayRuntime {

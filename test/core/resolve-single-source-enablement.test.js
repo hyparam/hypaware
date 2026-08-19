@@ -31,7 +31,7 @@ test('resolveSingleSourceEnablement resolves the claude descriptor to ai-gateway
     pluginNames: ['@hypaware/ai-gateway', '@hypaware/claude'],
     entries: [
       { name: '@hypaware/ai-gateway' },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
     ],
   })
 })

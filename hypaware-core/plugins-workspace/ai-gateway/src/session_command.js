@@ -17,13 +17,13 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionEndpointResolution, SessionIdResolution, SessionMutationOutcome, SessionStatusReport } from './types.js'
+ * @import { SessionEndpointResolution, SessionIdResolution, SessionMutationOutcome, SessionStatusOutcome, SessionStatusReport } from './types.js'
  */
 
 const CONTROL_PATH = '/_hypaware/ignore/session'
 
 /** The other, independent governor. LLP 0066 R7: either match suppresses. */
-const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp policy show` (this verb reports the session set only)'
+const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp privacy show` (this verb reports the session set only)'
 
 /**
  * Printed next to every confirmed `ignored`, by the writer and the reader
@@ -65,7 +65,7 @@ const EPHEMERAL_NOTE =
  * nothing verified.
  */
 const MEMBERSHIP_NOTE =
-  'what this proves: the gateway holds this exact id in its drop set, and nothing more. It never inspects traffic, so an exchange is dropped only where the client adapter stamps it with this same session_id - an id this session does not carry prints this same line and suppresses nothing. Naming the right id is on the caller, which is why this verb resolves it (or takes it explicitly) rather than asking the gateway to confirm it afterwards.'
+  'what this proves: every recorder listed as ignored holds this exact id in its drop set, and nothing more. The control route never inspects traffic, so an exchange is dropped only where the client adapter stamps it with this same session_id - an id this session does not carry prints this same line and suppresses nothing. Naming the right id is on the caller, which is why this verb resolves it (or takes it explicitly) rather than asking a recorder to confirm it afterwards.'
 
 /**
  * The machine-readable form of `MEMBERSHIP_NOTE`, carried by the write verbs'
@@ -238,6 +238,7 @@ export async function runSessionStatus(argv, ctx) {
       endpoint: null,
       endpoint_source: null,
       reason: resolvedId.error,
+      recorders: [],
     })
   }
 
@@ -253,8 +254,8 @@ export async function runSessionStatus(argv, ctx) {
     thread_id: resolvedId.threadId ?? null,
   }
 
-  const endpoint = resolveGatewayEndpointForCli(ctx)
-  if (!endpoint.ok) {
+  const resolvedTargets = resolveRecorderTargetsForCli(ctx)
+  if (resolvedTargets.targets.length === 0) {
     return writeStatus(ctx, parsed.json, {
       ...who,
       status: 'unknown',
@@ -262,36 +263,69 @@ export async function runSessionStatus(argv, ctx) {
       total: null,
       endpoint: null,
       endpoint_source: null,
-      reason: endpoint.error,
+      reason: resolvedTargets.gatewayError ?? 'no live recorder advertises session control',
+      recorders: [],
     })
   }
-
-  const result = await controlRequest({
-    endpoint: endpoint.endpoint,
-    method: 'GET',
-    sessionId: resolvedId.sessionId,
-  })
-  if (!result.ok) {
-    return writeStatus(ctx, parsed.json, {
-      ...who,
-      status: 'unknown',
-      ignored: null,
-      total: null,
-      endpoint: endpoint.endpoint,
-      endpoint_source: endpoint.source,
-      reason: result.error,
-    })
+  // A resolvable extra recorder with no resolvable gateway narrows what this
+  // answer covers, so say it out loud here for the same reason `runMutation`
+  // does: an `ignored` that never asked the gateway must not read as an
+  // `ignored` everywhere. stderr, so the `--json` document stays parseable.
+  // @ref LLP 0266#milestones [implements]: status and mutations report the same recorder inventory, gaps included
+  if (resolvedTargets.gatewayError) {
+    ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
   }
 
-  const ignored = result.body.ignored
+  /** @type {SessionStatusOutcome[]} */
+  const outcomes = []
+  for (const target of resolvedTargets.targets) {
+    const result = await controlRequest({
+      endpoint: target.endpoint,
+      method: 'GET',
+      sessionId: resolvedId.sessionId,
+    })
+    outcomes.push(result.ok
+      ? {
+          recorder: target.recorder,
+          endpoint: target.endpoint,
+          endpoint_source: target.endpointSource,
+          endpoint_authenticated: false,
+          status: result.body.ignored ? 'ignored' : 'not_ignored',
+          ignored: result.body.ignored,
+          total: result.body.total,
+          reason: null,
+        }
+      : {
+          recorder: target.recorder,
+          endpoint: target.endpoint,
+          endpoint_source: target.endpointSource,
+          endpoint_authenticated: false,
+          status: 'unknown',
+          ignored: null,
+          total: null,
+          reason: result.error,
+        })
+  }
+
+  const recording = outcomes.find((outcome) => outcome.status === 'not_ignored')
+  const unknown = outcomes.filter((outcome) => outcome.status === 'unknown')
+  const status = recording
+    ? 'not_ignored'
+    : unknown.length > 0
+      ? 'unknown'
+      : 'ignored'
+  const primary = recording ?? outcomes.find((outcome) => outcome.status !== 'unknown') ?? outcomes[0]
   return writeStatus(ctx, parsed.json, {
     ...who,
-    status: ignored ? 'ignored' : 'not_ignored',
-    ignored,
-    total: result.body.total,
-    endpoint: endpoint.endpoint,
-    endpoint_source: endpoint.source,
-    reason: null,
+    status,
+    ignored: status === 'unknown' ? null : status === 'ignored',
+    total: status === 'unknown' ? null : primary.total,
+    endpoint: primary.endpoint,
+    endpoint_source: primary.endpoint_source,
+    reason: unknown.length > 0
+      ? unknown.map((outcome) => `${outcome.recorder} at ${outcome.endpoint}: ${outcome.reason}`).join('; ')
+      : null,
+    recorders: outcomes,
   })
 }
 
@@ -336,33 +370,25 @@ async function runMutation(argv, ctx, method, usage) {
     return SESSION_EXIT_UNKNOWN
   }
 
-  const gateway = resolveGatewayEndpointForCli(ctx)
-  const advertised = resolveAdvertisedRecordersForCli(ctx, gateway.ok ? gateway.endpoint : undefined)
+  const resolvedTargets = resolveRecorderTargetsForCli(ctx)
 
   // NO recorder at all is the old no-gateway error: nothing would hold the
   // token, so nothing may read as success.
-  if (!gateway.ok && advertised.length === 0) {
-    ctx.stderr.write(`hyp session: ${gateway.error}\n`)
+  if (resolvedTargets.targets.length === 0) {
+    ctx.stderr.write(`hyp session: ${resolvedTargets.gatewayError ?? 'no live recorder advertises session control'}\n`)
     return SESSION_EXIT_UNKNOWN
   }
   // A resolvable extra recorder with no resolvable gateway is possible only
   // when the live snapshot carries the listener but no bound gateway port:
   // the gateway is not listening, so it records nothing and is not
   // addressed - said out loud rather than silently narrowed.
-  if (!gateway.ok) {
-    ctx.stderr.write(`hyp session: gateway not addressed: ${gateway.error}\n`)
-  }
-
-  /** @type {Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>} */
-  const targets = []
-  if (gateway.ok) targets.push({ recorder: 'gateway', endpoint: gateway.endpoint, endpointSource: gateway.source })
-  for (const extra of advertised) {
-    targets.push({ recorder: extra.source, endpoint: extra.endpoint, endpointSource: 'daemon_status' })
+  if (resolvedTargets.gatewayError) {
+    ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
   }
 
   /** @type {SessionMutationOutcome[]} */
   const outcomes = []
-  for (const target of targets) {
+  for (const target of resolvedTargets.targets) {
     const result = await controlRequest({
       endpoint: target.endpoint,
       method,
@@ -471,6 +497,28 @@ async function runMutation(argv, ctx, method, usage) {
 }
 
 /**
+ * Resolve the recorder set shared by status, ignore, and unignore. The gateway
+ * remains the primary target when it can be resolved. Every additional live
+ * recorder advertising the shared route follows it, with duplicate endpoints
+ * removed by `resolveAdvertisedRecordersForCli`.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {{ targets: Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>, gatewayError?: string }}
+ * @ref LLP 0266#milestones [implements]: session status and mutations use one recorder inventory
+ */
+function resolveRecorderTargetsForCli(ctx) {
+  const gateway = resolveGatewayEndpointForCli(ctx)
+  const advertised = resolveAdvertisedRecordersForCli(ctx, gateway.ok ? gateway.endpoint : undefined)
+  /** @type {Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>} */
+  const targets = []
+  if (gateway.ok) targets.push({ recorder: 'gateway', endpoint: gateway.endpoint, endpointSource: gateway.source })
+  for (const extra of advertised) {
+    targets.push({ recorder: extra.source, endpoint: extra.endpoint, endpointSource: 'daemon_status' })
+  }
+  return gateway.ok ? { targets } : { targets, gatewayError: gateway.error }
+}
+
+/**
  * The recorders beyond the gateway that host the session-ignore control
  * route, discovered by their own `control_routes` advertisement in a live
  * daemon snapshot (`resolveLiveControlRouteEndpointsFromStatus`).
@@ -518,7 +566,7 @@ function writeStatus(ctx, json, report) {
         // this particular one failed a check.
         // @ref LLP 0166#stated-not-proved [implements]
         endpoint_authenticated: false,
-        folder_policy: 'hyp policy show',
+        folder_policy: 'hyp privacy show',
       }) + '\n'
     )
   } else if (report.status === 'unknown') {
@@ -526,11 +574,14 @@ function writeStatus(ctx, json, report) {
     ctx.stdout.write(`session ${who}: UNKNOWN - cannot confirm the opt-out is in effect\n`)
     ctx.stdout.write(`reason:  ${report.reason ?? 'unknown'}\n`)
     ctx.stdout.write('assume this session IS being recorded until a check succeeds.\n')
+    writeRecorderStatusLines(ctx, report.recorders)
+    writeRecorderTrustNotes(ctx, report.recorders)
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
     ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
@@ -540,10 +591,12 @@ function writeStatus(ctx, json, report) {
     })) {
       ctx.stdout.write(`${note}\n`)
     }
+    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
     ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
@@ -553,12 +606,68 @@ function writeStatus(ctx, json, report) {
     })) {
       ctx.stdout.write(`${note}\n`)
     }
+    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   }
 
   if (report.status === 'ignored') return 0
   if (report.status === 'not_ignored') return SESSION_EXIT_NOT_IGNORED
   return SESSION_EXIT_UNKNOWN
+}
+
+/**
+ * The per-recorder rows the headline has NOT already spoken for.
+ *
+ * The headline reports one outcome (`report.endpoint` / `endpoint_source` and
+ * `total` are that outcome's), and it is not always `recorders[0]`: the
+ * aggregate takes the first `not_ignored` answer, so with the gateway
+ * `ignored` and a second recorder `not_ignored` the headline describes the
+ * second recorder. A blind `slice(1)` then re-printed that recorder and
+ * dropped the gateway's answer from the output entirely. Matching on
+ * `endpoint` is exact because the inventory carries no duplicate endpoints:
+ * `resolveAdvertisedRecordersForCli` drops any advertised endpoint equal to
+ * the gateway's.
+ *
+ * @param {SessionStatusReport} report
+ * @returns {SessionStatusOutcome[]}
+ * @ref LLP 0256#cli-posts-to-both [implements]: every addressed recorder's answer is reported, exactly once
+ */
+function secondaryRecorders(report) {
+  const spokenFor = report.recorders.findIndex((outcome) => outcome.endpoint === report.endpoint)
+  if (spokenFor === -1) return report.recorders
+  return report.recorders.filter((_, index) => index !== spokenFor)
+}
+
+/**
+ * @param {CommandRunContext} ctx
+ * @param {SessionStatusOutcome[]} outcomes
+ */
+function writeRecorderStatusLines(ctx, outcomes) {
+  for (const outcome of outcomes) {
+    if (outcome.status === 'unknown') {
+      ctx.stdout.write(`recorder ${outcome.recorder} at ${outcome.endpoint}: UNKNOWN - ${outcome.reason ?? 'no answer'}\n`)
+    } else {
+      ctx.stdout.write(
+        `recorder ${outcome.recorder} at ${outcome.endpoint}: ${outcome.status === 'ignored' ? 'ignored' : 'not ignored'} (${outcome.total} ignored)\n`
+      )
+    }
+  }
+}
+
+/**
+ * Every confirmed per-recorder answer carries the same local-responder trust
+ * disclosure as the legacy primary answer. Unknown rows make no membership
+ * claim and therefore add no responder note.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {SessionStatusOutcome[]} outcomes
+ */
+function writeRecorderTrustNotes(ctx, outcomes) {
+  for (const outcome of outcomes) {
+    if (outcome.status !== 'unknown') {
+      ctx.stdout.write(`${responderTrustNote(outcome.endpoint)}\n`)
+    }
+  }
 }
 
 /**
@@ -700,7 +809,7 @@ export function resolveGatewayEndpointForCli(ctx) {
   return {
     ok: false,
     error:
-      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp start`) or pin a port with `hyp init`.',
+      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp daemon start`) or configure it with `hyp setup`.',
   }
 }
 

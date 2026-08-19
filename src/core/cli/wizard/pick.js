@@ -531,7 +531,7 @@ export async function commitWizardPickedConfig(args) {
     ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
   })
   if (!guard.proceed) {
-    args.stderr.write(`hyp init: ${guard.message}\n`)
+    args.stderr.write(`hyp setup: ${guard.message}\n`)
     await withSpan(
       'wizard.pick.write_config',
       {
@@ -793,7 +793,7 @@ async function cancelledResult(opts) {
     { component: 'wizard' }
   )
   try {
-    opts.stderr.write('hyp init: cancelled\n')
+    opts.stderr.write('hyp setup: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

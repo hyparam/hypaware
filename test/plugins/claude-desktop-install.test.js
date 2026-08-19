@@ -102,7 +102,7 @@ test('install: subscription mode already signed in skips login without calling i
   const { cmdCtx, commandCalls, credential, sectionConfig } = fixture({
     stateDir,
     mode: 'subscription',
-    commandRuns: { 'claude-account status': 0 },
+    commandRuns: { 'client claude-account status': 0 },
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
@@ -111,8 +111,8 @@ test('install: subscription mode already signed in skips login without calling i
   })
 
   assert.equal(code, 0)
-  assert.ok(commandCalls.some((c) => c.name === 'claude-account status'))
-  assert.ok(!commandCalls.some((c) => c.name === 'claude-account login'))
+  assert.ok(commandCalls.some((c) => c.name === 'client claude-account status'))
+  assert.ok(!commandCalls.some((c) => c.name === 'client claude-account login'))
 })
 
 test('install: subscription mode not signed in runs login, and a failed login drops the run', async () => {
@@ -120,7 +120,7 @@ test('install: subscription mode not signed in runs login, and a failed login dr
   const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
     stateDir,
     mode: 'subscription',
-    commandRuns: { 'claude-account status': 1, 'claude-account login': 1 },
+    commandRuns: { 'client claude-account status': 1, 'client claude-account login': 1 },
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
@@ -129,7 +129,7 @@ test('install: subscription mode not signed in runs login, and a failed login dr
   })
 
   assert.equal(code, 1)
-  assert.ok(commandCalls.some((c) => c.name === 'claude-account login'))
+  assert.ok(commandCalls.some((c) => c.name === 'client claude-account login'))
   assert.ok(bufs.stdout.text().includes('incomplete'))
   // Later steps still ran: failure in step 1 does not strand the rest.
   assert.ok(spawnCalls.some((c) => c.startsWith('sudo cp')))
@@ -140,7 +140,7 @@ test('install: no stdin in subscription mode fails the login step without attemp
   const { cmdCtx, commandCalls, credential, sectionConfig } = fixture({
     stateDir,
     mode: 'subscription',
-    commandRuns: { 'claude-account status': 1 },
+    commandRuns: { 'client claude-account status': 1 },
     stdin: undefined,
   })
   const spawnCalls = /** @type {string[]} */ ([])
@@ -150,7 +150,7 @@ test('install: no stdin in subscription mode fails the login step without attemp
   })
 
   assert.equal(code, 1)
-  assert.ok(!commandCalls.some((c) => c.name === 'claude-account login'))
+  assert.ok(!commandCalls.some((c) => c.name === 'client claude-account login'))
 })
 
 test('install: refuses up front on an ephemeral gateway listen, with no side effects', async () => {
@@ -301,7 +301,7 @@ test('install: a failed privileged write drops with a re-run hint, not a thrown 
   })
 
   assert.equal(code, 1)
-  assert.match(bufs.stdout.text(), /re-run 'hyp claude-desktop install'/)
+  assert.match(bufs.stdout.text(), /re-run 'hyp client claude-desktop install'/)
   // killall still runs: the plist failure doesn't strand the restart step.
   assert.ok(spawnCalls.some((c) => c.startsWith('killall')))
 })
@@ -333,7 +333,7 @@ test('install: --print-commands applies nothing at all, including the non-privil
   const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
     stateDir,
     mode: 'subscription',
-    commandRuns: { 'claude-account status': 1 },
+    commandRuns: { 'client claude-account status': 1 },
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
@@ -346,8 +346,8 @@ test('install: --print-commands applies nothing at all, including the non-privil
   assert.equal(code, 0, bufs.stdout.text())
   assert.deepEqual(commandCalls, [], 'no sub-command invoked, not even claude-account status')
   assert.equal(spawnCalls.length, 0)
-  assert.match(bufs.stdout.text(), /hyp claude-account login/)
-  assert.match(bufs.stdout.text(), /hyp claude-desktop install-helper/)
+  assert.match(bufs.stdout.text(), /hyp client claude-account login/)
+  assert.match(bufs.stdout.text(), /hyp client claude-desktop install-helper/)
 })
 
 test('install: --print-commands never asks for consent, because it changes nothing', async () => {
@@ -376,7 +376,7 @@ test('install: a bare enter proceeds - disclosure, question, then the steps', as
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
   const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
     stateDir, mode: 'subscription', stdin: Readable.from(['\n']),
-    commandRuns: { 'claude-account status': 1 },
+    commandRuns: { 'client claude-account status': 1 },
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
@@ -397,7 +397,7 @@ test('install: a bare enter proceeds - disclosure, question, then the steps', as
   // stream), so probing the live sign-in state to sharpen the wording would
   // print `mode:` / `signed in:` lines into the middle of the consent screen.
   assert.equal(
-    commandCalls.filter((c) => c.name === 'claude-account status').length,
+    commandCalls.filter((c) => c.name === 'client claude-account status').length,
     1,
     'the status probe belongs to the login step, not to the question',
   )

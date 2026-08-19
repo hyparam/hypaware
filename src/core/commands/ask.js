@@ -52,7 +52,7 @@ export async function runAsk(argv, ctx) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
-      ctx.stderr.write('  Attach one with `hyp attach claude` (or `codex`), and make sure its CLI is on your PATH.\n')
+      ctx.stderr.write('  Attach one with `hyp client attach claude` (or `codex`), and make sure its CLI is on your PATH.\n')
       return 1
     }
     ctx.stdout.write(`\nStarting ${launchers[0].label}...\n\n`)

@@ -23,7 +23,10 @@ const LARGE_GRAPH = 500_000
  * @ref LLP 0034#verbs [implements]: context-graph registers a verb; `graph_neighbors` becomes a tool with zero core change
  */
 export const graphNeighborsVerb = {
-  name: 'graph neighbors',
+  name: 'query graph neighbors',
+  aliases: ['graph neighbors'],
+  category: 'explore-share',
+  audience: 'everyday',
   tool: 'graph_neighbors',
   plugin: PLUGIN_NAME,
   summary: 'Walk the activity graph from a node out to N hops',

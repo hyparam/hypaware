@@ -12,7 +12,7 @@ import { runAttach } from '../../src/core/commands/clients.js'
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// `hyp attach` used to dead-end on two different "we don't know that client"
+// Client attach used to dead-end on two different "we don't know that client"
 // messages when the real state was "the adapter exists but is not enabled on
 // this install" (LLP 0174 #detection). These fixtures drive the three states
 // through BOTH failure sites: the `hypaware.ai-gateway` capability gate (no
@@ -90,13 +90,13 @@ function localConfigPath(home) {
 function notEnabledMessage(home, client, plugin) {
   return (
     `error: the ${client} adapter is not enabled on this install; ` +
-    `enable it with 'hyp init', or add ${plugin} to ${localConfigPath(home)} ` +
-    `and run 'hyp daemon restart', then re-run attach\n`
+    `enable it with 'hyp setup', or add ${plugin} to ${localConfigPath(home)} ` +
+    `and run 'hyp daemon restart', then re-run 'hyp client attach ${client}'\n`
   )
 }
 
 const DISABLED_CENTRAL_MESSAGE =
-  `error: the claude adapter is disabled by your fleet config; ` +
+  `error: the claude adapter is disabled by your central config; ` +
   `a local config cannot override the central-managed setting\n`
 
 /** @param {(home: string) => Promise<void> | void} fn */
@@ -138,7 +138,7 @@ test('capability gate: a catalog-known client reports not_enabled, not cap_missi
   })
 })
 
-test('capability gate: bare `hyp attach` defaults to claude and takes the same path', async () => {
+test('capability gate: bare attach runner defaults to claude and takes the same path', async () => {
   await withTempHome(async (home) => {
     const { ctx, stderr } = makeCtx({ home, gatewayCapability: false })
     const code = await runAttach([], ctx)
@@ -219,7 +219,7 @@ test('registry miss: a genuinely unrecognized name still gets the plain unknown 
   })
 })
 
-test('fleet-disabled adapter refuses with the central-managed explanation, not the local remedy', async () => {
+test('central-disabled adapter refuses with the central-managed explanation, not the local remedy', async () => {
   await withTempHome(async (home) => {
     // The central layer names @hypaware/claude with enabled:false. LLP 0031's
     // merge drops any local entry with that name, so telling the user to edit
@@ -235,12 +235,12 @@ test('fleet-disabled adapter refuses with the central-managed explanation, not t
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
     assert.equal(stderr.text(), DISABLED_CENTRAL_MESSAGE)
-    assert.doesNotMatch(stderr.text(), /hyp init/)
+    assert.doesNotMatch(stderr.text(), /hyp setup/)
     assert.doesNotMatch(stderr.text(), /hyp daemon restart/)
   })
 })
 
-test('fleet-disabled adapter reports adapter_disabled_central through the capability gate too', async () => {
+test('central-disabled adapter reports adapter_disabled_central through the capability gate too', async () => {
   await withTempHome(async (home) => {
     writeCentralConfig(home, {
       version: 2,
@@ -261,7 +261,7 @@ test('fleet-disabled adapter reports adapter_disabled_central through the capabi
 test('a locally disabled adapter is fixable, so it renders the not_enabled remedy', async () => {
   await withTempHome(async (home) => {
     // enabled:false in the LOCAL layer only: the entry exists but the user can
-    // flip it, so this shares the not_enabled wording rather than the fleet one.
+    // flip it, so this shares the not_enabled wording rather than the central one.
     mkdirSync(path.dirname(localConfigPath(home)), { recursive: true })
     writeFileSync(
       localConfigPath(home),
@@ -279,15 +279,6 @@ test('a registered client still attaches unchanged', async () => {
     const { ctx, stderr } = makeCtx({ home, registered: ['claude'] })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 0, stderr.text())
-    // The only stderr a non-interactive attach may add is the LLP 0244
-    // pointer: this install's config lacks proxy_mode and claude attaches by
-    // proxy, so the one-line migration hint is part of the unchanged-attach
-    // contract now, and nothing else is.
-    // @ref LLP 0244#non-interactive [tests]: non-TTY attach never migrates and emits exactly the pointer
-    assert.equal(
-      stderr.text(),
-      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
-      'interactive terminal to switch it to proxy mode\n'
-    )
+    assert.equal(stderr.text(), '')
   })
 })

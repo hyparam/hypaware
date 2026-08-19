@@ -850,7 +850,7 @@ test('hyp query overview: no capture configured reports that, not a schema name'
   assert.equal(code, 1)
   assert.equal(stdout.text(), '')
   assert.match(stderr.text(), /nothing has been recorded yet - no AI client is connected/)
-  assert.match(stderr.text(), /Run `hyp init` to start capturing Claude or Codex sessions/)
+  assert.match(stderr.text(), /Run `hyp setup` to start capturing Claude or Codex sessions/)
   // The dataset name is the tool's vocabulary, not the reader's.
   assert.ok(!stderr.text().includes('ai_gateway_messages'))
   assert.ok(!stderr.text().includes('dataset'))

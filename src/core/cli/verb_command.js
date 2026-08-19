@@ -22,6 +22,9 @@ import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 export function verbToCommand(verb) {
   return {
     name: verb.name,
+    ...(verb.aliases ? { aliases: verb.aliases } : {}),
+    ...(verb.category ? { category: verb.category } : {}),
+    ...(verb.audience ? { audience: verb.audience } : {}),
     ...(verb.plugin ? { plugin: verb.plugin } : {}),
     summary: verb.summary,
     usage: usageForVerb(verb.name, verb.inputSchema),

@@ -381,7 +381,7 @@ function renderFirstSyncWarning(deadlineMs) {
     `  Your review window runs until ${formatFirstSyncDeadline(deadlineMs)}.\n` +
     '  Syncing now ends it early and sends your backfilled history.\n' +
     '  What has been sent cannot be un-sent. To exclude a folder first:\n' +
-    '    hyp policy set <path> local-only\n'
+    '    hyp privacy set <path> local-only\n'
   )
 }
 

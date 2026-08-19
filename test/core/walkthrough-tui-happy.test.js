@@ -152,7 +152,7 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
     const result = await promise
     assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
     assert.equal(result.exitCode, 130)
-    assert.match(stderr.text(), /hyp init: cancelled/)
+    assert.match(stderr.text(), /hyp setup: cancelled/)
 
     await obs.shutdown()
     const traces = await readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))

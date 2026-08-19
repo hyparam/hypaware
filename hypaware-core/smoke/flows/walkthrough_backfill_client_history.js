@@ -20,7 +20,7 @@ import { resolveDependencies } from '../../../src/core/dep_graph.js'
  * Boots `@hypaware/ai-gateway` + `@hypaware/claude` + `@hypaware/codex`
  * against a tmp HYP_HOME with both a Claude transcript and a Codex
  * rollout staged under the fake HOME (timestamped inside the retention
- * window), then drives the real `hyp init` picker non-interactively with
+ * window), then drives the real `hyp setup` picker non-interactively with
  * both clients selected and `--no-daemon` (a local import still runs).
  * Asserts the bead-6 onboarding contract:
  *
@@ -153,7 +153,7 @@ export async function run({ harness, expect }) {
     const initStderr = makeBuf()
     const initCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--client', 'claude',
         '--client', 'codex',
@@ -167,7 +167,7 @@ export async function run({ harness, expect }) {
       { stdout: initStdout, stderr: initStderr, kernel, registry, env }
     )
     const initText = initStdout.text()
-    expect.that('dispatch: hyp init exited 0', initCode, (v) => v === 0)
+    expect.that('dispatch: hyp setup exited 0', initCode, (v) => v === 0)
 
     // ----- Finale summary: both providers imported rows -----
     expect.that(

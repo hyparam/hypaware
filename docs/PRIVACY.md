@@ -7,7 +7,7 @@ you enroll.
 
 ## What gets recorded
 
-Each capture source you enable during `hyp init` records into the local
+Each capture source you enable during `hyp setup` records into the local
 query cache under `~/.hyp` (`HYP_HOME`):
 
 | Source          | What lands in the cache                                                       |
@@ -21,7 +21,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 Recording is content-level: conversation rows include the actual message
 text, not just metadata. Rows age out of the local cache after the
 retention window init set (90 days on a team install, 120 on a
-local-only one; `hyp init --retention-days <N>` overrides).
+local-only one; `hyp setup --retention-days <N>` overrides).
 
 ### The raw-body spool
 
@@ -41,7 +41,7 @@ Three things keep it from becoming a second record:
   `@hypaware/claude` config). Past it the oldest files go first, so a stopped
   daemon costs detail, never disk.
 - `hyp purge` empties it, whatever else you asked that purge to delete, and
-  `hyp detach claude` empties it on the way out.
+  `hyp client detach claude` empties it on the way out.
 
 ### If you turned on proxy mode
 
@@ -90,15 +90,16 @@ re-runs that one command at each login. What it runs is `/bin/launchctl`
 itself, once, which sets the variable and exits: there is no resident
 process, no HypAware code in it, and nothing is sent anywhere. It is still a
 login item on your machine, and a session-wide variable that other Node
-programs will also read. `hyp detach claude` unsets the variable and removes
-the agent, as do `hyp detach claude --purge` and `hyp daemon uninstall`.
+programs will also read. `hyp client detach claude` unsets the variable and
+removes the agent, as do `hyp client detach claude --purge` and
+`hyp daemon uninstall`.
 
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
 permitted to vouch for, whether the keychain still trusts it, and whether
-the launchd variable is live. `hyp detach claude` deliberately keeps the CA
-and the trust in place, so re-attaching later does not ask for your password
-again; `hyp detach claude --purge` and `hyp daemon uninstall` remove the CA
-and its keychain trust.
+the launchd variable is live. `hyp client detach claude` deliberately keeps
+the CA and the trust in place, so re-attaching later does not ask for your
+password again; `hyp client detach claude --purge` and `hyp daemon uninstall`
+remove the CA and its keychain trust.
 
 ## Where it goes
 
@@ -132,25 +133,25 @@ There are two authoring surfaces for the same classes:
   travels with the repo, so it covers every clone:
 
   ```sh
-  hyp ignore              # write a .hypignore at the repo root (or cwd)
-  hyp ignore <path>       # ignore a specific subtree
-  hyp unignore            # remove it, re-enabling recording
+  hyp privacy ignore              # write a .hypignore at the repo root (or cwd)
+  hyp privacy ignore <path>       # ignore a specific subtree
+  hyp privacy unignore            # remove it, re-enabling recording
   ```
 
   An empty or comment-only `.hypignore` also means `ignore`.
 
-- **A machine-local store** (`hyp policy`) records the class privately on
+- **A machine-local store** (`hyp privacy`) records the class privately on
   this machine, never as a file in the repo. Use it when the marking itself
   is sensitive (a dotfile in a hidden directory is a breadcrumb pointing at
   exactly the thing you are hiding), or when the path is not a repo:
 
   ```sh
-  hyp policy set <path> ignore        # never recorded, no dotfile
-  hyp policy set <path> local-only    # recorded, never forwarded
-  hyp policy set <path> sync          # explicitly synced (not asked again)
-  hyp policy show [path]              # which class governs, and why
-  hyp policy list                     # every machine-local entry
-  hyp policy unset <path> [class]     # back to the implicit default
+  hyp privacy set <path> ignore        # never recorded, no dotfile
+  hyp privacy set <path> local-only    # recorded, never forwarded
+  hyp privacy set <path> sync          # explicitly synced (not asked again)
+  hyp privacy show [path]              # which class governs, and why
+  hyp privacy list                     # every machine-local entry
+  hyp privacy unset <path> [class]     # back to the implicit default
   ```
 
 On a machine connected to a server, folders you have not marked sync
@@ -158,22 +159,22 @@ without asking. You can instead be asked, once per new folder, how to
 handle it, at the moment you open a session there:
 
 ```sh
-hyp policy folders ask    # ask once per new folder
-hyp policy folders sync   # back to syncing without asking (the default)
-hyp policy folders        # report which is in force
+hyp privacy folders ask    # ask once per new folder
+hyp privacy folders sync   # back to syncing without asking (the default)
+hyp privacy folders        # report which is in force
 ```
 
 This gates the question only. In either setting, folders you already
 marked keep their class, `.hypignore` files are unaffected, and nothing
 already local-only or ignored starts syncing. The setting is machine-local
-and reversible, `hyp init` asks for it in its own step, and `hyp status`
+and reversible, `hyp setup` asks for it in its own step, and `hyp status`
 names it on an enrolled machine.
 
 Two caveats apply to both surfaces:
 
 - **Prospective only.** A marking gates future recording and forwarding.
   Rows captured before it existed stay in the cache; deleting them is the
-  separate, explicit `hyp purge` step below.
+  separate, explicit `hyp privacy purge` step below.
 - **Class resolution needs a working directory.** Only the Claude and
   Codex pathways supply one, so directory markings are a no-op for the
   `raw-anthropic` / `raw-openai` proxy and OTEL sources.
@@ -197,15 +198,15 @@ the id.
 
 ## Deleting what was already recorded
 
-`hyp purge` permanently deletes rows from this machine's local cache. It
+`hyp privacy purge` permanently deletes rows from this machine's local cache. It
 never contacts a sink or the remote, and never deletes copies that were
 already exported or forwarded:
 
 ```sh
-hyp purge <path>          # rows whose cwd is at or under the path
-hyp purge --session <id>  # one session's rows
-hyp purge --ignored       # every row whose directory now resolves to ignore
-hyp purge --all           # everything, wholesale
+hyp privacy purge <path>          # rows whose cwd is at or under the path
+hyp privacy purge --session <id>  # one session's rows
+hyp privacy purge --ignored       # every row whose directory now resolves to ignore
+hyp privacy purge --all           # everything, wholesale
 ```
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
@@ -239,7 +240,7 @@ already forwarded to a server.
 `hyp leave` disconnects the machine from its central server: forwarding and
 config pull stop, org-driven client attaches are undone, and the forward
 credential is removed. Local recordings, config, and the daemon stay; use
-`hyp purge` and the uninstall steps in the [README](../README.md#uninstalling)
+`hyp privacy purge` and the uninstall steps in the [README](../README.md#uninstalling)
 to remove those too.
 
 ## The daemon's own telemetry

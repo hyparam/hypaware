@@ -238,7 +238,7 @@ async function runClientLifecycle(action, argv, ctx) {
     for (const name of catalog.clientDescriptors.keys()) {
       if (!liveNames.has(name)) {
         ctx.stdout.write(
-          `note: ${name} is a known client but its adapter is not enabled; run 'hyp attach ${name}' to enable it\n`
+          `note: ${name} is a known client but its adapter is not enabled; run 'hyp client attach ${name}' to enable it\n`
         )
       }
     }
@@ -407,16 +407,16 @@ async function runClientLifecycle(action, argv, ctx) {
             } else {
               // Which give-up message to show hinges on whether a daemon
               // service is installed at all: an install-but-unstarted daemon
-              // just needs `hyp start`, but with no service installed that
-              // command has nothing to start, so the message must also point
-              // at `hyp daemon install` / `hyp daemon start`.
+              // just needs `hyp daemon start`, but with no service installed
+              // that command has nothing to start, so the message must also
+              // point at `hyp daemon install`.
               // @ref LLP 0174#bootstrap-floor [implements]: "config exists but no daemon is installed" extends the endpoint give-up message instead of attach gaining daemon orchestration
               const { serviceDaemonStatus } = await import('../daemon/install.js')
               const daemonStatus = await serviceDaemonStatus({ homeDir })
               const message = daemonStatus.installed
                 ? `cannot resolve the gateway endpoint: the gateway is not running in this ` +
                   `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
-                  `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+                  `(hyp daemon start) so it can attach clients, or set 'listen' in the ai-gateway config.`
                 : `cannot resolve the gateway endpoint: the gateway is not running in this ` +
                   `process and no ai-gateway 'listen' address is configured, and no daemon ` +
                   `service is installed on this machine. Run 'hyp daemon install' then ` +
@@ -594,7 +594,7 @@ async function resolveAttachEnablementState({ name, ctx }) {
       state: 'disabled_central',
       errorKind: 'adapter_disabled_central',
       message:
-        `the ${name} adapter is disabled by your fleet config; ` +
+        `the ${name} adapter is disabled by your central config; ` +
         `a local config cannot override the central-managed setting`,
     }
   }
@@ -602,9 +602,9 @@ async function resolveAttachEnablementState({ name, ctx }) {
     state: 'not_enabled',
     errorKind: 'adapter_not_enabled',
     message:
-      `the ${name} adapter is not enabled on this install; enable it with 'hyp init', ` +
+      `the ${name} adapter is not enabled on this install; enable it with 'hyp setup', ` +
       `or add ${descriptor.plugin} to ${configPath} and run 'hyp daemon restart', ` +
-      `then re-run attach`,
+      `then re-run 'hyp client attach ${name}'`,
   }
 }
 
@@ -770,7 +770,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   if (!allLive) {
     ctx.stderr.write(
       `error: enabled the ${name} adapter (config updated${result.daemonInstalled ? ' and daemon restarted' : ''}), ` +
-      `but could not activate it in this process; re-run 'hyp attach ${name}' to finish\n`
+      `but could not activate it in this process; re-run 'hyp client attach ${name}' to finish\n`
     )
     getLogger('cmd-attach').warn('client.attach.enable_activate_failed', {
       [Attr.COMPONENT]: 'cmd-attach',
@@ -878,14 +878,14 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   if (centralGateway) {
     ctx.stderr.write(
       `note: this install attaches ${name} by base URL, and its gateway config is ` +
-      `centrally managed; enable proxy_mode in the fleet config to switch it\n`
+      `centrally managed; enable proxy_mode in the central config to switch it\n`
     )
     return
   }
 
   if (parsed.client === 'all' || parsed.json || !isTty(ctx.stdin)) {
     ctx.stderr.write(
-      `note: this install attaches ${name} by base URL; run 'hyp attach ${name}' in an ` +
+      `note: this install attaches ${name} by base URL; run 'hyp client attach ${name}' in an ` +
       `interactive terminal to switch it to proxy mode\n`
     )
     return
@@ -909,7 +909,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   )
   if (!accepted) {
     ctx.stderr.write(
-      `keeping the base-URL attach; re-run 'hyp attach ${name}' to switch later\n`
+      `keeping the base-URL attach; re-run 'hyp client attach ${name}' to switch later\n`
     )
     log.info('client.attach.proxy_migration', {
       [Attr.COMPONENT]: 'cmd-attach',
@@ -941,7 +941,7 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     } else {
       ctx.stdout.write(
         `✓ proxy_mode written to ${result.configPath}; no daemon service is installed, so ` +
-        `start one (hyp daemon install, hyp daemon start) and re-run 'hyp attach ${name}'\n`
+        `start one (hyp daemon install, hyp daemon start) and re-run 'hyp client attach ${name}'\n`
       )
     }
     return
@@ -1149,7 +1149,7 @@ function reportEnableFailure({ name, result, ctx }) {
     : `could not enable the ${name} adapter: the ${failedStep} step failed (${detail}). ` +
       `The config change already persists` +
       (result.backupPath ? ` (config backed up to ${result.backupPath})` : '') +
-      `; re-running 'hyp attach ${name}' resumes from the new state.`
+      `; re-running 'hyp client attach ${name}' resumes from the new state.`
   ctx.stderr.write(`error: ${message}\n`)
 }
 

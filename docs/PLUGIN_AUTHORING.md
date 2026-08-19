@@ -228,7 +228,7 @@ Only clients whose manifest declares `contributes.client.agent_dir`
 receive agents; a target without one is skipped.
 
 Skills and agents are both **client assets** and share one install path
-(LLP 0138): attaching a client materializes them, and `hyp skills
+(LLP 0138): attaching a client materializes them, and `hyp client skills
 install` re-copies both on demand. There is no separate `agents`
 command.
 

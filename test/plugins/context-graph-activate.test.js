@@ -33,20 +33,28 @@ test('activate provides the context-graph capability and registers node/edge dat
   assert.equal(typeof caps[0].value.kit.edgeId, 'function')
 
   assert.deepEqual(datasets.map((d) => d.name).sort(), ['edge', 'node'])
-  // `graph neighbors` is now a verb (projects a CLI command + the
+  // `query graph neighbors` is a verb (projects a CLI command + the
   // graph_neighbors MCP tool); the two imperative graph ops stay commands.
   assert.deepEqual(commands.map((c) => c.name).sort(), ['graph compact', 'graph project'])
   assert.equal(verbs.length, 1)
-  assert.equal(verbs[0].name, 'graph neighbors')
+  assert.equal(verbs[0].name, 'query graph neighbors')
   assert.equal(verbs[0].tool, 'graph_neighbors')
   assert.equal(verbs[0].authClass, 'read')
 
-  // The group describes itself, so `hyp graph --help` opens with what the
-  // graph is and that projection runs on demand, rather than a bare table.
+  // The group describes itself, so `hyp graph --help` and `hyp query graph
+  // --help` both open with what the graph is and that projection runs on
+  // demand, rather than a bare table. LLP 0248 keeps `graph project|compact`
+  // as direct operations while the journey moved to `query graph neighbors`,
+  // so both prefixes need the description.
   // @ref LLP 0214#d2 [tests]: a plugin namespace registers a group description
-  assert.equal(groups.length, 1)
-  assert.equal(groups[0].name, 'graph')
-  assert.match(groups[0].help, /hyp graph project/)
+  assert.deepEqual(
+    groups.map((group) => group.name).sort(),
+    ['graph', 'query graph']
+  )
+  for (const group of groups) {
+    assert.match(group.help, /hyp graph project/)
+    assert.match(group.help, /hyp query graph neighbors/)
+  }
 
   // Mechanics belong in help, not in a skill narrating the command from
   // outside it. These are the two the graph skill used to carry.

@@ -588,7 +588,7 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   // as it was, every time, until the CA is gone.
   // @ref LLP 0262#migration [tests]: the stale-CA remedy cannot be a plain re-attach
   const reason = String(staleWarn.attrs.reason ?? '')
-  assert.match(reason, /hyp detach claude --purge/)
+  assert.match(reason, /hyp client detach claude --purge/)
   assert.doesNotMatch(reason, /run `hyp attach claude` to move it back/)
 
   // The tunnel is still served, so an already-attached client keeps its egress

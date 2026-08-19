@@ -85,11 +85,11 @@ export async function activate(ctx) {
     start: startCurateSource,
   })
 
-  ctx.commands.register({ name: 'enrich', plugin: PLUGIN_NAME, summary: 'Context-graph enrichment', usage: 'hyp enrich <propose|curate|backfill|status>', run: runEnrich })
-  ctx.commands.register({ name: 'enrich propose', plugin: PLUGIN_NAME, summary: 'Run one T1 propose tick now', usage: 'hyp enrich propose', run: runEnrichPropose })
-  ctx.commands.register({ name: 'enrich curate', plugin: PLUGIN_NAME, summary: 'Run one T2 curate tick now', usage: 'hyp enrich curate', run: runEnrichCurate })
-  ctx.commands.register({ name: 'enrich backfill', plugin: PLUGIN_NAME, summary: 'Enrich ALL history (propose every session, curate via the Batch API)', usage: 'hyp enrich backfill [--propose-only|--curate-only]', run: runEnrichBackfill })
-  ctx.commands.register({ name: 'enrich status', plugin: PLUGIN_NAME, summary: 'Show enrichment watermarks and counts', usage: 'hyp enrich status', run: runEnrichStatus })
+  ctx.commands.register({ name: 'enrichment', aliases: ['enrich'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Context-graph enrichment', usage: 'hyp enrichment <propose|curate|backfill|status>', run: runEnrich })
+  ctx.commands.register({ name: 'enrichment propose', aliases: ['enrich propose'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Run one T1 propose tick now', usage: 'hyp enrichment propose', run: runEnrichPropose })
+  ctx.commands.register({ name: 'enrichment curate', aliases: ['enrich curate'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Run one T2 curate tick now', usage: 'hyp enrichment curate', run: runEnrichCurate })
+  ctx.commands.register({ name: 'enrichment backfill', aliases: ['enrich backfill'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Enrich ALL history (propose every session, curate via the Batch API)', usage: 'hyp enrichment backfill [--propose-only|--curate-only]', run: runEnrichBackfill })
+  ctx.commands.register({ name: 'enrichment status', aliases: ['enrich status'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Show enrichment watermarks and counts', usage: 'hyp enrichment status', run: runEnrichStatus })
 
   ctx.log.info('enrich.activated', {
     source_dataset: config.source_dataset,

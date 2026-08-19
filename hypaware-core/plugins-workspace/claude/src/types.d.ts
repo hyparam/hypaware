@@ -276,7 +276,7 @@ export interface ClaudeAttachChanged {
    * up into the marker's `prev_malformed` and keeps succeeding (LLP 0163), so
    * this is the only thing that tells the user a hand-edit was moved aside.
    *
-   * A list, not a joined string: attach's callers render it (`hyp attach`
+   * A list, not a joined string: attach's callers render it (`hyp client attach`
    * prints a line each, `--json` echoes the array) and there is no reason to
    * hand them a field they would have to split. Omitted when nothing was
    * displaced, including on a re-attach whose backup was carried over from an

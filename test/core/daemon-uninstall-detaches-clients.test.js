@@ -243,7 +243,7 @@ test('one wedged client is a collected failure with a remedy; the rest still det
     assert.equal(code, 1)
     assert.match(staged.out(), /Detached claude/)
     assert.match(staged.err(), /detach 'codex' failed/)
-    assert.match(staged.err(), /run 'hyp detach codex'/)
+    assert.match(staged.err(), /run 'hyp client detach codex'/)
     assert.match(staged.err(), /the service itself was removed/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })

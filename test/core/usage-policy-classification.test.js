@@ -30,10 +30,10 @@ import {
 // copy is load-bearing (many users' first contact with the class vocabulary),
 // so it is pinned here like the other consent surfaces.
 
-test('verbArgvForClass maps each class to its hyp policy set token (LLP 0111 #teaching)', () => {
-  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['policy', 'set', '/work/repo', 'sync'])
-  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['policy', 'set', '/work/repo', 'local-only'])
-  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['policy', 'set', '/work/repo', 'ignore'])
+test('verbArgvForClass maps each class to its hyp privacy set token (LLP 0111 #teaching)', () => {
+  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['privacy', 'set', '/work/repo', 'sync'])
+  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['privacy', 'set', '/work/repo', 'local-only'])
+  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['privacy', 'set', '/work/repo', 'ignore'])
   assert.throws(() => verbArgvForClass(/** @type {any} */ ('nope'), '/x'), /unknown class/)
 })
 
@@ -42,7 +42,7 @@ test('the three choices are presented least-to-most restrictive with their token
   assert.deepEqual(CLASSIFICATION_CHOICES.map((c) => c.token), ['sync', 'local-only', 'ignore'])
 })
 
-test('buildClassificationPrompt names the folder, all three classes, and each policy set command', () => {
+test('buildClassificationPrompt names the folder, all three classes, and each privacy set command', () => {
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
   assert.match(prompt, /\/work\/secret-repo/)
   assert.match(prompt, /enrolled/)
@@ -51,9 +51,9 @@ test('buildClassificationPrompt names the folder, all three classes, and each po
   assert.match(prompt, /sync:/)
   assert.match(prompt, /local-only:/)
   assert.match(prompt, /ignore:/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo sync/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo local-only/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo ignore/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo sync/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo local-only/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo ignore/)
   // Exit criterion (LLP 0110): the hook never teaches an ignore-spelled command
   // for a non-ignore class - the deprecated flag spellings are gone entirely.
   assert.equal(/hyp ignore --sync/.test(prompt), false)
@@ -73,8 +73,8 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
   // A user who does not want this question at all has to be able to answer
   // that in the session that asked, not by finding a setting later.
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
-  assert.match(prompt, /hyp policy folders sync/)
-  assert.match(prompt, /hyp policy folders ask/)
+  assert.match(prompt, /hyp privacy folders sync/)
+  assert.match(prompt, /hyp privacy folders ask/)
 })
 
 test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
@@ -313,7 +313,7 @@ test('the classification answer lands via the real hyp policy set verb (LLP 0106
 
     // Answer "ignore" by running exactly the argv the hook advertises.
     const argv = verbArgvForClass('ignore', root)
-    assert.deepEqual(argv, ['policy', 'set', root, 'ignore'])
+    assert.deepEqual(argv, ['privacy', 'set', root, 'ignore'])
     const res = await runVerb(argv, { cwd: root, hypHome })
     assert.equal(res.code, 0, res.stderr)
 

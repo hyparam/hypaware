@@ -32,11 +32,11 @@ import { buildOperationContext } from '../cli/verb_command.js'
 export async function runMcp(argv, ctx) {
   const parsed = parseMcpArgv(argv)
   if (!parsed.ok) {
-    ctx.stderr.write(`hyp mcp: ${parsed.error}\n`)
+    ctx.stderr.write(`hyp mcp serve: ${parsed.error}\n`)
     return 2
   }
   if (parsed.http) {
-    ctx.stderr.write('hyp mcp: --http is a follow-up; only stdio is supported in V1 (LLP 0034 §implementation-sequencing)\n')
+    ctx.stderr.write('hyp mcp serve: --http is a follow-up; only stdio is supported in V1 (LLP 0034 §implementation-sequencing)\n')
     return 2
   }
   if (parsed.remote) {
@@ -72,7 +72,7 @@ export async function runMcp(argv, ctx) {
     tool_count: tools.length,
   })
   // Lifecycle line to stderr (stdout is reserved for the protocol).
-  ctx.stderr.write(`hyp mcp: serving ${tools.length} tool(s) over stdio${tools.length ? ` (${tools.map((t) => t.name).join(', ')})` : ''}\n`)
+  ctx.stderr.write(`hyp mcp serve: serving ${tools.length} tool(s) over stdio${tools.length ? ` (${tools.map((t) => t.name).join(', ')})` : ''}\n`)
 
   const stdin = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
   await serveStdio({
@@ -104,7 +104,7 @@ function parseMcpArgv(argv) {
       http: { type: 'boolean', default: false },
     },
   })
-  if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp [--remote <target>]' }
+  if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp serve [--remote <target>]' }
   if (!parsed.ok) return parsed
   const p = /** @type {{ remote?: string, http: boolean }} */ (parsed.params)
   return { ok: true, remote: p.remote, http: p.http }

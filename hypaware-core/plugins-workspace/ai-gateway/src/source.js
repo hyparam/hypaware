@@ -437,7 +437,7 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
     // state. A plain re-attach is NOT the remedy: attach leaves the CA where
     // it is on purpose (the trust is offered back, never taken), so the file
     // that puts the install in this state survives the re-attach. The
-    // remedies that land are removing the CA (`hyp detach claude --purge`,
+    // remedies that land are removing the CA (`hyp client detach claude --purge`,
     // then re-attach) or turning `proxy_mode` back on.
     // @ref LLP 0262#migration [constrained-by]: attach offers the CA back rather than removing it, so it cannot clear this state on its own
     const stale = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
@@ -447,7 +447,7 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         ca_cert_path: stale.certPath,
         reason: 'serving blind tunnels so an already-attached client keeps working; ' +
-          're-attaching leaves this CA on disk, so run `hyp detach claude --purge` ' +
+          're-attaching leaves this CA on disk, so run `hyp client detach claude --purge` ' +
           'and re-attach to clear the proxy residue, or turn proxy_mode back on',
       })
       return { tunnelOnly: true }

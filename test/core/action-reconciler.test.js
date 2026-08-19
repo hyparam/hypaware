@@ -679,7 +679,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
     assert.deepEqual(kept.installed_assets, ['/home/u/.claude/skills/org'], 'the undo record survives the re-arm')
     assert.equal(kept.request_key, 'claude')
     assert.equal(kept.endpoint, 'http://127.0.0.1:4388', 'unrelated detail is carried, not reconstructed')
-    assert.match(String(kept.reason), /re-armed by an explicit 'hyp attach claude'/)
+    assert.match(String(kept.reason), /re-armed by an explicit 'hyp client attach claude'/)
     assert.match(String(kept.reason), /previous refusal: JSONC settings file/)
     assert.equal('attempts' in kept, false, 'no attempt counter is invented for a re-arm')
   } finally {

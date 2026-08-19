@@ -225,7 +225,7 @@ export async function runQueryOverview(argv, ctx) {
     // "no AI client is set up yet".
     ctx.stderr.write(
       'hyp query overview: nothing has been recorded yet - no AI client is connected.\n' +
-      '  Run `hyp init` to start capturing Claude or Codex sessions.\n'
+      '  Run `hyp setup` to start capturing Claude or Codex sessions.\n'
     )
     return 1
   }

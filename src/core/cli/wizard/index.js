@@ -291,14 +291,14 @@ export async function runInitWizard(opts) {
               // #consequences: a cancelled run still exits 130).
               // @ref LLP 0191#esc-back [implements]: ctrl+c cancels the run at the disconnect question rather than acting as a back-step
               if (joined) await narrateEnrolledAbort(opts)
-              opts.stderr.write('hyp init: cancelled\n')
+              opts.stderr.write('hyp setup: cancelled\n')
               return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {
-                opts.stderr.write('hyp init: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
+                opts.stderr.write('hyp setup: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
                 continue
               }
               // Disconnected: the org's rows are no longer locked and the
@@ -406,7 +406,7 @@ export async function runInitWizard(opts) {
           if (choice === 'back') continue atFork
           if (choice === 'cancelled') {
             if (joined) await narrateEnrolledAbort(opts)
-            opts.stderr.write('hyp init: cancelled\n')
+            opts.stderr.write('hyp setup: cancelled\n')
             return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
           expressShown = true
@@ -611,7 +611,7 @@ export async function runInitWizard(opts) {
 
   // Loop invariant, restated for the type system: the only way out of the
   // lanes above, other than returning, assigns `picked` first.
-  if (!picked) throw new Error('hyp init: internal error: the pick lane did not run')
+  if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
   const finaleProgress = express ? undefined : wizardStepProgress(pathway, 'finale', { managed: enrolled() })
 
@@ -665,7 +665,7 @@ export async function runInitWizard(opts) {
   const cancelled = finaleSummary?.cancelled === true
   if (cancelled) {
     try {
-      opts.stderr.write('hyp init: cancelled\n')
+      opts.stderr.write('hyp setup: cancelled\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -871,7 +871,7 @@ function printJoinFailure(opts, join) {
     return
   }
   if (join.reason === 'org_selection_required') {
-    opts.stderr.write('Joining failed: this account belongs to more than one org. Run `hyp remote login --org <name>` first, then re-run `hyp init`.\n')
+    opts.stderr.write('Joining failed: this account belongs to more than one org. Run `hyp remote login --org <name>` first, then re-run `hyp setup`.\n')
     return
   }
   opts.stderr.write('Joining failed: an admin needs to grant this account access before this machine can enroll.\n')
@@ -1011,7 +1011,7 @@ async function narrateEnrolledAbort(opts) {
     opts.stdout.write(
       '\n' +
       'This machine is enrolled: its configured sources sync to your server by default.\n' +
-      "Keep any local-only with 'hyp policy client <name> local-only'.\n"
+      "Keep any local-only with 'hyp privacy client <name> local-only'.\n"
     )
     await narratePrivacyIfTeamPath(opts)
   } catch {

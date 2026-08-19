@@ -89,7 +89,7 @@ export function buildForkOptions() {
     {
       value: 'local',
       label: 'Collect agent logs locally',
-      summary: 'Everything stays on this machine. You can switch to shared later by re-running hyp init.',
+      summary: 'Everything stays on this machine. You can switch to shared later by re-running hyp setup.',
     },
     { value: 'quit', label: 'Quit' },
   ]

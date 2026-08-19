@@ -201,7 +201,7 @@ function perSignalOverrideWarnings(env) {
       `env.${key} is set and outranks the endpoint hypaware just wrote; ` +
       'Claude Code will export there instead, including the prompt and response ' +
       'text this attach turns on. Remove it, or point it at the same local ' +
-      'listener, then re-run hyp attach claude'
+      'listener, then re-run hyp client attach claude'
     )
   }
   return out
@@ -222,6 +222,27 @@ export class ClaudeSettingsError extends Error {
       this.cause = opts.cause
     }
   }
+}
+
+/**
+ * Read-only preflight shared by real and dry-run OTEL attach. A dry run must
+ * refuse the same provably old Claude Code release as the write path, or its
+ * plan promises an attach the real command rejects.
+ *
+ * @param {{ claudeVersion?: string, telemetryPort?: number, spoolDir?: string }} opts
+ * @ref LLP 0258#version-floor [implements]: dry-run and real attach enforce one version floor before settings I/O
+ */
+export function preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir }) {
+  if (isBelowClaudeVersion(claudeVersion, CLAUDE_OTEL_MIN_VERSION)) {
+    throw markActionRefused(new ClaudeSettingsError(
+      `Claude Code ${String(claudeVersion)} is older than ${CLAUDE_OTEL_MIN_VERSION}, ` +
+      'which is the first release that exports the telemetry HypAware captures; ' +
+      `run '${CLAUDE_UPDATE_HINT}' and attach again`,
+      { code: 'VERSION_FLOOR' }
+    ))
+  }
+  validateTelemetryPort(telemetryPort)
+  validateSpoolDir(spoolDir)
 }
 
 /**
@@ -269,16 +290,7 @@ export async function attach(opts) {
     // or base-URL mode here - one attach mode per client - so the refusal is
     // an error the caller reports, not a quiet downgrade.
     // @ref LLP 0258#version-floor [implements]: below the floor attach refuses the switch and prints the upgrade hint
-    if (isBelowClaudeVersion(claudeVersion, CLAUDE_OTEL_MIN_VERSION)) {
-      throw markActionRefused(new ClaudeSettingsError(
-        `Claude Code ${String(claudeVersion)} is older than ${CLAUDE_OTEL_MIN_VERSION}, ` +
-        'which is the first release that exports the telemetry HypAware captures; ' +
-        `run '${CLAUDE_UPDATE_HINT}' and attach again`,
-        { code: 'VERSION_FLOOR' }
-      ))
-    }
-    validateTelemetryPort(telemetryPort)
-    validateSpoolDir(spoolDir)
+    preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
   }
   // Proxy mode routes *all* of Claude Code's HTTPS through the gateway, so an
   // attach that lands without a working local CA does not degrade to
@@ -364,14 +376,14 @@ export async function attach(opts) {
       warnings.push(
         `${dottedPath} was not a JSON ${expected}; ` +
         `${MARKER_KEY}.prev_malformed already holds an earlier backup for that path, ` +
-        `so this value was discarded and hyp detach will not restore it`
+        `so this value was discarded and hyp client detach will not restore it`
       )
       return
     }
     displaced[dottedPath] = prior
     warnings.push(
       `${dottedPath} was not a JSON ${expected}; ` +
-      `its previous value is backed up in ${MARKER_KEY}.prev_malformed and hyp detach restores it`
+      `its previous value is backed up in ${MARKER_KEY}.prev_malformed and hyp client detach restores it`
     )
   }
 
@@ -479,7 +491,7 @@ export async function attach(opts) {
       // restored on detach either way, but the user has to be told.
       warnings.push(
         `env.${key} was already set to ${String(prior.value)}; ` +
-        'hypaware now manages it and hyp detach restores it'
+        'hypaware now manages it and hyp client detach restores it'
       )
     }
     // An existing proxy is far more likely to be a corporate egress proxy than
@@ -501,7 +513,7 @@ export async function attach(opts) {
     if (typeof displacedProxy === 'string' && displacedProxy.length > 0) {
       warnings.push(
         `env.HTTPS_PROXY was already set to ${redactUrlUserinfo(displacedProxy)}; ` +
-        `hypaware now handles it and hyp detach restores it. ` +
+        `hypaware now handles it and hyp client detach restores it. ` +
         `If that is a required outbound proxy, set upstream_proxy on the ` +
         `ai-gateway config to the same value so traffic still chains through it`
       )
@@ -530,7 +542,7 @@ export async function attach(opts) {
       // echoed: an endpoint or a headers value is exactly where a collector
       // token ends up, and this string is printed and logged.
       warnings.push(
-        `env.${key} was already set; hypaware now manages it and hyp detach restores it`
+        `env.${key} was already set; hypaware now manages it and hyp client detach restores it`
       )
     }
     for (const { key, value } of additions) {
@@ -791,7 +803,7 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
  * with nothing on disk to recover it from, and nothing told them. Attach still
  * repairs the block (it has to write into it, and refusing would turn a
  * one-key typo into a failed enrollment), but the displaced value goes into the
- * marker's `prev_malformed` backup, `hyp detach` puts it back, and the caller
+ * marker's `prev_malformed` backup, `hyp client detach` puts it back, and the caller
  * gets a warning to print.
  *
  * Absent is not malformed: a key that was never there displaces nothing and

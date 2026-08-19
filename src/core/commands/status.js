@@ -110,6 +110,182 @@ export async function runStatus(argv, ctx) {
 }
 
 /**
+ * Narrow client projection of the same snapshot `hyp status` uses. This is
+ * intentionally not a second attach probe or config reader: adding another
+ * client surface must not create two answers to whether a client is attached.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0248#client-status [implements]: client status projects the overall status collector
+ */
+export async function runClientStatus(argv, ctx) {
+  const json = argv.includes('--json')
+  const positional = argv.filter((token) => token !== '--json')
+  const unknownFlag = positional.find((token) => token.startsWith('-'))
+  if (unknownFlag || positional.length > 1) {
+    ctx.stderr.write(`usage: hyp client status [client] [--json]\n`)
+    return 2
+  }
+
+  const report = await collectHypAwareStatus({
+    env: ctx.env,
+    runtime: {
+      sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
+      sinks: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
+      capabilities: ctx.capabilities,
+      query: ctx.query,
+      storage: ctx.storage,
+    },
+  })
+  const requested = positional[0]
+  const clients = requested
+    ? report.clients.filter((client) => client.name === requested)
+    : report.clients
+  if (requested && clients.length === 0) {
+    ctx.stderr.write(`hyp client status: unknown client '${requested}'\n`)
+    return 1
+  }
+
+  const rows = projectClientStatus(report, clients)
+
+  if (json) {
+    ctx.stdout.write(JSON.stringify({ clients: rows }, null, 2) + '\n')
+    return 0
+  }
+  if (rows.length === 0) {
+    ctx.stdout.write('No clients are configured or detected.\n')
+    return 0
+  }
+  renderClientStatusText(rows, ctx.stdout)
+  return 0
+}
+
+/**
+ * Project client-focused facts out of the same status report used by
+ * `hyp status`. The projection reads listener details already persisted in the
+ * report's source snapshot and never probes settings, transcripts, or a live
+ * endpoint itself.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {HypAwareStatusReport['clients']} clients
+ * @ref LLP 0248#client-status [implements]: one overall snapshot supplies attach, endpoint, activity, and recorder-health facts
+ */
+export function projectClientStatus(report, clients) {
+  return clients.map((client) => {
+    const health = report.captureHealth.find((entry) => entry.client === client.name)
+    const listener = listenerEndpointFromReport(report, health?.source ?? null)
+    const clientTelemetryEndpoint = client.telemetryPort !== undefined
+      ? `http://127.0.0.1:${client.telemetryPort}`
+      : null
+    const endpointDrift = client.telemetryPort !== undefined && listener.port !== null
+      ? client.telemetryPort !== listener.port
+      : null
+
+    return {
+      name: client.name,
+      configured: client.configured,
+      attachable: client.attachable !== false,
+      attached: client.attached,
+      mode: client.mode ?? null,
+      provenance: report.layered
+        ? (report.layered.centralPlugins.includes(client.plugin) ? 'central' : 'local')
+        : 'local',
+      settings_path: client.settingsPath ?? null,
+      version: client.version ?? null,
+      port: client.port ?? null,
+      telemetry_endpoint: clientTelemetryEndpoint,
+      listener_endpoint: listener.endpoint,
+      endpoint_drift: endpointDrift,
+      capture_health: health
+        ? {
+          source: health.source,
+          last_event_at: health.lastEventAt,
+          last_transcript_activity_at: health.lastTranscriptActivityAt,
+          attached_at: health.attachedAt,
+          listener_started_at: health.listenerStartedAt,
+          gap_seconds: Math.round(health.gapMs / 1000),
+          state: health.state,
+        }
+        : null,
+      error: client.error ?? null,
+      recent_entrypoints: report.recentEntrypoints
+        .filter((entry) => entry.clientName === client.name)
+        .map((entry) => ({
+          entrypoint: entry.entrypoint,
+          last_seen: entry.lastSeen,
+          rows: entry.rows,
+        })),
+    }
+  })
+}
+
+/**
+ * @param {ReturnType<typeof projectClientStatus>} rows
+ * @param {{ write(chunk: string): unknown }} stdout
+ */
+export function renderClientStatusText(rows, stdout) {
+  stdout.write('Clients:\n')
+  for (const row of rows) {
+    const attach = row.attachable
+      ? row.attached
+        ? (row.mode ? `attached (${row.mode})` : 'attached')
+        : 'not attached'
+      : 'attach n/a'
+    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    if (row.telemetry_endpoint || row.listener_endpoint) {
+      const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
+      const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
+      const drift = row.endpoint_drift === true ? ' [endpoint drift]' : ''
+      stdout.write(`    telemetry: ${clientEndpoint} -> ${listenerEndpoint}${drift}\n`)
+    }
+    if (row.capture_health) {
+      const events = row.capture_health.last_event_at ?? 'none'
+      const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
+      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
+    }
+    if (row.error) stdout.write(`    error: ${row.error}\n`)
+    for (const entry of row.recent_entrypoints) {
+      stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
+    }
+  }
+}
+
+/**
+ * Where the recorder's listener is bound, read from the report's source
+ * snapshot.
+ *
+ * Liveness-gated, exactly like the `client_telemetry_stale` diagnostic in
+ * `hyp status` (src/core/daemon/status.js): "the listener is bound to X" is
+ * not a claim a dead daemon's persisted snapshot can support, and a restart
+ * is what moves an ephemeral port back. Without the gate, `hyp client status`
+ * boots with no plugins, falls back to the last `status.json`, and reports
+ * `[endpoint drift]` for a stopped daemon while `hyp status` correctly stays
+ * silent, so the two surfaces this projection exists to reconcile disagree.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {string | null} sourceName
+ * @returns {{ endpoint: string | null, port: number | null }}
+ * @ref LLP 0248#client-status [implements]: the projection reports what the overall status collector would report, drift gate included
+ */
+function listenerEndpointFromReport(report, sourceName) {
+  if (!sourceName) return { endpoint: null, port: null }
+  if (!report.daemon?.running) return { endpoint: null, port: null }
+  const source = report.sources.find((entry) => entry.name === sourceName)
+  if (!source?.details || typeof source.details !== 'object') return { endpoint: null, port: null }
+  const details = /** @type {Record<string, unknown>} */ (source.details)
+  const host = typeof details.listen_host === 'string' ? details.listen_host : null
+  const port = typeof details.listen_port === 'number' && Number.isInteger(details.listen_port)
+    ? details.listen_port
+    : null
+  return {
+    endpoint: host !== null && port !== null ? `http://${host}:${port}` : null,
+    port,
+  }
+}
+
+/**
  * Render the V1 status report as a stable JSON shape. Consumers may
  * pin keys without dispatching on platform; missing values surface as
  * `null` rather than being omitted, so smoke assertions can probe
@@ -465,7 +641,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
       // A client with no attach probe has no attach state to report: printing
-      // `not attached` for it invites a `hyp attach` that is a documented
+      // `not attached` for it invites a `hyp client attach` that is a documented
       // no-op and can never change the line (#544). Where there is an attach,
       // the marker's mode rides the attached state (`attached (otel)`), so a
       // machine that just migrated modes is visibly on the new one from the
@@ -602,8 +778,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.layered?.hasCentral && report.usagePolicy) {
     stdout.write(
       report.usagePolicy.folderAsk === 'sync'
-        ? '  new folders:     sync without asking (`hyp policy folders ask` to be asked instead)\n'
-        : '  new folders:     asked about once each (`hyp policy folders sync` to stop asking)\n'
+        ? '  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)\n'
+        : '  new folders:     asked about once each (`hyp privacy folders sync` to stop asking)\n'
     )
   }
 
@@ -711,7 +887,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
         if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp attach ${a.requestKey}' after fixing the cause`
+        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
@@ -743,7 +919,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 function describeCaTrust(trusted) {
   if (trusted === true) return 'trusted'
   if (trusted === false) {
-    return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
+    return 'not trusted - Remote Control inbound will not work, run `hyp client attach claude` to retry'
   }
   return 'unknown - the keychain probe could not run'
 }
@@ -777,7 +953,7 @@ function describePermittedHosts(hosts) {
  */
 function describeLaunchdEnv(set) {
   if (set === true) return `${ENV_VAR_NAME}=1 set`
-  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp attach claude\` to set it`
+  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp client attach claude\` to set it`
   return 'unknown - the launchctl probe could not run'
 }
 

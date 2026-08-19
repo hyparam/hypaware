@@ -194,7 +194,7 @@ export async function run({ harness, expect }) {
             manifest: l.manifest,
             rootDir: l.rootDir,
             // Port 0: the smoke reads the bound port back off the source
-            // status, the same way `hyp attach claude` will.
+            // status, the same way `hyp client attach claude` will.
             config: /** @type {any} */ (l.manifest.name === '@hypaware/claude'
               ? { telemetry: { listen_host: '127.0.0.1', listen_port: 0, spool_max_bytes: spoolCapBytes } }
               : {}),

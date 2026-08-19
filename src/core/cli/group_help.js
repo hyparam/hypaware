@@ -133,26 +133,59 @@ export function renderCommandHelp({ stdout, command }) {
  * time, so subcommands registered later (plugin activation) appear.
  *
  * @param {{
- *   registry: Pick<CommandRegistry, 'list'>,
+ *   registry: Pick<CommandRegistry, 'list' | 'getGroup'>,
  *   name: string,
  *   summary: string,
  *   help?: string,
+ *   aliases?: string[],
+ *   category?: string,
+ *   audience?: 'everyday'|'operator'|'developer'|'machine',
+ *   bootProfile?: 'config'|'all-available'|'none',
  * }} args
  * @returns {CommandRegistration}
  * @ref LLP 0009#layered-help [implements]: bare group commands render registry-backed subcommand tables; no hand-maintained lists
  */
-export function makeGroupCommand({ registry, name, summary, help }) {
+export function makeGroupCommand({ registry, name, summary, help, aliases, category, audience, bootProfile }) {
   const usage = `hyp ${name} <subcommand> [args...]`
   return {
     name,
+    group: true,
     summary,
     usage,
     ...(help !== undefined ? { help } : {}),
+    ...(aliases !== undefined ? { aliases } : {}),
+    ...(category !== undefined ? { category } : {}),
+    ...(audience !== undefined ? { audience } : {}),
+    ...(bootProfile !== undefined ? { bootProfile } : {}),
     async run(argv, ctx) {
       const children = listGroupChildren(registry, name)
       if (argv.length === 0 || isHelpFlag(argv[0])) {
         renderGroupHelp({ stdout: ctx.stdout, group: name, groupCommand: { summary, usage, help }, children })
         return 0
+      }
+      // A registered top-level group can contain metadata-only nested groups
+      // (`client history`, `client claude-desktop`, `privacy client`). An
+      // exact leaf is selected by longest-prefix dispatch before this runner;
+      // reaching here means the remaining tokens may name one of those nested
+      // groups or an unknown child of one.
+      // @ref LLP 0248#tree [implements]: nested task groups remain navigable without executable placeholder commands
+      const nonHelp = argv.filter((token) => !isHelpFlag(token))
+      for (let depth = nonHelp.length; depth >= 1; depth -= 1) {
+        const prefix = [name, ...nonHelp.slice(0, depth)].join(' ')
+        const nested = listGroupChildren(registry, prefix)
+        if (nested.length === 0) continue
+        if (depth === nonHelp.length) {
+          renderGroupHelp({
+            stdout: ctx.stdout,
+            group: prefix,
+            groupCommand: registry.getGroup?.(prefix),
+            children: nested,
+          })
+          return 0
+        }
+        ctx.stderr.write(`hyp ${prefix}: unknown subcommand '${nonHelp[depth]}'\n`)
+        ctx.stderr.write(`  expected one of: ${nested.map((c) => c.name).join(', ')}\n`)
+        return 2
       }
       ctx.stderr.write(`hyp ${name}: unknown subcommand '${argv[0]}'\n`)
       ctx.stderr.write(`  expected one of: ${children.map((c) => c.name).join(', ')}\n`)

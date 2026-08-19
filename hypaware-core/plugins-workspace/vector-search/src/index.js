@@ -21,7 +21,10 @@ const CAPABILITY_VERSION = '1.0.0'
 /**
  * Activate `@hypaware/vector-search`. Registers:
  *  - capability `hypaware.vector-search` (programmatic search/status)
- *  - commands `vector`, `vector search`, `vector status`
+ *  - commands `query vector`, `query vector search` (each keeping its
+ *    pre-rollover `vector ...` spelling as an alias), and `vector status`,
+ *    which stays a direct operation per LLP 0248 but answers to
+ *    `query vector status` so the group's own blurb is navigable
  *  - source `vector-search-refresh` (the daemon refresh timer)
  *  - config section `vector-search`
  *
@@ -71,22 +74,38 @@ export async function activate(ctx) {
   ctx.provideCapability('hypaware.vector-search', CAPABILITY_VERSION, capability)
 
   ctx.commands.register({
-    name: 'vector',
+    name: 'query vector',
+    aliases: ['vector'],
     plugin: PLUGIN_NAME,
+    category: 'explore-share',
+    audience: 'everyday',
     summary: 'Vector similarity search (see subcommands: search, status)',
-    usage: 'hyp vector <subcommand> [args...]',
+    usage: 'hyp query vector <subcommand> [args...]',
     run: runVector,
   })
   ctx.commands.register({
-    name: 'vector search',
+    name: 'query vector search',
+    aliases: ['vector search'],
     plugin: PLUGIN_NAME,
+    category: 'explore-share',
+    audience: 'everyday',
     summary: 'Similarity search across configured vector indexes',
-    usage: 'hyp vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
+    usage: 'hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
     run: runVectorSearch,
   })
   ctx.commands.register({
+    // Canonical spelling stays direct (LLP 0248 lists `vector status` among the
+    // direct operations, and `vector` keeps its own top-level help row because
+    // of it). The alias is what makes `hyp query vector`'s printed subcommand
+    // table true: without it that blurb named a `status` subcommand which
+    // longest-prefix matching resolved back to `query vector`, reprinting the
+    // same blurb with exit 0.
+    // @ref LLP 0248#aliases [implements]: the canonical route is reachable from the group that advertises it
     name: 'vector status',
+    aliases: ['query vector status'],
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Per-index vector shard coverage and staleness',
     usage: 'hyp vector status [--json]',
     run: runVectorStatus,

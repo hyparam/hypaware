@@ -14,10 +14,10 @@
   },
   "contributes": {
     "commands": [
-      { "name": "claude-account credential", "summary": "Print the resolved Anthropic credential (Desktop helper contract)" },
-      { "name": "claude-account login", "summary": "Sign in with your Claude account (subscription mode)" },
-      { "name": "claude-account logout", "summary": "Forget the stored subscription credential" },
-      { "name": "claude-account status", "summary": "Show credential mode and sign-in state" }
+      { "name": "claude-account credential", "hidden": true, "summary": "Print the resolved Anthropic credential (Desktop helper contract)" },
+      { "name": "client claude-account login", "aliases": ["claude-account login"], "category": "capture-movement", "audience": "everyday", "summary": "Sign in with your Claude account (subscription mode)" },
+      { "name": "client claude-account logout", "aliases": ["claude-account logout"], "category": "capture-movement", "audience": "everyday", "summary": "Forget the stored subscription credential" },
+      { "name": "client claude-account status", "aliases": ["claude-account status"], "category": "capture-movement", "audience": "everyday", "summary": "Show credential mode and sign-in state" }
     ],
     "config_sections": [
       {
