@@ -144,8 +144,10 @@ export async function legacyForkPrompt(opts, options) {
  * The returning-install gate (LLP 0011), amended per LLP 0129
  * `#returning-gate` and again per LLP 0182.
  *
- * A missing or invalid config is the first-run path, not the gate: the
- * caller falls straight through to `runWizardFork` (no pathway preset).
+ * A missing or invalid config is the first-run path, not the gate, and so
+ * is a config that records no answer to the pick question (LLP 0281
+ * #returning-gate): the caller falls straight through to `runWizardFork`
+ * (no pathway preset).
  * `managed` is still reported truthfully on that path, so a machine with
  * a central layer keeps its org rows locked (see the derivation below).
  * Once a valid config exists, every machine gets the same `Reconfigure`,
@@ -181,7 +183,14 @@ export async function evaluateReturningGate(opts) {
   // @ref LLP 0129#join-before-picker [implements]: central rows lock whenever a central layer exists, invalid merge included
   const managed = !!(report.layered && report.layered.hasCentral)
 
-  if (!report.configExists || !report.configValid) {
+  // A config that exists but records no pick answer is not a returning
+  // install: `hyp remote add` writes one before the first `hyp init` (the
+  // documented team order), and fronting onboarding with "HypAware is
+  // already configured" over a machine that collects nothing is the same
+  // misreading LLP 0277 took out of the pick lane. The gate now asks the
+  // question the pick lane asks, off the same discriminator.
+  // @ref LLP 0281#returning-gate [implements]: the returning gate keys on a recorded pick answer, not on the config file existing
+  if (!report.configExists || !report.configValid || !report.configRecordsAnswer) {
     log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action: 'first-run', managed })
     return { action: 'first-run', managed, report }
   }

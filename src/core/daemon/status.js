@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
@@ -941,6 +941,15 @@ export async function collectHypAwareStatus(opts = {}) {
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
 
+  // The stronger claim behind `configExists`: does anything on this machine
+  // record an *answer* to onboarding's pick question, or does the file merely
+  // exist because a side-channel writer created it (`hyp remote add` before
+  // the first `hyp init`, the documented team order)? Read off the effective
+  // config, so a machine carried entirely by its central layer still counts
+  // as answered - the fleet gave the answer on its behalf.
+  // @ref LLP 0281#returning-gate [implements]: the report carries the answer-keyed claim the returning gate needs, not only file existence
+  const configRecordsAnswer = config !== null && configRecordsPickAnswer(config)
+
   // A local layer that is present but does not parse: `activePlugins` is then
   // empty (or central-only) because the file could not be read, not because
   // the operator disabled anything. Any diagnostic whose repair is "your
@@ -1762,6 +1771,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configPath,
     configExists,
     configValid,
+    configRecordsAnswer,
     activePlugins,
     layered,
     daemon,

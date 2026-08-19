@@ -86,6 +86,11 @@ filter ("hiding is a display filter, never a catalog deletion").
 
 ## The empty no-question line {#no-candidates}
 
+> **Extended-by: [LLP 0281 §visible-org-row](./0281-deferred-874-residuals.decision.md#visible-org-row).**
+> The split below covers the branches where `candidates` is empty *and* the
+> locked list is. A fifth case - a visible org row standing beside a hidden
+> pick - narrows the fleet sentence to the rows the fleet owns.
+
 `runWizardSyncScope` short-circuits when there are no candidates, printing
 *"Everything you picked is managed by your fleet and always syncs"* over the
 locked rows. With the filter above that branch becomes reachable with an

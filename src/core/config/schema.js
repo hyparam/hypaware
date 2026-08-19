@@ -38,6 +38,30 @@ export function defaultConfigPath(hypHome) {
 }
 
 /**
+ * Whether a config records a pick answer at all, as opposed to having been
+ * created by a config writer that never asked one. The discriminator is the
+ * `plugins` key: the picker's composer always writes a `plugins` array (a
+ * record-nothing pick still composes the export pair), while the
+ * side-channel writers (`hyp remote add` / `remove`) create-or-augment the
+ * file without ever touching `plugins`.
+ *
+ * `plugins: []` counts as an answer: it cannot be told apart from a
+ * deliberately emptied install, and re-seeding that from detection would
+ * re-consent to capture on the user's behalf.
+ *
+ * It lives here, beside the loader, rather than in the wizard: the pick lane
+ * and `collectHypAwareStatus` both read it, and the daemon must not import
+ * the CLI walkthrough to ask one question about a config document.
+ *
+ * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function configRecordsPickAnswer(config) {
+  return Array.isArray(config.plugins)
+}
+
+/**
  * Guard a write to the user-owned **local** config layer
  * (`hypaware-config.json`) so `init` cannot silently clobber it: the
  * remaining, non-destructive half of #111 (`join` no longer writes here;

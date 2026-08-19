@@ -401,6 +401,14 @@ export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether the effective config records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to existing only because a
+   * side-channel writer created it. `hyp remote add` before the first
+   * `hyp init` leaves `configExists` true and this false; that pair is what
+   * the returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a

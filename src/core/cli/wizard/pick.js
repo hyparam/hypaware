@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
-import { defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
+import { configRecordsPickAnswer, defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { narrateAcceptedGate } from './express.js'
 import {
@@ -13,7 +13,6 @@ import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   buildWalkthroughClientDescriptorMap,
   composePickerConfig,
-  configRecordsPickAnswer,
   configuredExportChoice,
   configuredPickerSources,
   defaultConfirmSelectPromptFactory,
