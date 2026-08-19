@@ -22,10 +22,9 @@ import { parseCommandArgv } from './verb_codec.js'
  * are the same authored object rather than two strings kept in step by
  * hand. `core_commands.js` reads `usage` from here.
  *
+ * @type {Record<string, CoreCommandArgSpec>}
  * @ref LLP 0266#usage-agreement [implements]: usage line and parser schema are one declaration, so neither can advertise a flag the other rejects
  */
-
-/** @type {Record<string, CoreCommandArgSpec>} */
 export const CORE_COMMAND_ARGS = {
   'version': {
     usage: 'hyp version',

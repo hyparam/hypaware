@@ -118,6 +118,12 @@ by the parameterized test, not by the table.
 - A misspelled flag now fails the same way everywhere, so a script can rely on
   exit 2. This is a behaviour change for the sixteen commands listed above: an
   invocation that used to be silently accepted now exits 2.
+- Documentation that named a flag a command only ever ignored is now wrong in a
+  way that fails. The shipped query skills and the `hypaware-analyst` agent told
+  their reader to run `hyp query schema <table> --format json` (and
+  `--format markdown`); `query schema` is not a verb, has never rendered
+  anything but its plain-text listing, and now exits 2 on the flag. Those lines
+  drop the flag here.
 - `hyp remote login`'s usage line becomes `[name]` rather than `<name>`, which
   is what the command has actually done since
   [LLP 0062 #bare-remote](./0062-builtin-default-remote.decision.md#bare-remote)
