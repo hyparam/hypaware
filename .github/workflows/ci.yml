@@ -1,7 +1,14 @@
 name: CI
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   typecheck:
@@ -31,3 +38,18 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - run: npm i
       - run: npm test
+
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs: [typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$TYPECHECK_RESULT" = success
+          test "$TEST_RESULT" = success
