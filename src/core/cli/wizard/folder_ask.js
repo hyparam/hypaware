@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
+import { readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
 import { narrateAcceptedGate } from './express.js'
 
 /**
@@ -76,14 +76,18 @@ export async function runWizardFolderAsk(opts) {
   const items = ['  Folders you already marked keep their class either way.']
 
   // The express gate already answered this lane (LLP 0201): state the
-  // question and its default answer, record it, and move on.
+  // question and its default answer, record it, and move on. The default
+  // is the one the asked screen below states - the standing answer, not
+  // the shipped one - so accepting the gate cannot silently retire a
+  // per-folder question the user asked for on an earlier run.
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
+  // @ref LLP 0268#standing-answer [implements]: the express arm records the lane's stated default, which on a re-run is the standing mode
   if (opts.autoAccept) {
     narrateAcceptedGate({ stdout: opts.stdout, title: FOLDER_ASK_TITLE, items })
     // Inline: the block's title already said "New folders", so the answer
     // belongs under it as one more indented line rather than as a second
     // flush-left announcement repeating the subject.
-    return await recordAnswer(DEFAULT_FOLDER_ASK_MODE, { stateDir, before, opts, inline: true })
+    return await recordAnswer(before, { stateDir, before, opts, inline: true })
   }
 
   const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
@@ -126,25 +130,61 @@ export async function runWizardFolderAsk(opts) {
  * auto-accepted path, where the title is still on screen); the asked path
  * prints it flush-left, because the prompt frame it answers has cleared.
  *
+ * Under `deferWrite` the lane states the answer here and hands the write
+ * back as `commit` (LLP 0268 #one-commit-point): the statement belongs to
+ * the screen that produced it, but the preference itself is part of this
+ * run's answer set and lands only once the run's config does. A run that
+ * ends before that point leaves the standing mode alone.
+ *
+ * @ref LLP 0268#one-commit-point [implements]: the preference write is handed back rather than made the moment the lane is answered
  * @param {FolderAskMode} mode
  * @param {{ stateDir: string, before: FolderAskMode, opts: RunWizardFolderAskOptions, inline?: boolean }} ctx
  * @returns {Promise<WizardFolderAskResult>}
  */
 async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
-  try {
-    await writeFolderAskMode({ stateDir, mode })
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err)
-    opts.stderr.write(
-      `warning: could not record the new-folder answer (${detail}); ` +
-      `it stays '${before}' - set it later with 'hyp policy folders ${mode}'\n`
-    )
-    return await finishSpan({ mode: before, skipped: true }, opts)
+  /**
+   * The write, and what it leaves in force: the answer, or the previous
+   * mode with the warning the lane's contract promises.
+   *
+   * @returns {Promise<{ mode: FolderAskMode, skipped?: true }>}
+   */
+  const write = async () => {
+    try {
+      await writeFolderAskMode({ stateDir, mode })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      opts.stderr.write(
+        `warning: could not record the new-folder answer (${detail}); ` +
+        `it stays '${before}' - set it later with 'hyp policy folders ${mode}'\n`
+      )
+      return { mode: before, skipped: /** @type {const} */ (true) }
+    }
+    return { mode }
   }
 
-  // Two short lines rather than one long one: what is now true, then the
-  // command that changes it, indented so it reads as a footnote to the
-  // first rather than a second announcement.
+  if (opts.deferWrite) {
+    announceAnswer(mode, opts, inline)
+    return await finishSpan({ mode, commit: async () => (await write()).mode }, opts)
+  }
+
+  const written = await write()
+  if (written.skipped) return await finishSpan(written, opts)
+  announceAnswer(mode, opts, inline)
+  return await finishSpan({ mode }, opts)
+}
+
+/**
+ * Say what is now true and how to change it.
+ *
+ * Two short lines rather than one long one: what is now true, then the
+ * command that changes it, indented so it reads as a footnote to the
+ * first rather than a second announcement.
+ *
+ * @param {FolderAskMode} mode
+ * @param {RunWizardFolderAskOptions} opts
+ * @param {boolean} inline
+ */
+function announceAnswer(mode, opts, inline) {
   const undo = mode === 'sync' ? 'hyp policy folders ask' : 'hyp policy folders sync'
   const said = mode === 'sync'
     ? 'New folders will sync without asking.'
@@ -154,7 +194,6 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
       ? `  ${mode === 'sync' ? 'Syncing them all' : 'Asking about each one'}; change later with ${undo}\n`
       : `${said}\n  change this later: ${undo}\n`
   )
-  return await finishSpan({ mode }, opts)
 }
 
 /**

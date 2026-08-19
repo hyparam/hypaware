@@ -104,6 +104,14 @@ export interface RunWizardSyncScopeOptions {
    * no default to state, which still asks.
    */
   autoAccept?: boolean
+  /**
+   * Hand the store write back instead of making it here (LLP 0268
+   * #one-commit-point). The lane answers and states the split as always,
+   * and the caller runs `commit` once this run's config is on disk, so an
+   * abandoned run leaves the opt-out store exactly as it found it. Direct
+   * callers without the flag keep the inline write.
+   */
+  deferWrite?: boolean
 }
 
 export interface WizardSyncScopeResult {
@@ -124,6 +132,14 @@ export interface WizardSyncScopeResult {
    * express path, which asks nothing anywhere and never backs.
    */
   noQuestion?: true
+  /**
+   * The store write this lane deferred (`deferWrite`, LLP 0268
+   * #one-commit-point), for the caller to run when the run's config
+   * commits. Absent when the lane wrote inline, and absent on every
+   * outcome that writes nothing (cancel, back, corrupt store, no
+   * candidates).
+   */
+  commit?: () => Promise<void>
 }
 
 /**
@@ -148,9 +164,17 @@ export interface RunWizardFolderAskOptions {
   confirm?: AsyncConfirmSelectPrompt
   /**
    * Take the default answer without asking (LLP 0201): the express gate
-   * already answered this lane, so it narrates and records the default.
+   * already answered this lane, so it narrates and records the default,
+   * which on a re-run is the standing answer (LLP 0268 #standing-answer).
    */
   autoAccept?: boolean
+  /**
+   * Hand the preference write back instead of making it here (LLP 0268
+   * #one-commit-point). The lane still states its answer; the caller runs
+   * `commit` once this run's config is on disk, so an abandoned run leaves
+   * the standing mode alone.
+   */
+  deferWrite?: boolean
 }
 
 /**
@@ -180,6 +204,13 @@ export interface RunWizardExpressGateOptions {
    * that new folders sync without a question.
    */
   enrolled?: boolean
+  /**
+   * The standing new-folder answer (LLP 0200), so the accept row's one
+   * line of consequence states what accepting actually leaves in force
+   * (LLP 0268 #standing-answer). Absent or `sync` reads as the shipped
+   * default and the line is unchanged.
+   */
+  folderAsk?: FolderAskMode
   /** Offer back-navigation to the fork (LLP 0191). */
   allowBack?: boolean
   /** Prompt seam (tests); defaults to the confirm-select factory. */
@@ -198,6 +229,14 @@ export interface WizardFolderAskResult {
   back?: true
   /** The answer could not be written; the previous mode stands. */
   skipped?: boolean
+  /**
+   * The preference write this lane deferred (`deferWrite`, LLP 0268
+   * #one-commit-point), for the caller to run when the run's config
+   * commits. It resolves to the mode actually left in force, which is the
+   * previous one when the write fails (the failure warns exactly as the
+   * inline path's does). Absent on cancel and back, which write nothing.
+   */
+  commit?: () => Promise<FolderAskMode>
 }
 
 export interface RunWizardForkOptions {

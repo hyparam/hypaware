@@ -8,6 +8,10 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { runWizardFolderAsk } from '../../../../src/core/cli/wizard/folder_ask.js'
+import { clientSyncListPath } from '../../../../src/core/usage-policy/client_sync.js'
+import { readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
@@ -1228,4 +1232,91 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
   const { opts, stdout } = wizardOpts(home)
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /Nothing has been uploaded yet/)
+})
+
+// --- the question lanes' policy writes ride the same commit point ---
+// The sync lane's opt-out store and the new-folder lane's preference are
+// answers to this run's questions, so they land when this run's config
+// lands and not before: a declined overwrite leaves the machine exactly as
+// it found it, and says so.
+// @ref LLP 0268#one-commit-point [tests]:
+
+/** The pick result an enrolled lane run needs: one editable candidate. */
+function enrolledPickResult(configPath) {
+  return pickResult({
+    configPath,
+    configPending: true,
+    descriptors: [{ plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }],
+  })
+}
+
+/**
+ * A `confirm` seam that answers each question lane's gate by title, so the
+ * real lanes can run inside the orchestrator without a terminal.
+ *
+ * @param {string} folderAnswer
+ */
+function laneConfirm(folderAnswer) {
+  return async (/** @type {any} */ question) => {
+    if (String(question.title).startsWith('When you start a session')) return folderAnswer
+    return 'accept'
+  }
+}
+
+test('runInitWizard: a declined commit leaves the sync store and the new-folder preference untouched', async () => {
+  const home = await tmpHome()
+  const stateDir = path.join(home, '.hyp', 'hypaware')
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  // A standing preference the abandoned run must not overwrite.
+  await writeFolderAskMode({ stateDir, mode: 'ask' })
+
+  const { opts, stderr } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => enrolledPickResult(configPath),
+    // The real lanes, so the writes under test are the real writes.
+    syncScope: runWizardSyncScope,
+    folderAsk: runWizardFolderAsk,
+    confirm: laneConfirm('sync'),
+    confirmOverwrite: async () => false,
+  })
+
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.equal(
+    await fs.access(clientSyncListPath(stateDir)).then(() => true, () => false),
+    false,
+    'the opt-out store is not even stamped: absence is the LLP 0188 migration marker'
+  )
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'the standing new-folder answer stands')
+  assert.match(stderr.text(), /answers from this run were not recorded/)
+})
+
+test('runInitWizard: a committed run persists both lanes right after the config lands', async () => {
+  const home = await tmpHome()
+  const stateDir = path.join(home, '.hyp', 'hypaware')
+  const configPath = path.join(home, '.hyp', 'config.json')
+  let storeDuringLanes = true
+
+  const { opts } = wizardOpts(home, {
+    fork: async () => 'team',
+    pick: async () => enrolledPickResult(configPath),
+    syncScope: runWizardSyncScope,
+    folderAsk: async (/** @type {any} */ o) => {
+      storeDuringLanes = await fs.access(clientSyncListPath(stateDir)).then(() => true, () => false)
+      return runWizardFolderAsk(o)
+    },
+    confirm: laneConfirm('ask'),
+  })
+
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(storeDuringLanes, false, 'the sync store waits for the commit, like the config does')
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(clientSyncListPath(stateDir), 'utf8')),
+    { version: 1, entries: [] },
+    'the answered lane still stamps the store once the config lands'
+  )
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask')
 })
