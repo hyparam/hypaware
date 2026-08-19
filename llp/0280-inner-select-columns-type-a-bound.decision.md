@@ -120,7 +120,7 @@ simply not typed.
 
 The boundary is therefore visible and testable rather than implicit:
 `with c as (select * from other)` (unregistered), `select id, upper(date)`
-(an output column with no name), and `from unnest(...)` (a table function) all
+(an unaliased expression column), and `from unnest(...)` (a table function) all
 type nothing.
 
 ### The unqualified correlated reference is not this defect {#unqualified-correlated}
@@ -166,10 +166,37 @@ is only an engine that can evaluate the resolved reference.
 This is a *predicate*, not an inference engine: it answers "is this name a
 TIMESTAMP" and nothing else. It does not compute the type of an arbitrary
 expression, does not model `USING`/natural-join column merging, does not know
-what a table function returns, and gives up on an output column that has no
-name. Widening any of those is a separate design call, and it should be made
-against evidence of a query that fails, the way this one was, rather than for
-completeness.
+what a table function returns, and gives up on an **unaliased expression
+column**. Widening any of those is a separate design call, and it should be
+made against evidence of a query that fails, the way this one was, rather than
+for completeness.
+
+"Unaliased expression column" rather than "an output column that has no name":
+squirreling derives a name for one anyway (its exported `derivedAlias` calls
+`count(*)` `count_all`), so no output column of a query this engine runs is
+truly nameless. The consequence is concrete and worth having on the record for
+whoever widens this. `with c as (select message_created_at, count(*) from
+ai_gateway_messages group by message_created_at) select * from c where
+message_created_at >= '...'` returns no rows on matching data and exits 0,
+while adding `as n` to the `count(*)` makes the same query work.
+
+Two further residuals sit alongside those, both observed while reviewing the
+implementation and both failing toward "no coercion" rather than a wrong one,
+which is why neither is decided here:
+
+- **The `SELECT *` model and squirreling's own expansion differ for a join.**
+  [#carry](#carry) models `*` over a join as the concatenated bare names.
+  squirreling exposes a *derived table's* join columns only in prefixed form
+  and rejects both the qualified and the bare outer reference to them, while
+  flattening a *CTE's* to bare names last-wins. So for the derived-table
+  spelling the walk can type a name the engine will refuse either way: an
+  error, never wrong rows, and identical typed or bare. It belongs with the
+  `USING`/natural-join merging above.
+- **The ambiguity collapse is symmetric.** [#complete](#complete) declines to
+  type a name whose occurrences disagree, in either direction, so a CTE join
+  whose last-wins occurrence (the one squirreling actually hands outward) is
+  the TIMESTAMP gets no coercion either. Reading the engine's own last-wins
+  rule instead would recover it, at the cost of binding this walk to that rule.
 
 Coercion for types other than `TIMESTAMP` remains where LLP 0272 left it
 (`#not-settled` there): unopened, and needing its own document.

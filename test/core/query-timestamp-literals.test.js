@@ -686,3 +686,101 @@ test('an ambiguous name does not refuse a string bound that is not a timestamp',
   })
   assert.deepEqual(out.rows.map((row) => Number(row.id)), [4])
 })
+
+// --- a set operation's own ORDER BY ------------------------------------------
+
+// `rewriteStatement` walked a compound statement's two branches and stopped,
+// so a bound written in the `UNION`-level `ORDER BY` never reached the rewrite
+// and kept comparing a Date to a string. That comparison is false for every
+// row, so the sort key collapses to one value and the result comes back in the
+// wrong order, quietly: the rows are all there, which is why it reads as
+// working. LLP 0272 #scope already settles that every clause is rewritten
+// alike, `ORDER BY` named among them; a set operation's own `ORDER BY` is one
+// of those clauses and was simply not visited.
+// @ref LLP 0272#scope [tests]: a bound in a set operation's own ORDER BY is typed like one in a branch's
+test("a bound in a set operation's own ORDER BY is typed", async () => {
+  const branches =
+    'SELECT id, message_created_at FROM ai_gateway_messages ' +
+    'UNION ALL SELECT id, message_created_at FROM ai_gateway_messages WHERE id = 1 ORDER BY '
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // rows: 2026-08-17T09:00:00Z, 08-18T20:59:59Z, 08-18T21:00:00Z, 08-18T22:01:39Z,
+    // plus a second copy of row 1 from the right branch
+    [branches + "CASE WHEN message_created_at >= '2026-08-18T21:00:00Z' THEN 0 ELSE 1 END, id", [3, 4, 1, 1, 2]],
+    // the bare comparison as the sort key itself
+    [branches + "message_created_at >= '2026-08-18T21:00:00Z' DESC, id", [3, 4, 1, 1, 2]],
+    // a CTE bound above the set operation still reaches the ORDER BY
+    [
+      'WITH c AS (SELECT * FROM ai_gateway_messages) SELECT id, message_created_at FROM c ' +
+      'UNION ALL SELECT id, message_created_at FROM c WHERE id = 1 ' +
+      "ORDER BY CASE WHEN message_created_at >= '2026-08-18T21:00:00Z' THEN 0 ELSE 1 END, id",
+      [3, 4, 1, 1, 2],
+    ],
+    // not only UNION: the operator does not change the clause
+    [
+      'SELECT id, message_created_at FROM ai_gateway_messages WHERE id >= 2 ' +
+      'INTERSECT SELECT id, message_created_at FROM ai_gateway_messages WHERE id <= 3 ' +
+      "ORDER BY CASE WHEN message_created_at >= '2026-08-18T21:00:00Z' THEN 0 ELSE 1 END, id",
+      [3, 2],
+    ],
+  ]
+  /** @type {string[]} */
+  const wrong = []
+  for (const [query, expected] of cases) {
+    const got = await ids(query)
+    if (got.join(',') !== expected.join(',')) {
+      wrong.push(`${query} -> got [${got.join(',')}], SQL says [${expected.join(',')}]`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+})
+
+// The output column list of a set operation pairs its sides by position and
+// keeps a type only when both sides carry it, so the ORDER BY is typed from
+// that pairing and not from either branch alone. Both guards below would have
+// their rows reordered by a coercion that read only the left side.
+// @ref LLP 0280#complete [tests]: a set operation's ORDER BY takes the paired column list, or nothing
+test("a set operation's ORDER BY is not typed from one side alone", async () => {
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // the right side hands a STRING up under the same name, so the pair is not
+    // a TIMESTAMP and the comparison stays the string one it was written as
+    [
+      'SELECT id, message_created_at FROM ai_gateway_messages ' +
+      'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
+      "ORDER BY CASE WHEN message_created_at >= '2026-08-18' THEN 0 ELSE 1 END, id",
+      [1, 1, 2, 3, 4],
+    ],
+    // both sides rename a STRING onto the TIMESTAMP column's name: typing that
+    // from the dataset would compare a string cell to a Date
+    [
+      'SELECT id, date AS message_created_at FROM ai_gateway_messages ' +
+      'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
+      "ORDER BY CASE WHEN message_created_at >= '2026-08-18' THEN 0 ELSE 1 END, id",
+      [2, 3, 4, 1, 1],
+    ],
+  ]
+  /** @type {string[]} */
+  const wrong = []
+  for (const [query, expected] of cases) {
+    const got = await ids(query)
+    if (got.join(',') !== expected.join(',')) {
+      wrong.push(`${query} -> got [${got.join(',')}], SQL says [${expected.join(',')}]`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+})
+
+// A literal the coercion cannot read is an error rather than a silently wrong
+// answer, in this clause as in every other.
+// @ref LLP 0272#refuse-uncoercible [tests]: an uncoercible bound in a set operation's ORDER BY is refused
+test("an uncoercible literal in a set operation's ORDER BY is refused", async () => {
+  await assert.rejects(
+    ids(
+      'SELECT id, message_created_at FROM ai_gateway_messages ' +
+      'UNION ALL SELECT id, message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
+      "ORDER BY CASE WHEN message_created_at >= 'yesterday' THEN 0 ELSE 1 END, id"
+    ),
+    TimestampLiteralError
+  )
+})
