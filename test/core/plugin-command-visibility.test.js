@@ -11,6 +11,8 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { validateManifest } from '../../src/core/manifest.js'
 import { activate as activateClaudeAccount } from '../../hypaware-core/plugins-workspace/claude-account/src/index.js'
 import { activate as activateClaudeDesktop } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
+import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
+import { activate as activateCodex } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
 
 function makeBuf() {
   /** @type {string[]} */
@@ -47,20 +49,37 @@ function readPluginManifest(dirName) {
  * @returns {Promise<Map<string, any>>}
  */
 async function collectRegisteredCommands(activate) {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-cmd-visibility-'))
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-cmd-visibility-'))
+  const stateDir = path.join(homeDir, '.hyp', 'plugins', 'p')
+  await fs.mkdir(stateDir, { recursive: true })
   /** @type {Map<string, any>} */
   const registered = new Map()
+  const gateway = {
+    registerUpstreamPreset() {},
+    registerExchangeProjector() {},
+    registerSettlementEnricher() {},
+    registerClient() {},
+  }
   await activate(/** @type {any} */ ({
     config: {},
+    env: { HOME: homeDir, HYP_HOME: path.join(homeDir, '.hyp'), HYP_CONFIG: '' },
+    plugin: { version: '0.0.0-test' },
     paths: { stateDir },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     configRegistry: { registerSection() {} },
     provideCapability() {},
     commands: { register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) } },
+    sources: { register() {} },
+    sinks: { register() {} },
+    backfills: { register() {} },
+    skills: { register() {} },
+    agents: { register() {} },
+    initPresets: { register() {} },
+    query: { registerDataset() {} },
     requireCapability: (/** @type {string} */ name) => (
       name === 'hypaware.anthropic-credential'
         ? { mode: 'org_key', helperCommandArgs: ['claude-account', 'credential'] }
-        : {}
+        : gateway
     ),
   }))
   return registered
@@ -142,6 +161,17 @@ test('manifest command hidden must be a boolean', () => {
     contributes: { commands: [{ name: 'demo plumbing', summary: 's', hidden: true }] },
   })
   assert.equal(good.ok, true)
+
+  // Only `hidden` is fatal here. A malformed `summary`/`name` is help
+  // metadata, and `hyp plugin doctor` reports it with a field path and a
+  // repair. Rejecting the manifest for it would abort loadManifest before
+  // the doctor's shape checks run and would take the plugin's sources and
+  // sinks down over a typo in a help string.
+  const cosmetic = validateManifest({
+    ...base,
+    contributes: { commands: [{ name: 'demo plumbing', summary: 42 }, 'not an object'] },
+  })
+  assert.equal(cosmetic.ok, true, 'a malformed help field must stay a doctor finding, not a plugin outage')
 })
 
 test('the credential helper contract is an internal mechanism in manifest and registry alike', async () => {
@@ -191,17 +221,24 @@ test('every claude-desktop and claude-account command declares the same visibili
 // the hook line stays in the client's settings after the plugin leaves
 // the config, and an undeclared head token cannot be attributed.
 // @ref LLP 0268#internal [tests]: every internal mechanism is declared and marked, never omitted
-test('the client hook commands are declared internal mechanisms, not omitted ones', () => {
-  for (const [dirName, names] of /** @type {[string, string[]][]} */ ([
-    ['claude', ['claude-hook session-context', 'claude-hook classify-cwd']],
-    ['codex', ['codex-hook classify-cwd']],
+test('the client hook commands are declared internal mechanisms, not omitted ones', async () => {
+  for (const [dirName, activate, names] of /** @type {[string, any, string[]][]} */ ([
+    ['claude', activateClaude, ['claude-hook session-context', 'claude-hook classify-cwd']],
+    ['codex', activateCodex, ['codex-hook classify-cwd']],
   ])) {
     const commands = readPluginManifest(dirName).contributes.commands
     assert.ok(Array.isArray(commands), `${dirName}: declares no commands at all`)
+    // Both sides, not just the manifest: hiding on one renderer and not
+    // the other is the half-hidden state LLP 0268#field calls worse than
+    // either consistent answer, and only walking the registry can catch it.
+    const registered = await collectRegisteredCommands(activate)
     for (const name of names) {
       const declared = commands.find((/** @type {any} */ c) => c.name === name)
       assert.ok(declared, `${name}: registered hidden but declared in no manifest`)
       assert.equal(declared.hidden, true, `${name}: an internal mechanism must be marked hidden`)
+      const cmd = registered.get(name)
+      assert.ok(cmd, `${name}: declared but never registered`)
+      assert.equal(cmd.hidden, true, `${name}: hidden in the manifest but visible in group help`)
     }
   }
 })

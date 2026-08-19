@@ -141,10 +141,16 @@ read a registered-but-undeclared command as drift.
 ## Consequences {#consequences}
 
 - `PluginCommandManifest` gains `hidden?: boolean`.
-  `validateCommandContributions` (`src/core/manifest.js`) now validates the
-  `contributes.commands` array instead of passing it through opaquely, and
-  rejects a non-boolean `hidden` - a manifest spelling it `"true"` would
-  otherwise advertise an internal mechanism with nothing to say so.
+  `validateCommandContributions` (`src/core/manifest.js`) rejects a
+  non-boolean `hidden` - a manifest spelling it `"true"` would otherwise
+  advertise an internal mechanism with nothing to say so. It checks that
+  one field and nothing else: the rest of a command entry stays opaque
+  to `validateManifest`, like every sibling contribution category, so a
+  mistyped `summary` remains a `hyp plugin doctor` finding with a field
+  path and a repair line rather than a manifest rejection that takes the
+  plugin's sources and sinks down with it. `hidden` earns the harder
+  treatment because it is not help metadata: it decides whether the
+  command is CLI surface at all.
 - `collectPluginHelpCommands` (`src/core/cli/dispatch.js`) skips hidden
   entries. The registry-side filters (`renderHelp`, `listGroupChildren`)
   already existed and are unchanged.
