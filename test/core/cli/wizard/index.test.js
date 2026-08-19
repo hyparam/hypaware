@@ -463,6 +463,28 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
 })
 
+// The whole sync picture is the *visible* whole picture. `raw-anthropic` and
+// `raw-openai` are hidden (LLP 0202) and owned by `@hypaware/ai-gateway`,
+// which the central layer declares on every enrolled machine - so without
+// this filter the sync gate led with two fleet-labelled rows the picker had
+// deliberately never offered, and the label read as if it described the
+// client rows beneath them.
+// @ref LLP 0266#sync-gate [tests]:
+test('runInitWizard: a hidden locked row stays off the sync-scope screen', async () => {
+  const catalog = emptyCatalog()
+  const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('claude', claudeDescriptor)
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['raw-anthropic', 'claude'] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor], 'the hidden org row is filtered out, the visible one kept')
+})
+
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),

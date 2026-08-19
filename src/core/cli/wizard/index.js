@@ -30,6 +30,7 @@ import {
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
   runPickerFinale,
+  visiblePickerDescriptors,
   writeAttachedNotConfiguredReminder,
   writeWalkthroughRunSummary,
 } from '../walkthrough.js'
@@ -518,9 +519,18 @@ export async function runInitWizard(opts) {
             const syncFn = opts.syncScope ?? runWizardSyncScope
             // The locked descriptors ride along so the lane can state the whole
             // sync picture: org rows always sync and are shown read-only there.
-            const lockedDescriptors = picked.lockedSources
-              .map((id) => catalog.pickerDescriptors.get(id))
-              .filter((d) => d !== undefined)
+            // Through the same display filter the picker uses, though: a
+            // hidden row (LLP 0202) is locked on every enrolled machine,
+            // because the central layer owns the gateway that contributes it,
+            // and leading the sync gate with two fleet-labelled rows the
+            // picker never offered made the label look like it described the
+            // clients underneath it.
+            // @ref LLP 0266#sync-gate [implements]: the sync lane's locked rows go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
+            const lockedDescriptors = visiblePickerDescriptors(
+              picked.lockedSources
+                .map((id) => catalog.pickerDescriptors.get(id))
+                .filter((d) => d !== undefined)
+            )
             const syncScope = await syncFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
