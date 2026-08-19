@@ -10,6 +10,11 @@ import { readClientActionStatus } from '../config/action_reconciler.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import {
+  isOtlpHeadersOverride,
+  otlpOverrideSignal,
+  perSignalOtlpOverrides,
+} from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
@@ -1554,6 +1559,95 @@ export async function collectHypAwareStatus(opts = {}) {
           repair: [
             `hyp client attach ${clientName}`,
             `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
+      // ----- per-signal OTLP override in the environment -----
+      // The third leg beside the drift check above and the gap below. A
+      // per-signal OTLP key outranks the general endpoint attach wrote, so one
+      // variable left over in the user's shell - a profile, a launchd entry, a
+      // collector switched off months ago - takes every event elsewhere, or
+      // (exported empty, which still outranks) nowhere at all. Nothing else
+      // here can see it: the settings file stays byte-perfect, the listener is
+      // bound and started, and the body spool even keeps growing, because
+      // OTEL_LOG_RAW_API_BODIES is a file path that endpoint precedence cannot
+      // touch. `capture_gap` notices the resulting silence only after a
+      // threshold of transcript activity, and cannot name a cause.
+      //
+      // Read off the shell `hyp status` was run in, which is not necessarily
+      // the shell claude launches from - so a warning, non-degrading: a strong
+      // lead, not a proof. The key name is named; the value never is, being
+      // exactly where a collector credential lives.
+      // @ref LLP 0271#status-names-it-too [implements]
+      //
+      // Reported in two groups, because the list carries two hazards and one
+      // sentence cannot be true of both. A routing key (endpoint, protocol)
+      // stops the export arriving; a headers key routes nothing and its harm
+      // runs the other way, a collector credential attached to requests aimed
+      // at the loopback listener. Telling someone with an unrelated
+      // `OTEL_EXPORTER_OTLP_HEADERS` that nothing is captured would be the
+      // standing false alarm that teaches them to skip the real line.
+      const envOverrides = perSignalOtlpOverrides(/** @type {Record<string, unknown>} */ (env))
+      const routingOverrides = envOverrides.filter((key) => !isOtlpHeadersOverride(key))
+      const headerOverrides = envOverrides.filter(isOtlpHeadersOverride)
+      if (routingOverrides.length > 0) {
+        const names = routingOverrides.join(', ')
+        const many = routingOverrides.length > 1
+        const them = many ? 'them' : 'it'
+        // What is lost, named by signal. Attach turns on two exporters and a
+        // per-signal key only outranks its own: a shell exporting nothing but
+        // `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to a Prometheus collector - an
+        // ordinary setup - loses the token and cost counters while every
+        // prompt and response still reaches the listener. Telling that user on
+        // every `hyp status` run that none of their telemetry is captured is
+        // the same standing false alarm the headers split just below exists to
+        // avoid, one list entry over.
+        const signals = new Set(routingOverrides.map(otlpOverrideSignal))
+        const lost = signals.has('logs') && signals.has('metrics')
+          ? 'none of it is captured'
+          : signals.has('logs')
+            ? 'none of its log records are captured, the prompt and response text ' +
+              'this attach turns on included (its metrics are unaffected)'
+            : 'none of its token and cost metrics are captured (its log records, ' +
+              'and the prompt and response text with them, are unaffected)'
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_env_override',
+          message:
+            names + (many ? ' are' : ' is') + " set in this shell's environment and " +
+            (many ? 'outrank' : 'outranks') + ' the telemetry settings ' + clientName +
+            ' was attached with - a ' + clientName + ' session launched from a shell carrying ' +
+            them + ' sends that traffic somewhere else, or nowhere at all if the value is ' +
+            'empty, and ' + lost,
+          // One `unset` with space-separated names, not the comma-joined list
+          // in the message: `unset A, B` exits 0 in bash and unsets only `B`,
+          // so a comma here would hand the user a repair that reports success
+          // and leaves the key that is eating their capture still exported.
+          repair: [
+            'unset ' + routingOverrides.join(' ') +
+              '  # in the shell profile or launchd entry that exports ' + them,
+            'start a fresh ' + clientName + ' session from a shell without ' + them,
+          ],
+        })
+      }
+      if (headerOverrides.length > 0) {
+        const names = headerOverrides.join(', ')
+        const many = headerOverrides.length > 1
+        const them = many ? 'them' : 'it'
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_env_override',
+          message:
+            names + (many ? ' are' : ' is') + " set in this shell's environment, so a " +
+            clientName + ' session launched from a shell carrying ' + them +
+            ' sends ' + (many ? 'those headers' : 'that header') +
+            " on every OTLP request to hypaware's local listener - capture still works, but " +
+            'any collector credential in ' + (many ? 'those values' : 'that value') +
+            ' is handed to a listener that never asked for it',
+          repair: [
+            'unset ' + headerOverrides.join(' ') +
+              '  # in the shell profile or launchd entry that exports ' + them,
+            'start a fresh ' + clientName + ' session from a shell without ' + them,
           ],
         })
       }

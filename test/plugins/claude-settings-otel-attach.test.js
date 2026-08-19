@@ -396,3 +396,206 @@ test('an ordinary otel attach warns about no per-signal key', async (t) => {
   assert.equal(result.changed, true)
   assert.equal(result.changed && result.warnings, undefined)
 })
+
+// The shape that actually happens. The per-signal keys almost never live in
+// `settings.json` - attach writes exactly its nine keys and never these, so
+// the settings block is essentially guaranteed not to hold one. They come from
+// the user's shell: a profile, a launchd variable, a collector that was turned
+// off months ago and left its exports behind. A check that only reads the
+// settings block therefore fires on the case that does not occur and stays
+// silent on the case that does, while every HypAware surface reports healthy
+// and not one event reaches the listener.
+// @ref LLP 0271#attach-reads-the-process-environment [tests]
+test('a per-signal OTLP key exported from the shell is warned about', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+
+  const result = await otelAttach(r, {
+    processEnv: {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://token@collector.corp:4318',
+    },
+  })
+  assert.equal(result.changed, true)
+  const warned = String(result.changed && result.warnings?.join(' '))
+  assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
+  assert.match(warned, /outranks/)
+  // Named as coming from the environment, because the repair is not the same
+  // one an entry in the settings block calls for.
+  assert.match(warned, /environment|shell/)
+  assert.doesNotMatch(warned, /collector\.corp/)
+
+  // Warned about, never touched: the user's shell is theirs.
+  const attached = await r.read()
+  assert.equal(Object.hasOwn(attached.env, 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'), false)
+})
+
+// The variant found on the real machine: the collector's URL variables were
+// commented out, the `set -x` lines that referenced them were not, so the
+// per-signal endpoint was exported as the empty string. An empty per-signal
+// value still outranks the general endpoint, so the logs went nowhere, and a
+// naive truthiness check is exactly what misses it.
+// @ref LLP 0271#empty-counts-as-set [tests]
+test('an empty per-signal OTLP value counts as set, in the shell and in settings', async (t) => {
+  const shell = await rig()
+  t.after(() => shell.cleanup())
+  const fromShell = await otelAttach(shell, {
+    processEnv: {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
+    },
+  })
+  const shellWarned = String(fromShell.changed && fromShell.warnings?.join(' '))
+  assert.match(shellWarned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
+
+  const inSettings = await rig({ env: { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: '' } })
+  t.after(() => inSettings.cleanup())
+  const fromSettings = await otelAttach(inSettings)
+  const settingsWarned = String(fromSettings.changed && fromSettings.warnings?.join(' '))
+  assert.match(settingsWarned, /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT/)
+})
+
+// The per-signal headers keys are the same hazard as the generic one already
+// on the list, one rank up: they carry a collector's credential and they would
+// now ride requests aimed at a loopback listener that never asked for it.
+// @ref LLP 0271#the-key-list [tests]
+test('per-signal headers keys are on the list too', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: {
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'authorization=Bearer sekrit',
+      OTEL_EXPORTER_OTLP_METRICS_HEADERS: 'authorization=Bearer sekrit',
+    },
+  })
+  const warned = String(result.changed && result.warnings?.join(' '))
+  assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_HEADERS/)
+  assert.match(warned, /OTEL_EXPORTER_OTLP_METRICS_HEADERS/)
+  assert.doesNotMatch(warned, /sekrit/)
+})
+
+// Traces are deliberately absent from the list. Attach turns on the logs and
+// metrics exporters and nothing else (LLP 0258 #env-keys), so a traces
+// endpoint in the user's shell redirects nothing HypAware captures, and
+// warning about it would be a false alarm that teaches the user to skip the
+// real ones.
+// @ref LLP 0271#the-key-list [tests]
+test('a traces-only per-signal key is not warned about', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  assert.equal(result.changed && result.warnings, undefined)
+})
+
+// A key set in both places is one finding, not two: the user has one problem
+// and repeating it doubles the noise of a warning list that is already the
+// only thing standing between them and total silent capture loss.
+test('a key present in both the shell and settings warns once', async (t) => {
+  const r = await rig({ env: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://a:4318' } })
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://b:4318' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  const hits = warnings.filter((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
+  assert.equal(hits.length, 1, `expected one warning, got ${JSON.stringify(hits)}`)
+})
+
+// A headers key carries no endpoint and outranks nothing attach wrote, so the
+// redirect sentence would be false of it. It is on the list for the opposite
+// hazard (LLP 0271 #the-key-list): the credential it carries is about to ride
+// requests aimed at the loopback listener. Telling a user whose telemetry
+// arrives fine that Claude Code "will export there instead" is the false alarm
+// that gets the true warnings skipped.
+// @ref LLP 0271#the-key-list [tests]
+test('a headers key is warned about as a credential leak, not a redirect', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  const warned = warnings[0]
+  assert.match(warned, /OTEL_EXPORTER_OTLP_HEADERS/)
+  assert.match(warned, /credential/)
+  assert.doesNotMatch(warned, /outranks/)
+  assert.doesNotMatch(warned, /export there instead/)
+  assert.doesNotMatch(warned, /sekrit/)
+})
+
+// The routing keys keep the redirect sentence, and keep it apart from the
+// headers one: two hazards, two consequences, two lines.
+test('a routing key and a headers key get their own sentences', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318',
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
+    },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  const routing = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
+  const headers = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_HEADERS'))
+  assert.ok(routing && headers, JSON.stringify(warnings))
+  assert.match(routing, /outranks/)
+  assert.doesNotMatch(headers, /outranks/)
+})
+
+// A per-signal key outranks only its own signal, and attach turns on two
+// exporters. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` takes the token and cost
+// counters; the prompts and responses ride the log records and keep arriving.
+// Telling that user their prompt and response text went to a foreign collector
+// is a false alarm, and a scary one.
+// @ref LLP 0271#the-key-list [tests]
+test('a metrics-only key does not claim the prompt text went with it', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT/)
+  assert.match(warnings[0], /metrics/)
+  assert.doesNotMatch(warnings[0], /prompt/)
+
+  const logs = await rig()
+  t.after(() => logs.cleanup())
+  const logsResult = await otelAttach(logs, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const logsWarnings = (logsResult.changed && logsResult.warnings) || []
+  assert.equal(logsWarnings.length, 1)
+  assert.match(logsWarnings[0], /log records/)
+  assert.match(logsWarnings[0], /prompt and response text/)
+})
+
+// `hyp status` promises repair lines you can act on, and attach's warning is
+// read the same way. A headers value names no destination, so "point it at the
+// same local listener" is not a repair for it - and for the hazard it actually
+// carries, a collector credential handed to a listener that never asked for
+// it, re-pointing is not a repair at all.
+// @ref LLP 0271#the-key-list [tests]
+test('a headers key is not told to point itself at the local listener', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /Unset it/)
+  assert.doesNotMatch(warnings[0], /point it at/)
+
+  // The routing keys keep the option, because they do name a destination.
+  const routing = await rig()
+  t.after(() => routing.cleanup())
+  const routingResult = await otelAttach(routing, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  const routingWarnings = (routingResult.changed && routingResult.warnings) || []
+  assert.match(routingWarnings[0], /point it at the same local listener/)
+})

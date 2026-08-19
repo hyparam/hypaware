@@ -233,6 +233,14 @@ export async function activate(ctx) {
               telemetryPort,
               spoolDir,
               claudeVersion,
+              // The half of the per-signal override check that can only be
+              // made here. A leftover OTEL_EXPORTER_OTLP_LOGS_ENDPOINT lives in
+              // the user's shell, never in the settings file attach writes, and
+              // it outranks the endpoint this attach is about to write - which
+              // is total, silent capture loss with every surface reporting
+              // healthy. Read to warn; never unset, never shadowed.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              processEnv: ctx.env,
             })
             // After the settings write, not before: a floor refusal must leave
             // nothing behind, and Claude Code only starts writing bodies once a
