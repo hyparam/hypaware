@@ -21,3 +21,22 @@ jobs:
           for n in $dups; do find llp -path llp/reviews -prune -o -name "$n-*.md" -print >&2; done
           echo "Fix: renumber the doc that landed second to the next free number across all branches (tombstones count - numbers are never reused), and update the @refs that meant it." >&2
           exit 1
+
+  # The in-tree job above only sees a collision once both documents are in one
+  # tree, which is after the second merge. Three branches minting the same number
+  # in parallel is not visible from any one of them (issue #907), so this job
+  # fetches every branch and asks whether the number this one mints is already
+  # claimed somewhere else. It reports only the numbers this branch adds, so a
+  # collision already settled on master, still carried by a stale branch that
+  # predates the repair, does not redden pull requests party to none of it.
+  cross-branch-numbers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Fetch every branch that could merge
+        run: git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+      - name: No newly minted LLP number is claimed elsewhere
+        run: node scripts/llp-numbers.js check
