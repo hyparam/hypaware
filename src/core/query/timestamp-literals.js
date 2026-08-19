@@ -355,6 +355,30 @@ function exprIsTimestamp(node, relations) {
 }
 
 /**
+ * A relation's columns collapsed by name. A relation can expose one name more
+ * than once - `select *` over a join expands both sides, and two relations may
+ * declare the same column with different types - and the collapsed entry is a
+ * TIMESTAMP only when every occurrence is. Which occurrence a reference to
+ * that name actually reaches is the engine's call (squirreling flattens a CTE
+ * last-wins and rejects the derived-table spelling outright), so a name whose
+ * occurrences disagree is not typed: guessing hands a `Date` to a string
+ * column, which is the silently-empty answer this rewrite exists to end.
+ *
+ * @param {InferredColumn[]} columns
+ * @returns {Map<string, boolean>}
+ * @ref LLP 0280#complete [implements]: a name a relation exposes twice with two types is not a TIMESTAMP
+ */
+function columnTypes(columns) {
+  /** @type {Map<string, boolean>} */
+  const types = new Map()
+  for (const column of columns) {
+    const seen = types.get(column.name)
+    types.set(column.name, seen === undefined ? column.isTimestamp : seen && column.isTimestamp)
+  }
+  return types
+}
+
+/**
  * Whether a column list declares this name a TIMESTAMP, or undefined when it
  * does not declare the name at all.
  *
@@ -363,8 +387,7 @@ function exprIsTimestamp(node, relations) {
  * @returns {boolean | undefined}
  */
 function declaresTimestamp(columns, name) {
-  const found = columns.find((column) => column.name === name)
-  return found === undefined ? undefined : found.isTimestamp
+  return columnTypes(columns).get(name)
 }
 
 /**
@@ -424,10 +447,13 @@ function timestampScope(select, registry, ctes, outer) {
     if (!columns) continue
     /** @type {Set<string>} */
     const declared = new Set()
-    for (const column of columns) {
-      if (column.isTimestamp) declared.add(column.name)
-      const seen = seenTypes.get(column.name)
-      seenTypes.set(column.name, seen === undefined ? column.isTimestamp : seen && column.isTimestamp)
+    // Collapsed first: a name this one relation exposes twice with two types
+    // is not a TIMESTAMP for a qualified reference either, and `declared` is
+    // the union it would otherwise be read out of.
+    for (const [name, isTimestamp] of columnTypes(columns)) {
+      if (isTimestamp) declared.add(name)
+      const seen = seenTypes.get(name)
+      seenTypes.set(name, seen === undefined ? isTimestamp : seen && isTimestamp)
     }
     for (const key of keys) byRelation.set(key, declared)
   }

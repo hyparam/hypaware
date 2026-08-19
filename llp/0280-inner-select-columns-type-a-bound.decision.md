@@ -103,6 +103,21 @@ typed from an unrelated relation that declares it, which is a wrong coercion
 and wrong rows. Refusing costs only the pruning, and that is the trade LLP 0272
 already made.
 
+A complete list is not a list of *distinct* names. A relation can expose one
+name twice, because `*` expands every relation in the join and two of them may
+declare the same column with different types. The occurrence a reference to
+that name actually reaches is the engine's call, not this walk's (squirreling
+flattens a CTE's duplicate last-wins and rejects the derived-table spelling of
+the same reference outright), so a name is a TIMESTAMP only when **every**
+occurrence of it is, both for the unqualified reference `agreed` answers and
+for the qualified one `byRelation` answers. Reading the first occurrence, or
+the union of the TIMESTAMP ones, types the bound against a column the engine
+does not hand it: the bound then goes silently empty on matching data, and a
+string bound that is not a timestamp at all is refused outright by
+[LLP 0272 `#refuse-uncoercible`](0272-string-literals-typed-by-the-column.decision.md#refuse-uncoercible).
+Both are the failure this document exists to avoid, so an ambiguous name is
+simply not typed.
+
 The boundary is therefore visible and testable rather than implicit:
 `with c as (select * from other)` (unregistered), `select id, upper(date)`
 (an output column with no name), and `from unnest(...)` (a table function) all
