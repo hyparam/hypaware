@@ -101,3 +101,97 @@ export async function writeOpenclawSessionFixture(spec) {
 
   return { agentsDir, agentId, sessionId: spec.sessionId, filePath }
 }
+
+/**
+ * Write the `<sessionId>.trajectory.jsonl` sibling OpenClaw records beside a
+ * session, in the event shape a live trajectory holds (verified against
+ * OpenClaw 2026.7.1-2): every line states `traceSchema`, `sessionId`,
+ * `runId`, `type`, `ts`, and a per-type `data` object, and one run writes
+ * `session.started`, `trace.metadata`, `context.compiled`,
+ * `model.completed`, `session.ended` in that order.
+ *
+ * Here for the same reason the session fixture is: the shape is the point.
+ * The sweep fills `system_text` and `tools` from `context.compiled` alone
+ * (LLP 0265), and a flow that invented a flatter event stream would prove
+ * only that it can read its own invention. Callers author runs, not events,
+ * so no flow has to restate the ordering.
+ *
+ * `systemPrompt` is passed through as given: a string is a prompt the run
+ * recorded in full, and the `{ truncated: true, ... }` stub is what OpenClaw
+ * substitutes past its 32768-character field cap. `report` writes the
+ * `trace.metadata` system-prompt report that describes a stubbed prompt.
+ *
+ * @ref LLP 0265#trajectory-reader [tests]: the per-run event shape the
+ * trajectory reader exists to know about, written rather than assumed
+ * @param {{
+ *   homeDir: string,
+ *   agentId?: string,
+ *   sessionId: string,
+ *   runs: Array<{
+ *     runId?: string,
+ *     compiledAt: string,
+ *     endedAt?: string,
+ *     systemPrompt?: unknown,
+ *     tools?: unknown[],
+ *     report?: { chars?: number, hash?: string },
+ *   }>,
+ * }} spec
+ * @returns {Promise<{ filePath: string }>}
+ */
+export async function writeOpenclawTrajectoryFixture(spec) {
+  const agentId = spec.agentId ?? 'main'
+  const sessionsDir = path.join(spec.homeDir, '.openclaw', 'agents', agentId, 'sessions')
+  await fs.mkdir(sessionsDir, { recursive: true })
+
+  /** @type {string[]} */
+  const lines = []
+  /**
+   * @param {string} type
+   * @param {string} ts
+   * @param {string} runId
+   * @param {Record<string, unknown>} data
+   */
+  const push = (type, ts, runId, data) => {
+    lines.push(JSON.stringify({
+      traceSchema: 'openclaw-trajectory',
+      schemaVersion: 1,
+      traceId: spec.sessionId,
+      source: 'runtime',
+      type,
+      ts,
+      sessionId: spec.sessionId,
+      sessionKey: `agent:${agentId}:${agentId}`,
+      runId,
+      workspaceDir: path.join(spec.homeDir, 'workspace'),
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-5',
+      modelApi: 'anthropic-messages',
+      data,
+    }))
+  }
+
+  spec.runs.forEach((run, index) => {
+    const runId = run.runId ?? `${spec.sessionId}-run-${index + 1}`
+    push('session.started', run.compiledAt, runId, { trigger: 'user', agentId })
+    if (run.report) {
+      push('trace.metadata', run.compiledAt, runId, {
+        prompting: {
+          systemPromptReport: { source: 'run', sessionId: spec.sessionId, systemPrompt: run.report },
+        },
+      })
+    }
+    push('context.compiled', run.compiledAt, runId, {
+      ...(run.systemPrompt !== undefined ? { systemPrompt: run.systemPrompt } : {}),
+      ...(run.tools !== undefined ? { tools: run.tools } : {}),
+      transport: 'auto',
+    })
+    if (run.endedAt) {
+      push('model.completed', run.endedAt, runId, { aborted: false })
+      push('session.ended', run.endedAt, runId, {})
+    }
+  })
+
+  const filePath = path.join(sessionsDir, `${spec.sessionId}.trajectory.jsonl`)
+  await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  return { filePath }
+}

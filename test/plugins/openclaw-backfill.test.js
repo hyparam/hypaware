@@ -1417,3 +1417,372 @@ test('a file outside the quiesce window still goes through the CLI-backend exclu
     await env.cleanup()
   }
 })
+
+
+// ---------------------------------------------------------------------------
+// Trajectory enrichment (LLP 0265)
+// ---------------------------------------------------------------------------
+
+/**
+ * Write the `<sessionId>.trajectory.jsonl` sibling OpenClaw records beside a
+ * session, in the event shape a live file holds (verified against OpenClaw
+ * 2026.7.1-2): every line states `traceSchema`, `sessionId`, `runId`, `type`,
+ * `ts`, and a per-type `data` object.
+ *
+ * `runs` are authored as `{ compiledAt, endedAt?, systemPrompt?, tools?,
+ * report? }` and expanded here into the event sequence a run actually
+ * writes, so no fixture can invent a stream OpenClaw does not produce.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {{
+ *   agentId?: string,
+ *   sessionId?: string,
+ *   runs: Array<{
+ *     compiledAt: string,
+ *     endedAt?: string,
+ *     runId?: string,
+ *     systemPrompt?: unknown,
+ *     tools?: unknown[],
+ *     report?: { chars: number, hash: string },
+ *   }>,
+ * }} doc
+ */
+async function writeTrajectory(env, doc) {
+  const agentId = doc.agentId ?? 'main'
+  const sessionId = doc.sessionId ?? 'sess-1'
+  const dir = path.join(env.homeDir, '.openclaw', 'agents', agentId, 'sessions')
+  await fs.mkdir(dir, { recursive: true })
+  /** @type {string[]} */
+  const lines = []
+  /** @param {string} type @param {string} ts @param {string} runId @param {Record<string, unknown>} data */
+  const push = (type, ts, runId, data) => {
+    lines.push(JSON.stringify({
+      traceSchema: 'openclaw-trajectory',
+      schemaVersion: 1,
+      traceId: sessionId,
+      source: 'runtime',
+      type,
+      ts,
+      sessionId,
+      sessionKey: `agent:${agentId}:${agentId}`,
+      runId,
+      workspaceDir: '/work/repo',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-5',
+      modelApi: 'anthropic-messages',
+      data,
+    }))
+  }
+  doc.runs.forEach((run, index) => {
+    const runId = run.runId ?? `run-${index + 1}`
+    push('session.started', run.compiledAt, runId, { trigger: 'user', agentId })
+    if (run.report) {
+      push('trace.metadata', run.compiledAt, runId, {
+        prompting: { systemPromptReport: { source: 'run', sessionId, systemPrompt: run.report } },
+      })
+    }
+    push('context.compiled', run.compiledAt, runId, {
+      ...(run.systemPrompt !== undefined ? { systemPrompt: run.systemPrompt } : {}),
+      ...(run.tools !== undefined ? { tools: run.tools } : {}),
+      transport: 'auto',
+    })
+    if (run.endedAt) {
+      push('model.completed', run.endedAt, runId, { aborted: false })
+      push('session.ended', run.endedAt, runId, {})
+    }
+  })
+  const filePath = path.join(dir, `${sessionId}.trajectory.jsonl`)
+  await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  return filePath
+}
+
+const READ_TOOL = { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } }
+const EXEC_TOOL = { name: 'exec', description: 'Run a command', parameters: { type: 'object', properties: {} } }
+
+// @ref LLP 0265#per-message [tests]: the two columns the session transcript
+// states nowhere reach the materialized rows, through the per-message
+// contract rather than the exchange-level pair.
+test('stamps the run\'s system prompt and tool set onto the rows it produced', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    await writeTrajectory(env, {
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: 'you are an agent',
+        tools: [READ_TOOL, EXEC_TOOL],
+      }],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, 2)
+    for (const row of rows) {
+      assert.equal(row.system_text, 'you are an agent')
+      assert.deepEqual(row.tools, [READ_TOOL, EXEC_TOOL])
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0265#per-message [tests]: an OpenClaw session recompiles per run,
+// so one exchange-level value would be some turn's answer presented as every
+// turn's.
+test('two runs in one session stamp their own prompts and tool sets', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        { ...USER_RECORD, id: 'msg-user-2', timestamp: '2026-07-30T10:05:00.100Z' },
+        { ...ASSISTANT_RECORD, id: 'msg-asst-2', timestamp: '2026-07-30T10:05:01.000Z' },
+      ],
+    })
+    await writeTrajectory(env, {
+      runs: [
+        {
+          compiledAt: '2026-07-30T10:00:00.500Z',
+          endedAt: '2026-07-30T10:00:03.000Z',
+          systemPrompt: 'first prompt',
+          tools: [READ_TOOL],
+        },
+        {
+          compiledAt: '2026-07-30T10:05:00.000Z',
+          endedAt: '2026-07-30T10:05:02.000Z',
+          systemPrompt: 'second prompt',
+          tools: [READ_TOOL, EXEC_TOOL],
+        },
+      ],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    const byId = new Map(rows.map((row) => [row.message_id, row]))
+    assert.equal(byId.get('msg-user-1')?.system_text, 'first prompt')
+    assert.deepEqual(byId.get('msg-asst-1')?.tools, [READ_TOOL])
+    assert.equal(byId.get('msg-user-2')?.system_text, 'second prompt')
+    assert.deepEqual(byId.get('msg-asst-2')?.tools, [READ_TOOL, EXEC_TOOL])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0265#backfill-stamping [tests]: the match is on the session file's
+// recording time. A webchat prompt states the moment the user sent it, which
+// predates its own run's compile, and matching on that would hand the turn
+// the previous run's context.
+test('a prompt whose stated time predates its own run still lands on that run', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        { ...USER_RECORD, id: 'msg-user-1', timestamp: '2026-07-30T10:00:01.000Z' },
+        ASSISTANT_RECORD,
+        // Recorded at 10:05:00.100 (the record line), but the message itself
+        // carries the send time 10:04:57.000, before the run compiled.
+        {
+          id: 'msg-user-2',
+          timestamp: '2026-07-30T10:05:00.100Z',
+          role: 'user',
+          content: [{ type: 'text', text: 'hi again' }],
+        },
+        { ...ASSISTANT_RECORD, id: 'msg-asst-2', timestamp: '2026-07-30T10:05:01.000Z' },
+      ],
+    })
+    // Rewrite the second prompt's envelope timestamp to its send time, the
+    // shape a webchat message actually has: the line and the envelope
+    // disagree, and only the line orders the file.
+    const sessionPath = path.join(env.homeDir, '.openclaw', 'agents', 'main', 'sessions', 'sess-1.jsonl')
+    const lines = (await fs.readFile(sessionPath, 'utf8')).trim().split('\n')
+    const rewritten = lines.map((line) => {
+      const record = JSON.parse(line)
+      if (record.id !== 'msg-user-2') return line
+      record.message.timestamp = Date.parse('2026-07-30T10:04:57.000Z')
+      return JSON.stringify(record)
+    })
+    await fs.writeFile(sessionPath, rewritten.join('\n') + '\n', 'utf8')
+    await ageFile(sessionPath, FIXTURE_MTIME_MARGIN_MS)
+
+    await writeTrajectory(env, {
+      runs: [
+        { compiledAt: '2026-07-30T10:00:00.500Z', endedAt: '2026-07-30T10:00:03.000Z', systemPrompt: 'first prompt' },
+        { compiledAt: '2026-07-30T10:05:00.000Z', endedAt: '2026-07-30T10:05:02.000Z', systemPrompt: 'second prompt' },
+      ],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    const byId = new Map(rows.map((row) => [row.message_id, row]))
+    assert.equal(byId.get('msg-user-2')?.system_text, 'second prompt')
+    // The message keeps its own stated time as the created-at: only the run
+    // match reads the recording time.
+    assert.equal(byId.get('msg-user-2')?.message_created_at, '2026-07-30T10:04:57.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0265#truncated-prompts [tests]: a prompt over OpenClaw's 32768-char
+// trajectory field cap is described, never reconstructed.
+test('an over-32k system prompt lands as a digest attribute, not as text', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    await writeTrajectory(env, {
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: { truncated: true, reason: 'trajectory-field-size-limit', originalChars: 36775, limitChars: 32768 },
+        report: { chars: 36775, hash: 'a6e6cdcce0c609b1' },
+        tools: [READ_TOOL],
+      }],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    for (const row of rows) {
+      assert.equal(row.system_text, undefined, 'no row claims a prompt that was never recorded')
+      assert.deepEqual(row.tools, [READ_TOOL], 'the tool set is unaffected by the string cap')
+      assert.deepEqual(attributesOf(row).openclaw.system_prompt, {
+        hash: 'a6e6cdcce0c609b1',
+        chars: 36775,
+        truncated: true,
+      })
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0265#backfill-stamping [tests]: a turn that compiled no context is
+// not described by whatever the previous run compiled.
+test('a session with no trajectory, and a turn outside every run window, stamp nothing', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, {
+      sessionId: 'sess-untraced',
+      header: { cwd: '/work/repo' },
+      records: [USER_RECORD, ASSISTANT_RECORD],
+    })
+    await writeSession(env, {
+      sessionId: 'sess-gap',
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        // A later turn whose run failed before compiling anything.
+        { ...USER_RECORD, id: 'msg-user-2', timestamp: '2026-07-30T11:00:00.000Z' },
+      ],
+    })
+    await writeTrajectory(env, {
+      sessionId: 'sess-gap',
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: 'first prompt',
+        tools: [READ_TOOL],
+      }],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const bySession = new Map(items.map((item) => [value(item).session_id, item]))
+
+    const untraced = await materialize(/** @type {any} */ (bySession.get('sess-untraced')))
+    assert.equal(untraced.length, 2)
+    for (const row of untraced) {
+      assert.equal(row.system_text, undefined)
+      assert.equal(row.tools, undefined)
+    }
+
+    const gap = await materialize(/** @type {any} */ (bySession.get('sess-gap')))
+    const byId = new Map(gap.map((row) => [row.message_id, row]))
+    assert.equal(byId.get('msg-user-1')?.system_text, 'first prompt')
+    assert.equal(byId.get('msg-user-2')?.system_text, undefined)
+    assert.equal(byId.get('msg-user-2')?.tools, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The run's own accounting, which is how an operator tells "no trajectory"
+// from "windowing miss" from "prompt over the cap" without re-reading files.
+test('the scan log reports run contexts and per-column coverage', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    await writeTrajectory(env, {
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: { truncated: true, reason: 'trajectory-field-size-limit', originalChars: 40183, limitChars: 32768 },
+        tools: [READ_TOOL],
+      }],
+    })
+    const { ctx, entries } = runContext()
+    await collect(provider(env).run(ctx))
+    const projected = entries.find((entry) => entry.message === 'openclaw.backfill.session_projected')
+    assert.equal(projected?.fields?.run_context_count, 1)
+    assert.equal(projected?.fields?.messages_with_tools, 2)
+    assert.equal(projected?.fields?.messages_with_system_text, 0)
+    const complete = entries.find((entry) => entry.message === 'openclaw.backfill.scan_complete')
+    assert.equal(complete?.fields?.messages_with_tools, 2)
+    assert.equal(complete?.fields?.messages_with_system_text, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0265#truncated-prompts [tests]: the silent 20000-character clip.
+// A recorded string is not evidence of a complete prompt, and every
+// substantial run in the verified corpus was clipped this way, so a rule
+// that trusted the string would mislabel the common case.
+test('a silently clipped system prompt is stamped but marked truncated', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    const clipped = 'you are an agent. '.repeat(1200).slice(0, 20000) + '\u2026'
+    await writeTrajectory(env, {
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: clipped,
+        tools: [READ_TOOL],
+      }],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    for (const row of rows) {
+      assert.equal(row.system_text, clipped, 'the recorded prefix is kept')
+      assert.deepEqual(attributesOf(row).openclaw.system_prompt, { recorded_chars: 20001, truncated: true })
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a complete system prompt carries no truncation flag', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    await writeTrajectory(env, {
+      runs: [{
+        compiledAt: '2026-07-30T10:00:00.500Z',
+        endedAt: '2026-07-30T10:00:03.000Z',
+        systemPrompt: 'you are an agent',
+        report: { chars: 16, hash: 'complete-hash' },
+        tools: [READ_TOOL],
+      }],
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    for (const row of rows) {
+      assert.equal(row.system_text, 'you are an agent')
+      assert.deepEqual(attributesOf(row).openclaw.system_prompt, { hash: 'complete-hash', chars: 16 })
+    }
+  } finally {
+    await env.cleanup()
+  }
+})

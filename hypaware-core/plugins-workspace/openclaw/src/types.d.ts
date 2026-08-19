@@ -90,6 +90,15 @@ export interface OpenclawSessionHeader {
 export interface OpenclawSessionMessage {
   id?: string
   timestampMs?: number
+  /**
+   * When the session file recorded the message, from the record LINE's own
+   * `timestamp`, read at that level only. Distinct from `timestampMs`, which
+   * prefers the envelope's value: an envelope states when the message was
+   * made (a webchat prompt carries its send time), the line states when this
+   * file wrote it down. Consumers that order the transcript against another
+   * file OpenClaw wrote in the same instants want this one (@ref LLP 0265).
+   */
+  recordedAtMs?: number
   role?: string
   content?: unknown
   model?: string
@@ -98,6 +107,36 @@ export interface OpenclawSessionMessage {
   stopReason?: string
   usage?: Record<string, unknown>
   record: Record<string, unknown>
+}
+
+/**
+ * One run's compiled context, recovered from an OpenClaw trajectory file
+ * (`<sessionId>.trajectory.jsonl`). A run is one prompt-to-completion cycle,
+ * and OpenClaw compiles a fresh context for each: `systemText` and `tools`
+ * are the two facts the session transcript never states, and both change
+ * within a single session (@ref LLP 0265#decision).
+ *
+ * `startMs` is the run's `context.compiled` timestamp and `endMs` its
+ * `session.ended`; a context with no end is open until the next one starts,
+ * which is a run still in flight at sweep time.
+ *
+ * `systemText` is whatever the run RECORDED, which is not always the whole
+ * prompt: OpenClaw drops an over-32768-character value entirely (leaving
+ * `systemText` absent) and silently clips a long one to 20000 characters
+ * plus an ellipsis. `systemPromptDigest` is what is known about the prompt
+ * itself either way: `chars` its true assembled size, `hash` the digest the
+ * run's `trace.metadata` reported, `recordedChars` how much of it
+ * `systemText` actually holds, and `truncated` that the two differ. A
+ * consumer that needs a whole prompt must check `truncated`, not the
+ * presence of `systemText`.
+ */
+export interface OpenclawRunContext {
+  startMs: number
+  endMs?: number
+  runId?: string
+  systemText?: string
+  systemPromptDigest?: { chars?: number, hash?: string, recordedChars?: number, truncated?: boolean }
+  tools?: unknown[]
 }
 
 /**

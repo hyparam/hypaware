@@ -973,8 +973,12 @@ function expandMessageParts(ctx) {
     // model per exchange (landing on user rows too), and for backfill is unset
     // (backfilled user/tool_result rows carry no model, by design)).
     model: stringValue(ctx.message.model) ?? ctx.projection.model,
-    system_text: ctx.projection.system_text,
-    tools: ctx.projection.tools,
+    // @ref LLP 0265#decision [implements]: per-message system prompt and tool
+    // definitions win over the exchange's, the `model`/`provider` precedence
+    // extended to the pair a per-turn-recompiling agent changes mid-session.
+    // Live projectors set neither, so their rows are unchanged.
+    system_text: stringValue(ctx.message.system_text) ?? ctx.projection.system_text,
+    tools: ctx.message.tools ?? ctx.projection.tools,
     conversation_started_at: ctx.conversationStarted,
     conversation_source: ctx.projection.conversation_source,
     client_name: stringValue(ctx.projection.client_name),
