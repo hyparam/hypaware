@@ -178,7 +178,7 @@ export function otelModeEnv({ telemetryPort, spoolDir }) {
  * the user's prompts and the model's replies to whatever collector it names.
  *
  * A warning, not a refusal, and nothing is unset: the environment read here is
- * the shell `hyp attach` ran in, which is not necessarily the one Claude Code
+ * the shell `hyp client attach` ran in, which is not necessarily the one Claude Code
  * will launch from, and no process can reach into the shell that spawned it
  * anyway. Shadowing the key from the settings block would mean managing a key
  * LLP 0258 leaves alone and silently breaking a collector that may still be in

@@ -37,7 +37,7 @@ The resulting failure is total and silent. Found on a real machine (issue
 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` from variables that no longer resolved,
 so both were exported as the empty string. Claude Code sessions launched from
 that shell captured nothing; sessions launched from any other shell captured
-perfectly. Meanwhile `hyp attach claude` printed success with the right
+perfectly. Meanwhile `hyp client attach claude` printed success with the right
 endpoint, `hyp status` showed `attached (otel)` with a started
 `claude-telemetry` source, the settings file was byte-perfect, and the raw-body
 spool kept growing - because `OTEL_LOG_RAW_API_BODIES` is a file path, which
@@ -69,7 +69,7 @@ into `--json`.
 **Attach warns and writes; it does not refuse, and it does not unset or
 override the user's variable.** Three reasons, and none of them is timidity.
 
-The environment attach can see is the shell `hyp attach` ran in, which is not
+The environment attach can see is the shell `hyp client attach` ran in, which is not
 necessarily the shell Claude Code will launch from - that is the whole shape of
 the bug, in reverse. Refusing on that evidence would block an attach that is
 about to work fine. Unsetting is not available either: a process cannot reach

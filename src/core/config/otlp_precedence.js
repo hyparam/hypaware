@@ -12,7 +12,7 @@
  *
  * This lives in core, not in the `claude` plugin that writes the endpoint,
  * because two callers apply the same precedence rule from two directions:
- * `hyp attach claude` at write time, and `hyp status` on every run. A second
+ * `hyp client attach claude` at write time, and `hyp status` on every run. A second
  * copy of the list is a copy that drifts.
  *
  * @ref LLP 0271#the-key-list [implements]
