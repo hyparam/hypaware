@@ -154,3 +154,27 @@ test('an empty plugins array survives beside a central layer that adds none', as
   assert.equal(report.layered?.hasCentral, true)
   assert.equal(report.configRecordsAnswer, true)
 })
+
+// The boundary on the central half: "carries capture of its own" is a test for
+// a plugin that contributes a picker row, not for "any plugin that is not the
+// enrollment seed". A fleet whose central layer also pushes a sink or format
+// plugin has still asked nobody anything, and reading that as an answer would
+// leave the returning gate fronting "already configured" over a machine that
+// records nothing - the exact failure LLP 0281 #returning-gate closes.
+test('a central layer carrying only non-capture plugins records no pick answer', async () => {
+  const hypHome = await makeHome()
+  await writeCentralSeed(hypHome, {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/local-fs' }, { name: '@hypaware/format-parquet' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    query: { remotes: { team: { url: 'https://example.invalid' } } },
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.layered?.hasCentral, true, 'enrolled')
+  assert.equal(report.configExists, true, 'and configured enough to boot')
+  assert.equal(report.configRecordsAnswer, false, 'but a sink plugin answers no pick question')
+})

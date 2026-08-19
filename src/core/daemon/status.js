@@ -63,7 +63,10 @@ import {
  * The plugin the enrollment seed names. `hyp join` and the enrolling
  * `hyp remote login` write `plugins: [{ name: '@hypaware/central' }]` plus the
  * central sink so the machine can reach its server; it records no capture
- * choice, so a central layer naming only it has answered nothing.
+ * choice, so a central layer naming only it has answered nothing. Only the
+ * catalog-less fallback in `collectHypAwareStatus` reads it: with a catalog the
+ * test is the positive one (does the layer name a capture plugin?), which
+ * excludes this and every other non-capture plugin.
  */
 const CENTRAL_ENROLLMENT_PLUGIN = '@hypaware/central'
 
@@ -960,17 +963,32 @@ export async function collectHypAwareStatus(opts = {}) {
   // pick lane reads, so the two lanes cannot classify one file two ways. The
   // central layer answers when it carries capture of its own: a machine whose
   // fleet configured its sources is set up, the fleet having answered on its
-  // behalf (LLP 0129 #join-before-picker). `@hypaware/central` on its own is
-  // not that answer - it is the enrollment seed `hyp remote login` and
-  // `hyp join` write to reach the server at all, and it is on disk before
-  // anyone has been asked anything.
+  // behalf (LLP 0129 #join-before-picker).
+  //
+  // "Carries capture" is a plugin-level test against the picker catalog - does
+  // the central layer name a plugin that contributes a picker row? - which is
+  // the same test `computeCentralLockedSources` uses to decide which rows the
+  // org owns, so the locked set and this claim cannot disagree. Naming a sink
+  // or format plugin is not an answer to the pick question: it configures where
+  // rows go, not whether any are recorded. Neither is `@hypaware/central` on
+  // its own - it is the enrollment seed `hyp remote login` and `hyp join`
+  // write to reach the server at all, and it is on disk before anyone has been
+  // asked anything. Without a catalog the question cannot be asked at all, so
+  // that case falls back to the weaker plugin-name reading, which keeps a
+  // managed machine on the returning path: re-opening onboarding's consent
+  // questions is the direction that costs the user something (LLP 0183).
   //
   // The merged config cannot express either half: it hides the enrollment seed
   // among the plugins, and it drops a local `plugins: []` whenever the merged
   // list comes out empty (`mergeConfigLayers` only sets the key when it is
   // non-empty), turning a deliberate record-nothing pick back into "no answer".
   // @ref LLP 0281#returning-gate [implements]: the report carries the answer-keyed claim the returning gate needs, not only file existence
-  const centralAnswersPick = [...centralPluginNames].some((name) => name !== CENTRAL_ENROLLMENT_PLUGIN)
+  const capturePluginNames = catalog
+    ? new Set([...catalog.pickerDescriptors.values()].map((d) => d.plugin))
+    : null
+  const centralAnswersPick = [...centralPluginNames].some((name) => (
+    capturePluginNames ? capturePluginNames.has(name) : name !== CENTRAL_ENROLLMENT_PLUGIN
+  ))
   const configRecordsAnswer =
     (localConfig !== null && configRecordsPickAnswer(localConfig)) || centralAnswersPick
 
