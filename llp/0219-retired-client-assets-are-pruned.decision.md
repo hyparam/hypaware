@@ -6,7 +6,7 @@
 **Author:** Claude
 **Date:** 2026-08-13
 **Related:** LLP 0138 (#one-materializer, #marker-undo: the module this extends and the half-record it left), LLP 0107 (#currency, #reversal: why attach re-runs and what reversal may touch), LLP 0142 (the retirement that is still installed), LLP 0212 (the retirement that motivated #726), LLP 0215 (#not-in-scope: named this gap and deferred it)
-**Extended-by:** LLP 0226 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable)
+**Extended-by:** LLP 0226 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable), LLP 0278 (widens #edited-assets-are-not-ours's match from one client's record to every digest recorded for the path)
 
 > Extends [LLP 0138](./0138-client-assets-one-install.decision.md), which made
 > one routine own copying client assets and recorded, on the org-driven half
@@ -207,6 +207,11 @@ path, and only while the bytes there are still the bytes it wrote.**
   fact about the *candidate itself*, and the two are split apart in
   [LLP 0226](./0226-prune-direct-children-and-unreadable-assets.decision.md)
   #unreadable-is-not-absent.
+
+  Which digest counts as "one we recorded" is widened in
+  [LLP 0278](./0278-recorded-digests-are-per-path.decision.md)
+  #digests-are-per-path: the ledger's `(client, dest)` key gives one path a
+  digest column per client, and the match is asked of all of them.
 
   **The digest separates shapes, not only bytes.** A skill is a directory and a
   subagent a single file, and hashing both into one unframed stream let the two

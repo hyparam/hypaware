@@ -359,6 +359,33 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
   // contributing right now reads as another client's retired copy.
   const keepAll = new Set(planned.map(({ dest }) => dest))
 
+  // Every digest the ledger records **for a physical path**, whoever's record
+  // holds it. The ledger is keyed on `(client, dest)` because one path
+  // legitimately belongs to two clients at once, and that keying is what makes
+  // a record go stale: a `claude-desktop`-scoped run rewrites
+  // `~/.claude/skills/<name>` and re-records only its own digest, while the
+  // `claude` record keeps the digest of bytes that are no longer there. Asked
+  // of one record, the evidence gate below then reads HypAware's own rewrite as
+  // the user taking the file over, and reports it that way.
+  //
+  // Which client's record carries the proof is an artifact of the key, not a
+  // fact about the bytes: a digest recorded against a path says HypAware wrote
+  // those bytes there, and that is the whole of what the gate needs to know.
+  // So the digests are indexed by dest and asked as a set. This adds no
+  // evidence the ledger did not already hold and re-records none - a path with
+  // no recorded digest at all still fails the gate, exactly as before.
+  // @ref LLP 0278#digests-are-per-path [implements]: the evidence gate matches
+  //   the bytes against every digest recorded for that path, not only against
+  //   the record whose client this pass happens to be walking.
+  /** @type {Map<string, Set<string>>} */
+  const recordedDigests = new Map()
+  for (const record of ledger) {
+    if (!record.digest) continue
+    const known = recordedDigests.get(record.dest)
+    if (known) known.add(record.digest)
+    else recordedDigests.set(record.dest, new Set([record.digest]))
+  }
+
   // A client this run did not install for keeps every record it had: this pass
   // learned nothing about it.
   /** @type {ClientAssetLedgerRecord[]} */
@@ -391,7 +418,16 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
       }
 
       for (const [dest, record] of candidates) {
-        const outcome = await pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, stderr })
+        const outcome = await pruneOneAsset({
+          dest,
+          record,
+          recorded: recordedDigests.get(dest) ?? EMPTY_DIGESTS,
+          client,
+          baseDirs,
+          dryRun,
+          stdout,
+          stderr,
+        })
         if (outcome.carried) next.push(outcome.carried)
         if (outcome.removal) (outcome.removed ? pruned : withheld).push(outcome.removal)
       }
@@ -446,6 +482,7 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
  * @param {{
  *   dest: string,
  *   record: ClientAssetLedgerRecord | undefined,
+ *   recorded: Set<string>,
  *   client: string,
  *   baseDirs: string[],
  *   dryRun: boolean,
@@ -458,7 +495,7 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
  *   removal?: ClientAssetRemoval,
  * }>}
  */
-async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, stderr }) {
+async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun, stdout, stderr }) {
   const kind = record?.kind ?? (path.extname(dest) === '.md' ? 'agent' : 'skill')
   const name = record?.name ?? path.basename(dest, kind === 'agent' ? '.md' : '')
   /** @type {ClientAssetRemoval} */
@@ -553,8 +590,8 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   // it and leave it: the file stays visible, and the record stays, so the same
   // report reappears until the user acts on it.
   //
-  // A candidate with no recorded digest takes the same exit, and that is the
-  // whole of the marker's demotion from a deletion source to a reporting one.
+  // A candidate no digest was ever recorded for takes the same exit, and that is
+  // the whole of the marker's demotion from a deletion source to a reporting one.
   // The marker records paths, never bytes, and `installed_assets` is unioned
   // across every rewrite and never shrinks, so a path that appears there once
   // is a candidate forever - including after HypAware itself removed it and the
@@ -562,8 +599,8 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
   // evidence is not evidence, so it may not read as a match.
   // @ref LLP 0219#edited-assets-are-not-ours [implements]: the removal proceeds
   //   only on a recorded digest that still matches; anything else is a report.
-  if (record?.digest !== digest) {
-    const reason = record?.digest
+  if (!recorded.has(digest)) {
+    const reason = recorded.size > 0
       ? 'changed since HypAware installed it'
       : 'has no recorded content digest, so nothing proves the bytes are ours'
     stderr?.write(
@@ -575,7 +612,7 @@ async function pruneOneAsset({ dest, record, client, baseDirs, dryRun, stdout, s
       [Attr.OPERATION]: 'client_assets.prune',
       hyp_client: client,
       [Attr.STATUS]: 'ok',
-      [Attr.ERROR_KIND]: record?.digest ? 'asset_modified' : 'digest_unrecorded',
+      [Attr.ERROR_KIND]: recorded.size > 0 ? 'asset_modified' : 'digest_unrecorded',
       detail: dest,
     })
     return { carried: record, removed: false, removal }
@@ -657,6 +694,14 @@ function attachMarkerAssets(stateRoot, client) {
 }
 
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * The evidence about a path no digest was ever recorded for. Shared and never
+ * added to: {@link pruneOneAsset} only ever asks it questions.
+ *
+ * @type {Set<string>}
+ */
+const EMPTY_DIGESTS = new Set()
 
 /** Why a removal is refused when the client has no asset directories at all. */
 const NO_BASE_DIRS_REASON =
