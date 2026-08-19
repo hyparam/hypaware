@@ -46,7 +46,8 @@ export function defaultSessionContextFile(stateDir) {
  * @param {string} filePath
  * @param {SessionContextRecord} record
  * @param {{ maxBytes?: number, maxRecords?: number }} [opts] `maxBytes` is
- *   clamped to `SESSION_CONTEXT_MAX_BYTES`; a larger value has no effect.
+ *   clamped to the reader's window (the smaller of `SESSION_CONTEXT_MAX_BYTES`
+ *   and `SESSION_CONTEXT_READ_TAIL_BYTES`); a larger value has no effect.
  * @returns {Promise<void>}
  */
 export async function appendSessionContext(filePath, record, opts = {}) {
@@ -203,16 +204,22 @@ async function readTail(filePath, maxBytes) {
  *
  * `appendSessionContext` takes a per-call compaction cap, but the read side
  * has no matching seam: `createSessionContextReader` (the reader the live
- * projector and the telemetry listener use) tail-reads at a module constant
- * and takes no options. So a caller that compacts to a window wider than
- * `SESSION_CONTEXT_MAX_BYTES` keeps records that no reader ever sees, which is
- * indistinguishable from the hook never having recorded them.
+ * projector and the telemetry listener use) tail-reads at
+ * `SESSION_CONTEXT_READ_TAIL_BYTES` and takes no options. So a file kept above
+ * that tail carries records no reader ever sees, which is indistinguishable
+ * from the hook never having recorded them.
  *
  * That is not a nullable column on the ingest path: an unseen record resolves
  * to an `undetermined` usage policy, the listener withholds the batch, and the
  * session's spooled bodies are deleted unread. Clamping keeps the invariant
  * structural rather than a JSDoc promise. Narrowing stays allowed: a smaller
  * cap only ever keeps less than the reader can see.
+ *
+ * The binding cap is the smaller of the two module constants, not
+ * `SESSION_CONTEXT_MAX_BYTES` alone. Today the read tail is half the writer
+ * cap, so bytes between the two are retained-but-invisible and dropping them
+ * costs no reader anything; if the read window is later widened to follow the
+ * writer cap, this `Math.min` reverts to the writer cap on its own.
  *
  * @ref LLP 0254#policy-inline [constrained-by]: the hook's cwd is what the
  *   ingest verdict is resolved from, so the writer may not retain a record
@@ -221,7 +228,7 @@ async function readTail(filePath, maxBytes) {
  * @param {number} maxBytes
  */
 function clampToReadableWindow(maxBytes) {
-  return Math.min(maxBytes, SESSION_CONTEXT_MAX_BYTES)
+  return Math.min(maxBytes, SESSION_CONTEXT_MAX_BYTES, SESSION_CONTEXT_READ_TAIL_BYTES)
 }
 
 /** @param {unknown} value */

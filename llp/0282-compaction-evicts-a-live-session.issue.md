@@ -33,8 +33,9 @@ Both steps drop by position in an append-only file, so "oldest line" is what
 goes. A session that fires the hook once at `SessionStart` and then reads
 files for an hour has exactly one line, and it sits at the front. A neighbour
 firing `PostToolUse` on every Bash call writes hundreds. At the size the hook
-writes, the 1 MiB cap is roughly 1,300 hook events, which a Bash-heavy agent
-reaches in hours, and a mature install sits pinned at the cap permanently.
+writes (roughly 400 bytes a record), the effective 512 KiB cap is about 1,300
+hook events, which a Bash-heavy agent reaches in hours, and a mature install
+sits pinned at the cap permanently.
 
 ## Why
 
@@ -56,9 +57,13 @@ the usage policy is evaluated inline from it:
   session's spooled request bodies are deleted before anything reads them
   (LLP 0253 #delete-on-drop).
 
-PR #896 widened the *read* window to follow the writer's cap, which closes the
-sub-cap half: below the cap the record is on disk and now visible. Above the
-cap the record is gone from disk, and no read window can recover it.
+The sub-cap half is closed separately, by making the writer's effective cap the
+smaller of `SESSION_CONTEXT_MAX_BYTES` and `SESSION_CONTEXT_READ_TAIL_BYTES`:
+below that cap the record is on disk and visible. (PR #896 proposes to close it
+from the other side, by widening the *read* window to follow the writer's cap;
+it is still open at the time of writing, so on `master` the read tail remains
+half the writer cap.) Above the cap the record is gone from disk, and no read
+window can recover it. That half is what this document is about.
 
 ## Impact
 
@@ -104,5 +109,6 @@ is why it needs this document rather than a patch.
 
 ## Backlinks
 
-Issue #917 item 1; PR #896 review round 1, finding 1; issue #880. PR #896 documents the residual
-cliff in the doc comment on `SESSION_CONTEXT_READ_TAIL_BYTES`.
+Issue #917 item 1; PR #896 review round 1, finding 1; issue #880. PR #896 (open)
+proposes to document the residual cliff in a doc comment on
+`SESSION_CONTEXT_READ_TAIL_BYTES`.

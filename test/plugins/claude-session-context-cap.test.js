@@ -8,6 +8,7 @@ import test from 'node:test'
 
 import {
   SESSION_CONTEXT_MAX_BYTES,
+  SESSION_CONTEXT_READ_TAIL_BYTES,
   appendSessionContext,
   pickLatestMatching,
   readSessionContext,
@@ -17,17 +18,21 @@ import {
  * The writer's compaction cap is a ceiling, not a suggestion.
  *
  * `appendSessionContext` takes a per-call `maxBytes`, but the reader has no
- * matching seam: `createSessionContextReader` reads the tail at a module
- * constant and every production caller takes the default. So a caller that
- * compacts to a window wider than `SESSION_CONTEXT_MAX_BYTES` keeps records
- * the reader will never look at, and on the OTEL ingest path an unseen record
- * is not a null column: `resolveSessionUsagePolicy` answers `undetermined`,
- * the listener withholds the batch, and the session's spooled bodies are
- * deleted unread.
+ * matching seam: `createSessionContextReader` reads the tail at
+ * `SESSION_CONTEXT_READ_TAIL_BYTES` and every production caller takes the
+ * default. So a file kept above that tail carries records the reader will
+ * never look at, and on the OTEL ingest path an unseen record is not a null
+ * column: `resolveSessionUsagePolicy` answers `undetermined`, the listener
+ * withholds the batch, and the session's spooled bodies are deleted unread.
  *
  * Before this was enforced the invariant lived only in JSDoc. These tests pin
- * it structurally: the option may narrow the cap, never widen it.
+ * it structurally against the *reader's* window, not just the writer's module
+ * cap: an assertion against `SESSION_CONTEXT_MAX_BYTES` alone still passes on
+ * a build that keeps half a megabyte of records nobody can read.
  */
+
+/** The largest file every retained record is still readable from. */
+const READABLE_WINDOW = Math.min(SESSION_CONTEXT_MAX_BYTES, SESSION_CONTEXT_READ_TAIL_BYTES)
 
 test('a caller cannot compact wider than the read window', async () => {
   const env = await stageEnv()
@@ -45,14 +50,47 @@ test('a caller cannot compact wider than the read window', async () => {
 
     const after = await fs.stat(env.stateFile)
     assert.ok(
-      after.size <= SESSION_CONTEXT_MAX_BYTES,
-      `an over-wide maxBytes must be clamped to the module cap, got ${after.size} bytes`
+      after.size <= READABLE_WINDOW,
+      `an over-wide maxBytes must be clamped to the read window, got ${after.size} bytes`
     )
     const records = await readSessionContext(env.stateFile)
     assert.equal(
       pickLatestMatching(records, { sessionId: 'sess-live' })?.cwd,
       '/workspace/live',
       'the record just appended must survive the clamped compaction'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the writer keeps no record the reader cannot see', async () => {
+  const env = await stageEnv()
+  try {
+    // The gap the writer cap alone leaves open: a file bigger than the read
+    // tail but under the module cap is never compacted, so its oldest lines
+    // sit on disk outside every reader's window.
+    const staged = filler(Math.floor((READABLE_WINDOW + SESSION_CONTEXT_MAX_BYTES) / 2))
+    await fs.writeFile(env.stateFile, staged, 'utf8')
+    const before = await fs.stat(env.stateFile)
+    assert.ok(
+      before.size > READABLE_WINDOW && before.size < SESSION_CONTEXT_MAX_BYTES,
+      'precondition: the file sits between the read window and the module cap'
+    )
+
+    await appendSessionContext(env.stateFile, record('sess-live', '/workspace/live', 9999))
+
+    const onDisk = (await fs.readFile(env.stateFile, 'utf8')).split('\n').filter(Boolean).length
+    const records = await readSessionContext(env.stateFile)
+    assert.equal(
+      records.length,
+      onDisk,
+      `every retained line must be readable: ${onDisk} on disk, ${records.length} readable`
+    )
+    assert.equal(
+      pickLatestMatching(records, { sessionId: 'sess-live' })?.cwd,
+      '/workspace/live',
+      'the record just appended must survive compaction'
     )
   } finally {
     await env.cleanup()
