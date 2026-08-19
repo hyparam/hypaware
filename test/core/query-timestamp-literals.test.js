@@ -293,15 +293,24 @@ test('a qualified reference to a derived table is not typed from the dataset', (
   assert.equal(rewritten.where.right.type, 'literal')
 })
 
-test('a qualified reference to the base table (by alias or name) is still typed', () => {
+test('a qualified reference to the base table is typed by the name it is reachable under', () => {
   const registry = registryForMessages()
-  for (const qualifier of ['m', 'ai_gateway_messages']) {
-    const rewritten = whereOfRewritten(
-      `SELECT m.id FROM ai_gateway_messages m WHERE ${qualifier}.message_created_at >= '2026-08-18T21:00:00Z'`,
-      registry
-    )
-    assert.equal(rewritten.where.right.type, 'cast', qualifier)
-  }
+  // With no alias the table's own name is the qualifier...
+  const byName = whereOfRewritten(
+    "SELECT id FROM ai_gateway_messages WHERE ai_gateway_messages.message_created_at >= '2026-08-18T21:00:00Z'",
+    registry
+  )
+  assert.equal(byName.where.right.type, 'cast')
+  // ...and once it is aliased, the alias is, exactly as squirreling resolves
+  // it. The base name under an alias is not a second spelling of the same
+  // relation: the engine rejects it ('Table "ai_gateway_messages" not found
+  // ... Available tables: m'), so typing through it can only ever type the
+  // wrong relation.
+  const byAlias = whereOfRewritten(
+    "SELECT m.id FROM ai_gateway_messages m WHERE m.message_created_at >= '2026-08-18T21:00:00Z'",
+    registry
+  )
+  assert.equal(byAlias.where.right.type, 'cast')
 })
 
 // The same Date-against-string comparison is false for every row wherever it
@@ -434,6 +443,30 @@ test('a qualified reference is typed even when the in-scope datasets agree on no
     registry
   )
   assert.equal(other.where.right.type, 'literal')
+})
+
+// An alias replaces the base table name, so a *different* relation is free to
+// carry that base name as its own. Recording an aliased relation under both
+// names let the second one overwrite the first in `byRelation`, and the bound
+// was then typed from a dataset the qualifier does not name: the query lost
+// rows the identical query without the rewrite returns, which is issue #860's
+// own signature produced by its fix.
+test('an alias that shadows another relation table name keeps its own columns', async () => {
+  const registry = registryForBoth()
+  const sql =
+    'SELECT m.id FROM node ai_gateway_messages JOIN ai_gateway_messages m ON m.id = ai_gateway_messages.id ' +
+    "WHERE ai_gateway_messages.message_created_at >= '2026-08-18' ORDER BY m.id"
+  // the qualifier names the STRING column of `node`, so the literal stays one
+  assert.equal(whereOfRewritten(sql, registry).where.right.type, 'literal')
+  const out = await executeQuerySql({ query: sql, registry, storage })
+  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
+  // and a bound no timestamp parser accepts stays an ordinary string
+  // comparison rather than being refused outright
+  const plain =
+    'SELECT m.id FROM node ai_gateway_messages JOIN ai_gateway_messages m ON m.id = ai_gateway_messages.id ' +
+    "WHERE ai_gateway_messages.message_created_at >= 'n4' ORDER BY m.id"
+  const plainOut = await executeQuerySql({ query: plain, registry, storage })
+  assert.deepEqual(plainOut.rows.map((row) => Number(row.id)), [4])
 })
 
 // A correlated reference resolves outward, so a bound written on the enclosing

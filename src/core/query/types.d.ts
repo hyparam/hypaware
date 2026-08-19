@@ -205,7 +205,9 @@ export interface RelationRef {
  * How a select resolves a column reference to a declared TIMESTAMP, for the
  * LLP 0272 literal rewrite. `agreed` answers an unqualified reference (the
  * names every relation in scope types the same way); `byRelation`
- * answers a qualified one, keyed by lower-cased table name and alias.
+ * answers a qualified one, keyed by the lower-cased name a qualifier can
+ * actually reach the relation by (its alias when it has one, otherwise its
+ * table name).
  * `bound` holds every relation this select binds including the ones whose
  * columns cannot be read (a table function, a CTE over an unregistered
  * table), so a qualifier resolved through `outer` can be stopped here

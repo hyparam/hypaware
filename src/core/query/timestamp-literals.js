@@ -216,17 +216,29 @@ function selectRelations(select) {
 }
 
 /**
- * The names a reference can qualify this relation by, lower-cased.
+ * The name a reference qualifies this relation by, lower-cased: its alias when
+ * it has one, otherwise its table name. An alias *replaces* the base name
+ * rather than adding to it, and squirreling agrees - it keys every relation by
+ * `alias ?? table`, and rejects `ai_gateway_messages.id` outright under
+ * `FROM ai_gateway_messages m`. So keying an aliased relation by both names is
+ * not a harmless superset: a later relation whose table name equals this one's
+ * alias overwrites the alias entry in `byRelation`, and the bound is then typed
+ * against the wrong relation's columns. `FROM node ai_gateway_messages JOIN
+ * ai_gateway_messages m` typed `ai_gateway_messages.message_created_at` from
+ * the joined dataset rather than from the STRING column the qualifier actually
+ * names, which is the wrong coercion and the silently-empty answer LLP 0272
+ * exists to end.
+ *
+ * A list rather than one value because a relation can have neither name (an
+ * unaliased table function), and then it contributes no key at all.
  *
  * @param {RelationRef} relation
  * @returns {string[]}
+ * @ref LLP 0272#scope [implements]: a qualified reference resolves through its qualifier, and an alias is the only name that qualifier can be
  */
 function relationKeys(relation) {
-  /** @type {string[]} */
-  const keys = []
-  if (relation.table) keys.push(relation.table.toLowerCase())
-  if (relation.alias) keys.push(relation.alias.toLowerCase())
-  return keys
+  const key = relation.alias ?? relation.table
+  return key === undefined ? [] : [key.toLowerCase()]
 }
 
 /**
@@ -415,8 +427,9 @@ function rewriteExprStatements(node, registry, ctes, scope) {
 /**
  * The TIMESTAMP columns this select's relations expose, two ways: the names
  * every relation in scope agrees are TIMESTAMP (for an unqualified
- * reference), and the names each relation exposes under its own name and
- * alias (for a qualified one). A name two relations type differently is
+ * reference), and the names each relation exposes under the one name a
+ * qualifier can reach it by, its alias or its table (for a qualified one). A
+ * name two relations type differently is
  * dropped rather than guessed at, and a relation whose columns cannot be read
  * (a table function, a CTE over an unregistered table) contributes nothing,
  * so `s.ts` against such a relation is never typed from an unrelated dataset
