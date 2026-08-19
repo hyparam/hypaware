@@ -332,16 +332,19 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
 - **A machine-local certificate authority is generated** under
   `~/.hyp/hypaware/tls`, readable only by you, and name-constrained so it
   cannot vouch for any host outside the provider set HypAware intercepts.
-  On macOS it can also be added to your **login keychain** as a user-domain
-  trusted root, for a client whose transport trusts only the keychain: macOS
-  raises its own password dialog, and declining it leaves capture working
-  with that inbound channel off. No admin rights are needed and the
-  machine-wide system keychain is not touched. On other platforms trust
-  stays file-scoped to the client's own settings. `hyp status` shows the
-  fingerprint, every host the CA is permitted to vouch for, and whether the
-  keychain still trusts it. `hyp detach <client>` keeps the CA and the
-  trust, so re-attaching does not ask again; `hyp detach <client> --purge`
-  and `hyp daemon uninstall` remove both.
+  Trust stays file-scoped to the proxied client's own settings: nothing
+  installs it into a system trust store, and anything wider is your own
+  decision. Earlier releases attached Claude Code by proxy and did add the
+  CA to the macOS **login keychain** as a user-domain trusted root, for a
+  transport that trusts only the keychain; macOS raised its own password
+  dialog for that, it never needed admin rights, and the machine-wide system
+  keychain was never touched. If you ran one of those releases, that trust
+  setting is still on your account until you remove it. `hyp status` shows
+  the fingerprint, every host the CA is permitted to vouch for, and whether
+  the login keychain still trusts it. `hyp detach <client>` leaves the CA
+  and any trust an earlier release was granted in place, because a detach is
+  not a statement about the certificate and no attach re-creates the grant;
+  `hyp detach <client> --purge` and `hyp daemon uninstall` remove both.
 - **On macOS, a proxy attach also leaves a login-session variable behind.**
   Bun picks its trust store before any settings file is read, so a keychain
   root only counts if `NODE_USE_SYSTEM_CA=1` is already in the process
