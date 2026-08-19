@@ -407,16 +407,16 @@ async function runClientLifecycle(action, argv, ctx) {
             } else {
               // Which give-up message to show hinges on whether a daemon
               // service is installed at all: an install-but-unstarted daemon
-              // just needs `hyp start`, but with no service installed that
-              // command has nothing to start, so the message must also point
-              // at `hyp daemon install` / `hyp daemon start`.
+              // just needs `hyp daemon start`, but with no service installed
+              // that command has nothing to start, so the message must also
+              // point at `hyp daemon install`.
               // @ref LLP 0174#bootstrap-floor [implements]: "config exists but no daemon is installed" extends the endpoint give-up message instead of attach gaining daemon orchestration
               const { serviceDaemonStatus } = await import('../daemon/install.js')
               const daemonStatus = await serviceDaemonStatus({ homeDir })
               const message = daemonStatus.installed
                 ? `cannot resolve the gateway endpoint: the gateway is not running in this ` +
                   `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
-                  `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+                  `(hyp daemon start) so it can attach clients, or set 'listen' in the ai-gateway config.`
                 : `cannot resolve the gateway endpoint: the gateway is not running in this ` +
                   `process and no ai-gateway 'listen' address is configured, and no daemon ` +
                   `service is installed on this machine. Run 'hyp daemon install' then ` +

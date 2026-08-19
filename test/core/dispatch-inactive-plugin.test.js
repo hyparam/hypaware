@@ -212,7 +212,7 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   )
   assert.match(
     stderr.text(),
-    /^ {2}repair: @hypaware\/gascity is disabled by the fleet \(central\) config and cannot be enabled locally; ask your fleet admin to enable it$/m
+    /^ {2}repair: @hypaware\/gascity is disabled by the organization \(central\) config and cannot be enabled locally; ask your administrator to enable it$/m
   )
   // Neither the add-entry nor the local-enable advice should appear.
   assert.equal(stderr.text().includes('add {"name"'), false)

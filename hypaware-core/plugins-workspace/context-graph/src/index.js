@@ -35,10 +35,12 @@ const CAPABILITY_VERSION = '1.0.0'
  *    every registered source contract
  *  - command `graph compact` - merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
- *  - command `graph neighbors` - walks the activity graph from a seed node out
- *    to N hops, reading the published node/edge datasets ([LLP 0064])
- *  - group `graph` - the namespace's own help, so `hyp graph --help` states the
- *    projection model instead of listing subcommands bare ([LLP 0214])
+ *  - command `query graph neighbors` (alias `graph neighbors`) - walks the
+ *    activity graph from a seed node out to N hops, reading the published
+ *    node/edge datasets ([LLP 0064])
+ *  - groups `graph` and `query graph` - the namespace's own help, so both
+ *    `hyp graph --help` and `hyp query graph --help` state the projection
+ *    model instead of listing subcommands bare ([LLP 0214])
  *
  * Registration only; the projection runs on demand via the command (no
  * snapshot/commit hook exists, and eventual freshness is acceptable).
@@ -63,32 +65,38 @@ export async function activate(ctx) {
   ctx.query.registerDataset(graphDatasetRegistration(NODE_DATASET))
   ctx.query.registerDataset(graphDatasetRegistration(EDGE_DATASET))
 
-  // The group's own voice. `graph` has no bare command, so without this its
-  // `--help` is a subcommand table with no prose, and the projection model
-  // (derived, on demand, never live) has nowhere to be stated.
+  // The group's own voice. Neither prefix has a bare command, so without this
+  // their `--help` is a subcommand table with no prose, and the projection
+  // model (derived, on demand, never live) has nowhere to be stated.
+  //
+  // Both prefixes are registered because LLP 0248 splits the namespace in two:
+  // `graph project|compact` stay direct operations under `graph`, while the
+  // journey moved to `query graph neighbors`. Registering only one of them
+  // leaves the other rendering a bare table, which is the exact regression
+  // LLP 0214 exists to prevent.
   // @ref LLP 0214#d2 [implements]: a plugin namespace describes itself instead of rendering a bare table
-  ctx.commands.registerGroup({
-    name: 'query graph',
-    plugin: PLUGIN_NAME,
-    summary: 'Build and walk the activity graph projected from recorded sessions',
-    help: [
-      'The graph is a derived projection of the recorded AI sessions: the same',
-      'data `hyp query` reads as rows, read instead as relationships. Sessions',
-      'connect to the apps, models, tools, files, skills, programs, repos, and',
-      'commits they touched.',
-      '',
-      'It is built on demand and never updates itself. Run `hyp graph project`',
-      'before querying, and again after new sessions are recorded; projection is',
-      'idempotent, so re-running it is the cheap way to be current.',
-      '',
-      'Two ways to read it, and they answer different questions:',
-      '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
-      '  hyp query graph neighbors <node>         what connects to X, N hops',
-      '',
-      '`node` and `edge` are ordinary query datasets, so everything in',
-      "`hyp query --help` applies to them, including --format and --output.",
-    ].join('\n'),
-  })
+  // @ref LLP 0248#tree [constrained-by]: `graph` keeps project/compact while the neighbors journey lives under `query graph`
+  const groupSummary = 'Build and walk the activity graph projected from recorded sessions'
+  const groupHelp = [
+    'The graph is a derived projection of the recorded AI sessions: the same',
+    'data `hyp query` reads as rows, read instead as relationships. Sessions',
+    'connect to the apps, models, tools, files, skills, programs, repos, and',
+    'commits they touched.',
+    '',
+    'It is built on demand and never updates itself. Run `hyp graph project`',
+    'before querying, and again after new sessions are recorded; projection is',
+    'idempotent, so re-running it is the cheap way to be current.',
+    '',
+    'Two ways to read it, and they answer different questions:',
+    '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
+    '  hyp query graph neighbors <node>         what connects to X, N hops',
+    '',
+    '`node` and `edge` are ordinary query datasets, so everything in',
+    "`hyp query --help` applies to them, including --format and --output.",
+  ].join('\n')
+  for (const name of ['graph', 'query graph']) {
+    ctx.commands.registerGroup({ name, plugin: PLUGIN_NAME, summary: groupSummary, help: groupHelp })
+  }
 
   ctx.commands.register({
     name: 'graph project',

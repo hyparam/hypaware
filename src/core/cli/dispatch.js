@@ -360,29 +360,15 @@ export async function dispatch(argv, opts = {}) {
     // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
     const inactive = await findInactivePluginForCommand(helpDiscovery, argv)
     if (inactive) {
-      stderr.write(
-        `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
-      )
-      // The repair depends on *why* the plugin is inactive. Absent from
-      // plugins[] → add it (LLP 0153, byte-identical). Present but
-      // `enabled: false` → the entry exists, so tell the user to flip it, and
-      // when the fleet (central) layer is what disabled it, say it cannot be
-      // enabled locally at all rather than send them editing a local entry the
-      // additive merge would drop (collides_with_central).
+      // One renderer for both miss paths (here and the group probe below), so
+      // the same condition cannot print two different repair lines depending
+      // on which path detected it. The repair branches on *why* the plugin is
+      // inactive: absent from plugins[] → add it; `enabled: false` → flip it;
+      // disabled by the organization (central) layer → it cannot be enabled
+      // locally at all, because the additive merge would drop a local entry
+      // whose name central already declares (collides_with_central).
       // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
-      if (inactive.state === 'disabled-central') {
-        stderr.write(
-          `  repair: ${inactive.plugin} is disabled by the fleet (central) config and cannot be enabled locally; ask your fleet admin to enable it\n`
-        )
-      } else if (inactive.state === 'disabled-local') {
-        stderr.write(
-          `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
-        )
-      } else {
-        stderr.write(
-          `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
-        )
-      }
+      renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
     } else {
       stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
       stderr.write(`run 'hyp --help' for the list of available commands\n`)
@@ -403,7 +389,7 @@ export async function dispatch(argv, opts = {}) {
   const emptyGroup =
     matched.command.group === true && listGroupChildren(registry, matched.command.name).length === 0
 
-  // A canonical task group (`client`, `query`, `admin`) is core-owned, so it
+  // A canonical task group (`client`, `query`, `privacy`) is core-owned, so it
   // still matches when a deeper plugin command is inactive. Check that miss
   // before running the group command or an unavailable plugin leaf would be
   // misreported as an unknown subcommand. An empty group is probed on its own
@@ -415,7 +401,15 @@ export async function dispatch(argv, opts = {}) {
   if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
     const probe = emptyGroup ? matched.command.name.split(' ') : argv
     const inactive = await findInactivePluginForCommand(helpDiscovery, probe)
-    if (inactive) {
+    // A non-empty group already matched, so only a *deeper* command can be the
+    // unavailable one. `longestCommandPrefix` falls back to the flag-stripped
+    // invocation, which collapses `hyp query --json` to the bare group token
+    // and would match any inactive plugin contributing anything under `query`:
+    // that blames a plugin for what is really an unknown subcommand. Requiring
+    // the match to be deeper than the tokens the group consumed keeps the
+    // probe answering the question it was added for.
+    const groupDepth = argv.length - matched.rest.length
+    if (inactive && (emptyGroup || inactive.token.split(' ').length > groupDepth)) {
       renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
       if (ownsKernel) await stopBootStartedSources(kernel)
       return 2

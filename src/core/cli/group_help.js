@@ -164,7 +164,7 @@ export function makeGroupCommand({ registry, name, summary, help, aliases, categ
         return 0
       }
       // A registered top-level group can contain metadata-only nested groups
-      // (`client history`, `admin cache`, `admin client claude-desktop`). An
+      // (`client history`, `client claude-desktop`, `privacy client`). An
       // exact leaf is selected by longest-prefix dispatch before this runner;
       // reaching here means the remaining tokens may name one of those nested
       // groups or an unknown child of one.
