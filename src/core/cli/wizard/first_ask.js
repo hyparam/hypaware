@@ -1,16 +1,15 @@
 // @ts-check
 
 /**
- * The wizard's closing "first ask": a short list of questions worth
- * asking of the data setup just captured, and the launcher that starts
- * the user's own client on the chosen one.
+ * Suggested questions shared by onboarding and `hyp ask`, plus the
+ * explicit command's client launcher.
  *
- * The first look (`first_look.js`) proves there are rows. This spends
- * them. Between the two, a user finishing setup goes from "something was
- * recorded" to having asked their first question without opening a second
- * terminal or retyping anything.
+ * The first look (`first_look.js`) proves there are rows. Onboarding then
+ * prints what the user can ask, while an explicit `hyp ask` can spend those
+ * rows by starting a client later.
  *
- * @ref LLP 0198#first-ask [implements]: setup closes on a live question list, not a printed hint
+ * @ref LLP 0198#onboarding-list [implements]: setup prints the shared questions without launching
+ * @ref LLP 0198#first-ask [implements]: the explicit command keeps the live question menu
  *
  * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
@@ -37,17 +36,44 @@ import { isPromptBackError } from '../tui/runtime.js'
  * answer is a change teaches them it is a feedback loop, which is the
  * thing worth learning in the first minute.
  *
- * Phrased as a user would phrase them, never as skill invocations: the
- * skills' own `description` fields do the routing, and a prompt that
- * named one would teach the user a vocabulary they should never need
- * (`@ref LLP 0011#no-architectural-names`).
+ * Phrased as a user would phrase them, never as skill invocations
+ * (`@ref LLP 0011#no-architectural-names`): the skills' own `description`
+ * fields do the routing, and a prompt naming one would teach the user a
+ * vocabulary they should never need.
+ *
+ * Each does name HypAware, in a leading "From my HypAware history"
+ * clause. The product name is not an architectural name - it is the thing
+ * the user just installed, and the words they would reach for themselves.
+ * What the earlier "Based on the hypaware logs." prefix got wrong was
+ * naming the *artifact* (a dataset the user has never seen) in a sentence
+ * fragment bolted on ahead of the question. The clause has to stay,
+ * though: `hyp ask` opens a session with no context, and a question about
+ * "my sessions" with nothing pointing at the history is one a cold client
+ * may answer from its own conversation, or refuse for want of data.
+ *
+ * `which` and `what` are not interchangeable here. `which` presupposes a
+ * set the reader could point at, so it is correct only for things already
+ * in the recorded history (a task, a request, a stage of a workflow) and
+ * wrong for a skill or a subagent that does not exist yet - "which skill
+ * should I build" reads as a menu of skills the user already has. The
+ * proposed thing takes `what`, the evidence it is proposed from takes
+ * `which`, which is why the two forward-looking questions carry one of
+ * each.
+ *
+ * Each is one subject with one criterion, closing on a short clause that
+ * asks for the *mechanism* rather than restating the subject: "what drove
+ * the cost", not "how much did it cost". The mechanism is the half only
+ * the user's own sessions can answer, and the half that is actionable.
+ * Each is scoped (a week, "across sessions", "over and over") so the
+ * answer is a specific thing rather than a survey, which keeps it fast
+ * under `@ref LLP 0054`'s bounded execution as well as pointed.
  *
  * `label` is what the menu shows; `prompt` is what the client is started
  * with. They differ because a menu row wants to be scannable and an
  * opening prompt wants to be specific.
  *
  * The labels are noun phrases rather than questions, and no two lean on
- * the same noun. The screen's own title already asks the question ("Ask
+ * the same noun (spend, mistake, skill, subagent). The screen's own title already asks the question ("Ask
  * your first question"), so four rows repeating the interrogative spend
  * their first words on grammar the reader has had; and a set where three
  * rows said "tokens" scanned as one topic listed three times rather than
@@ -60,23 +86,23 @@ import { isPromptBackError } from '../tui/runtime.js'
 export const SUGGESTED_PROMPTS = Object.freeze([
   {
     id: 'tokens',
-    label: 'Biggest token costs this week',
-    prompt: 'Based on the hypaware logs. What AI tasks cost the most tokens this week?',
+    label: "Last week's biggest token spend",
+    prompt: 'From my HypAware history, which task took the biggest share of my tokens last week, and what drove the cost?',
   },
   {
     id: 'errors',
-    label: 'Where agents stall or waste effort',
-    prompt: 'Based on the hypaware logs. What are the most common reasons for my AI agents getting stuck, wasting tokens, or failing to complete a task?',
+    label: 'The mistake my agents repeat',
+    prompt: 'From my HypAware history, what mistake do my agents keep repeating across sessions, and what triggers it?',
   },
   {
     id: 'skills',
-    label: 'Repeated work worth turning into a skill',
-    prompt: 'Based on the hypaware logs. What repeated tasks do my AI agents run that should be made into a skill?',
+    label: "The skill I'm missing",
+    prompt: 'From my HypAware history, what additional skill would save me the most repeated work, and which requests would it replace?',
   },
   {
     id: 'subagents',
-    label: 'Where a subagent would pay off',
-    prompt: 'Based on the hypaware logs. What subagents could I add to my workflow to improve efficiency and token cost?',
+    label: 'The subagent worth adding',
+    prompt: 'From my HypAware history, what subagent could I add to cut the most wasted effort, and which tasks would I delegate to it?',
   },
 ])
 
@@ -124,17 +150,17 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
 }
 
 /**
- * The launchable clients for this run: picked *and* resolvable.
+ * The launchable clients for this run: eligible *and* resolvable.
  *
- * Both conditions are required and neither is redundant. An unpicked
+ * Both conditions are required and neither is redundant. An ineligible
  * client is one HypAware is not recording, so starting it would open a
- * session the user never consented to capture. A picked client with no
+ * session the user never consented to capture. An eligible client with no
  * binary on `$PATH` cannot be started at all - which is the ordinary
  * state of Claude Desktop, a client that is detectable, pickable, and
  * attachable but carries no `launch` block because it has no prompt
  * argument to carry one for.
  *
- * @ref LLP 0198#path-probe [implements]: offer only what was picked and resolves
+ * @ref LLP 0198#path-probe [implements]: offer only what is attached and resolves
  * @param {{
  *   clients: string[],
  *   descriptors: Map<string, ClientDescriptor>,
@@ -170,57 +196,82 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 }
 
 /**
- * The printed fallback: the same questions as copyable text.
+ * The question list, in every framing that prints it.
  *
- * Reached whenever the launch cannot happen or the user declines, and it
- * is never silent about which. A user with no launchable client is told
- * the questions still work, just typed into their own session; a user who
- * declined keeps the list to come back to.
+ * One renderer rather than one per caller: the questions, the
+ * empty-history preamble, and the footers are a single surface, and a
+ * second copy of them is how the "nothing recorded yet" sentence drifts
+ * out of agreement with itself. Same one-place grounds as the frame
+ * helper ([LLP 0189 #palette](../../../../llp/0189-cli-severity-colour.decision.md#palette)).
  *
+ * `hasRows === false` swaps the preamble: every suggested question is
+ * about recorded history, so a cache with nothing in it gets the list
+ * framed as something to come back to, prefaced by the one fact that
+ * makes the emptiness make sense - capture starts now, not
+ * retroactively. `undefined` means the caller could not tell, which
+ * never withholds the ordinary framing.
+ *
+ * `footer` says who is reading:
+ *
+ * - `ask`: a launch is possible, and this run is not doing one (declined,
+ *   piped, or `--list`). Names the verb that would.
+ * - `paste`: nothing here can be launched, so the questions still work
+ *   typed into a session the user opens themselves.
+ * - `onboarding`: setup, which never launches. Names what the verb is
+ *   *for* (putting one of these to a client) before naming the directory
+ *   it must be run from, because a footer that only states the
+ *   constraint leaves the reader to infer what they would be running it
+ *   to do. The client binaries are named outright: a user who has just
+ *   picked one in the wizard still has no reason to know the verb starts
+ *   the same program they picked.
+ *
+ * @ref LLP 0198#empty-cache [implements]: no rows reframes the list, and the reason is stated
+ * @ref LLP 0198#onboarding-list [implements]: setup's footer names `hyp ask` and the directory to run it from
  * @param {{
  *   stdout: { write(chunk: string): unknown },
- *   launchable: boolean,
+ *   footer: 'ask' | 'paste' | 'onboarding',
+ *   hasRows?: boolean,
  * }} args
  */
-export function writeSuggestedPrompts({ stdout, launchable }) {
-  stdout.write('\nQuestions worth asking your AI client about this data:\n')
+export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
+  if (hasRows === false) {
+    stdout.write('\nNothing recorded yet: HypAware captures from your next session onward.\n')
+    stdout.write('Once you have some history, these are worth asking your AI client:\n')
+  } else {
+    stdout.write('\nQuestions worth asking your AI client about this data:\n')
+  }
   for (const p of SUGGESTED_PROMPTS) {
     stdout.write(`  ${p.prompt}\n`)
   }
-  // The unlaunchable variant must not name `hyp ask`: the reader either
-  // just ran it, or is being told setup could not start anything. Either
-  // way it would point at the screen they are already looking at.
-  stdout.write(
-    launchable
-      ? '\nRun `hyp ask` to pick one of these and start your client on it.\n'
-      : '\nPaste one into a Claude Code or Codex session to get started.\n'
-  )
+  stdout.write(`\n${promptListFooter(footer, hasRows)}\n`)
 }
 
 /**
- * The empty-cache variant: the questions, held back until they have
- * something to answer from.
+ * The closing line for a printed list.
  *
- * A fresh install with nothing backfilled is the common case for someone
- * new to Claude or Codex, and every suggested question is about recorded
- * history. Launching one against an empty cache spends the user's first
- * impression on an empty answer and teaches them the tool does not work.
+ * `ask` under an empty cache is the one combination that is not a
+ * straight lookup: the verb is still the right one, but "run it" is
+ * wrong advice until there is something to run it against, so the
+ * sentence becomes "run it *then*".
  *
- * So the list is still printed - it is the clearest statement of what
- * HypAware is for - but framed as something to come back to, with the
- * one fact that makes the emptiness make sense: capture starts now, not
- * retroactively.
- *
- * @ref LLP 0198#empty-cache [implements]: no rows means no launch, and the reason is stated
- * @param {{ stdout: { write(chunk: string): unknown } }} args
+ * @param {'ask' | 'paste' | 'onboarding'} footer
+ * @param {boolean | undefined} hasRows
+ * @returns {string}
  */
-export function writeEmptyCacheNote({ stdout }) {
-  stdout.write('\nNothing recorded yet: HypAware captures from your next session onward.\n')
-  stdout.write('Once you have some history, these are worth asking your AI client:\n')
-  for (const p of SUGGESTED_PROMPTS) {
-    stdout.write(`  ${p.prompt}\n`)
+function promptListFooter(footer, hasRows) {
+  switch (footer) {
+    case 'paste':
+      // Must not name `hyp ask`: the reader either just ran it, or is
+      // being told nothing here can be started. Either way it would
+      // point at the screen they are already looking at.
+      return 'Paste one into a Claude Code or Codex session to get started.'
+    case 'onboarding':
+      return 'To ask any of these, run `hyp ask` from the directory where you want your AI client (claude or codex) to start.'
+    default:
+      return hasRows === false
+        ? 'Run `hyp ask` then, to pick one and start your client on it.'
+        : 'Run `hyp ask` to pick one of these and start your client on it.'
   }
-  stdout.write('\nRun `hyp ask` then, to pick one and start your client on it.\n')
 }
 
 /**
@@ -234,11 +285,11 @@ export function writeEmptyCacheNote({ stdout }) {
  * mode it started in. Spawning from inside a prompt would hand a child
  * a raw-mode terminal, which renders as a client that opens broken.
  *
- * The child's exit code is deliberately dropped. `hyp init` reports
- * whether *setup* succeeded, and a user who quits the client with ctrl+c
- * has not failed an install that finished minutes earlier.
+ * The child's exit code is deliberately dropped. `hyp ask` reports whether
+ * it could start the client; a user who later quits that client with ctrl+c
+ * has not made the launch itself fail.
  *
- * @ref LLP 0198#real-launch [implements]: inherit the terminal, keep the wizard's own exit code
+ * @ref LLP 0198#real-launch [implements]: inherit the terminal and do not reinterpret the client's eventual exit as a launch failure
  * @param {{
  *   launcher: FirstAskLauncher,
  *   prompt: string,
@@ -269,11 +320,11 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
 }
 
 /**
- * Run the closing first ask. Never throws: setup has already succeeded by
- * the time this runs, so a missing binary, a spawn failure, a cancelled
- * prompt, or an unforeseen error all degrade to the printed list.
+ * Run the explicit first ask. Never throws: a missing binary, a spawn
+ * failure, a cancelled prompt, or an unforeseen error all degrade to the
+ * printed list.
  *
- * @ref LLP 0198#first-ask [implements]: the closing step, and that it can never fail a finished install
+ * @ref LLP 0198#first-ask [implements]: the explicit command owns the live menu and launch
  * @param {RunWizardFirstAskOptions} opts
  * @returns {Promise<FirstAskResult>}
  */
@@ -297,7 +348,7 @@ export async function runWizardFirstAsk(opts) {
         if (opts.hasRows === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
-          writeEmptyCacheNote({ stdout })
+          writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
           return { launched: false, reason: /** @type {const} */ ('no-rows') }
         }
 
@@ -313,7 +364,7 @@ export async function runWizardFirstAsk(opts) {
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          writeSuggestedPrompts({ stdout, launchable: false })
+          writeSuggestedPrompts({ stdout, footer: 'paste' })
           return { launched: false, reason: /** @type {const} */ ('no-launcher') }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
@@ -324,7 +375,7 @@ export async function runWizardFirstAsk(opts) {
         if (opts.interactive === false || !canPrompt) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
-          writeSuggestedPrompts({ stdout, launchable: true })
+          writeSuggestedPrompts({ stdout, footer: 'ask' })
           return { launched: false, reason: /** @type {const} */ ('not-interactive') }
         }
 
@@ -335,7 +386,7 @@ export async function runWizardFirstAsk(opts) {
         if (!chosen) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'declined')
-          writeSuggestedPrompts({ stdout, launchable: true })
+          writeSuggestedPrompts({ stdout, footer: 'ask' })
           return { launched: false, reason: /** @type {const} */ ('declined') }
         }
 
@@ -349,7 +400,9 @@ export async function runWizardFirstAsk(opts) {
           launcher: chosen.launcher,
           prompt: chosen.prompt.prompt,
           env,
-          ...(opts.cwd ? { cwd: opts.cwd } : {}),
+          // No cwd override: the client starts where the user ran `hyp
+          // ask`, which is the boundary that made this a separate command
+          // (`@ref LLP 0198#onboarding-list`).
           ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
         })
         if (!result.ok) {
@@ -357,7 +410,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           span.setAttribute('launched', false)
           opts.stderr?.write(`Could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
-          writeSuggestedPrompts({ stdout, launchable: false })
+          writeSuggestedPrompts({ stdout, footer: 'paste' })
           return { launched: false, reason: /** @type {const} */ ('spawn-failed') }
         }
         span.setAttribute('launched', true)
@@ -371,7 +424,7 @@ export async function runWizardFirstAsk(opts) {
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
         try {
-          writeSuggestedPrompts({ stdout, launchable: false })
+          writeSuggestedPrompts({ stdout, footer: 'paste' })
         } catch {
           // the stream itself is failing; the step is a courtesy, not a gate
         }
@@ -405,12 +458,9 @@ async function chooseQuestion(opts, launchers) {
   let picked
   try {
     picked = await ask({
-      // Framed, unlike every other prompt in the wizard. Those arrive one
-      // per screen with nothing above them; this one lands under the first
-      // look's tables and rules, at the end of a long scroll, and an
-      // unframed list of sentences there reads as more output rather than
-      // as the thing still waiting for a keypress.
-      // @ref LLP 0198#frame [implements]: the closing ask is drawn as its own screen
+      // Framed so the explicit command's interactive menu is visually
+      // distinct from its plain printed-list mode.
+      // @ref LLP 0198#frame [implements]: the explicit ask is drawn as its own screen
       box: true,
       title: 'Ask your first question',
       items: launchers.length === 1

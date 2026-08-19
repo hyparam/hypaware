@@ -9,15 +9,17 @@ import path from 'node:path'
 
 import {
   SUGGESTED_PROMPTS,
+  launchClient,
   resolveLaunchers,
   resolveOnPath,
   runWizardFirstAsk,
+  writeSuggestedPrompts,
 } from '../../../../src/core/cli/wizard/first_ask.js'
 import { PromptCancelledError } from '../../../../src/core/cli/tui/index.js'
 
-// The wizard's closing first ask (LLP 0198): which clients it will offer,
-// that a pick becomes a real spawn carrying the question, and that no
-// failure mode of any of it can fail a finished install.
+// The explicit first ask (LLP 0198): which clients it will offer,
+// that a pick becomes a real spawn carrying the question, and that launch
+// failures degrade to the printed list.
 // @ref LLP 0198#first-ask [tests]:
 
 function makeBuf() {
@@ -127,7 +129,6 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
     stdout,
     env: {},
     interactive: true,
-    cwd: '/w/acme',
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: chooser.fn,
@@ -138,14 +139,33 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
   assert.equal(spawner.calls[0].cmd, '/usr/local/bin/claude')
   const expected = FIRST.prompt
   assert.deepEqual(spawner.calls[0].args, [expected])
-  // The child must own the terminal, or it draws over the wizard's frame.
+  // The child must own the terminal, or it draws over the ask menu's frame.
   assert.equal(spawner.calls[0].opts.stdio, 'inherit')
-  assert.equal(spawner.calls[0].opts.cwd, '/w/acme')
+  // No cwd is set: the client starts where the user ran the command.
+  assert.equal(spawner.calls[0].opts.cwd, undefined)
   // Announced before the handoff: a client that takes a moment to draw
   // must not read as a hang.
   assert.match(stdout.text(), /Starting Claude Code/)
   // A launch replaces the list; it is not also printed.
   assert.doesNotMatch(stdout.text(), /Questions worth asking/)
+})
+
+test('launchClient: an explicit cwd is honoured, so the low-level seam stays parameterised', () => {
+  // The wizard-level option is gone (the launch directory is the one the
+  // user ran `hyp ask` from), but the helper itself still takes a cwd:
+  // it is the seam a caller with a directory to name would use.
+  // @ref LLP 0198#real-launch [tests]: the spawn carries the prompt and whatever directory it is given
+  const spawner = recordingSpawn()
+  launchClient({
+    launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/usr/local/bin/claude', args: ['{prompt}'] },
+    prompt: FIRST.prompt,
+    cwd: '/w/acme',
+    env: {},
+    spawnFn: spawner.fn,
+  })
+  assert.equal(spawner.calls.length, 1)
+  assert.equal(spawner.calls[0].opts.cwd, '/w/acme')
+  assert.deepEqual(spawner.calls[0].args, [FIRST.prompt])
 })
 
 test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is filled', async () => {
@@ -190,8 +210,25 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   assert.match(text, /Paste one into a Claude Code or Codex session/)
 })
 
+test('onboarding only prints the questions and tells the user to choose the launch directory later', () => {
+  // @ref LLP 0198#onboarding-list [tests]: setup never launches or depends on client detection
+  const stdout = makeBuf()
+  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
+  const text = stdout.text()
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
+  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your AI client \(claude or codex\) to start/)
+  assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
+})
+
+test('onboarding with no detected dataset still prints the questions', () => {
+  const stdout = makeBuf()
+  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: false })
+  assert.match(stdout.text(), /Nothing recorded yet/)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.prompt), `missing prompt ${p.id}`)
+})
+
 test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as more output', async () => {
-  // @ref LLP 0198#frame [tests]: the closing ask is drawn as its own screen
+  // @ref LLP 0198#frame [tests]: the explicit ask is drawn as its own screen
   const stdout = makeBuf()
   const chooser = selectReturning(FIRST.id)
   await runWizardFirstAsk({
@@ -297,7 +334,7 @@ test('runWizardFirstAsk: a non-interactive run prints the list and never prompts
 })
 
 test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', async () => {
-  // @ref LLP 0198#real-launch [tests]: nothing here may fail a finished install
+  // @ref LLP 0198#real-launch [tests]: launch failures degrade to the list
   const stdout = makeBuf()
   const stderr = makeBuf()
   /** @type {any} */

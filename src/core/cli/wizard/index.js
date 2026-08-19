@@ -5,7 +5,6 @@
  * @import { FinaleSummary, PickerSource } from '../../../../src/core/cli/types.js'
  * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import {
- *   FirstAskResult,
  *   FirstLookOutcome,
  *   FirstLookResult,
  *   InitWizardResult,
@@ -26,7 +25,6 @@ import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
-  buildWalkthroughClientDescriptorMap,
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
   runPickerFinale,
@@ -37,7 +35,7 @@ import {
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { runWizardFirstAsk } from './first_ask.js'
+import { writeSuggestedPrompts } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, defaultRowLabels, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -747,8 +745,8 @@ export async function runInitWizard(opts) {
   const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
 
   // ...and then the offer to end the wait. It sits between the narration
-  // and the first ask because it is an action on what the narration just
-  // said, and because the first ask may take the terminal for good.
+  // and the question list because it is an action on what the narration just
+  // said.
   // @ref LLP 0203#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
@@ -764,29 +762,21 @@ export async function runInitWizard(opts) {
     })
   }
 
-  // The exit door. Placed after the privacy narration on purpose: the
-  // narration stays the wizard's last *words* (LLP 0135 #privacy), and
-  // this is what the user does next rather than one more thing to read.
-  // Attended, non-dry-run, non-cancelled, same as the first look - and it
-  // may take the terminal for good, so nothing may follow it but the
-  // return.
-  // @ref LLP 0198#first-ask [implements]: the closing question list, after the narration, last of all
-  /** @type {FirstAskResult | undefined} */
-  let firstAsk
+  // The closing question list comes after the privacy narration, but it is
+  // output only: onboarding never starts Claude Code or Codex. `hyp init`
+  // may have been run from any directory, and that directory must not become
+  // an agent session without an explicit launch command from the user.
+  // @ref LLP 0198#onboarding-list [implements]: the wizard prints questions and never launches a client from its caller's cwd
+  /** @type {'listed' | 'listed-empty' | 'skipped'} */
+  let firstAskListed = 'skipped'
   if (interactive && !cancelled && opts.finale?.dryRun !== true) {
-    firstAsk = await runWizardFirstAsk({
-      clients: picked.clientsPicked,
-      descriptors: opts.catalog
-        ? opts.catalog.clientDescriptors
-        : await buildWalkthroughClientDescriptorMap(),
+    const hasRows = firstLookHadRows(firstLookResult)
+    writeSuggestedPrompts({
       stdout: opts.stdout,
-      stderr: opts.stderr,
-      env: opts.env,
-      interactive: true,
-      hasRows: firstLookHadRows(firstLookResult),
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
-      ...(opts.firstAsk ?? {}),
+      footer: 'onboarding',
+      hasRows,
     })
+    firstAskListed = hasRows === false ? 'listed-empty' : 'listed'
   }
 
   log.info('wizard.finish', {
@@ -798,7 +788,13 @@ export async function runInitWizard(opts) {
     folder_ask: folderAsk ?? 'not-asked',
     express,
     cancelled,
-    first_ask: firstAsk ? (firstAsk.launched ? `launched:${firstAsk.client}` : firstAsk.reason) : 'skipped',
+    // Which framing printed, not whether the step ran: `skipped` restates
+    // `pathway` and `cancelled` above it, while `listed-empty` is the one
+    // value nothing else on this line carries - the rate of installs
+    // finishing with an empty cache, which is backfill health read at the
+    // moment every install passes through.
+    // @ref LLP 0198#empty-cache [implements]: the empty-cache framing is the measurement setup contributes
+    first_ask: firstAskListed,
     // How often an enrolled install chooses not to wait is the measurement
     // that says whether the window is sized for the people in it.
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
