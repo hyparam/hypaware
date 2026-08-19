@@ -247,7 +247,7 @@ function timestampScope(select, registry, shadowed, outer) {
     if (shadowed.has(table.toLowerCase())) continue
     // `?.columns` rather than a bare deref: a registration that hands the
     // kernel a malformed schema must not turn every query touching it into a
-    // TypeError, the same way `hyp backfill` reads it.
+    // TypeError, the same way `hyp client history import` reads it.
     const columns = registry.getDataset(table)?.schema?.columns
     if (!columns) continue
     /** @type {Set<string>} */
