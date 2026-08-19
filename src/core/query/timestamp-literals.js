@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ExprNode, SelectStatement, Statement } from 'squirreling/src/ast.js'
+ * @import { ExprNode, SelectStatement, SetOperationStatement, Statement } from 'squirreling/src/ast.js'
  * @import { QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { InferredColumn, RelationRef, TimestampScope } from '../../../src/core/query/types.js'
  */
@@ -129,9 +129,50 @@ function rewriteStatement(statement, registry, ctes, outer) {
   if (statement.type === 'compound') {
     rewriteStatement(statement.left, registry, ctes, outer)
     rewriteStatement(statement.right, registry, ctes, outer)
+    rewriteCompoundOrderBy(statement, registry, ctes)
     return
   }
   rewriteSelect(statement, registry, ctes, outer)
+}
+
+/**
+ * A set operation's own `ORDER BY`, which belongs to neither branch: it sorts
+ * the combined result, so it resolves against the compound's output columns
+ * and nothing else. Walking the two branches and stopping there left this one
+ * clause comparing a `Date` to a string, and that comparison is false for
+ * every row, so the sort key collapses to a single value and the rows come
+ * back in the wrong order with none of them missing. That is quieter than the
+ * empty result issue #860 reported, not louder.
+ *
+ * Only an unqualified name is typed. The compound binds no relation of its
+ * own, so there is no qualifier this walk can resolve; `byRelation` and
+ * `bound` are empty and no enclosing scope is passed, so a qualified
+ * reference here is left alone rather than risking an outer relation that
+ * happens to share a branch's alias. That costs a coercion and never
+ * mis-types one, which is the trade the rest of this file already makes.
+ *
+ * @param {SetOperationStatement} statement
+ * @param {QueryRegistry} registry
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
+ * @ref LLP 0272#scope [implements]: every clause is rewritten alike, and a set operation's ORDER BY is one of them
+ */
+function rewriteCompoundOrderBy(statement, registry, ctes) {
+  if (statement.orderBy.length === 0) return
+  // The positionally paired list `#complete` already computes: a name is a
+  // TIMESTAMP only when both sides carry one into it, so a `UNION` of a
+  // TIMESTAMP with a STRING types nothing here either.
+  const columns = inferColumns(statement, registry, ctes) ?? []
+  /** @type {Set<string>} */
+  const agreed = new Set()
+  for (const [name, isTimestamp] of columnTypes(columns)) {
+    if (isTimestamp) agreed.add(name)
+  }
+  /** @type {TimestampScope} */
+  const scope = { agreed, byRelation: new Map(), bound: new Set() }
+  for (const item of statement.orderBy) {
+    rewriteExprStatements(item.expr, registry, ctes, scope)
+    rewriteExpr(item.expr, scope)
+  }
 }
 
 /**
