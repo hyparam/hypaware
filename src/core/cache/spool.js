@@ -91,16 +91,22 @@ export function createCacheSpool(args) {
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
         await fs.mkdir(dir, { recursive: true })
-        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a')
+        // Opened `a+` rather than `a`: writes still append, and the read
+        // side is what lets a failed append verify the tail is its own
+        // bytes before truncating them (see `discardTail`).
+        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a+')
         // An append either lands in the spool or it does not, and the
         // outcome says which. Callers read a rejection as "nothing landed"
-        // and act on it - the AI gateway source rolls its projector dedupe
-        // journal back so the conversation replays those messages on its
-        // next exchange - so a rejection that left the record behind
-        // commits the rows twice, and a rejection over a durable record
-        // does it for a fault that cost nothing. Both halves of that are
-        // handled here rather than by asking every caller to reason about
-        // which syscall failed (issues #879, #924).
+        // and re-derive what to write from the spool - `dedupeStoredPartIds`
+        // in the AI gateway's exchange writer rescans the committed
+        // partitions plus the spool on every call - so the spool has to
+        // tell the truth about what is in it. A rejection that left a torn
+        // record behind is the expensive half: the remnant carries no
+        // newline, so it swallows the NEXT record into one malformed line
+        // the flush reader drops. A rejection over a durable record is the
+        // other half, reporting landed rows as lost for a fault that cost
+        // nothing. Both are handled here rather than by asking every caller
+        // to reason about which syscall failed (issues #879, #924).
         try {
           const startSize = (await handle.stat()).size
           try {
@@ -110,7 +116,7 @@ export function createCacheSpool(args) {
             // `writeFile` can fail with a prefix of the line already in the
             // file; that remnant has no trailing newline, so leaving it
             // would also swallow the NEXT record into one malformed line.
-            await discardTail(handle, startSize, bytesWritten)
+            await discardTail(handle, startSize, line)
             throw err
           }
         } finally {
@@ -320,26 +326,41 @@ function* rowsFromSpoolLine(line) {
  * Roll a failed append off the tail of the active spool file, so a
  * rejected `append` really does mean "the record is not in the spool".
  *
- * Best effort by nature: the device that just refused a write or an fsync
- * may refuse the truncate too, and there is nothing better to do about
- * that than leave the tail alone and let the flush reader's malformed-line
- * handling absorb it.
+ * The tail is compared byte for byte against the line this append tried
+ * to write, and only an exact prefix match is truncated. `append` holds
+ * the per-table write lock, so nothing in THIS process can have appended
+ * behind us, but nothing locks `active.jsonl` across processes: two `hyp`
+ * runs can share one table's spool. A size ceiling alone would not catch
+ * that, because a small concurrent record fits inside the bytes this
+ * append could have produced; comparing the content does, and discarding
+ * another writer's durable rows to tidy up ours would be the worse trade.
  *
- * The size guard keeps the truncate to bytes this append could have
- * written. `append` holds the per-table write lock, so nothing in THIS
- * process can have appended behind us; a file grown past what one line
- * could produce means another process shares the spool, and discarding
- * its rows to tidy ours would be the worse trade.
+ * Best effort past that: the device that just refused a write or an fsync
+ * may refuse the truncate too. When it does the remnant gets a closing
+ * newline instead, which is the difference between this failed append
+ * costing its own rows and costing the next record as well.
  *
  * @param {FileHandle} handle
  * @param {number} startSize
- * @param {number} maxBytes
+ * @param {string} line
  */
-async function discardTail(handle, startSize, maxBytes) {
+async function discardTail(handle, startSize, line) {
   try {
     const { size } = await handle.stat()
-    if (size <= startSize || size > startSize + maxBytes) return
-    await handle.truncate(startSize)
+    const written = size - startSize
+    const expected = Buffer.from(line, 'utf8')
+    if (written <= 0 || written > expected.length) return
+    const tail = Buffer.alloc(written)
+    const { bytesRead } = await handle.read(tail, 0, written, startSize)
+    if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return
+    try {
+      await handle.truncate(startSize)
+    } catch {
+      // Terminate the remnant so the flush reader drops that line alone
+      // instead of concatenating it with whatever is appended next.
+      await handle.writeFile('\n', 'utf8')
+      return
+    }
     await handle.sync()
   } catch {
     /* the write path is already failing; the tail stays as it is */

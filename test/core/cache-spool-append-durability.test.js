@@ -3,13 +3,16 @@
 /**
  * `spool.append` is the cache write seam: every source row lands in the
  * spool before anything commits it (LLP 0013). Its callers read a
- * rejection as "the record is not in the spool" - the AI gateway source
- * rolls its projector dedupe journal back on one, so the conversation
- * replays those messages on the next exchange - which makes a rejection
- * that LEAVES the record behind commit the rows twice.
+ * rejection as "the record is not in the spool" and re-derive what to
+ * write from the spool itself - `dedupeStoredPartIds` in the AI gateway's
+ * exchange writer rescans the committed partitions plus the spool on
+ * every call - so a rejection that leaves a TORN record behind costs the
+ * next record too, and a rejection over a durable one reports landed rows
+ * as lost.
  *
  * These tests pin the contract the callers assume: `append` resolves when
- * the record is in the spool, and rejects only when it is not.
+ * the record is in the spool, rejects only when it is not, and never
+ * tidies up by discarding bytes that are not its own.
  */
 
 import test from 'node:test'
@@ -152,6 +155,75 @@ test('append that fails part-way through the write leaves no torn line behind', 
     // A half-written line carries no newline, so leaving it in place also
     // costs the NEXT record: the two concatenate into one malformed line
     // the flush reader drops.
+    await spool.append(tablePath, COLUMNS, [{ id: 2 }])
+    await spool.flushTable(tablePath, { reason: 'test' })
+    assert.deepEqual(committed.map((row) => row.id), [2])
+  } finally {
+    restore()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a failing append does not truncate away a concurrent writer\'s durable line', async () => {
+  const cacheRoot = await makeTmpDir('foreign')
+  // Nothing locks `active.jsonl` across processes, so another `hyp` run can
+  // land a complete record between this append's size probe and its write.
+  const foreignLine = JSON.stringify({ version: 1, columns: COLUMNS, rows: [{ id: 9 }] }) + '\n'
+  const restore = interceptActiveFile((handle) => {
+    const realWriteFile = handle.writeFile.bind(handle)
+    handle.writeFile = async (/** @type {any} */ data, /** @type {any} */ options) => {
+      await realWriteFile(foreignLine, options)
+      await realWriteFile(String(data).slice(0, 12), options)
+      throw failWith('write')
+    }
+  })
+  try {
+    const { spool, committed } = spoolWithCommitLog(cacheRoot)
+    const tablePath = path.join(cacheRoot, 'datasets', 'test_data', 'source=claude')
+
+    await assert.rejects(
+      // Padded so the foreign line plus this append's torn prefix still fit
+      // inside one line's worth of bytes: a size ceiling would wave that
+      // through and truncate the foreign row away with it.
+      () => spool.append(tablePath, COLUMNS, [{ id: 1, pad: 'x'.repeat(400) }]),
+      /simulated write failure/
+    )
+    restore()
+
+    await spool.flushTable(tablePath, { reason: 'test' })
+    assert.deepEqual(committed.map((row) => row.id), [9])
+  } finally {
+    restore()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('an append whose rollback truncate is refused still spares the next record', async () => {
+  const cacheRoot = await makeTmpDir('truncate')
+  const restore = interceptActiveFile((handle) => {
+    const realWriteFile = handle.writeFile.bind(handle)
+    let torn = false
+    handle.writeFile = async (/** @type {any} */ data, /** @type {any} */ options) => {
+      if (torn) return realWriteFile(data, options)
+      torn = true
+      await realWriteFile(String(data).slice(0, 12), options)
+      throw failWith('write')
+    }
+    handle.truncate = async () => { throw failWith('truncate') }
+  })
+  try {
+    const { spool, committed } = spoolWithCommitLog(cacheRoot)
+    const tablePath = path.join(cacheRoot, 'datasets', 'test_data', 'source=claude')
+
+    await assert.rejects(
+      () => spool.append(tablePath, COLUMNS, [{ id: 1 }]),
+      /simulated write failure/
+    )
+    restore()
+
+    // The remnant survives, but terminated: it is one malformed line the
+    // flush reader drops on its own rather than a prefix that swallows the
+    // record appended after it.
     await spool.append(tablePath, COLUMNS, [{ id: 2 }])
     await spool.flushTable(tablePath, { reason: 'test' })
     assert.deepEqual(committed.map((row) => row.id), [2])
