@@ -9,7 +9,7 @@
 **Extends:** LLP 0085 (compaction now guarantees a session's session-start
 record survives eviction, which is what `pickRecordForRow`'s at-or-before rule
 needs once the file is over cap)
-**Related:** LLP 0254 (#policy-inline, #hook-stays: the ingest verdict this file feeds, and why the hook record is load-bearing for privacy), LLP 0257 (#ingest: S10, "a session with no hook record is undetermined, not clean"), LLP 0253 (#delete-on-drop: what an undetermined verdict costs a session), LLP 0085 (the settlement backstop that reads a session's record history), LLP 0032 (#capture: the repo identity the record also carries)
+**Related:** LLP 0254 (#policy-inline, #hook-stays: the ingest verdict this file feeds, and why the hook record is load-bearing for privacy), LLP 0257 (#ingest: S10, "a session with no hook record is undetermined, not clean"), LLP 0253 (#delete-on-drop: what an undetermined verdict costs a session), LLP 0085 (the settlement backstop that reads a session's record history), LLP 0032 (the repo identity the record also carries)
 
 > `<stateDir>/session-context.jsonl` is bounded by compaction, and until now
 > compaction dropped records purely by position. Position is the one axis on
@@ -58,10 +58,28 @@ compaction rewrites the file, the record is gone.
 
 ### A session's endpoint records are evicted last {#endpoints-evicted-last}
 
-**Compaction evicts a session's INTERIOR records first (oldest-first across all
-sessions), and only then its ENDPOINTS: its earliest and its newest record,
-again oldest-first.** A session therefore loses its middle before either end,
-and loses an end only when every session's middle is already gone.
+**Compaction evicts a session's INTERIOR records first (oldest record first
+across all sessions), and only then its ENDPOINTS: its earliest and its newest
+record, stalest SESSION first.** A session therefore loses its middle before
+either end, and loses an end only when every session's middle is already gone.
+
+The tier-two order is by session, not by record position, and that distinction
+is the whole rule. "Oldest record first" reads the front of the file as the
+cheapest thing to drop, but the front of the file is exactly where a
+long-running session's session-start record lives, so it would evict the
+session-start record of the session that has been alive longest before touching
+anything belonging to a session that ended hours ago. Ordering by the position
+of each session's NEWEST record instead means a whole stale session is given up
+before a live one gives up either end: the record a session loses is decided by
+when that session last fired the hook, never by how much a neighbour wrote in
+between.
+
+What this does not buy, because a byte cap cannot buy it: a session that stops
+firing the hook for longer than the window holds is still evicted, endpoints and
+all. Presence costs about two records per session in the window, so on today's
+512 KB that is thousands of sessions of headroom, but it is headroom, not a
+guarantee. Compaction ranks sessions by last activity; it cannot tell a live
+session that spent an hour thinking from one that exited.
 
 Two endpoints, not one, because the file answers two different questions and
 each end answers one of them:
@@ -124,10 +142,11 @@ has to be a tighter file, never a refused append.
 - A quiet session survives a noisy neighbour at the writer, and survives it
   inside the window the default reader reads. Pinned by
   `test/plugins/claude-session-context-compaction.test.js`.
-- A session that changed dirs mid-turn keeps the session-start record its
-  opening rows settle against, so LLP 0085's at-or-before rule still has a
-  record to find on a file over cap and cannot fall back to a later, cleaner
-  cwd.
+- A session that changed dirs mid-turn and is still firing the hook keeps the
+  session-start record its opening rows settle against, so LLP 0085's
+  at-or-before rule still has a record to find on a file over cap and cannot
+  fall back to a later, cleaner cwd. A session that has gone quiet for longer
+  than the window holds loses it anyway; that is the cap, not the order.
 - The existing shape is unchanged where it was already right: with every
   record belonging to a distinct session, eviction is still oldest-first, so
   the assertion in `test/plugins/claude-session-context-hook.test.js`

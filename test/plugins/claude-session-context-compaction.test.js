@@ -76,15 +76,19 @@ test('compaction keeps a session-start record so an opening row still settles', 
   const env = await stageEnv()
   try {
     const opts = { maxBytes: 1400 }
-    // Long-dead single-record sessions, each one competing for the same cap.
-    for (let i = 0; i < 20; i++) {
-      await appendSessionContext(env.stateFile, record(`dead-${i}`, `/repo/dead-${i}`, i), opts)
+    // The live session OPENS FIRST, in an ignored dir, and keeps firing the hook
+    // from a clean dir for the rest of the run. Its session-start record is
+    // therefore the record nearest the FRONT of the file the whole time, which
+    // is what makes this the case that discriminates: evicting endpoints by
+    // their own position drops it first, though the session writing it is the
+    // one session that never went quiet. Short one-shot neighbours run
+    // alongside it, two records each so tier one has no interior to give.
+    await appendSessionContext(env.stateFile, record('live', '/repo/ignored', 0), opts)
+    for (let i = 0; i < 30; i++) {
+      await appendSessionContext(env.stateFile, record(`dead-${i}`, `/repo/dead-${i}`, 1 + i), opts)
+      await appendSessionContext(env.stateFile, record(`dead-${i}`, `/repo/dead-${i}`, 1 + i), opts)
+      await appendSessionContext(env.stateFile, record('live', '/repo/clean', 40 + i), opts)
     }
-    // A live session that opened in an ignored dir and then changed out of it.
-    await appendSessionContext(env.stateFile, record('live', '/repo/ignored', 30), opts)
-    await appendSessionContext(env.stateFile, record('live', '/repo/ignored', 31), opts)
-    await appendSessionContext(env.stateFile, record('live', '/repo/clean', 32), opts)
-    await appendSessionContext(env.stateFile, record('live', '/repo/clean', 33), opts)
 
     const records = await readSessionContext(env.stateFile)
     const live = records.filter((entry) => entry.session_id === 'live')
@@ -94,10 +98,23 @@ test('compaction keeps a session-start record so an opening row still settles', 
     // cwd, which retains a row settlement exists to drop.
     assert.equal(live[0]?.cwd, '/repo/ignored', 'the live session lost its session-start record')
     assert.equal(live.at(-1)?.cwd, '/repo/clean', 'the live session lost its latest record')
+    // The neighbours are what paid for it: the file is over cap throughout, so
+    // records were genuinely evicted rather than all of them fitting, and what
+    // went is the sessions that stopped firing, oldest activity first.
+    assert.ok(
+      records.length < 61,
+      `nothing was evicted (${records.length} records), so the test proves nothing`
+    )
+    assert.equal(
+      pickLatestMatching(records, { sessionId: 'dead-0' }),
+      undefined,
+      'the first neighbour to go quiet outlived the live session, so eviction is still positional'
+    )
   } finally {
     await env.cleanup()
   }
 })
+
 
 test('compaction clamps a caller cap wider than the window the reader reads', async () => {
   const env = await stageEnv()

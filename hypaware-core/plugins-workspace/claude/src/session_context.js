@@ -150,23 +150,11 @@ function recordFrom(value) {
  * exists to avoid, reached through the other door. Widening the retained window
  * means widening the read window first.
  *
- * Eviction is oldest-first, but a session's own EARLIEST and NEWEST records are
- * evicted last. Dropping purely by position takes out whichever sessions have
- * been quiet, however live they are: one neighbour firing the hook on every
- * Bash call can push a session that spent the turn reading files off the disk
- * entirely. Ingest asks only for a session's latest record
- * (`pickLatestMatching`), so the newest is what presence costs; settlement
- * resolves an OPENING row against the record live at that row's own time
- * (LLP 0085), which for an opening row is the session-start record, so the
- * earliest is what a correct drop costs. Two records per session buys both. The
- * alternative is an `undetermined` session whose spooled bodies are deleted
- * unread, or an opening row in an ignored dir resolved against a later clean
- * cwd and retained: a leak, which is the direction that cannot be taken back.
+ * Eviction gives up a session's history before its presence; `compactBody` has
+ * the two tiers and the order within each.
  *
  * @ref LLP 0286#writer-cap-is-clamped [implements]: the retained window may not
  *   exceed the window readers are able to read
- * @ref LLP 0286#endpoints-evicted-last [implements]: a session's session-start and
- *   latest records are the last things compaction gives up
  * @param {string} filePath
  * @param {{ maxBytes?: number, maxRecords?: number }} opts
  */
@@ -194,17 +182,41 @@ async function compactSessionContextIfNeeded(filePath, opts) {
 /**
  * Render the retained records, evicting until the body fits both bounds.
  *
- * Eviction runs in two tiers, oldest-first within each: a session's INTERIOR
- * records (the ones with both an older and a newer record of their own session)
- * go first, then its ENDPOINTS (its earliest and its newest record, which are
- * the same record for a single-record session). So a session gives up its middle
- * before either endpoint, and gives up an endpoint only once every session's
- * middle is already gone. The final record standing is never evicted, matching
- * the byte loop this replaces.
+ * Eviction runs in two tiers. Tier one is a session's INTERIOR records (the
+ * ones with both an older and a newer record of their own session), oldest
+ * record first across all sessions. Tier two is its ENDPOINTS (its earliest and
+ * its newest record, which are the same record for a single-record session). So
+ * a session gives up its middle before either endpoint, and gives up an endpoint
+ * only once every session's middle is already gone.
+ *
+ * Tier two is ordered by how stale the SESSION is (the position of its newest
+ * record), not by where the endpoint itself sits. Ordering endpoints by their
+ * own position reads the front of the file as "oldest", but the front of the
+ * file is exactly where a long-running session's session-start record lives: the
+ * first endpoint evicted would be the session-start record of the session that
+ * has been alive longest, while every record of a session that ended hours ago
+ * survived. That is the eviction this rule exists to prevent, so a whole stale
+ * session goes before a live one gives up either end.
+ *
+ * Why both ends: ingest asks only for a session's latest record
+ * (`pickLatestMatching`), so the newest is what presence costs; settlement
+ * resolves an OPENING row against the record live at that row's own time
+ * (LLP 0085), which for an opening row is the session-start record, so the
+ * earliest is what a correct drop costs. The alternative is an `undetermined`
+ * session whose spooled bodies are deleted unread, or an opening row in an
+ * ignored dir resolved against a later clean cwd and retained: a leak, which is
+ * the direction that cannot be taken back.
+ *
+ * The final record standing is never evicted, matching the byte loop this
+ * replaces: the file's last record is always its own session's newest, and that
+ * session is by construction the freshest, so it sorts last in tier two.
  *
  * Earliest is by append order rather than by `ts`, because append order is the
  * order the hook observed and a record's `ts` is optional.
  *
+ * @ref LLP 0286#endpoints-evicted-last [implements]: a session's session-start and
+ *   latest records are the last things compaction gives up, and the session that
+ *   went quiet longest ago gives them up first
  * @param {SessionContextRecord[]} records append-ordered, any session
  * @param {{ maxBytes: number, maxRecords: number }} bounds
  * @returns {string}
@@ -226,9 +238,13 @@ function compactBody(records, { maxBytes, maxRecords }) {
   let kept = records.length
   let bytes = sizes.reduce((sum, size) => sum + size, 0)
   const indexes = records.map((_, index) => index)
+  /** @param {number} index */
+  const lastSeen = (index) => newestBySession.get(records[index].session_id) ?? index
   const order = [
     ...indexes.filter((index) => !endpoints.has(index)),
-    ...indexes.filter((index) => endpoints.has(index)),
+    ...indexes
+      .filter((index) => endpoints.has(index))
+      .sort((a, b) => lastSeen(a) - lastSeen(b) || a - b),
   ]
   for (const index of order) {
     if (kept <= maxRecords && bytes <= maxBytes) break
