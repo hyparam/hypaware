@@ -7,7 +7,7 @@ import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/d
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
 import { createUsagePolicyResolver } from '../../../../../src/core/usage-policy/index.js'
 import { createSessionContextReader, pickLatestMatching } from '../session_context.js'
-import { deleteSpooledBodies, deleteSpooledBodiesForEvents, loadSpooledBodies } from './bodies.js'
+import { bodyRefDigest, deleteSpooledBodies, deleteSpooledBodiesForEvents, loadSpooledBodies } from './bodies.js'
 import { partitionByUsagePolicy, resolveSessionUsagePolicy } from './policy.js'
 import { flattenClaudeTelemetryEvents, flattenClaudeTelemetryMetrics } from './events.js'
 import {
@@ -15,7 +15,7 @@ import {
   claudeTelemetryEventRows,
   claudeTelemetryTablePath,
 } from './events_dataset.js'
-import { projectClaudeTelemetryEvents } from './projection.js'
+import { projectClaudeTelemetryEvents, restoreUnclaimedUsage } from './projection.js'
 import {
   DEFAULT_SPOOL_MAX_BYTES,
   claudeBodySpoolDir,
@@ -401,6 +401,13 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
     const removal = await deleteSpooledBodiesForEvents(events, { spoolDir })
     tally.bodiesDropped += removal.deleted
     state.bodiesDropped += removal.deleted
+    // The drop arm deletes bodies the read path never accounted for, so
+    // without this the gauge only came back down at the next sweep, a minute
+    // later - and `hyp status` read `spool_bytes` in between and reported
+    // bytes for content that had already been removed on the user's say-so.
+    // @ref LLP 0253#byte-cap [implements]: the published byte size is what is
+    //   on disk, whichever arm removed the file
+    state.spoolBytes = Math.max(0, state.spoolBytes - removal.bytesRemoved)
     if (withheld) {
       tally.eventsUndetermined += events.length
       state.eventsUndetermined += events.length
@@ -412,7 +419,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
       ctx.log.warn('claude.telemetry.body_ref_refused', {
         [Attr.PLUGIN]: PLUGIN_NAME,
         error_kind: 'body_ref_outside_spool',
-        body_ref: ref,
+        body_ref_sha256: bodyRefDigest(ref),
       })
     }
     // Warn for a withheld session, info for a policy that answered: the first
@@ -557,9 +564,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           }
           state.eventsReceived += allMetricEvents.length
           for (const event of allMetricEvents) {
-            if (event.timestamp && (state.lastEventAt === undefined || event.timestamp > state.lastEventAt)) {
-              state.lastEventAt = event.timestamp
-            }
+            if (event.timestamp) state.lastEventAt = newerEventTimestamp(state.lastEventAt, event.timestamp)
           }
           // The opt-out covers the behavioral record too: a metric data
           // point names its session, so it is droppable on the same key.
@@ -600,9 +605,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         }
         state.eventsReceived += allEvents.length
         for (const event of allEvents) {
-          if (event.timestamp && (state.lastEventAt === undefined || event.timestamp > state.lastEventAt)) {
-            state.lastEventAt = event.timestamp
-          }
+          if (event.timestamp) state.lastEventAt = newerEventTimestamp(state.lastEventAt, event.timestamp)
         }
 
         // The per-session opt-out, enforced at ingest BEFORE the spool is
@@ -648,9 +651,14 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           ctx.log.warn('claude.telemetry.body_ref_refused', {
             [Attr.PLUGIN]: PLUGIN_NAME,
             error_kind: 'body_ref_outside_spool',
-            body_ref: ref,
+            body_ref_sha256: bodyRefDigest(ref),
           })
         }
+
+        // What the usage index held before projection claims anything out of
+        // it, so a failed write can put back what it took (see the catch
+        // below). A copy of one Map of small objects, per POST.
+        const usageBeforeProjection = new Map(usageByRequestId)
 
         // The same records the policy gate decided on, so the cwd a row is
         // stamped with is the cwd its verdict was resolved from.
@@ -677,6 +685,18 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
             rowsSkipped += result.rowsSkipped
           }
         } catch (err) {
+          // Projection CONSUMED the usage index (an `api_request`'s tokens and
+          // cost are claimed by the `assistant_response` that names its
+          // `request_id`), but no row carrying them reached the dataset. The
+          // exporter retries this batch, and a retry that re-projects against a
+          // drained index writes the same assistant rows with no
+          // `attributes.usage` and no `claude.cost_usd` - a permanent hole in
+          // exactly the batch that already failed once. Put back only what this
+          // batch consumed: entries it newly remembered are left alone, so an
+          // `api_request` whose response has not arrived yet still waits here,
+          // and the restore re-applies the index cap, which the snapshot would
+          // otherwise reopen for as long as the outage lasts.
+          restoreUnclaimedUsage(usageByRequestId, usageBeforeProjection)
           state.lastError = err instanceof Error ? err.message : String(err)
           span.setAttribute('error_kind', 'dataset_write')
           span.setAttribute('row_count', rowsWritten)
@@ -707,12 +727,17 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         // @ref LLP 0252#project-then-delete [implements]: deletion is the
         //   normal end of a body's life, not a cleanup pass
         if (spooled.consumedFiles.length > 0) {
-          const deleted = await deleteSpooledBodies(spooled.consumedFiles)
+          const removed = await deleteSpooledBodies(spooled.consumedFiles)
           state.bodiesProjected += spooled.bodies.size
-          state.bodiesDeleted += deleted
-          state.spoolBytes = Math.max(0, state.spoolBytes - spooled.consumedBytes)
+          state.bodiesDeleted += removed.deleted
+          // What actually left the disk, not what was read. A body whose
+          // unlink failed (EPERM, a read-only spool) is still occupying the
+          // cap, and subtracting its bytes here would under-report
+          // `spool_bytes` until the next sweep restated it, which is the drop
+          // arm's bug in the other direction.
+          state.spoolBytes = Math.max(0, state.spoolBytes - removed.bytesRemoved)
           span.setAttribute('bodies_projected', spooled.bodies.size)
-          span.setAttribute('bodies_deleted', deleted)
+          span.setAttribute('bodies_deleted', removed.deleted)
         }
 
         span.setAttribute('row_count', rowsWritten)
@@ -731,6 +756,47 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
       { component: 'plugin.claude' }
     )
   }
+}
+
+/**
+ * The later of two event timestamps, compared as instants rather than as
+ * strings.
+ *
+ * Claude Code stamps `event.timestamp` from more than one producer, so a
+ * batch mixes `...:24Z` with `...:24.500Z`, and a legal OTLP timestamp may
+ * carry a numeric offset instead of `Z`. By text `...:24Z` sorts AFTER
+ * `...:24.500Z` ('Z' is above '.'), and `...T21:00+03:00` sorts after an hour
+ * that is genuinely later in UTC, so the running max could go backwards on a
+ * perfectly ordered stream. This value is published as `last_event_at`, the
+ * baseline `hyp status` measures a capture gap from, where running backwards
+ * invents a gap that is not there.
+ *
+ * `event.timestamp` is whatever string the attribute carried, unvalidated, so
+ * one malformed value has to stay one malformed value. A value that names an
+ * instant therefore beats one that names nothing, whichever side it is on: a
+ * text compare between the two orders nothing real, and letting the
+ * unparseable side win would pin `last_event_at` for the life of the daemon
+ * (`unknown` sorts above every ISO string that could follow it, so no later
+ * event ever displaces it), which is the invented capture gap this function
+ * exists to prevent, reached by a slower route. Only when NEITHER parses is
+ * there an ordering left to fall back on, and there the string compare is what
+ * this did for every value before.
+ *
+ * @ref LLP 0257#status-and-health [implements]: `last_event_at` is the
+ *   capture-gap baseline, so it has to name the newest instant seen
+ * @param {string | undefined} current
+ * @param {string} next
+ * @returns {string}
+ */
+export function newerEventTimestamp(current, next) {
+  if (current === undefined) return next
+  const currentMs = Date.parse(current)
+  const nextMs = Date.parse(next)
+  const currentParsed = !Number.isNaN(currentMs)
+  const nextParsed = !Number.isNaN(nextMs)
+  if (currentParsed && nextParsed) return nextMs > currentMs ? next : current
+  if (currentParsed !== nextParsed) return currentParsed ? current : next
+  return next > current ? next : current
 }
 
 /**

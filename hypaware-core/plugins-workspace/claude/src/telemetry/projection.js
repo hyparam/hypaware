@@ -263,11 +263,46 @@ function messageFromEvent(event, usageByRequestId) {
  */
 function rememberUsage(index, requestId, usage) {
   index.set(requestId, usage)
+  trimUsageIndex(index)
+}
+
+/**
+ * Evict oldest-first until the index is back under `USAGE_INDEX_LIMIT`.
+ * `Map` iterates in insertion order, so the first key is the oldest.
+ *
+ * @param {Map<string, Record<string, unknown>>} index
+ */
+function trimUsageIndex(index) {
   while (index.size > USAGE_INDEX_LIMIT) {
     const oldest = index.keys().next()
     if (oldest.done) break
     index.delete(oldest.value)
   }
+}
+
+/**
+ * Put back the usage a batch claimed out of the index when the write that
+ * would have carried it failed, so the exporter's retry re-projects against
+ * the same inputs and its rows still get their tokens and cost.
+ *
+ * `snapshot` is the index as it stood before projection ran. A key missing
+ * from `index` now was either claimed by an assistant message (whose row
+ * never landed, so it has to come back) or evicted by the cap (which does
+ * not), and the two are indistinguishable from here. So both come back and
+ * the cap is re-applied: during a sustained write outage nothing is ever
+ * claimed and nothing ever shrinks the index, and restoring the evictions
+ * unchecked would grow it by a batch on every failure instead of holding it
+ * at `USAGE_INDEX_LIMIT`. Entries the batch newly remembered are left
+ * alone, so an `api_request` whose response has not arrived yet still waits.
+ *
+ * @param {Map<string, Record<string, unknown>>} index
+ * @param {Map<string, Record<string, unknown>>} snapshot
+ */
+export function restoreUnclaimedUsage(index, snapshot) {
+  for (const [requestId, usage] of snapshot) {
+    if (!index.has(requestId)) index.set(requestId, usage)
+  }
+  trimUsageIndex(index)
 }
 
 /**

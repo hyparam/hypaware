@@ -1,5 +1,6 @@
 // @ts-check
 
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -125,23 +126,61 @@ export async function loadSpooledBodies(events, opts) {
  * retried batch re-reads the same files. Deletion is the normal end of
  * a body's life, which is what keeps the spool transient.
  *
+ * The size is read before the unlink, and a ref that is already gone is not
+ * counted: `fs.rm(..., { force: true })` succeeds on a missing path, so
+ * counting its return alone reported every vanished ref as one more deletion
+ * (`bodies_deleted`, and the drop path's `bodies_dropped`). The byte total
+ * is what lets a caller that never read the files - the policy-drop arm, which
+ * deletes unread - bring `spool_bytes` down by what actually left the disk
+ * instead of leaving it high until the next sweep restates it.
+ *
  * @ref LLP 0252#project-then-delete [implements]: a body file is deleted as
  *   soon as it has been projected
  * @param {string[]} files
- * @returns {Promise<number>} how many files were removed
+ * @returns {Promise<{ deleted: number, bytesRemoved: number }>}
  */
 export async function deleteSpooledBodies(files) {
   let deleted = 0
+  let bytesRemoved = 0
   for (const file of files) {
+    /** @type {number} */
+    let size
+    try {
+      size = (await fs.stat(file)).size
+    } catch {
+      // Already evicted, already swept, or never written: nothing here to
+      // remove, and nothing to subtract.
+      continue
+    }
     try {
       await fs.rm(file, { force: true })
-      deleted += 1
     } catch {
-      // A vanished or unremovable file is the sweep's problem, not a
-      // reason to fail the batch that already recorded its content.
+      // An unremovable file is the sweep's problem, not a reason to fail the
+      // batch that already recorded its content.
+      continue
     }
+    deleted += 1
+    bytesRemoved += size
   }
-  return deleted
+  return { deleted, bytesRemoved }
+}
+
+/**
+ * A short, non-reversible handle for a `body_ref` that has to be named in a
+ * log line. A refused ref is out-of-spool by definition and arrived over the
+ * wire, so logging it verbatim puts an unvalidated, possibly attacker-chosen
+ * absolute path into a line an operator's own sink may ship off the machine,
+ * while every other line on this path carries basenames and counts. The digest
+ * still correlates repeats of one ref across lines and runs, which is what the
+ * refusal signal is read for.
+ *
+ * @ref LLP 0257#observability [implements]: S23 - payload identity is carried
+ *   by a hash, not by the raw value
+ * @param {string} ref
+ * @returns {string}
+ */
+export function bodyRefDigest(ref) {
+  return crypto.createHash('sha256').update(ref).digest('hex').slice(0, 12)
 }
 
 /**
@@ -160,7 +199,7 @@ export async function deleteSpooledBodies(files) {
  *   works AND the content goes
  * @param {ClaudeTelemetryEvent[]} events
  * @param {{ spoolDir: string }} opts
- * @returns {Promise<{ deleted: number, refused: string[] }>}
+ * @returns {Promise<{ deleted: number, bytesRemoved: number, refused: string[] }>}
  */
 export async function deleteSpooledBodiesForEvents(events, opts) {
   const spoolRoot = path.resolve(opts.spoolDir)
@@ -182,8 +221,8 @@ export async function deleteSpooledBodiesForEvents(events, opts) {
     }
     files.push(file)
   }
-  const deleted = await deleteSpooledBodies(files)
-  return { deleted, refused }
+  const removed = await deleteSpooledBodies(files)
+  return { deleted: removed.deleted, bytesRemoved: removed.bytesRemoved, refused }
 }
 
 /**
