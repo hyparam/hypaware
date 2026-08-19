@@ -84,7 +84,8 @@ for (const argv of [['--remot', 'prod'], ['-r', 'prod'], ['--format', 'json'], [
 
     assert.equal(code, 2, 'an unrecognized argument is a usage error, not a local answer')
     assert.equal(stdout.value, '', 'no local inventory may be printed for an argument status does not take')
-    assert.match(stderr.value, /takes no arguments/)
+    assert.ok(stderr.value.includes(argv[0]), `refusal did not name ${argv[0]}: ${stderr.value}`)
+    assert.match(stderr.value, /usage: hyp cache status/)
   })
 }
 
@@ -93,7 +94,7 @@ test('query status renders usage for --help without touching the cache', async (
   const code = await runQueryStatus(['--help'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.value, /usage: hyp query status/)
+  assert.match(stdout.value, /usage: hyp cache status/)
   assert.equal(stderr.value, '')
 })
 
