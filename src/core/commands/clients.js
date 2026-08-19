@@ -1,7 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -1709,7 +1709,7 @@ function parseIgnoreArgs(argv) {
       sync: { type: 'boolean', default: false },
     },
     positional: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { ...empty, error: `usage: ${IGNORE_USAGE}` }
   if (!parsed.ok) return { ...empty, error: parsed.error }
   const p = /** @type {{ path?: string, check: boolean, json: boolean, 'local-only': boolean, private: boolean, sync: boolean }} */ (

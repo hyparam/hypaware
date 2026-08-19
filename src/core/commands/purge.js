@@ -5,7 +5,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { askYesNo } from '../cli/confirm.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -281,7 +281,7 @@ function parseArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { ...base, error: USAGE }
   }

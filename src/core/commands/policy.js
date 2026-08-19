@@ -3,7 +3,7 @@
 import path from 'node:path'
 import process from 'node:process'
 
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getActiveSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import {
@@ -147,7 +147,7 @@ function parsePolicySetArgs(argv) {
     },
     positional: ['path', 'class'],
     required: ['path', 'class'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: `usage: ${POLICY_SET_USAGE}` }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ path: string, class: string }} */ (parsed.params)
@@ -167,7 +167,7 @@ function parsePolicyShowArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_SHOW_USAGE}` }
   if (!parsed.ok) return { ...empty, error: parsed.error }
   const p = /** @type {{ path?: string, json: boolean }} */ (parsed.params)
@@ -187,7 +187,7 @@ function parsePolicyUnsetArgs(argv) {
     },
     positional: ['path', 'class'],
     required: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: `usage: ${POLICY_UNSET_USAGE}` }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ path: string, class?: string }} */ (parsed.params)
@@ -392,7 +392,7 @@ function parsePolicyClientArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['name', 'class'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_CLIENT_USAGE}` }
   if (!parsed.ok) return { ...empty, error: parsed.error }
   const p = /** @type {{ name?: string, class?: 'sync' | 'local-only', json: boolean }} */ (parsed.params)
@@ -577,7 +577,7 @@ function parsePolicyFoldersArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['mode'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_FOLDERS_USAGE}` }
   if (!parsed.ok) return { ...empty, error: parsed.error }
   const p = /** @type {{ mode?: FolderAskMode, json: boolean }} */ (parsed.params)

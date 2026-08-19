@@ -211,6 +211,25 @@ export function argvToParams(inputSchema, argv, opts = {}) {
 }
 
 /**
+ * The parse options a core command that binds a positional passes to
+ * {@link parseCommandArgv}. Spread it (`{ ...STRICT_SHORT_FLAGS, aliases }`)
+ * where the command also declares aliases.
+ *
+ * Only `--` tokens read as flags, so without this a misspelled short flag
+ * binds as the positional's *value*: `hyp policy show -Z` reported on a
+ * directory named `-Z` and exited 0, and `hyp sink maintain -Z` looked up a
+ * sink named `-Z` and exited 1. Commands that reach `parseCoreCommandArgv()`
+ * get the rule from there; the ones that call this function directly opt in
+ * here, one call site at a time, because each site owes a look at whether a
+ * legitimate value of its positional can start with a dash. The verb family
+ * never opts in: a greedy SQL positional carries tokens like `-1`.
+ *
+ * @type {{ strictShortFlags: true }}
+ * @ref LLP 0266#one-contract [implements]: D1's short-flag rule reaches the commands that parse through the codec directly, not only the ones in the table
+ */
+export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
+
+/**
  * Parse a core command's argv against a verb-style input schema. The
  * schema-driven half is {@link argvToParams} (same flag forms, coercion,
  * enums, positional binding, and error texts as the verb family); on top

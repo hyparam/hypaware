@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import fsp from 'node:fs/promises'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -1011,7 +1011,7 @@ export function parseRunArgv(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['providers'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]' }
   }
@@ -1070,7 +1070,7 @@ export function parsePlanArgv(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['providers'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
   }

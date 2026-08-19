@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 
 /**
@@ -394,7 +394,7 @@ const QUERY_MAINTAIN_SCHEMA = {
  * @returns {{ error: string } | { dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }}
  */
 function parseQueryMaintainArgv(argv) {
-  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA)
+  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: QUERY_MAINTAIN_USAGE }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ dataset?: string, 'dry-run': boolean, force: boolean, 'compact-only': boolean, 'expire-only': boolean }} */ (parsed.params)
