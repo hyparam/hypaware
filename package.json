@@ -71,6 +71,7 @@
     "@aws-sdk/credential-provider-ini": "3.973.13",
     "hyparquet": "1.28.2",
     "hyparquet-compressors": "1.1.1",
+    "hypgrep": "0.5.1",
     "icebird": "0.8.22",
     "marked": "18.0.9",
     "squirreling": "0.15.3"
@@ -81,6 +82,10 @@
   },
   "overrides": {
     "icebird": {
+      "hyparquet-writer": "0.16.6"
+    },
+    "hypgrep": {
+      "hyparquet": "1.28.2",
       "hyparquet-writer": "0.16.6"
     }
   },
