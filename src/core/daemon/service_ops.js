@@ -32,30 +32,6 @@ export class ServiceOpError extends Error {
 }
 
 /**
- * Error raised when a bounded service command passed its deadline and was
- * killed. A distinct name so a caller can tell "the probe did not answer"
- * apart from "the probe answered no": only the second is a fact about the
- * machine.
- */
-export class ServiceCommandTimeoutError extends ServiceOpError {
-  /**
-   * @param {string} message
-   */
-  constructor(message) {
-    super(message)
-    this.name = 'ServiceCommandTimeoutError'
-  }
-}
-
-/**
- * How long a read-only status probe waits for a service command before it
- * gives up. Long enough for a cold `security verify-cert` (keychain open,
- * trust evaluation) on a healthy machine, short enough that the offline or
- * captive-portal host it exists for still gets a report.
- */
-export const SERVICE_PROBE_TIMEOUT_MS = 5000
-
-/**
  * Error raised when the test-runner guard refuses to spawn a service
  * manager. A distinct name so a caller (or a test) can tell "we declined
  * to touch the host" apart from "the service manager said no".

@@ -223,7 +223,7 @@ test('accept, write succeeds, restart fails: names the restart step, the backup 
     // line above, it denies the write that just landed and instructs an edit
     // already made. One failure, one report.
     assert.doesNotMatch(message, /error: the claude adapter is not enabled on this install/)
-    assert.doesNotMatch(message, /enable it with 'hyp init'/)
+    assert.doesNotMatch(message, /enable it with 'hyp setup'/)
     assert.equal(
       (message.match(/error: /g) ?? []).length,
       1,
@@ -244,7 +244,7 @@ test('accept, write succeeds, in-process activation fails: the activation report
 
     const message = stderr.text()
     assert.match(message, /could not activate it in this process/)
-    assert.match(message, /re-run 'hyp attach claude' to finish/)
+    assert.match(message, /re-run 'hyp client attach claude' to finish/)
     assert.doesNotMatch(message, /error: the claude adapter is not enabled on this install/)
     assert.equal(
       (message.match(/error: /g) ?? []).length,

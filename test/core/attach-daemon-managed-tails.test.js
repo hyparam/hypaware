@@ -13,7 +13,7 @@ import { readClientActionStatus } from '../../src/core/config/action_reconciler.
 
 /**
  * The daemon-managed "already attached at the live port" branch is a success
- * exit of `hyp attach`, and it is the one an operator on a default install
+ * exit of `hyp client attach`, and it is the one an operator on a default install
  * actually reaches: the gateway is not bound in this CLI process, no `listen`
  * is configured, and the marker in the client's settings already names the
  * daemon's live port. It used to `continue` straight after materializing

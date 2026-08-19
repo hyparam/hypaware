@@ -408,7 +408,7 @@ async function runClientLifecycle(action, argv, ctx) {
               }
               // The three tails below `client.attach()` are reached from here
               // too, because this branch is a successful attach: it is the
-              // exit an explicit `hyp attach <client>` takes on a
+              // exit an explicit `hyp client attach <client>` takes on a
               // daemon-managed install, the shape an operator most often runs
               // it on. Skipping them made this the one path where the re-arm
               // LLP 0186 specifies never happens and where LLP 0174's step-4
@@ -417,7 +417,7 @@ async function runClientLifecycle(action, argv, ctx) {
               //
               // Reached with the settings already in place rather than freshly
               // written, which changes nothing any tail depends on: the
-              // re-arm's precondition is an explicit `hyp attach` that
+              // re-arm's precondition is an explicit `hyp client attach` that
               // succeeded (LLP 0295 scopes it to the manual re-run, not to a
               // write having happened), and the offer's is that this
               // invocation enabled the adapter. With a live endpoint the
@@ -442,7 +442,7 @@ async function runClientLifecycle(action, argv, ctx) {
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a
               // daemon-managed install actually reaches. Short-circuiting past
-              // the materialization would make `hyp attach` install nothing on
+              // the materialization would make `hyp client attach` install nothing on
               // exactly the install shape it is most often run on,
               // reintroducing the split this change removes. Idempotent and
               // cheap, so running it on a no-op attach costs a stat pass.
@@ -552,7 +552,7 @@ async function runClientLifecycle(action, argv, ctx) {
  *
  * Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose. A
  * `done` marker is the only record naming the files an org-driven attach
- * installed, so clearing it would strand them past any later `hyp detach`,
+ * installed, so clearing it would strand them past any later `hyp client detach`,
  * which reads exactly this marker to know what to remove (LLP 0138#marker-undo).
  * A `failed` marker needs no help: nothing short-circuits it, so the next pass
  * already retries it. And a dry run must leave the marker store exactly as it
@@ -573,7 +573,7 @@ async function runClientLifecycle(action, argv, ctx) {
  * exits, the freshly-wired one and the daemon-managed already-current one, and
  * the second silently had no re-arm at all while this lived in the first.
  *
- * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
+ * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp client attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
  * @param {{ name: string, ctx: CommandRunContext, dryRun: boolean }} args
  * @returns {void}
  */
