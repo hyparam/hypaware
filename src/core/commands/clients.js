@@ -301,8 +301,13 @@ async function runClientLifecycle(action, argv, ctx) {
         if (!client) {
           if (enablement.state !== 'unknown') {
             // Same rule as the capability gate above: a prompt that already
-            // reported its own step's failure owns the message.
-            if (!promptResult.reported) reportAttachEnablement({ name, enablement, parsed, ctx })
+            // reported its own step's failure owns the *human* message. Only
+            // that line is suppressed, exactly as the capability gate
+            // suppresses only its `stderr.write`: the structured warn and the
+            // `--json` payload are the machine record of a failed attach and
+            // no prompt writes either, so dropping them here would lose the
+            // failure from the log and from a scripted caller's output.
+            reportAttachEnablement({ name, enablement, parsed, ctx, quiet: promptResult.reported })
             exitCode = 1
             continue
           }
@@ -401,17 +406,7 @@ async function runClientLifecycle(action, argv, ctx) {
                   `the daemon manages attach for this install, so only its assets are refreshed.\n`
                 )
               }
-              // The settings are already wired, but attach means settings *and*
-              // assets, and this branch is the one an operator on a
-              // daemon-managed install actually reaches. Short-circuiting past
-              // the materialization below would make `hyp attach` install
-              // nothing on exactly the install shape it is most often run on,
-              // reintroducing the split this change removes. Idempotent and
-              // cheap, so running it on a no-op attach costs a stat pass.
-              // @ref LLP 0107#every-attach [implements]: every attach path
-              //   materializes, including the one with nothing left to wire
-              await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: false, json: parsed.json })
-              // The two tails below `client.attach()` are reached from here
+              // The three tails below `client.attach()` are reached from here
               // too, because this branch is a successful attach: it is the
               // exit an explicit `hyp attach <client>` takes on a
               // daemon-managed install, the shape an operator most often runs
@@ -421,9 +416,9 @@ async function runClientLifecycle(action, argv, ctx) {
               // never made.
               //
               // Reached with the settings already in place rather than freshly
-              // written, which changes nothing either tail depends on: the
+              // written, which changes nothing any tail depends on: the
               // re-arm's precondition is an explicit `hyp attach` that
-              // succeeded (LLP 0186 scopes it to the manual re-run, not to a
+              // succeeded (LLP 0295 scopes it to the manual re-run, not to a
               // write having happened), and the offer's is that this
               // invocation enabled the adapter. With a live endpoint the
               // marker was validated against it, so "already correct" is the
@@ -431,8 +426,29 @@ async function runClientLifecycle(action, argv, ctx) {
               // against, a present marker is a no-op success by the pre-#277
               // rule above, and this is still the explicit re-run the re-arm
               // is scoped to.
-              // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: the explicit re-run re-arms, including on the daemon-managed install where the settings need no rewrite
+              //
+              // Ordered re-arm before materialize, the same order the
+              // freshly-wired exit below uses. `materializeAttachAssets`
+              // swallows a per-copy failure, but not everything it does is
+              // guarded (the plan read, the prune pass, the digest of an
+              // installed asset), and a throw there lands in the loop's outer
+              // catch: with the re-arm second, an asset-tail failure would
+              // leave the `refused` marker short-circuiting the reconciler
+              // forever after exactly the explicit re-run that is its only
+              // trigger. The re-arm cannot fail the other way round, since it
+              // logs and swallows its own marker error.
+              // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
               rearmRefusedAttachMarker({ name, ctx, dryRun: false })
+              // The settings are already wired, but attach means settings *and*
+              // assets, and this branch is the one an operator on a
+              // daemon-managed install actually reaches. Short-circuiting past
+              // the materialization would make `hyp attach` install nothing on
+              // exactly the install shape it is most often run on,
+              // reintroducing the split this change removes. Idempotent and
+              // cheap, so running it on a no-op attach costs a stat pass.
+              // @ref LLP 0107#every-attach [implements]: every attach path
+              //   materializes, including the one with nothing left to wire
+              await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: false, json: parsed.json })
               // @ref LLP 0174#prompt [implements]: step 4's backfill consent
               //   follows the accept path to whichever attach exit it reaches
               if (activatedViaPrompt) {
@@ -667,15 +683,21 @@ async function resolveAttachEnablementState({ name, ctx }) {
  * attach failure in this file uses (the capability gate renders its own
  * because it also owns the failure span).
  *
+ * `quiet` drops only the human stderr line, for the caller whose enable
+ * prompt already printed a truer one; the structured warn and the `--json`
+ * payload always run, because no prompt writes either and they are the only
+ * machine-readable record that this attach failed.
+ *
  * @param {{
  *   name: string,
  *   enablement: { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
  *   parsed: { dryRun: boolean, json: boolean },
  *   ctx: CommandRunContext,
+ *   quiet?: boolean,
  * }} args
  * @returns {void}
  */
-function reportAttachEnablement({ name, enablement, parsed, ctx }) {
+function reportAttachEnablement({ name, enablement, parsed, ctx, quiet = false }) {
   getLogger('cmd-attach').warn('client.attach.adapter_inactive', {
     [Attr.COMPONENT]: 'cmd-attach',
     [Attr.OPERATION]: 'client.attach',
@@ -696,6 +718,7 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
     )
     return
   }
+  if (quiet) return
   ctx.stderr.write(`error: ${enablement.message}\n`)
 }
 

@@ -2009,21 +2009,21 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
   }
   if (!ca) return null
 
+  // Started together, not one after the other: the two probes read
+  // unrelated system state (the login keychain, the launchd environment) and
+  // neither reads the other's answer, so serializing them only adds their
+  // deadlines. On the wedged host this bound exists for that is the
+  // difference between the report stalling for one probe timeout and for
+  // two. `allSettled` keeps the per-probe independence the catches gave: one
+  // rejection reports its own line unknown and leaves the other's answer.
+  const [trustedResult, launchdResult] = await Promise.allSettled([
+    isCaTrustedFn({ certPath: ca.certPath }),
+    isLaunchdEnvSetFn(),
+  ])
   /** @type {boolean | null} */
-  let trusted = null
-  try {
-    trusted = await isCaTrustedFn({ certPath: ca.certPath })
-  } catch {
-    trusted = null
-  }
-
+  const trusted = trustedResult.status === 'fulfilled' ? trustedResult.value : null
   /** @type {boolean | null} */
-  let launchdEnvSet = null
-  try {
-    launchdEnvSet = await isLaunchdEnvSetFn()
-  } catch {
-    launchdEnvSet = null
-  }
+  const launchdEnvSet = launchdResult.status === 'fulfilled' ? launchdResult.value : null
 
   return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
 }

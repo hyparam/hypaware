@@ -29,8 +29,9 @@ import { readClientActionStatus } from '../../src/core/config/action_reconciler.
  *
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  *
- * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [tests]: the explicit
- *   re-run re-arms a refused marker on the daemon-managed install too
+ * @ref LLP 0295#both-success-exits [tests]: the explicit re-run re-arms a
+ *   refused marker on the daemon-managed exit too, and does so ahead of the
+ *   asset tail that can throw
  * @ref LLP 0174#prompt [tests]: step 4's backfill consent is reached from the
  *   attach exit the accept path actually lands on here
  */
@@ -182,14 +183,20 @@ function makeProvider(name, onRun) {
  * discovery. `preEnabled` picks which of the two shapes this is: an adapter
  * already enabled coming in, or one the enable prompt turns on here.
  *
+ * `brokenAssets` makes the asset tail throw rather than warn: the plan is read
+ * through `skills.list()`, so a registry that cannot answer propagates out of
+ * `materializeClientAssets` into attach's outer catch, the same way the
+ * unguarded halves of the prune and digest passes would.
+ *
  * @param {{
  *   home: string,
  *   preEnabled: boolean,
  *   answers?: string[],
  *   backfillProvider?: ReturnType<typeof makeProvider>,
+ *   brokenAssets?: boolean,
  * }} opts
  */
-function makeDaemonManagedCtx({ home, preEnabled, answers = [], backfillProvider }) {
+function makeDaemonManagedCtx({ home, preEnabled, answers = [], backfillProvider, brokenAssets = false }) {
   /** @type {string[]} */
   const registered = preEnabled ? ['claude'] : []
   /** @type {{ name: string }[]} */
@@ -237,6 +244,15 @@ function makeDaemonManagedCtx({ home, preEnabled, answers = [], backfillProvider
     cwd: home,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
     config: { version: 2 },
+    ...(brokenAssets
+      ? {
+        skills: {
+          list() {
+            throw new Error('asset registry unavailable')
+          },
+        },
+      }
+      : {}),
     storage: { cacheRoot: home },
     query: {},
     backfillMaterializers: { get: () => undefined },
@@ -291,6 +307,28 @@ test('an explicit attach on a daemon-managed install re-arms a refused marker', 
       readClientActionStatus({ stateRoot: stateRoot(home) }).byKind.attach?.claude,
       undefined,
       'the explicit re-run is the only re-arm a refused marker gets, and this is the install shape it is run on'
+    )
+  })
+})
+
+test('the re-arm survives an asset tail that throws after it', async () => {
+  await withTempHome(async (home) => {
+    writeLocalConfig(home)
+    seedDaemonManagedAttach(home, 55555)
+    seedRefusedMarker(home)
+
+    const { ctx, stderr } = makeDaemonManagedCtx({ home, preEnabled: true, brokenAssets: true })
+    // The asset tail's throw is reported by attach's outer catch, so this run
+    // is a failure overall. That is exactly the case the ordering is for.
+    assert.equal(await runAttach(['claude'], ctx), 1)
+    assert.match(stderr.text(), /asset registry unavailable/)
+
+    // Ordered ahead of the asset tail: a failure there costs the assets, not
+    // the one re-arm a refused marker will ever be offered.
+    assert.equal(
+      readClientActionStatus({ stateRoot: stateRoot(home) }).byKind.attach?.claude,
+      undefined,
+      'the re-arm must already have landed before the tail that failed'
     )
   })
 })
