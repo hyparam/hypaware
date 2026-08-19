@@ -3,6 +3,23 @@
  * and `--remote` answer in the same shape (LLP 0264 #shared).
  */
 
+/**
+ * The caller-supplied search parameters, identical on every serving
+ * surface: `hyp query grep` locally, the `grep_search` MCP tool, and the
+ * same tool spoken to a server through `--remote`. Server-side wrappers
+ * extend this with their own routing fields (`org`); those never ride
+ * the wire from a client.
+ */
+export interface GrepSearchParams {
+  query: string
+  regex?: boolean
+  sessionId?: string
+  chainId?: string
+  from?: string
+  to?: string
+  limit: number
+}
+
 /** One matching message row, projected to locators plus bounded snippets. */
 export interface GrepSearchHit {
   date: string

@@ -449,6 +449,53 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
 }
 
 /**
+ * List the table's live data files with their identity-partition values and
+ * committed position-delete positions, for readers that walk files directly
+ * rather than scanning the table as one stream. The grep service is the
+ * consumer: its two tiers are per FILE (a sidecar-indexed file is searched
+ * through `parquetFind`, an unindexed one is brute-scanned), so it needs the
+ * file list, each file's partition `date` for the newest-first walk, and the
+ * deleted positions, because a raw file read does not apply position deletes
+ * and would otherwise resurrect purged rows (LLP 0104).
+ *
+ * Files whose manifest entry is deleted (status 2) or not parquet are
+ * excluded. An unreadable or snapshot-less table returns `[]`, matching the
+ * "empty table" degradation of `dataSourceForTable`.
+ *
+ * @param {string} tablePath
+ * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, recordCount: number, deletedPositions: Set<bigint> | undefined }[]>}
+ */
+export async function listLiveDataFiles(tablePath) {
+  if (!tableExists(tablePath)) return []
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+  /** @type {TableMetadata} */
+  let metadata
+  try {
+    ({ metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister }))
+  } catch {
+    return []
+  }
+  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
+  const dataFileMap = await findDataFileEntries(metadata, resolver)
+  if (dataFileMap.size === 0) return []
+  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  /** @type {{ filePath: string, partition: Record<string, unknown>, recordCount: number, deletedPositions: Set<bigint> | undefined }[]} */
+  const out = []
+  for (const [filePath, { partition, entry }] of dataFileMap) {
+    const file = entry.data_file
+    if (String(file.file_format).toLowerCase() !== 'parquet') continue
+    out.push({
+      filePath,
+      partition,
+      recordCount: Number(file.record_count ?? 0),
+      deletedPositions: deleted.get(filePath),
+    })
+  }
+  return out
+}
+
+/**
  * Streaming counterpart to `readRowsFromTable`. Yields rows one at a
  * time so callers (in particular `QueryStorageService.readRows`) never
  * materialize the full table in memory.
