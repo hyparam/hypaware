@@ -31,7 +31,7 @@ Run `node scripts/llp-numbers.js next` and use what it prints.
 - `check` exits nonzero when a number this branch mints is already claimed elsewhere. It runs in CI (`.github/workflows/llp-check.yml`) and in `npm test`.
 - `survey` lists every collision across every ref, including the settled ones stale branches still carry.
 
-Fetch first (`git fetch --prune --unshallow`) or the scan only sees the refs you already had; the script warns when it can tell that it is reading a shallow or single-branch checkout.
+Fetch first or the scan only sees the refs you already had: `git fetch --prune --unshallow` on a shallow clone, `git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'` on a complete one (`--unshallow` aborts there). The script warns when it can tell that it is reading a shallow or single-branch checkout, and `check` refuses outright rather than passing on a corpus it never saw.
 
 Fall back to `max(existing) + 1` over `llp/`, **and say that you did so the number is known to be a guess**, in the three cases the script cannot cover: the repository has no `scripts/llp-numbers.js` (it is a HypAware file, not part of LLP itself), the repository is not a git checkout, or LLP documents live somewhere the script does not look. The script scans `llp/` only. If another LLP tree exists in a non-standard location (some projects use `docs/site/content/llp/` or similar), scan it by hand and take the higher of the two answers. Check the project's root LLP or `CLAUDE.md` / `AGENTS.md` for any documented LLP locations.
 

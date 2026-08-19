@@ -32,6 +32,7 @@ import {
   partialScan,
   refFilesFromGit,
   scanRefFiles,
+  supersededRefs,
   run,
 } from '../../scripts/llp-numbers.js'
 
@@ -335,6 +336,108 @@ test('a checkout that cannot see the corpus says so instead of answering', t => 
   assert.match(err.join(''), /^warning: /)
 
   assert.equal(partialScan(path.join(os.tmpdir(), 'llp-numbers-no-such-checkout')), NOT_A_CHECKOUT)
+})
+
+// The tip is the working tree, so it can carry base-branch content the fork
+// point never had: an interrupted `git merge origin/master`, a
+// `git checkout origin/master -- llp/`. Read against the merge base alone, every
+// such document is newly minted here, and the branch is told to renumber one it
+// never wrote.
+test('a base-branch document sitting in this tree is inherited, not minted here', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0100-a.spec.md')
+  commit(repo, 'the fork point')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '-b', 'topic'])
+  writeDoc(repo, 'llp/0102-c.spec.md')
+  commit(repo, 'this branch mints 0102')
+
+  // Master lands 0101, and a branch cut before that landing claims it too.
+  git(repo, ['checkout', '-q', 'master'])
+  writeDoc(repo, 'llp/0101-winner.spec.md')
+  commit(repo, 'a document that reached master while topic was out')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '-b', 'stale', 'master~1'])
+  writeDoc(repo, 'llp/0101-loser.spec.md')
+  commit(repo, 'a settled collision a stale branch still carries')
+  git(repo, ['update-ref', 'refs/remotes/origin/stale', 'stale'])
+
+  // Topic pulls master in and the merge stops for a conflict elsewhere, so
+  // master's 0101 is on disk with nothing committed.
+  git(repo, ['checkout', '-q', 'topic'])
+  git(repo, ['checkout', 'origin/master', '--', 'llp/0101-winner.spec.md'])
+
+  assert.deepEqual([...mintedNumbers(repo).numbers], [102])
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 0, err.join(''))
+})
+
+// A rival that lands on the base branch first is still a collision, and the
+// inheritance rule above must not swallow it: the base branch claims the number
+// under a name this branch does not carry, so the branch really did mint it.
+test('a rival document landing on the base branch first still fails the gate', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0265-a.plan.md')
+  commit(repo, 'the fork point')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '-b', 'topic'])
+  writeDoc(repo, 'llp/0266-mine.decision.md')
+  commit(repo, 'this branch mints 0266')
+  git(repo, ['checkout', '-q', 'master'])
+  writeDoc(repo, 'llp/0266-winner.decision.md')
+  commit(repo, 'a different 0266 reaches master first')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', 'topic'])
+
+  assert.deepEqual([...mintedNumbers(repo).numbers], [266])
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 1)
+  assert.match(err.join(''), /0266-winner\.decision\.md/)
+})
+
+// Slugs get reworded after review, and the pre-rename filename lives on at
+// `refs/remotes/origin/<branch>` until the rename is pushed. That ref is
+// reachable from HEAD, so it is a prior version of this branch, not a rival, and
+// failing the gate against it prescribes renumbering a collision with yourself.
+test('renaming the slug of a number this branch minted is not a collision with itself', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0100-a.spec.md')
+  commit(repo, 'the fork point')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '-b', 'topic'])
+  writeDoc(repo, 'llp/0101-first-slug.decision.md')
+  commit(repo, 'mint 0101')
+  git(repo, ['update-ref', 'refs/remotes/origin/topic', 'topic'])
+  git(repo, ['mv', 'llp/0101-first-slug.decision.md', 'llp/0101-clearer-slug.decision.md'])
+  commit(repo, 'reword the slug of the number this branch minted')
+
+  assert.deepEqual([...supersededRefs(repo)].includes('refs/remotes/origin/topic'), true)
+  assert.deepEqual([...mintedNumbers(repo).numbers], [101])
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 0, err.join(''))
+})
+
+// A gate whose failure mode is a silent pass is issue #907 one layer up: a job
+// that lost its `fetch-depth: 0` would go green having compared one ref with
+// itself. And the remedy has to be the one that works here: `--unshallow` aborts
+// on a complete single-branch clone.
+test('the check refuses a checkout that cannot see the corpus, and names a fetch that works', t => {
+  const alone = emptyRepo(t)
+  writeDoc(alone, 'llp/0100-a.spec.md')
+  commit(alone, 'one branch, no default branch, no remote')
+  git(alone, ['checkout', '-q', '-b', 'topic'])
+  git(alone, ['branch', '-q', '-D', 'master'])
+
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], alone, () => {}, text => err.push(text)), 2)
+  const report = err.join('')
+  assert.match(report, /no default-branch ref/)
+  assert.match(report, /refs\/heads\/\*:refs\/remotes\/origin\/\*/)
+  assert.ok(!report.includes('--unshallow'), report)
 })
 
 // The in-suite half of the gate: what this branch mints has to be free in this

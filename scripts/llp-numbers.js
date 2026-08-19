@@ -36,10 +36,27 @@ const DOC_PATTERN = /^(\d{4})-.*\.md$/
 const MAX_REFS_SHOWN = 6
 
 /** The label the working tree carries when it claims a number alongside the refs. */
-export const WORKTREE = "the working tree"
+export const WORKTREE = 'the working tree'
 
 /** What `partialScan` answers when the path is not a git checkout at all. */
 export const NOT_A_CHECKOUT = 'not a git checkout, so there is no corpus to scan'
+
+/** What `partialScan` answers when the clone carries truncated history. */
+export const SHALLOW_CLONE = 'a shallow clone, so the history it carries is not the corpus'
+
+/** What `partialScan` answers when the clone carries no branch to compare against. */
+export const NO_BASE_REF = 'a checkout with no default-branch ref, so the branches it carries are not the corpus'
+
+/**
+ * The fetch that turns each partial scan into a whole one, named per case
+ * because the two are not interchangeable: `--unshallow` aborts with
+ * `fatal: --unshallow on a complete repository does not make sense` on a
+ * single-branch clone, which is the other case entirely.
+ */
+const REMEDY = new Map([
+  [SHALLOW_CLONE, 'git fetch --prune --unshallow'],
+  [NO_BASE_REF, "git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'"],
+])
 
 /** Where the default branch is looked for, first hit wins. */
 const BASE_CANDIDATES = ['refs/remotes/origin/master', 'refs/remotes/origin/main', 'refs/heads/master', 'refs/heads/main']
@@ -171,6 +188,44 @@ export function mintedAgainst(baseFiles, headFiles) {
 }
 
 /**
+ * The base branch's own documents that are sitting in this tree: inherited, not
+ * minted here. The merge base alone is the wrong floor whenever the tree carries
+ * base-branch content the fork point did not have (an interrupted `git merge`,
+ * a `git checkout origin/master -- llp/`). Every such document then reads as
+ * newly minted and the branch is told to renumber one it never wrote. Matching
+ * by basename, and only where the document is actually here, keeps the count
+ * comparison honest: a slug this branch rewrote is not in the base tip under its
+ * new name, so it stays inherited at one document, and a number the base branch
+ * claims under a name this branch does not carry stays mintable, which is how a
+ * rival document landing on master first is still caught.
+ *
+ * @param {string[]} baseFiles paths at the base branch's tip
+ * @param {string[]} tipPaths paths this branch would merge
+ * @returns {string[]}
+ */
+function inheritedFrom(baseFiles, tipPaths) {
+  const here = new Set(tipPaths.map(basename))
+  return baseFiles.filter(file => here.has(basename(file)))
+}
+
+/**
+ * Refs whose tip is reachable from HEAD. They hold no claim of their own: every
+ * document they carry is either in this tree too or was removed on the way here,
+ * so a claim only they hold is a prior version of this branch rather than a
+ * rival. Without this, renaming the slug of a number you minted and pushed fails
+ * the gate against your own pre-rename filename, still sitting on
+ * `refs/remotes/origin/<branch>`, and prescribes a renumber for a collision with
+ * yourself.
+ *
+ * @param {string} repoRoot
+ * @returns {Set<string>}
+ */
+export function supersededRefs(repoRoot) {
+  const out = tryGit(repoRoot, ['for-each-ref', '--format=%(refname)', '--merged', 'HEAD', 'refs/heads', 'refs/remotes'])
+  return new Set((out ?? '').split('\n').filter(line => line !== ''))
+}
+
+/**
  * Every ref whose content could still reach the default branch: local branches,
  * remote tracking branches, and the working tree's own ref. Tags are excluded (a
  * tag is history that already merged or never will), and so is a remote's
@@ -263,8 +318,10 @@ export function mintedNumbers(repoRoot) {
   if (base === null) return { base: null, mergeBase: null, numbers: new Set() }
   const mergeBase = tryGit(repoRoot, ['merge-base', 'HEAD', base])
   if (mergeBase === null) return { base, mergeBase: null, numbers: new Set() }
-  const numbers = mintedAgainst(refFilesFromGit(repoRoot, [mergeBase]).get(mergeBase) ?? [], tipFiles(repoRoot))
-  return { base, mergeBase, numbers }
+  const tip = tipFiles(repoRoot)
+  const inherited = inheritedFrom(refFilesFromGit(repoRoot, [base]).get(base) ?? [], tip)
+  const floor = [...refFilesFromGit(repoRoot, [mergeBase]).get(mergeBase) ?? [], ...inherited]
+  return { base, mergeBase, numbers: mintedAgainst(floor, tip) }
 }
 
 /**
@@ -281,10 +338,8 @@ export function mintedNumbers(repoRoot) {
  */
 export function partialScan(repoRoot) {
   if (tryGit(repoRoot, ['rev-parse', '--git-dir']) === null) return NOT_A_CHECKOUT
-  if (tryGit(repoRoot, ['rev-parse', '--is-shallow-repository']) === 'true') return 'a shallow clone, so the history it carries is not the corpus'
-  if (!BASE_CANDIDATES.some(ref => tryGit(repoRoot, ['rev-parse', '--verify', '--quiet', ref]) !== null)) {
-    return 'a checkout with no default-branch ref, so the branches it carries are not the corpus'
-  }
+  if (tryGit(repoRoot, ['rev-parse', '--is-shallow-repository']) === 'true') return SHALLOW_CLONE
+  if (!BASE_CANDIDATES.some(ref => tryGit(repoRoot, ['rev-parse', '--verify', '--quiet', ref]) !== null)) return NO_BASE_REF
   return null
 }
 
@@ -367,7 +422,15 @@ export function run(argv, repoRoot, write, writeError) {
     return 2
   }
   if (partial !== null) {
-    writeError(`warning: this is ${partial}. Run \`git fetch --prune --unshallow\` and fetch every branch, or this answer is a guess.\n`)
+    const remedy = REMEDY.get(partial) ?? 'git fetch --prune'
+    // `check` refuses rather than warns: a gate whose failure mode is a silent
+    // pass is the defect of issue #907 again, one layer up. A job that loses its
+    // `fetch-depth: 0` would go green having compared one ref against itself.
+    if (mode === 'check') {
+      writeError(`this is ${partial}. The check would pass without looking, so it refuses instead. Run \`${remedy}\`, or run it where the whole corpus is.\n`)
+      return 2
+    }
+    writeError(`warning: this is ${partial}. Run \`${remedy}\`, or this answer is a guess.\n`)
   }
   const refFiles = scanRefFiles(repoRoot)
   const next = nextFreeNumber(refFiles)
@@ -389,7 +452,9 @@ export function run(argv, repoRoot, write, writeError) {
     writeError(`no common ancestor with ${minted.base}, so what this branch mints cannot be told from what it inherited\n`)
     return 0
   }
-  const found = collisions(refFiles, minted.numbers)
+  const superseded = supersededRefs(repoRoot)
+  const rivals = new Map([...refFiles].filter(([ref]) => !superseded.has(ref)))
+  const found = collisions(rivals, minted.numbers)
   if (found.length === 0) {
     write(`${minted.numbers.size} LLP number${minted.numbers.size === 1 ? '' : 's'} minted against ${minted.base}, no collision\n`)
     return 0
