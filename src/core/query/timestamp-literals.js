@@ -3,10 +3,44 @@
 /**
  * @import { ExprNode, SelectStatement, Statement } from 'squirreling/src/ast.js'
  * @import { QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { TimestampScope } from '../../../src/core/query/types.js'
  */
 
 /** Comparison operators that take an implicit literal coercion in SQL. */
 const COMPARISON_OPS = new Set(['=', '==', '!=', '<>', '<', '>', '<=', '>='])
+
+/**
+ * Calls whose result carries the type of an argument, and which argument
+ * positions carry it. `undefined` means every argument does. A bound written
+ * on such a call is a bound on the column underneath it, and it fails the
+ * same silent way a bare column did: `having max(message_created_at) >= '...'`
+ * is the idiom `docs/ACCEPTANCE.md` itself uses, and `HAVING` almost always
+ * holds an aggregate rather than a bare reference.
+ *
+ * Positions matter. `min_by(value, key)` takes only `value`'s type, so typing
+ * a literal from `key` would coerce it against the wrong column, which is the
+ * wrong-rows failure this rewrite exists to avoid. Functions that change the
+ * type (`epoch`, `extract`, `date_diff`, `cast`) are absent on purpose.
+ *
+ * @type {Map<string, number[] | undefined>}
+ * @ref LLP 0272#scope [implements]: a bound on a type-preserving call is a bound on the column under it
+ */
+const TYPE_PRESERVING_ARGS = new Map([
+  ['MIN', undefined],
+  ['MAX', undefined],
+  ['ANY_VALUE', undefined],
+  ['COALESCE', undefined],
+  ['NULLIF', undefined],
+  ['GREATEST', undefined],
+  ['LEAST', undefined],
+  ['MIN_BY', [0]],
+  ['ARG_MIN', [0]],
+  ['MAX_BY', [0]],
+  ['ARG_MAX', [0]],
+  ['LAG', [0, 2]],
+  ['LEAD', [0, 2]],
+  ['DATE_TRUNC', [1]],
+])
 
 /**
  * The shapes squirreling's `toDate` (and icebird's mirror of it) accept: an
@@ -64,7 +98,7 @@ export class TimestampLiteralError extends Error {
  * @ref LLP 0272 [implements]: string literals are typed by the column they are compared against, before the pushdown sees them
  */
 export function coerceTimestampLiterals(statement, registry) {
-  rewriteStatement(statement, registry, new Set())
+  rewriteStatement(statement, registry, new Set(), undefined)
   return statement
 }
 
@@ -72,8 +106,9 @@ export function coerceTimestampLiterals(statement, registry) {
  * @param {Statement} statement
  * @param {QueryRegistry} registry
  * @param {Set<string>} shadowed table names bound to a CTE rather than a dataset
+ * @param {TimestampScope | undefined} outer enclosing scope, for a correlated reference
  */
-function rewriteStatement(statement, registry, shadowed) {
+function rewriteStatement(statement, registry, shadowed, outer) {
   if (statement.type === 'with') {
     // A CTE is visible to its siblings that follow it and to the outer query,
     // and it shadows any dataset of the same name. Held lower-cased because
@@ -83,43 +118,51 @@ function rewriteStatement(statement, registry, shadowed) {
     // actually supplies.
     const inner = new Set(shadowed)
     for (const cte of statement.ctes) {
-      rewriteStatement(cte.query, registry, inner)
+      // A CTE body cannot reference the query it is attached to, so it never
+      // inherits the correlated scope the attached query may have.
+      rewriteStatement(cte.query, registry, inner, undefined)
       inner.add(cte.name.toLowerCase())
     }
-    rewriteStatement(statement.query, registry, inner)
+    rewriteStatement(statement.query, registry, inner, outer)
     return
   }
   if (statement.type === 'compound') {
-    rewriteStatement(statement.left, registry, shadowed)
-    rewriteStatement(statement.right, registry, shadowed)
+    rewriteStatement(statement.left, registry, shadowed, outer)
+    rewriteStatement(statement.right, registry, shadowed, outer)
     return
   }
-  rewriteSelect(statement, registry, shadowed)
+  rewriteSelect(statement, registry, shadowed, outer)
 }
 
 /**
  * @param {SelectStatement} select
  * @param {QueryRegistry} registry
  * @param {Set<string>} shadowed
+ * @param {TimestampScope | undefined} outer
  */
-function rewriteSelect(select, registry, shadowed) {
-  // Nested scopes first: each one resolves its own columns against its own
-  // FROM, so a subquery never borrows this select's types.
-  if (select.from?.type === 'subquery') rewriteStatement(select.from.query, registry, shadowed)
+function rewriteSelect(select, registry, shadowed, outer) {
+  const scope = timestampScope(select, registry, shadowed, outer)
+
+  // Nested scopes first. A relation in FROM or JOIN resolves entirely against
+  // its own tables and cannot see this select's, so it gets no outer scope; a
+  // subquery in expression position can be correlated, so it gets this one.
+  if (select.from?.type === 'subquery') rewriteStatement(select.from.query, registry, shadowed, undefined)
   for (const join of select.joins) {
-    if (join.subquery) rewriteStatement(join.subquery.query, registry, shadowed)
+    if (join.subquery) rewriteStatement(join.subquery.query, registry, shadowed, undefined)
   }
   const exprs = selectExprs(select)
-  for (const expr of exprs) rewriteExprStatements(expr, registry, shadowed)
+  for (const expr of exprs) rewriteExprStatements(expr, registry, shadowed, scope)
 
   // Every clause this select holds, not just WHERE: the same
   // Date-against-string comparison is false for every row wherever it sits,
   // so `select case when ts > '...' then 1 end` and `order by ts > '...'`
   // fail the same silent way the reported WHERE did.
-  const scope = timestampScope(select, registry, shadowed)
-  if (scope.agreed.size > 0) {
-    for (const expr of exprs) rewriteExpr(expr, scope)
-  }
+  //
+  // Unconditionally: a select whose own tables declare no TIMESTAMP (or whose
+  // in-scope tables contradict each other, emptying `agreed`) can still hold a
+  // qualified reference into a relation that does, or a correlated one into an
+  // enclosing scope. `rewriteExpr` is a no-op when nothing resolves.
+  for (const expr of exprs) rewriteExpr(expr, scope)
 }
 
 /**
@@ -158,17 +201,42 @@ function selectExprs(select) {
  * happens to share the column name: a wrong coercion returns wrong rows,
  * which is the failure this exists to end.
  *
+ * Every relation is still recorded in `bound`, schema or not, so a qualifier
+ * this select binds stops the correlated walk into `outer` instead of
+ * borrowing an enclosing relation that happens to share the alias.
+ *
  * @param {SelectStatement} select
  * @param {QueryRegistry} registry
  * @param {Set<string>} shadowed
- * @returns {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }}
+ * @param {TimestampScope | undefined} outer
+ * @returns {TimestampScope}
  */
-function timestampScope(select, registry, shadowed) {
+function timestampScope(select, registry, shadowed, outer) {
   /** @type {{ table: string, alias?: string }[]} */
   const tables = []
-  if (select.from?.type === 'table') tables.push({ table: select.from.table, alias: select.from.alias })
+  /** @type {Set<string>} */
+  const bound = new Set()
+  /** @param {string | undefined} name */
+  const bind = (name) => {
+    if (name) bound.add(name.toLowerCase())
+  }
+  if (select.from?.type === 'table') {
+    tables.push({ table: select.from.table, alias: select.from.alias })
+  } else if (select.from) {
+    bind(select.from.alias)
+  }
   for (const join of select.joins) {
-    if (join.table && !join.subquery && !join.fromFunction) tables.push({ table: join.table, alias: join.alias })
+    if (join.table && !join.subquery && !join.fromFunction) {
+      tables.push({ table: join.table, alias: join.alias })
+    } else {
+      bind(join.alias)
+      bind(join.subquery?.alias)
+      bind(join.fromFunction?.alias)
+    }
+  }
+  for (const { table, alias } of tables) {
+    bind(table)
+    bind(alias)
   }
 
   /** @type {Map<string, boolean>} */
@@ -199,34 +267,34 @@ function timestampScope(select, registry, shadowed) {
   for (const [name, isTimestamp] of seenTypes) {
     if (isTimestamp) agreed.add(name)
   }
-  return { agreed, byRelation }
+  return { agreed, byRelation, bound, outer }
 }
 
 /**
  * Nested statements an expression can carry. Each resolves against its own
- * FROM, so it is rewritten as a statement rather than with the enclosing
- * select's columns.
+ * FROM first, with the enclosing scope behind it for a correlated reference.
  *
  * @param {ExprNode} node
  * @param {QueryRegistry} registry
  * @param {Set<string>} shadowed
+ * @param {TimestampScope} scope the enclosing select's scope
  */
-function rewriteExprStatements(node, registry, shadowed) {
+function rewriteExprStatements(node, registry, shadowed, scope) {
   if (node.type === 'in') {
-    rewriteExprStatements(node.expr, registry, shadowed)
-    rewriteStatement(node.subquery, registry, shadowed)
+    rewriteExprStatements(node.expr, registry, shadowed, scope)
+    rewriteStatement(node.subquery, registry, shadowed, scope)
     return
   }
   if (node.type === 'subquery' || node.type === 'exists' || node.type === 'not exists') {
-    rewriteStatement(node.subquery, registry, shadowed)
+    rewriteStatement(node.subquery, registry, shadowed, scope)
     return
   }
-  for (const child of childExprs(node)) rewriteExprStatements(child, registry, shadowed)
+  for (const child of childExprs(node)) rewriteExprStatements(child, registry, shadowed, scope)
 }
 
 /**
  * @param {ExprNode} node
- * @param {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }} scope
+ * @param {TimestampScope} scope
  */
 function rewriteExpr(node, scope) {
   if (node.type === 'binary' && COMPARISON_OPS.has(node.op)) {
@@ -274,23 +342,72 @@ function childExprs(node) {
 }
 
 /**
- * The column name if this operand is a reference to a TIMESTAMP column in
+ * The column name if this operand carries the type of a TIMESTAMP column in
  * scope, otherwise undefined. A qualified reference is resolved through its
  * qualifier, so `s.message_created_at` against a joined derived table stays a
  * string comparison even when a base table in the same scope declares that
  * name TIMESTAMP; an unqualified one falls back to the names every base table
- * agrees on.
+ * agrees on. A type-preserving call is looked through to the argument that
+ * carries its type, so `max(ts)` types like `ts` does.
  *
  * @param {ExprNode} node
- * @param {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }} scope
+ * @param {TimestampScope} scope
  * @returns {string | undefined}
  */
 function timestampOperand(node, scope) {
-  if (node.type !== 'identifier') return undefined
-  if (node.prefix !== undefined) {
-    return scope.byRelation.get(node.prefix.toLowerCase())?.has(node.name) ? node.name : undefined
+  if (node.type === 'identifier') {
+    if (node.prefix === undefined) return scope.agreed.has(node.name) ? node.name : undefined
+    return qualifiedIsTimestamp(node.prefix.toLowerCase(), node.name, scope) ? node.name : undefined
   }
-  return scope.agreed.has(node.name) ? node.name : undefined
+  if (node.type === 'function' || node.type === 'window') {
+    for (const arg of typeCarryingArgs(node.funcName, node.args)) {
+      const column = timestampOperand(arg, scope)
+      if (column) return column
+    }
+  }
+  return undefined
+}
+
+/**
+ * The arguments whose type this call's result takes, empty when the call is
+ * not type-preserving.
+ *
+ * @param {string} funcName
+ * @param {ExprNode[]} args
+ * @returns {ExprNode[]}
+ */
+function typeCarryingArgs(funcName, args) {
+  const name = funcName.toUpperCase()
+  if (!TYPE_PRESERVING_ARGS.has(name)) return []
+  const positions = TYPE_PRESERVING_ARGS.get(name)
+  if (!positions) return args
+  return positions.map((index) => args[index]).filter((arg) => arg !== undefined)
+}
+
+/**
+ * Whether a qualified reference names a TIMESTAMP column, resolved through
+ * the scope chain: this select's relations first, then the enclosing ones,
+ * which is how SQL resolves a correlated reference from inside an `EXISTS`
+ * or `IN` subquery. A qualifier this select binds ends the walk even when its
+ * schema is unknown (a CTE, a derived table), so an inner alias never borrows
+ * an enclosing relation that happens to share its name.
+ *
+ * @param {string} prefix lower-cased qualifier
+ * @param {string} name
+ * @param {TimestampScope} scope
+ * @returns {boolean}
+ * @ref LLP 0272#scope [implements]: a qualified reference resolves through its qualifier, outward
+ */
+function qualifiedIsTimestamp(prefix, name, scope) {
+  /** @type {TimestampScope | undefined} */
+  let current = scope
+  while (current !== undefined) {
+    const declared = current.byRelation.get(prefix)
+    if (declared) return declared.has(name)
+    if (current.bound.has(prefix)) return false
+    current = current.outer
+  }
+  return false
 }
 
 /**
