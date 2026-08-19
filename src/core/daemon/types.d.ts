@@ -397,13 +397,15 @@ export interface ProxyTrustReport {
   /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
   launchdEnvSet: boolean | null
   /**
-   * Whether the effective gateway entry still carries `proxy_mode: true`.
+   * Whether an enabled gateway entry in the effective config still carries
+   * `proxy_mode: true`, or null when the config could not be read at all.
    * The two probes above cannot tell a CA in live use from residue an old
    * proxy attach left behind, and the advice differs completely: a
    * proxy-mode gateway re-mints this CA on every start and terminates TLS
-   * with it, so purging it breaks capture rather than tidying it up.
+   * with it, so purging it breaks capture rather than tidying it up. Null is
+   * "cannot tell", which a consumer must not read as "proxy_mode is off".
    */
-  proxyModeConfigured: boolean
+  proxyModeConfigured: boolean | null
 }
 
 export interface HypAwareStatusReport {

@@ -514,7 +514,9 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
         // Whether the CA is live or residue, which neither probe above can
-        // answer and which decides whether purging it is safe.
+        // answer and which decides whether purging it is safe. Tri-state like
+        // its siblings: `null` means the config could not be read, which a
+        // consumer must not read as "proxy_mode is off".
         proxy_mode_configured: report.proxyTrust.proxyModeConfigured,
       }
       : null,
@@ -758,14 +760,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     // gateway re-mint and present it on every start, so a purge there is not
     // tidying up, it is deleting the key the running interception terminates
     // TLS with. Residue gets the purge; live proxy capture gets told what
-    // still depends on the CA and nothing to run.
+    // still depends on the CA and nothing to run; a config we could not read
+    // gets neither, because "cannot tell" is not "safe to delete".
+    //
+    // The live branch names no client: `proxy_mode` is retained for codex,
+    // claude-desktop, openclaw, hermes, and raw SDK traffic, so the client
+    // this CA is actually serving here is not knowable from the trust state.
+    // The residue branch has to name one, because `hyp client detach` takes a
+    // client; that command detaches it as well as purging, which the note
+    // states rather than leaving the user to discover it.
     // @ref LLP 0262#migration [implements]: the CA and any trust it was granted outlive the migration and end at `detach --purge`, never at another attach
-    if (report.proxyTrust.proxyModeConfigured) {
+    if (report.proxyTrust.proxyModeConfigured === null) {
+      stdout.write(
+        '    note:           the config could not be read, so whether this CA is live or residue is unknown\n'
+      )
+      stdout.write(
+        '                    fix the config first: purging a CA a proxy_mode gateway presents breaks capture\n'
+      )
+    } else if (report.proxyTrust.proxyModeConfigured) {
       stdout.write(
         '    note:           proxy_mode is on, so the gateway still terminates TLS with this CA\n'
       )
       stdout.write(
-        '                    the claude attach does not use it; turn proxy_mode off before purging\n'
+        '                    the clients captured through the proxy need it; turn proxy_mode off before purging\n'
       )
     } else {
       stdout.write(
@@ -773,6 +790,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       )
       stdout.write(
         "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
+      )
+      stdout.write(
+        '                    it detaches claude on the way, so re-attach it afterwards to keep capturing\n'
       )
     }
   }

@@ -94,6 +94,10 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
     assert.match(text, /note: {11}only proxy_mode capture uses this CA/)
     assert.match(text, /hyp client detach claude --purge/)
     assert.doesNotMatch(text, /hyp client attach claude/)
+    // The command named is not a CA-only purge: it runs the full detach for
+    // `claude` first, which strips the managed `env` block that is this
+    // machine's whole capture path. Advice that ends capture has to say so.
+    assert.match(text, /it detaches claude on the way, so re-attach it afterwards to keep capturing/)
 
     const json = renderStatusJson({
       report,
@@ -273,6 +277,10 @@ test('a live proxy_mode gateway is never told to purge the CA it is using', asyn
     assert.match(text, /proxy_mode is on, so the gateway still terminates TLS with this CA/)
     assert.doesNotMatch(text, /hyp client detach claude --purge/, 'the purge would break live capture')
     assert.doesNotMatch(text, /hyp client attach claude/)
+    // proxy_mode is retained for codex, claude-desktop, openclaw, hermes and
+    // raw SDK traffic (LLP 0262 #migration), so the trust state cannot say
+    // which client this CA is serving and the note must not guess one.
+    assert.doesNotMatch(text, /the claude attach does not use it/)
 
     const json = renderStatusJson({
       report,
@@ -281,6 +289,67 @@ test('a live proxy_mode gateway is never told to purge the CA it is using', asyn
       cacheRoot: path.join(stateRoot, 'cache'),
     })
     assert.equal(json.proxy_trust?.proxy_mode_configured, true)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A gateway entry the config disables is not what runs, so its `proxy_mode`
+// key does not make this CA live. Reading it as live would withhold the purge
+// from the one machine where purging is unambiguously safe.
+test('a disabled gateway entry does not make the CA live', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({
+        version: 2,
+        plugins: [{
+          name: '@hypaware/ai-gateway',
+          enabled: false,
+          config: { proxy_mode: true },
+        }],
+      }) + '\n'
+    )
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.proxyTrust?.proxyModeConfigured, false)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.match(text, /hyp client detach claude --purge/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The population this protects: a config the user has just broken, on a
+// machine whose gateway is still running `proxy_mode: true` from its last
+// good boot. `config` is null there, and rounding that to "proxy_mode is off"
+// would hand exactly that machine the purge for the CA its live interception
+// terminates TLS with.
+// @ref LLP 0262#migration [tests]: the purge is offered for a CA nothing here uses, and a config we cannot read is not proof of that
+test('a config that will not parse is reported as unknown, not as proxy_mode off', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    await fs.writeFile(defaultConfigPath(hypHome), '{ this is not json\n')
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.proxyTrust?.proxyModeConfigured, null)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.match(text, /whether this CA is live or residue is unknown/)
+    assert.doesNotMatch(text, /hyp client detach claude --purge/, 'the CA may be in live use')
+    assert.doesNotMatch(text, /hyp client attach claude/)
+
+    const json = renderStatusJson({
+      report,
+      clientNames: [],
+      datasets: [],
+      cacheRoot: path.join(stateRoot, 'cache'),
+    })
+    assert.equal(json.proxy_trust?.proxy_mode_configured, null)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

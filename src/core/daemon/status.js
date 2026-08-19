@@ -2032,8 +2032,22 @@ async function collectProxyTrust({ platform, stateRoot, config, isCaTrustedFn, i
   /** @type {boolean | null} */
   const launchdEnvSet = launchdResult.status === 'fulfilled' ? launchdResult.value : null
 
-  const gateway = (config?.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN_NAME)
-  const proxyModeConfigured = gateway?.config?.proxy_mode === true
+  // Tri-state for the same reason the two probes above are: a plain `false`
+  // sends the caller's note to "this CA is residue, purge it", which is the
+  // wrong advice for a machine whose gateway is still intercepting. `config`
+  // is null when the local config would not parse and no central layer covers
+  // for it, and a config we could not read is not a config with `proxy_mode`
+  // off. A disabled gateway entry is skipped for the same reason
+  // `activePlugins` skips it: it is not what runs.
+  /** @type {boolean | null} */
+  const proxyModeConfigured = config === null
+    ? null
+    : (config.plugins ?? []).some(
+      (entry) =>
+        entry.name === GATEWAY_PLUGIN_NAME &&
+        entry.enabled !== false &&
+        entry.config?.proxy_mode === true
+    )
 
   return {
     caFingerprint: ca.fingerprint,
