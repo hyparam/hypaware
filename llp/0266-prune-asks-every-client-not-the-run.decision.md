@@ -93,7 +93,8 @@ still contributed?" comes from that, not from the run's own plan.
 
 - A skill or subagent whose `clients` narrows to a client that shares its asset
   directory with another survives the next scoped attach, where before it was
-  deleted by it and never re-installed.
+  deleted by it and never re-installed. Surviving is all it gets: that attach
+  does not refresh the bytes either, see #open-kept-not-refreshed.
 - The keep-set no longer depends on which clients a run was scoped to, so
   `hyp attach claude`, the reconciler's attach, the wizard finale, and
   `hyp skills install --client all` all reach the same verdict about the same
@@ -127,3 +128,26 @@ still contributed?" comes from that, not from the run's own plan.
   its own weighing, and keying the ledger on `dest` with a set of contributing
   clients is a format change to a file older versions read. Recorded here so
   that work starts from this paragraph rather than from a fresh diagnosis.
+
+- **A kept dest is never refreshed by the run that keeps it**
+  {#open-kept-not-refreshed}. Keeping a path is not maintaining it. A
+  `claude`-scoped run's own plan no longer contains a dest whose contribution
+  narrowed to `claude-desktop`, and the widened pass only answers "is this still
+  contributed?" - it never copies. The bytes under `~/.claude/skills/<name>`
+  therefore stay at whatever the last run that *planned* them wrote, while the
+  source keeps changing underneath, and the one automatic path never closes the
+  gap: the reconciler attaches no probe-less client, so nothing scoped to
+  `claude-desktop` ever runs on its own.
+
+  This is not a hole the widening opened so much as one it uncovers. Before it,
+  the same scoped run deleted that copy outright and nothing re-installed it,
+  which is strictly worse than a stale copy; #contributions-not-the-run moves the
+  failure from "gone" to "old" and stops there deliberately. It is left open
+  because the obvious close, having a scoped run copy every dest the widened plan
+  keeps, would make `hyp attach claude` install contributions nobody asked it to
+  install, which is the very thing "the widened pass is silent" refuses on the
+  reporting side; and the narrower "copy only what lands in this client's own
+  asset directories" changes what a scoped run *is*, which needs its own weighing
+  rather than a rider on this one. Until then the refresh exists, it is just not
+  automatic: `hyp skills install` is `--client all`, and an explicit
+  `hyp attach claude-desktop` plans the dest too.
