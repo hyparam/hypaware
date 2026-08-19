@@ -1,6 +1,7 @@
 import type {
   CapabilityRegistry,
   HypAwareV2Config,
+  VerbInputSchema,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -463,4 +464,19 @@ export interface ClientResult {
   error_kind?: string
   /** Human-readable error message on the error path. */
   error?: string
+}
+
+/**
+ * The whole argument surface of one core command: the schema its parser
+ * enforces and the usage line the registry advertises, authored together
+ * so a flag can never appear in one and not the other. Lives in
+ * `src/core/cli/command_args.js`.
+ */
+export interface CoreCommandArgSpec {
+  /** Registered usage line, without the `usage: ` prefix. */
+  usage: string
+  /** Schema `parseCommandArgv` enforces for this command. */
+  schema: VerbInputSchema
+  /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
+  aliases?: Record<string, string>
 }

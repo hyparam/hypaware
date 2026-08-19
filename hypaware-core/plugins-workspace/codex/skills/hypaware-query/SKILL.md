@@ -24,14 +24,14 @@ Whichever you choose, the answer you give the user must **say what you actually 
 2. **Cache freshness.** Query commands default to `--refresh auto`, and **stale partitions are still served**, with only a `warning: query cache last refreshed at …` line on stderr. Surface that timestamp to the user so they know the result may miss newer source rows. Force currency with `--refresh always`, or refresh one dataset with `hyp cache refresh <dataset>` (bare `hyp cache refresh` does every dataset - prefer the targeted form). A query that errors on a missing partition takes the same two moves.
 3. **Always read stderr; never `2>/dev/null`.** Errors, staleness warnings, and withheld-row notices all land there; an empty stdout is indistinguishable from zero rows; and a zero exit code does not mean the cache is current. This bites hardest in shell loops over several datasets, where a silent failure reads as an empty dataset. **`2>&1` and `| head`/`| tail` are the same mistake wearing a disguise**: merging the streams interleaves notices into stdout and breaks `--format json` parsing, and a `| head -20` then cuts whichever half falls past the limit. Leave stderr unmerged and bound the result with `--max-bytes <n>` or `--output <file>` instead of a pager.
 4. **A short result is not a small result set.** Inline output is context-budgeted, not row-capped: string cells truncate to ~200 code points (a `…(+N)` marker shows what was elided), and rows drop once a ~32KB row-data budget is hit, with `notice: showing X of Y rows …` on stderr. **Never read a reduced row count as "fewer rows matched".** For a complete result, spill to a file with `--output <file>` (stdout gets only a receipt, so the data never floods context) and post-process the file; or lift the caps with `--max-cell <n>` / `--max-bytes <n>` (`0` disables either). Use `--format json` for follow-up reasoning and `--format markdown` for tables you show the user.
-5. For unfamiliar tables, run `hyp query schema <table> --format json` first. Datasets sharing a logical shape can still have different column sets (e.g. per-user `agent_logs_*` S3 datasets), so check each before writing cross-table SQL. If `schema` reports `columns: 0` for a dataset that is still queryable, fall back to `SELECT * FROM <table> LIMIT 1`; failed queries also list the available columns in the error message.
+5. For unfamiliar tables, run `hyp query schema <table>` first. Datasets sharing a logical shape can still have different column sets (e.g. per-user `agent_logs_*` S3 datasets), so check each before writing cross-table SQL. If `schema` reports `columns: 0` for a dataset that is still queryable, fall back to `SELECT * FROM <table> LIMIT 1`; failed queries also list the available columns in the error message.
 
 ## Common Commands
 
 ```bash
 hyp query overview --json                              # orientation map: which models/days/repos/tools have data (--sql prints its queries)
 hyp cache status
-hyp query schema <table> --format json
+hyp query schema <table>
 hyp query sql "<sql>" --format json
 hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp cache refresh <dataset>
@@ -96,7 +96,7 @@ Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, 
 
 OpenClaw records to multiple sources depending on route: direct provider calls from OpenClaw's own client land under `conversation_source = 'openclaw'` (backfilled from its session store), but runs where OpenClaw drives Claude Code (e.g. on a Claude Code subscription, via the Agent SDK) are captured by the Claude adapter with `entrypoint = 'sdk-cli'`, under `conversation_source = 'claude_code'` when captured live through the gateway or `'claude'` when backfilled from the transcript. Do not filter those runs by a single source label; the reliable filter for all OpenClaw activity across every label is `cwd LIKE '%/.openclaw/%'`.
 
-Run `hyp query schema ai_gateway_messages --format markdown` for the authoritative column reference.
+Run `hyp query schema ai_gateway_messages` for the authoritative column reference.
 
 ## The activity graph: `node` / `edge`
 

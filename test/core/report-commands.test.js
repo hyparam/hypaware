@@ -202,6 +202,52 @@ test('publish forwards an explicit --org (the admin-token form)', async (t) => {
   assert.equal(calls[0].url.searchParams.get('org'), 'acme')
 })
 
+// `--org` was the last argv reader left in the file. `valueFlag()` drops a
+// dash-leading value, so the gate blessed `--org -acme` and the request went
+// out with no org at all; and `valueFlag()` reads the FIRST occurrence while
+// the codec validates the LAST, so a repeated flag validated one org and sent
+// another.
+test('publish forwards a dash-leading --org rather than dropping it', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-6', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p', '--org', '-acme'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('org'), '-acme')
+})
+
+test('publish sends the --org the gate validated when the flag repeats', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-7', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p', '--org', 'a', '--org', 'b'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('org'), 'b')
+})
+
+// The gate accepts any string for --title, so a title whose first character
+// is '-' is valid input. Reading it back with `valueFlag()` dropped it and
+// published untitled, exit 0, with nothing on stderr to say so.
+test('publish carries a --title that starts with a dash', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-4', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p', '--title', '-Q3 rollup'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('title'), '-Q3 rollup')
+})
+
+test('publish accepts the inline --flag=value form the gate parses', async (t) => {
+  const { file } = await tmpReportFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-5', kind: 'k', period: 'p' } } }))
+  const { ctx } = ctxWith()
+  const code = await runReportPublish([file, '--kind=k', '--period=p', '--title=Weekly'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('kind'), 'k')
+  assert.equal(calls[0].url.searchParams.get('period'), 'p')
+  assert.equal(calls[0].url.searchParams.get('title'), 'Weekly')
+})
+
 /* ---------- list ---------- */
 
 test('list renders the index newest first and passes filters through', async (t) => {
@@ -220,6 +266,17 @@ test('list renders the index newest first and passes filters through', async (t)
   const text = out.join('')
   assert.match(text, /usage-review\/2026-W29\trpt-b\t1200 bytes\tWeekly/)
   assert.match(text, /usage-review\/2026-W28\trpt-a\t900 bytes/)
+})
+
+// Same class as the --title drop above: a dash-leading filter value the gate
+// blessed reached the server as no filter at all, so the caller got the
+// default listing and exit 0 instead of the server's refusal.
+test('list forwards a dash-leading filter value instead of dropping it', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports: [] } }))
+  const { ctx } = ctxWith()
+  const code = await runReportList(['--limit', '-5'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls[0].url.searchParams.get('limit'), '-5')
 })
 
 test('list --json prints the raw records', async (t) => {

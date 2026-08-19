@@ -1,7 +1,8 @@
 // @ts-check
 
 import path from 'node:path'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
@@ -195,7 +196,7 @@ function parsePluginInstallArgs(argv) {
       yes: { type: 'boolean', default: false },
     },
     positional: ['source'],
-  }, { aliases: { '-y': '--yes' } })
+  }, { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } })
   if ('help' in parsed) return { ok: false, code: 2, message: PLUGIN_INSTALL_USAGE }
   if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
   const p = /** @type {{ source?: string, ref?: string, path?: string, yes: boolean }} */ (parsed.params)
@@ -216,7 +217,9 @@ function parsePluginInstallArgs(argv) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('plugin list', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
@@ -272,11 +275,9 @@ export async function runPluginList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginInfo(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin info <plugin>\n')
-    return 2
-  }
-  const name = argv[0]
+  const parsed = parseCoreCommandArgv('plugin info', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.plugin)
   const stateDir = pluginStateDir(ctx)
   const lock = await loadLock(stateDir)
   const entry = lock.plugins[name]
@@ -305,7 +306,9 @@ export async function runPluginInfo(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginOutdated(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('plugin outdated', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
   const entries = await listInstalledPlugins(stateDir)
   const outdated = entries.filter((e) => e.update?.available === true)
@@ -413,7 +416,7 @@ function parsePluginUpdateArgs(argv) {
       yes: { type: 'boolean', default: false },
     },
     positional: ['plugin'],
-  }, { aliases: { '-y': '--yes' } })
+  }, { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } })
   if ('help' in parsed) return { ok: false, code: 2, message: 'usage: hyp plugin update [plugin] [--yes]' }
   if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
   const p = /** @type {{ plugin?: string, yes: boolean }} */ (parsed.params)
@@ -425,11 +428,9 @@ function parsePluginUpdateArgs(argv) {
  * @param {CommandRunContext} ctx
  */
 export async function runPluginRemove(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin remove <plugin>\n')
-    return 2
-  }
-  const name = argv[0]
+  const parsed = parseCoreCommandArgv('plugin remove', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.plugin)
   const stateDir = pluginStateDir(ctx)
   const result = await removePlugin({ name, stateDir })
   if (!result.ok) {

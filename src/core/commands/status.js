@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -31,7 +32,9 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  * @returns {Promise<number>}
  */
 export async function runStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
 
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
@@ -120,13 +123,9 @@ export async function runStatus(argv, ctx) {
  * @ref LLP 0248#client-status [implements]: client status projects the overall status collector
  */
 export async function runClientStatus(argv, ctx) {
-  const json = argv.includes('--json')
-  const positional = argv.filter((token) => token !== '--json')
-  const unknownFlag = positional.find((token) => token.startsWith('-'))
-  if (unknownFlag || positional.length > 1) {
-    ctx.stderr.write(`usage: hyp client status [client] [--json]\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('client status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
 
   const report = await collectHypAwareStatus({
     env: ctx.env,
@@ -138,7 +137,7 @@ export async function runClientStatus(argv, ctx) {
       storage: ctx.storage,
     },
   })
-  const requested = positional[0]
+  const requested = typeof parsed.params.client === 'string' ? parsed.params.client : undefined
   const clients = requested
     ? report.clients.filter((client) => client.name === requested)
     : report.clients
