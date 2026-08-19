@@ -373,6 +373,13 @@ function checkCommandHelp(manifest, registered, out) {
     // registrable group. Comparing head tokens only would warn about a group
     // that renders correctly for `hyp query cache --help`.
     if ([...declared.keys()].some((name) => name === group.name || name.startsWith(`${group.name} `))) continue
+    // A group whose registered commands are ALL hidden is correctly absent
+    // from the manifest: D3 makes omission the mechanism that keeps an
+    // internal command out of pre-boot help, so warning here would ask the
+    // author to declare exactly what `hidden` exists to hide, and the bundled
+    // gate (D2) would then fail with no way to satisfy both rules at once.
+    // @ref LLP 0267#d3 [constrained-by]: the group warning must not undo the hidden exemption
+    if (registersOnlyHidden(registered, group.name)) continue
     out.push({
       kind: 'command_help_drift',
       severity: 'warn',
@@ -397,6 +404,21 @@ function checkCommandHelp(manifest, registered, out) {
  */
 function isHiddenCommand(registered, name) {
   return registered.commandDetails.some((c) => c.name === name && c.hidden)
+}
+
+/**
+ * Is every command registered under `group` hidden? A group with nothing
+ * registered under it answers false: an empty namespace is exactly the case
+ * the group warning exists for, and a description with neither a declared nor
+ * a registered command under it describes nothing.
+ *
+ * @param {RegisteredSnapshot} registered
+ * @param {string} group
+ * @returns {boolean}
+ */
+function registersOnlyHidden(registered, group) {
+  const under = registered.commandDetails.filter((c) => c.name === group || c.name.startsWith(`${group} `))
+  return under.length > 0 && under.every((c) => c.hidden)
 }
 
 /**

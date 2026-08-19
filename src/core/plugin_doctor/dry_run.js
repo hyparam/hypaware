@@ -12,7 +12,7 @@ import { createPluginPaths } from '../runtime/paths.js'
 import { createSourceRegistry } from '../registry/sources.js'
 
 /**
- * @import { ActivePlugin, PluginManifest } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, PluginManifest, SourceContribution, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { DryRunResult, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
@@ -32,7 +32,8 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  * - builds a throwaway `KernelRuntime`, so registrations never touch the
  *   live kernel;
  * - roots all plugin paths in a fresh `mkdtemp` directory that is
- *   removed before returning, so no state leaks into `<HYP_HOME>`;
+ *   removed before returning, and points `ctx.env.HYP_HOME` at that same
+ *   directory, so no state leaks into the caller's `<HYP_HOME>`;
  * - hands the plugin a source registry whose `start()` never runs the
  *   contribution. `@hypaware/otel` starts its own OTLP source from
  *   `activate()`, which binds a real port; a diagnostic pass must not
@@ -99,7 +100,17 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
     })
     /** @type {ActivePlugin} */
     const plugin = { name: manifest.name, version: manifest.version, manifest, rootDir }
-    const ctx = createActivationContext({ runtime, plugin, paths, config: {} })
+    // `ctx.env` defaults to `process.env`, which points a plugin that reads
+    // `HYP_HOME` during `activate()` at the caller's real install:
+    // `@hypaware/local-fs` mkdirs `<HYP_HOME>/exports` from `activate()`, so
+    // merely diagnosing it wrote into the home directory this function
+    // promises not to touch. Redirect `HYP_HOME` at the throwaway root the
+    // rest of the dry run already uses. The rest of the environment is passed
+    // through: this is a diagnostic, not a sandbox (see the trust boundary
+    // above), and a plugin that reads `PATH` should see what it would see for
+    // real.
+    const env = { ...process.env, HYP_HOME: tmpRoot }
+    const ctx = createActivationContext({ runtime, plugin, paths, config: {}, env })
 
     const entrypointAbs = path.resolve(rootDir, manifest.entrypoint)
     let mod
@@ -190,11 +201,40 @@ function inertSourceRegistry() {
   const registry = createSourceRegistry()
   return {
     ...registry,
-    async start(name) {
-      if (!registry.get(name)) throw new Error(`SourceRegistry.start: unknown source '${name}'`)
-      return { async stop() {} }
+    /** @param {SourceContribution} contribution */
+    register(contribution) {
+      // Neutered at registration, not by overriding `start`. The registry
+      // records the started handle in a map it closes over, so an override
+      // that returned its own handle left `reload`/`status`/`started`
+      // believing the source never started: a plugin that starts one of its
+      // own sources from `activate()` and then reloads it would fail its dry
+      // run as `activate_threw` under a kernel where it works. Routing the
+      // no-op through the real `register` keeps the whole lifecycle
+      // bookkeeping intact and runs nothing.
+      //
+      // A malformed contribution is passed through untouched so the real
+      // `register` still rejects it: a source missing `start()` is a finding
+      // about the plugin, not something the doctor should paper over.
+      if (contribution && typeof contribution === 'object' && typeof contribution.start === 'function') {
+        registry.register({ ...contribution, start: inertStart })
+        return
+      }
+      registry.register(contribution)
     },
   }
+}
+
+/**
+ * The `start()` every source gets under a dry run: it runs none of the
+ * plugin's own start logic and hands back the minimal `StartedSource` the
+ * registry requires. `reload`/`status` are deliberately absent, so the
+ * registry takes its documented unsupported-reload and default-status paths
+ * rather than reporting a behavior the real source may not have.
+ *
+ * @returns {Promise<StartedSource>}
+ */
+async function inertStart() {
+  return { async stop() {} }
 }
 
 /**

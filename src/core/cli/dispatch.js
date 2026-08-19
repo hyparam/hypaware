@@ -1241,12 +1241,18 @@ export async function activatePluginDependencyClosure({
  * - the config does not select the plugin at all (LLP 0153's case): add or
  *   enable it, per {@link classifyInactiveState};
  * - the config *does* select it, but this boot did not get it. Its `activate()`
- *   threw, the dep graph eliminated it for an unsatisfied `requires`, its
+ *   threw, the dep graph eliminated it for an unsatisfied `requires`, or the
  *   boot profile withheld it. Editing the config fixes none of those, and
- *   before this case existed the command fell
- *   through to "unknown command" - telling a user their own configured feature
- *   does not exist. Checked first, because a selected plugin is never also in
- *   the not-selected pool.
+ *   before this case existed the command fell through to "unknown command" -
+ *   telling a user their own configured feature does not exist. Checked first,
+ *   because a selected plugin is never also in the not-selected pool.
+ *
+ * The fourth route into `unavailablePlugins`, a manifest that would not load,
+ * is deliberately not matched here and still falls through to the generic
+ * message: boot names such a plugin by the directory it failed in rather than
+ * by a plugin name (`src/core/runtime/boot.js`, `unloadable`), and an
+ * unreadable manifest declares no commands to match `argv` against in the
+ * first place.
  *
  * Canonical names and compatibility aliases are matched by argv prefix. A typo
  * matches nothing and falls through to the generic unknown-command message.

@@ -395,3 +395,93 @@ test('a multi-word group whose subcommands are declared is not warned about', as
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
   assert.equal(report.diagnostics.length, 0, JSON.stringify(report.diagnostics))
 })
+
+test('a group whose registered commands are all hidden is not warned about', async () => {
+  // The hidden exemption and the group warning have to agree. A client-hook
+  // namespace is registered hidden and, per LLP 0267 #d3, left out of the
+  // manifest on purpose; warning that "the manifest declares no command under
+  // it" would ask the author to advertise what `hidden` exists to hide, and
+  // the bundled gate treats warnings as failures.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.register({ name: 'demo-hook fire', plugin: '@test/example', summary: 'Internal', usage: 'u', hidden: true, run: async () => 0 })\n` +
+      `  ctx.commands.registerGroup({ name: 'demo-hook', plugin: '@test/example', summary: 'Internal hooks' })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  assert.equal(report.diagnostics.length, 0, JSON.stringify(report.diagnostics))
+})
+
+test('a group with a visible command under it is still warned about', async () => {
+  // The all-hidden exemption must not swallow the case the warning is for: one
+  // visible command under the namespace and nothing declaring it means top
+  // level help never lists the group the description belongs to.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.register({ name: 'ghost fire', plugin: '@test/example', summary: 'Visible', usage: 'u', hidden: true, run: async () => 0 })\n` +
+      `  ctx.commands.register({ name: 'ghost show', plugin: '@test/example', summary: 'Visible', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.registerGroup({ name: 'ghost', plugin: '@test/example', summary: 'A group nothing lists' })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  const warn = report.diagnostics.find((d) => d.kind === 'command_help_drift' && d.severity === 'warn')
+  assert.ok(warn, JSON.stringify(report.diagnostics))
+  assert.match(warn.message, /ghost/)
+})
+
+test('a dry run points HYP_HOME at its throwaway root', async () => {
+  // `ctx.env` defaults to `process.env`, and `@hypaware/local-fs` mkdirs
+  // `<HYP_HOME>/exports` from `activate()`: without the redirect, diagnosing a
+  // plugin wrote into the caller's real install, and the bundled agreement
+  // test did it for the whole workspace on every `npm test`.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'doctor-home-'))
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
+    index:
+      `import fs from 'node:fs'\n` +
+      `import path from 'node:path'\n` +
+      `export async function activate(ctx) {\n` +
+      `  fs.mkdirSync(path.join(ctx.env.HYP_HOME, 'exports'), { recursive: true })\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const prior = process.env.HYP_HOME
+  process.env.HYP_HOME = home
+  try {
+    const report = await diagnosePlugin(root)
+    assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  } finally {
+    if (prior === undefined) delete process.env.HYP_HOME
+    else process.env.HYP_HOME = prior
+  }
+  assert.deepEqual(await fs.readdir(home), [], 'the dry run wrote into the caller\'s HYP_HOME')
+})
+
+test('a source started during a dry run can be reloaded and inspected', async () => {
+  // The inert registry must neuter `start()` without pretending the source
+  // never started: a plugin that starts one of its own sources from
+  // `activate()` and then reloads it works under the real kernel, so the
+  // doctor must not report `activate_threw` against it.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.sources.register({\n` +
+      `    name: 'demo', plugin: '@test/example',\n` +
+      `    async start() { throw new Error('start() must not run during a dry run') },\n` +
+      `  })\n` +
+      `  await ctx.sources.start('demo', ctx)\n` +
+      `  await ctx.sources.reload('demo', ctx)\n` +
+      `  if (await ctx.sources.status('demo') === undefined) throw new Error('status() lost the started source')\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
