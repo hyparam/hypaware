@@ -97,6 +97,14 @@ export interface RunWizardSyncScopeOptions {
    * on an enrolled machine the whole locked set is usually hidden.
    */
   lockedHidden?: number
+  /**
+   * How many picked rows the display filter removed from `candidates`,
+   * read for the same reason as `lockedHidden`: a carried hidden row
+   * (LLP 0202 #carry-through) is composed into the config and syncs
+   * unless an opt-out entry says otherwise, so the lane may not claim
+   * nothing syncs while one stands - even though it may not name it.
+   */
+  candidatesHidden?: number
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**

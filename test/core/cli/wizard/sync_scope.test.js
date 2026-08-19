@@ -396,6 +396,38 @@ test('zero candidates with only hidden org rows: does not claim nothing syncs', 
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
 
+// The candidate half of the same fact. A carried hidden row (LLP 0202
+// #carry-through) that is not locked is composed into the local layer and
+// syncs unless an opt-out entry says otherwise, and the display filter takes
+// it off this screen - so the empty-candidate line must not claim nothing
+// leaves the machine, and must not attribute the row to the fleet either.
+// @ref LLP 0276#no-candidates [tests]:
+test('zero visible candidates with a hidden picked row: does not claim nothing syncs, never names the fleet', async () => {
+  const { env, stateDir } = await makeHome()
+  const stdout = makeBuf()
+  let prompted = false
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    locked: [],
+    lockedHidden: 0,
+    candidatesHidden: 1,
+    progress: 'Step 3 of 4 · Choose what syncs',
+    prompt: async () => { prompted = true; return [] },
+    confirm: async () => { prompted = true; return 'accept' },
+  }))
+
+  assert.deepEqual(result, { noQuestion: true, optedOut: [] })
+  assert.equal(prompted, false)
+  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
+  assert.match(stdout.text(), /still syncs to your server/)
+  assert.doesNotMatch(stdout.text(), /nothing syncs to your server/)
+  assert.doesNotMatch(stdout.text(), /fleet/, 'the fleet owns no row here, so it is never named')
+  assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
+  assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
+})
+
 test('a cancelled gate returns cancelled and writes nothing', async () => {
   const { env, stateDir } = await makeHome()
   const stderr = makeBuf()

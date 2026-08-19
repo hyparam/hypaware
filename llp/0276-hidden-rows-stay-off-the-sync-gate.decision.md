@@ -93,8 +93,8 @@ empty locked list - an enrolled machine that picked nothing visible - where
 the sentence names an owner for an empty list.
 
 So the branch splits on whether there is a visible org row to name - and,
-when there is not, on whether a locked row is standing at all. Those are
-different facts and only the second licenses the strong sentence:
+when there is not, on whether any filtered-out row is standing at all.
+Those are different facts and only the last licenses the strong sentence:
 
 - **A visible org row.** *"Everything you picked is managed by your fleet
   and always syncs"*, over the named rows, exactly as before.
@@ -108,12 +108,21 @@ different facts and only the second licenses the strong sentence:
   user has never seen. Saying "nothing syncs" here would trade LLP 0202's
   over-disclosure for an affirmatively false claim about what leaves the
   machine, which is the failure LLP 0188 #never-silent exists to prevent.
-- **No locked row at all.** Nothing was picked and nothing syncs: *"You
+- **No locked row, but a hidden row among the picks.** The candidate half
+  of the same problem: a carried hidden row (LLP 0202 §carry-through) is
+  composed into the local layer and, absent an opt-out entry, syncs. The
+  filter above takes it off this screen, which empties `candidates` and
+  would otherwise reach the "nothing syncs" sentence with capture actually
+  leaving the machine. The fleet does not own that row, so the line may not
+  borrow the sentence above either: *"You picked nothing to record, but
+  capture already set up on this machine still syncs to your server."*
+- **Nothing standing at all.** Nothing was picked and nothing syncs: *"You
   picked nothing to record, so nothing syncs to your server."*
 
-The lane learns which of the last two it is from `lockedHidden`, the count
-of rows the display filter removed. It is a count, not a list: the lane
-must be able to tell the truth about them without being able to name them.
+The lane learns which of the last three it is from `lockedHidden` and
+`candidatesHidden`, the counts of rows the display filter removed from each
+list. They are counts, not lists: the lane must be able to tell the truth
+about them without being able to name them.
 
 All three paths stay `noQuestion`, so LLP 0191 #back-edges is unaffected
 and the step counter still does not skip a number.
@@ -122,9 +131,11 @@ and the step counter still does not skip a number.
 
 - `src/core/cli/wizard/index.js` imports `visiblePickerDescriptors` and
   applies it to both `lockedDescriptors` and the candidate list, and passes
-  `lockedHidden` alongside; `runWizardSyncScope` documents that both row
-  lists arrive display-filtered rather than filtering defensively, so there
-  is one filter, not two that can disagree.
+  `lockedHidden` and `candidatesHidden` alongside - one count per filtered
+  list, because the two lists license different sentences;
+  `runWizardSyncScope` documents that both row lists arrive
+  display-filtered rather than filtering defensively, so there is one
+  filter, not two that can disagree.
 - LLP 0202 §consequences' line "The sync/opt-out menu is unchanged" is
   superseded by this doc. It was written against the lane as it stood before
   the locked rows were added to the gate (PR #629, two days earlier), where

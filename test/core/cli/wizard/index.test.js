@@ -484,6 +484,7 @@ test('runInitWizard: a hidden locked row stays off the sync-scope screen', async
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor], 'the hidden org row is filtered out, the visible one kept')
   assert.equal(opts._syncOpts.lockedHidden, 1, 'the lane is told a locked row was withheld, without being given the row')
+  assert.equal(opts._syncOpts.candidatesHidden, 0, 'nothing hidden among the picks')
 })
 
 // The candidate list takes the same filter. A carried hidden row (LLP 0202
@@ -505,6 +506,7 @@ test('runInitWizard: a hidden picked row is not a sync-scope candidate', async (
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.candidates, [claudeDescriptor], 'the hidden row is not offered as an opt-out candidate')
   assert.equal(opts._syncOpts.lockedHidden, 0, 'nothing locked, so nothing was withheld from the locked list')
+  assert.equal(opts._syncOpts.candidatesHidden, 1, 'the lane is told a picked row was withheld, so it never claims nothing syncs')
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {

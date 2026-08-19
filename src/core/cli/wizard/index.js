@@ -536,18 +536,23 @@ export async function runInitWizard(opts) {
               .map((id) => catalog.pickerDescriptors.get(id))
               .filter((d) => d !== undefined)
             const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors)
+            const candidateDescriptors = visiblePickerDescriptors(picked.descriptors)
             const syncScope = await syncFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
-              candidates: visiblePickerDescriptors(picked.descriptors),
+              candidates: candidateDescriptors,
               locked: lockedDescriptors,
-              // How many locked rows the display filter removed. The lane
-              // never names them, but it must not tell the user nothing syncs
-              // while they stand: a locked row always syncs (LLP 0188 #locked).
-              // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible org row to name" from "no org row at all"
+              // How many rows the display filter removed from each list. The
+              // lane never names them, but it must not tell the user nothing
+              // syncs while they stand: a locked row always syncs (LLP 0188
+              // #locked), and a picked row carries no opt-out entry until the
+              // user writes one, so a hidden row dropped from either list is
+              // capture that still leaves the machine.
+              // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
               lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
+              candidatesHidden: picked.descriptors.length - candidateDescriptors.length,
               ...(syncProgress ? { progress: syncProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),
