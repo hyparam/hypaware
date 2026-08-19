@@ -109,17 +109,24 @@ export async function loadSpooledBodies(events, opts) {
     if (!isPlainObject(body)) {
       unparseable += 1
       try {
-        await fs.rm(file, { force: true })
-        // Sized only once the unlink succeeded, matching the projected arm:
-        // a file that is still there (EPERM, a read-only spool) is still
-        // occupying the cap, and subtracting it would under-report the gauge
-        // rather than over-report it.
-        // @ref LLP 0253#byte-cap [implements]: the published byte size tracks
-        //   what left the disk, whichever arm removed the file
+        // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
+        // for a path that is already gone, and the bytes below are only ours to
+        // report if this call is the one that took the file off the disk. Two
+        // reads of the same `body_ref` can be in flight at once (the handler is
+        // not serialized, so an exporter retry overlaps the original it is
+        // retrying), and a forced remove would let both subtract those bytes.
+        await fs.unlink(file)
+        // Sized only once the file is gone: one that is still there (EPERM, a
+        // read-only spool) is still spooled, so subtracting its bytes would
+        // publish a spool smaller than the one the next sweep finds.
+        // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
+        //   the spool's current size, so a deletion only the reader can see has
+        //   to be sized for the caller
         unparseableBytes += raw.length
       } catch {
-        // The sweep's problem, not this batch's: the content is recoverable
-        // from transcript backfill either way.
+        // Already gone, or not removable at all: either way this batch has no
+        // byte movement to report, and the content is recoverable from
+        // transcript backfill.
       }
       continue
     }

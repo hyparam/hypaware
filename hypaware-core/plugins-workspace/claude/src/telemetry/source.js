@@ -639,11 +639,13 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         state.bodiesMissing += spooled.missing
         state.bodiesUnparseable += spooled.unparseable
         // The read arm deletes an unparseable body on the spot, so the gauge
-        // has to come down here too: this file was on disk when the sweep last
-        // sized the spool, and without the subtraction `hyp status` reports
-        // its bytes for up to a sweep interval after it was removed.
-        // @ref LLP 0253#byte-cap [implements]: the published byte size is what
-        //   is on disk, whichever arm removed the file
+        // has to come down here too: a file the last sweep sized otherwise
+        // stays published for up to a sweep interval after it was removed.
+        // Clamped and sweep-corrected like the projected arm below. The
+        // policy-drop arm still lacks the same subtraction, because the
+        // delete-unread path reports no bytes to subtract.
+        // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
+        //   the spool's current size, not its size at the last sweep
         state.spoolBytes = Math.max(0, state.spoolBytes - spooled.unparseableBytes)
         span.setAttribute('body_count', spooled.bodies.size)
         if (spooled.unparseable > 0) {
