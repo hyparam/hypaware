@@ -511,6 +511,9 @@ export function backfillConsentTitle(providers, retentionDays) {
  * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
  * array and their descriptors in the catalog - see
  * {@link visiblePickerDescriptors} for what still depends on them.
+ * `claude-desktop` is hidden too (LLP 0297) and, like every id absent from
+ * this array, sorts after the known ones; nothing needs to change here if
+ * it is ever unhidden.
  *
  * @type {string[]}
  */
@@ -1041,6 +1044,33 @@ function contributedPlugins(compose) {
     ...(compose.plugin ? [compose.plugin] : []),
     ...(Array.isArray(compose.plugins) ? compose.plugins : []),
   ]
+}
+
+/**
+ * Does {@link configuredPickerSources} read this row back off plugins the
+ * row itself contributes, rather than off state some other row also
+ * composes?
+ *
+ * This is the derivative-read-back test LLP 0202 #carry-through argued
+ * from and LLP 0297 #own-plugins names. A row whose whole `compose`
+ * contribution is an upstream (`raw-anthropic`, `raw-openai`) reads as
+ * configured whenever *any* row supplying that upstream is picked, so its
+ * seeded state is evidence about the config, not about the user. A row
+ * that contributes plugins of its own (`claude-desktop`) is in the config
+ * only because something put it there deliberately, so its seeded state
+ * is a recorded answer and a hidden row may be carried on it.
+ *
+ * `requires_gateway` alone does not count: every gateway-backed row asks
+ * for `@hypaware/ai-gateway`, so its presence separates nothing.
+ *
+ * @param {PickerDescriptor} descriptor
+ * @returns {boolean}
+ * @ref LLP 0297#own-plugins [implements]: the read-back is non-derivative exactly when the row contributes plugins of its own
+ */
+export function readsBackFromOwnPlugins(descriptor) {
+  const compose = descriptor.compose
+  if (!compose) return false
+  return contributedPlugins(compose).length > 0
 }
 
 /**
@@ -2211,7 +2241,9 @@ export function ridersInDefaultSet(composeWith) {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`,
+ * widened by `@ref LLP 0297#claude-desktop` to a row that is hidden because
+ * its setup does not belong in a checkbox).
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:

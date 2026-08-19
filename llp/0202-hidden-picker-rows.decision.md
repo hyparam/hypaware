@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
 **Extended-by:** [LLP 0276](./0276-hidden-rows-stay-off-the-sync-gate.decision.md) (§hidden-rows below: "absent from the interactive menu and from the defaults gate" widens to every wizard screen - the sync gate's locked rows go through the same display filter; §consequences' "the sync/opt-out menu is unchanged" is superseded, having been written before the locked rows were added to that gate)
+**Extended-by:** [LLP 0297](./0297-claude-desktop-leaves-onboarding.decision.md) (§hidden-rows below: `claude-desktop` sets `hidden` too, so "No other row does" no longer holds; §carry-through: the "collects nothing the menu can show" test is a proxy for a derivative read-back, and a hidden row that reads back off plugins of its own carries without it)
 **Related:** LLP 0130 (#picker-block: the manifest-sourced row contract this extends), LLP 0012 (#source-kinds: the raw proxy source class), LLP 0183 (#seed-from-config: the read-back this has to stay compatible with), LLP 0192 (#fail-closed: what the ids are load-bearing for), LLP 0190 (#pick-gate: the two screens a hidden row must stay out of)
 
 > Extends [LLP 0130 §picker-block](./0130-declarative-picker-descriptors.decision.md#picker-block)
@@ -55,6 +56,11 @@ picker source in every respect:
 
 `raw-anthropic` and `raw-openai` set it. No other row does.
 
+> **Extended-by: [LLP 0297](./0297-claude-desktop-leaves-onboarding.decision.md).**
+> `claude-desktop` sets it as well, for a different reason: not that the row
+> composes nothing, but that what it composes is a sudo'd system write that
+> does not belong behind a first-run checkbox.
+
 **Hiding is a display filter, never a catalog deletion.** Deleting the two
 `contributes.picker` blocks would look like the same change and is not:
 the owner map that arms LLP 0192's fail-closed withholding is folded from
@@ -92,6 +98,13 @@ moment someone unchecks codex - breaking the guarantee that unchecking a
 row removes its upstream. The existing test
 `runWizardPick: unchecking a row still removes its plugin and its gateway
 upstream` pins that guarantee and is what caught the mistake.
+
+> **Extended-by: [LLP 0297](./0297-claude-desktop-leaves-onboarding.decision.md#carry-through).**
+> The property this section argues from is *derivative* read-back, and "the
+> config collects nothing the menu can show" is the proxy chosen for it while
+> the raw rows were the only hidden ones. A hidden row that reads back off
+> plugins of its own (`claude-desktop`) is not derivative, and carries off a
+> config seed whatever else is checked.
 
 ## What this does not fix {#residual}
 

@@ -92,6 +92,25 @@ async function mkTmp() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-pick-'))
 }
 
+/**
+ * The real catalog with `claude-desktop`'s `hidden` flag cleared.
+ *
+ * `needs_setup` is a kernel contract any picker row may declare (LLP 0130),
+ * but since LLP 0297 no BUNDLED row is both visible and `needs_setup`, so
+ * the tests for how such a row renders have nothing real to drive. Un-hiding
+ * the actual Desktop descriptor keeps them on the shipped manifest's shape
+ * rather than a hand-built stand-in that could drift away from it.
+ *
+ * @returns {Promise<PluginCatalog>}
+ */
+async function catalogWithVisibleNeedsSetup() {
+  const catalog = await realCatalog()
+  const desktop = catalog.pickerDescriptors.get('claude-desktop')
+  assert.ok(desktop, 'the bundled catalog still carries the Desktop descriptor')
+  catalog.pickerDescriptors.set('claude-desktop', { ...desktop, hidden: false })
+  return catalog
+}
+
 // --- non-interactive (pre-baked picks) ---
 
 test('runWizardPick: pre-baked picks skip prompting and compose the same config', async () => {
@@ -156,7 +175,7 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
 // @ref LLP 0011#autodetect-vs-default [tests]: detection labels a needs_setup row but never checks it
 test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detected', async () => {
   const tmp = await mkTmp()
-  const catalog = await realCatalog()
+  const catalog = await catalogWithVisibleNeedsSetup()
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
@@ -171,7 +190,7 @@ test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detec
 
 test('runWizardPick: the defaults gate omits a detected needs_setup row, and accept does not pick it', async () => {
   const tmp = await mkTmp()
-  const catalog = await realCatalog()
+  const catalog = await catalogWithVisibleNeedsSetup()
   const { confirm, state } = capturingConfirm('accept')
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
@@ -186,6 +205,11 @@ test('runWizardPick: the defaults gate omits a detected needs_setup row, and acc
 // A reconfigure reports which picks it carried from the config on disk, so
 // the configure phase can skip a carried needs_setup row's setup question
 // instead of re-asking an answer already given.
+//
+// A Desktop-only config collects nothing the menu can show now that the row
+// is hidden (LLP 0297), so this is also the LLP 0202 no-visible-row shape:
+// no gate is built, the menu opens on an empty seed, and the carried row has
+// to survive both.
 test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -200,11 +224,10 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
     ],
     query: { cache: { retention: { default_days: 90 } } },
   })
-  const { confirm } = capturingConfirm('accept')
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    prompt: capturingPrompt([]).prompt,
+    confirm: async () => { throw new Error('a gate with no visible row must not be shown') },
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -231,7 +254,7 @@ test('runWizardPick: a fresh pick reports nothing as previously configured', asy
 // phase walks a sign-in and a sudo prompt when it is newly picked.
 test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extra-setup suffix', async () => {
   const tmp = await mkTmp()
-  const catalog = await realCatalog()
+  const catalog = await catalogWithVisibleNeedsSetup()
   const { confirm, state } = capturingConfirm('accept')
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
@@ -1278,8 +1301,10 @@ test('runWizardPick: --source still composes a hidden row (no prompt involved)',
 // disk, or a re-entry's confirmed selection). On a FIRST run the seed is a
 // detection result, and a hidden row carried off that would be composed
 // without ever being rendered or made uncheckable - detection forcing a
-// source on, which LLP 0011 #autodetect-vs-default forbids. No bundled
-// hidden row declares a `detect` probe, so this drives detection directly.
+// source on, which LLP 0011 #autodetect-vs-default forbids. The one bundled
+// hidden row with a `detect` probe (`claude-desktop`) is also `needs_setup`,
+// which `detectedSeed` strips before the seed exists, so this drives
+// detection directly rather than resting on that.
 // @ref LLP 0011#autodetect-vs-default [tests]: a detected hidden row is not composed on the user's behalf
 test('runWizardPick: a hidden row that is merely detected is not carried on a first run', async () => {
   const tmp = await mkTmp()
@@ -1348,6 +1373,133 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
     gateway.config.upstreams.map((/** @type {any} */ u) => u.name).sort(),
     ['openai']
   )
+})
+
+// --- claude-desktop leaves onboarding (LLP 0297) ---
+
+/** The plugin entries a `claude-desktop` install has in `plugins[]`. */
+const DESKTOP_PLUGINS = [
+  { name: '@hypaware/ai-gateway', config: { upstreams: [
+    { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+  ] } },
+  { name: '@hypaware/claude-account', config: { mode: 'subscription' } },
+  { name: '@hypaware/claude-desktop' },
+]
+
+// The row's `configure_command` runs a browser sign-in, a residue wipe, and
+// a sudo'd write to /Library/Managed Preferences. None of that belongs
+// behind a first-run checkbox, so the row is `hidden` and the machine having
+// Claude.app installed changes nothing about what onboarding shows.
+// @ref LLP 0297#claude-desktop [tests]: no screen offers Claude Desktop, detected or not
+test('runWizardPick: claude-desktop is offered on no screen, even when detected', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt([])
+  const confirmCalls = []
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async (/** @type {any} */ q) => { confirmCalls.push(q); return 'customize' },
+    detect: async () => new Set(['claude-desktop']),
+    confirmOverwrite: async () => true,
+  }))
+  const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
+  assert.ok(!rendered.includes('claude-desktop'), 'absent from the menu')
+  // `needs_setup` rows never seed from detection, so there is no gate at all
+  // here; assert it could not have named the row either way.
+  for (const call of confirmCalls) {
+    assert.doesNotMatch(String(call?.title ?? ''), /Desktop/i)
+    assert.doesNotMatch(String(call?.body ?? ''), /Desktop/i)
+  }
+  assert.deepEqual(result.sourcesPicked, [])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(
+    written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'),
+    undefined,
+    'a detected Desktop is not composed on the user\'s behalf'
+  )
+})
+
+// The carry rule LLP 0202 wrote is "the config collects nothing the menu can
+// show", which is a proxy for a DERIVATIVE read-back and only sound for the
+// raw rows. claude-desktop reads back off two plugins nothing else composes,
+// so the proxy would drop it from every reconfigure of a machine that also
+// captures Claude Code - un-composing a sudo'd plist install and taking the
+// `hyp client claude-desktop install` command away with it, since that
+// command is contributed by the plugin the rewrite just removed.
+// @ref LLP 0297#carry-through [tests]: a hidden row with a non-derivative read-back carries whatever else is checked
+test('runWizardPick: a configured claude-desktop survives a reconfigure that keeps a visible row', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [...DESKTOP_PLUGINS, { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } }],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: capturingPrompt(['claude']).prompt,
+    confirm: async () => 'accept',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  assert.ok(names.includes('@hypaware/claude-desktop'), 'the adapter is still composed')
+  assert.ok(names.includes('@hypaware/claude-account'), 'so is the credential provider its capability needs')
+  // A carried row is a previously recorded answer, so the configure phase
+  // must not re-run the sign-in and the sudo prompt (LLP 0224).
+  assert.ok(result.previouslyConfigured.includes('claude-desktop'))
+})
+
+// The raw rows must keep the narrower rule: their read-back IS derivative,
+// so seeding proves nothing and unchecking the row that supplies the
+// upstream still removes it.
+// @ref LLP 0202#carry-through [tests]: the derivative case is unchanged by LLP 0297
+test('runWizardPick: widening the carry rule leaves the derivative raw rows alone', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [
+        { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+      ] } },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+    ],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    prompt: capturingPrompt([]).prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(),
+    confirmOverwrite: async () => true,
+  }))
+  assert.deepEqual(result.sourcesPicked, [])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(
+    written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/ai-gateway'),
+    undefined,
+    'unchecking claude removes the upstream raw-anthropic only read back derivatively'
+  )
+})
+
+// Hiding is a display filter, not a catalog deletion: the non-interactive
+// route a scripted or fleet install uses still composes the whole set.
+// @ref LLP 0297#not-deleting [tests]: --source still reaches the hidden Desktop row
+test('runWizardPick: --source claude-desktop still composes the Desktop dependency set', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    picks: { sources: ['claude-desktop'], exportChoice: 'keep-local', retentionDays: 90 },
+  }))
+  assert.deepEqual(result.sourcesPicked, ['claude-desktop'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  assert.ok(names.includes('@hypaware/claude-account'))
+  assert.ok(names.includes('@hypaware/claude-desktop'))
 })
 
 // --- the non-TTY numbered fallback over a seeded menu (LLP 0274) ---
