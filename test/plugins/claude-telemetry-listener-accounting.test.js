@@ -337,3 +337,49 @@ test('last_event_at names the newest instant, not the largest string', async () 
     await listener.cleanup()
   }
 })
+
+// `event.timestamp` is read off the wire with no validation, so a producer
+// that stamps a non-date puts a non-date in the index. Falling back to the
+// string compare for that pair let the malformed value WIN (nothing an ISO
+// stamp can start with sorts above 'u'), and because the fallback is symmetric
+// it then beat every genuinely newer event that followed - pinning
+// `last_event_at` for the life of the daemon, so `hyp status` reads an
+// unparseable baseline, falls back to `listener_started_at`, and raises
+// `capture_gap` against a listener that is capturing fine.
+// @ref LLP 0257#status-and-health [tests]: one malformed stamp stays one
+//   malformed stamp; it cannot pin the capture-gap baseline
+test('a malformed event.timestamp does not pin last_event_at', async () => {
+  const listener = await startListener()
+  try {
+    const bad = {
+      timeUnixNano: '1755459024000000000',
+      body: { stringValue: 'claude_code.api_request' },
+      attributes: kvAttributes({
+        'session.id': SESSION,
+        'event.name': 'api_request',
+        'event.timestamp': 'unknown',
+        request_id: REQUEST_ID,
+      }),
+    }
+    const first = await listener.post(envelope([/** @type {any} */ (bad)]))
+    assert.equal(first.status, 200)
+
+    const second = await listener.post(envelope([
+      record('api_request', { request_id: REQUEST_ID }, '2026-08-17T19:30:24.500Z'),
+    ]))
+    assert.equal(second.status, 200)
+    assert.equal(
+      (await listener.details()).last_event_at,
+      '2026-08-17T19:30:24.500Z',
+      'a real instant must displace a value that names none'
+    )
+
+    // And the reverse order: an unparseable stamp arriving later must not
+    // overwrite a baseline that does name an instant.
+    const third = await listener.post(envelope([/** @type {any} */ (bad)]))
+    assert.equal(third.status, 200)
+    assert.equal((await listener.details()).last_event_at, '2026-08-17T19:30:24.500Z')
+  } finally {
+    await listener.cleanup()
+  }
+})

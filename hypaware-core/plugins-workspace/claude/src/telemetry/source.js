@@ -732,7 +732,12 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           const removed = await deleteSpooledBodies(spooled.consumedFiles)
           state.bodiesProjected += spooled.bodies.size
           state.bodiesDeleted += removed.deleted
-          state.spoolBytes = Math.max(0, state.spoolBytes - spooled.consumedBytes)
+          // What actually left the disk, not what was read. A body whose
+          // unlink failed (EPERM, a read-only spool) is still occupying the
+          // cap, and subtracting its bytes here would under-report
+          // `spool_bytes` until the next sweep restated it, which is the drop
+          // arm's bug in the other direction.
+          state.spoolBytes = Math.max(0, state.spoolBytes - removed.bytesRemoved)
           span.setAttribute('bodies_projected', spooled.bodies.size)
           span.setAttribute('bodies_deleted', removed.deleted)
         }
@@ -768,8 +773,16 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
  * baseline `hyp status` measures a capture gap from, where running backwards
  * invents a gap that is not there.
  *
- * An unparseable timestamp falls back to the string compare: it is the only
- * ordering left, and it is what this did for every value before.
+ * `event.timestamp` is whatever string the attribute carried, unvalidated, so
+ * one malformed value has to stay one malformed value. A value that names an
+ * instant therefore beats one that names nothing, whichever side it is on: a
+ * text compare between the two orders nothing real, and letting the
+ * unparseable side win would pin `last_event_at` for the life of the daemon
+ * (`unknown` sorts above every ISO string that could follow it, so no later
+ * event ever displaces it), which is the invented capture gap this function
+ * exists to prevent, reached by a slower route. Only when NEITHER parses is
+ * there an ordering left to fall back on, and there the string compare is what
+ * this did for every value before.
  *
  * @ref LLP 0257#status-and-health [implements]: `last_event_at` is the
  *   capture-gap baseline, so it has to name the newest instant seen
@@ -781,8 +794,11 @@ export function newerEventTimestamp(current, next) {
   if (current === undefined) return next
   const currentMs = Date.parse(current)
   const nextMs = Date.parse(next)
-  if (Number.isNaN(currentMs) || Number.isNaN(nextMs)) return next > current ? next : current
-  return nextMs > currentMs ? next : current
+  const currentParsed = !Number.isNaN(currentMs)
+  const nextParsed = !Number.isNaN(nextMs)
+  if (currentParsed && nextParsed) return nextMs > currentMs ? next : current
+  if (currentParsed !== nextParsed) return currentParsed ? current : next
+  return next > current ? next : current
 }
 
 /**
