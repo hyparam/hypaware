@@ -29,6 +29,13 @@
       "types": "./types/core/query/index.d.ts",
       "import": "./src/core/query/index.js"
     },
+    "./core/search": {
+      "types": "./types/core/search/index.d.ts",
+      "import": "./src/core/search/index.js"
+    },
+    "./core/search/types.js": {
+      "types": "./src/core/search/types.d.ts"
+    },
     "./core/util": {
       "types": "./types/core/util/index.d.ts",
       "import": "./src/core/util/index.js"
