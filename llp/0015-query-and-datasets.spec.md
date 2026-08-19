@@ -22,7 +22,7 @@
 > OOM the host by buffering an unbounded scan
 > ([hyparam/hypaware-server#9](https://github.com/hyparam/hypaware-server/issues/9)).
 
-> **Extended by [LLP 0266](./0266-native-prepared-batches-through-query-sources.decision.md).**
+> **Extended by [LLP 0294](./0294-native-prepared-batches-through-query-sources.decision.md).**
 > Compatible partition unions now concatenate native prepared batches, remap
 > per-table field ids, and keep LIMIT/OFFSET on the merged stream. Drifted
 > schemas retain the row-padding behavior specified below.

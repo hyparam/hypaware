@@ -1,4 +1,4 @@
-# LLP 0266: Native prepared batches survive the query source stack
+# LLP 0294: Native prepared batches survive the query source stack
 
 **Type:** Decision
 **Status:** Accepted
@@ -90,7 +90,8 @@ position deletes coexist: filtering loses physical row ordinals before delete
 application, so a live matching row can be dropped. This is tracked in
 [icebird#41](https://github.com/hyparam/icebird/issues/41). The prepared path
 avoids the defect by withholding the filter when deletes exist, but visibility
-and schema-drift fallbacks remain exposed until Icebird fixes its row path.
+wrappers, `scanColumn` aggregates, and schema-drift fallbacks remain exposed
+until Icebird fixes its row path.
 
 ## Consequences
 

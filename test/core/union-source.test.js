@@ -169,7 +169,7 @@ function fallbackPreparedSource(fields, rows, options = {}) {
   return source
 }
 
-// @ref LLP 0266#partition-union [tests]: field ids are local to each table, filters may prune each child, and ranges belong to the concatenated stream
+// @ref LLP 0294#partition-union [tests]: field ids are local to each table, filters may prune each child, and ranges belong to the concatenated stream
 test('unionSources concatenates prepared batches, remaps field ids, and keeps range hints global', async () => {
   /** @type {ScanRequest[]} */
   const seenA = []

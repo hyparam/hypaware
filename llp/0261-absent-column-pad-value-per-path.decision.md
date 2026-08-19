@@ -9,7 +9,7 @@
 **Extends:** LLP 0032 (#capture: the parenthetical "padding absent physical
 columns to null" holds only on the column-stream path; the row path pads with
 a cell that reads `undefined`)
-**Extended by:** LLP 0266 (prepared batches are disabled across schema drift,
+**Extended by:** LLP 0294 (prepared batches are disabled across schema drift,
 so this document's row and column-stream values remain authoritative)
 
 > Corrects one sentence of [LLP 0032 §Capture](./0032-github-llm-graph-bridge.decision.md#capture)

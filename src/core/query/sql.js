@@ -156,7 +156,7 @@ function withHeapBudget(source, guard) {
     /** @type {AsyncDataSource} */
     const bounded = {
       numRows: source.numRows,
-      columns: source.columns,
+      columns: source.columns ?? schema.fields.map((field) => field.name),
       schema,
       prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
     }
@@ -169,7 +169,7 @@ function withHeapBudget(source, guard) {
     numRows: source.numRows,
     columns: source.columns ?? source.schema?.fields.map((field) => field.name) ?? [],
     scan(options) {
-      const inner = scan(options)
+      const inner = scan.call(source, options)
       return {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: inner.appliedLimitOffset,

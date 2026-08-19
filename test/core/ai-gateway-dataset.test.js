@@ -296,7 +296,7 @@ test('ai-gateway createDataSource advertises declared schema columns absent from
   }
 })
 
-// @ref LLP 0266#schema-drift [tests]: a complete declared schema forwards native batches, while the drifted test above does not
+// @ref LLP 0294#schema-drift [tests]: a complete declared schema forwards native batches, while the drifted test above does not
 test('ai-gateway createDataSource preserves prepared scans when the physical schema is complete', async () => {
   const cacheRoot = await makeTmpDir('prepared-schema')
   try {

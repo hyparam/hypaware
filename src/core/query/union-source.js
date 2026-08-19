@@ -300,7 +300,7 @@ export function unionSources(sources) {
  * @param {ScannableDataSource[]} sources
  * @param {string[]} columns
  * @returns {RelationSchema | undefined}
- * @ref LLP 0266#partition-union [implements]: only aligned schemas expose one logical prepared union
+ * @ref LLP 0294#partition-union [implements]: only aligned schemas expose one logical prepared union
  */
 function commonPreparedSchema(sources, columns) {
   if (sources.length === 0) return undefined
@@ -353,7 +353,7 @@ function schemasAreCompatible(left, right) {
  * @param {RelationSchema} options.schema
  * @param {ScanRequest} options.request
  * @returns {PreparedScan}
- * @ref LLP 0266#partition-union [implements]: remap field ids per child and keep range hints on the concatenated stream
+ * @ref LLP 0294#partition-union [implements]: remap field ids per child and keep range hints on the concatenated stream
  */
 function prepareUnionScan({ union, sources, schema, request }) {
   const fieldsById = new Map(schema.fields.map((field) => [field.id, field]))

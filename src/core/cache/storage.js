@@ -406,7 +406,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // internal-field projection to its logical schema. Squirreling plans
       // requests from this schema, so no prepared demand can name an internal
       // field and the inner source returns only the requested public fields.
-      // @ref LLP 0266#transparent-wrappers [implements]: storage preserves native batches without advertising internal cache fields
+      // @ref LLP 0294#transparent-wrappers [implements]: storage preserves native batches without advertising internal cache fields
       if (source.schema && source.prepareScan) {
         const prepareScan = source.prepareScan
         wrapped.schema = {

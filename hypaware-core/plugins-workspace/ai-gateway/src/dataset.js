@@ -240,7 +240,7 @@ function withSchemaColumns(source) {
   // Native batches are transparent only when the physical prepared schema
   // already covers the full declared schema. A drifted source stays on the
   // row/column paths above, which own its absent-column semantics.
-  // @ref LLP 0266#schema-drift [implements]: prepared batches never invent a value for a declared-but-absent field
+  // @ref LLP 0294#schema-drift [implements]: prepared batches never invent a value for a declared-but-absent field
   if (source.schema && source.prepareScan) {
     const prepareScan = source.prepareScan
     const fieldsByName = new Map(source.schema.fields.map((field) => [field.name, field]))

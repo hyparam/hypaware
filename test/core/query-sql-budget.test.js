@@ -171,7 +171,22 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
 })
 
-// @ref LLP 0266#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
+test('the budget decoration preserves the scan receiver', async () => {
+  const source = memorySource([{ a: 1 }])
+  const scan = /** @type {NonNullable<AsyncDataSource['scan']>} */ (source.scan)
+  source.scan = function scanWithReceiver(options) {
+    assert.equal(this, source)
+    return scan.call(source, options)
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT a FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.deepEqual(result.rows, [{ a: 1 }])
+})
+
+// @ref LLP 0294#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
 test('the prepared native-batch path stays lit through the budget decoration', async () => {
   let preparedCalls = 0
   const schema = {
