@@ -1,4 +1,4 @@
-# LLP 0268: The wizard's question lanes record with the config, and accepting a default never retires a standing answer
+# LLP 0279: The wizard's question lanes record with the config, and accepting a default never retires a standing answer
 
 **Type:** Decision
 **Status:** Accepted

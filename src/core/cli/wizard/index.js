@@ -168,7 +168,7 @@ export async function runInitWizard(opts) {
   let folderAsk
   /**
    * The question lanes' policy writes, held until the config commit
-   * (LLP 0268 #one-commit-point). Each lane answers, states its answer,
+   * (LLP 0279 #one-commit-point). Each lane answers, states its answer,
    * and hands its write back; the orchestrator runs them once the config
    * this run composed is on disk, so an abandoned run leaves every store
    * as it found it. Re-assigned, never appended: a back through the lanes
@@ -406,7 +406,7 @@ export async function runInitWizard(opts) {
           const expressFn = opts.express ?? runWizardExpressGate
           // The standing new-folder answer, so the gate's one line of
           // consequence names what accepting leaves in force rather than
-          // the shipped default (LLP 0268 #standing-answer). Read here and
+          // the shipped default (LLP 0279 #standing-answer). Read here and
           // not in the lane: the gate has to state it before the lane
           // runs, and the safe read never throws.
           const standingFolderAsk = await readFolderAskModeSafe({
@@ -563,7 +563,7 @@ export async function runInitWizard(opts) {
               allowBack: true,
               // The store write commits below with the config, so a
               // declined overwrite leaves this run's opt-outs unwritten
-              // too (LLP 0268 #one-commit-point).
+              // too (LLP 0279 #one-commit-point).
               deferWrite: true,
             })
             if (syncScope.back) continue atPick
@@ -589,7 +589,7 @@ export async function runInitWizard(opts) {
               // The sync lane is always behind this one.
               allowBack: true,
               // As above: the preference lands with the config or not at
-              // all (LLP 0268 #one-commit-point).
+              // all (LLP 0279 #one-commit-point).
               deferWrite: true,
             })
             // One screen back is the sync lane only when the sync lane was
@@ -650,7 +650,7 @@ export async function runInitWizard(opts) {
       // set went with it. Naming the lanes that actually asked, because a
       // run where the sync lane only made a statement never had a sync
       // answer to lose.
-      // @ref LLP 0268#one-commit-point [implements]: a refusal reports the held policy writes it also dropped
+      // @ref LLP 0279#one-commit-point [implements]: a refusal reports the held policy writes it also dropped
       const held = [...(syncCommit ? ['sync'] : []), ...(folderCommit ? ['new-folder'] : [])]
       if (held.length > 0) {
         opts.stderr.write(
@@ -666,11 +666,11 @@ export async function runInitWizard(opts) {
 
   // The question lanes' policy stores land here, with the config they
   // belong to: they hold this run's answers, and this run's answers are
-  // either all recorded or none of them are (LLP 0268 #one-commit-point).
+  // either all recorded or none of them are (LLP 0279 #one-commit-point).
   // `folderCommit` resolves to the mode actually left in force, so a failed
   // write reports the standing one rather than the answer it could not
   // keep.
-  // @ref LLP 0268#one-commit-point [implements]: the lanes' policy writes run once the config commits, never before
+  // @ref LLP 0279#one-commit-point [implements]: the lanes' policy writes run once the config commits, never before
   if (syncCommit) await syncCommit()
   if (folderCommit) folderAsk = await folderCommit()
 

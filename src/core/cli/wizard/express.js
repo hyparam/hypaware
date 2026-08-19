@@ -68,12 +68,12 @@ export async function runWizardExpressGate(opts) {
           // accepting does to the machine, plus the folder policy that
           // rides with it - the *standing* one, because accepting takes
           // each lane's stated default and the new-folder lane's default
-          // on a re-run is the answer already in force (LLP 0268
+          // on a re-run is the answer already in force (LLP 0279
           // #standing-answer). Promising "new folders sync too" to a
           // machine whose answer is `ask`, and then keeping `ask`, would
           // make the one line the fast path reads the one line it cannot
           // trust.
-          // @ref LLP 0268#standing-answer [implements]: the accept row names the standing new-folder answer, not the shipped default
+          // @ref LLP 0279#standing-answer [implements]: the accept row names the standing new-folder answer, not the shipped default
           summary: opts.enrolled
             ? opts.folderAsk === 'ask'
               ? 'Configures each to record through HypAware; new folders keep asking.'

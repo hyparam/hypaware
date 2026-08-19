@@ -1239,7 +1239,7 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
 // answers to this run's questions, so they land when this run's config
 // lands and not before: a declined overwrite leaves the machine exactly as
 // it found it, and says so.
-// @ref LLP 0268#one-commit-point [tests]:
+// @ref LLP 0279#one-commit-point [tests]:
 
 /** The pick result an enrolled lane run needs: one editable candidate. */
 function enrolledPickResult(configPath) {

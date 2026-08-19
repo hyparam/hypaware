@@ -51,7 +51,7 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
  * closed on it and `hyp status` names it too.
  *
  * Under `deferWrite` the write itself comes back to the caller as
- * `commit` (LLP 0268 #one-commit-point), so the wizard can land it with
+ * `commit` (LLP 0279 #one-commit-point), so the wizard can land it with
  * the config this run composed instead of the moment the lane is
  * answered. Direct callers without the flag keep the inline write.
  *
@@ -120,13 +120,13 @@ export async function runWizardSyncScope(opts) {
   ]
   const commit = async () => { await writeClientSyncEntries({ stateDir, entries }) }
   // Under `deferWrite` the store write is handed back instead of made here
-  // (LLP 0268 #one-commit-point). The lane still states the split it just
+  // (LLP 0279 #one-commit-point). The lane still states the split it just
   // settled - that statement belongs to the screen the user answered - but
   // the opt-out set is one of this run's answers, and this run's answers
   // land together with its config or not at all. Absence of the store is
   // itself a signal (LLP 0188 #migration), so stamping it on a run the
   // user then abandons is not the inert half-write it looks like.
-  // @ref LLP 0268#one-commit-point [implements]: the store write is handed back rather than made the moment the lane is answered
+  // @ref LLP 0279#one-commit-point [implements]: the store write is handed back rather than made the moment the lane is answered
   if (!opts.deferWrite) await commit()
   if (optedOut.length > 0) {
     opts.stdout.write(

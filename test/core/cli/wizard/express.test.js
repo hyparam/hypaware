@@ -171,10 +171,10 @@ test('narrateAcceptedGate prints the gate title and its items verbatim, led by a
 })
 
 // Accepting takes each lane's stated default, and the new-folder lane's
-// default on a re-run is the answer already in force (LLP 0268
+// default on a re-run is the answer already in force (LLP 0279
 // #standing-answer). The one line the fast path is guaranteed to read has
 // to name that, not the shipped default it is not about to apply.
-// @ref LLP 0268#standing-answer [tests]:
+// @ref LLP 0279#standing-answer [tests]:
 test('the accept row names the standing new-folder answer, not the shipped default', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')

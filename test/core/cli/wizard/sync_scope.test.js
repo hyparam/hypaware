@@ -392,10 +392,10 @@ test('a corrupt store skips the step with a warning and is never overwritten', a
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })
 
-// The lane's write rides the config commit (LLP 0268 #one-commit-point):
+// The lane's write rides the config commit (LLP 0279 #one-commit-point):
 // with `deferWrite` it answers and states the split, and hands the caller
 // the store write to run once the config it belongs to is on disk.
-// @ref LLP 0268#one-commit-point [tests]:
+// @ref LLP 0279#one-commit-point [tests]:
 test('deferWrite answers and states the split, but hands the store write back to the caller', async () => {
   const { env, stateDir } = await makeHome()
   const { prompt } = capturingPrompt(['b'])

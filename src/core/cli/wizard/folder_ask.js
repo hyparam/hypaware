@@ -81,7 +81,7 @@ export async function runWizardFolderAsk(opts) {
   // the shipped one - so accepting the gate cannot silently retire a
   // per-folder question the user asked for on an earlier run.
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
-  // @ref LLP 0268#standing-answer [implements]: the express arm records the lane's stated default, which on a re-run is the standing mode
+  // @ref LLP 0279#standing-answer [implements]: the express arm records the lane's stated default, which on a re-run is the standing mode
   if (opts.autoAccept) {
     narrateAcceptedGate({ stdout: opts.stdout, title: FOLDER_ASK_TITLE, items })
     // Inline: the block's title already said "New folders", so the answer
@@ -131,12 +131,12 @@ export async function runWizardFolderAsk(opts) {
  * prints it flush-left, because the prompt frame it answers has cleared.
  *
  * Under `deferWrite` the lane states the answer here and hands the write
- * back as `commit` (LLP 0268 #one-commit-point): the statement belongs to
+ * back as `commit` (LLP 0279 #one-commit-point): the statement belongs to
  * the screen that produced it, but the preference itself is part of this
  * run's answer set and lands only once the run's config does. A run that
  * ends before that point leaves the standing mode alone.
  *
- * @ref LLP 0268#one-commit-point [implements]: the preference write is handed back rather than made the moment the lane is answered
+ * @ref LLP 0279#one-commit-point [implements]: the preference write is handed back rather than made the moment the lane is answered
  * @param {FolderAskMode} mode
  * @param {{ stateDir: string, before: FolderAskMode, opts: RunWizardFolderAskOptions, inline?: boolean }} ctx
  * @returns {Promise<WizardFolderAskResult>}

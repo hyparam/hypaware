@@ -171,7 +171,7 @@ test('the two options are exactly sync and ask', () => {
 // Accepting the express gate takes each lane's *stated* default (LLP 0201
 // #gate), and this lane's stated default on a re-run is the standing
 // answer, not the shipped one: the asked path already defaults to it.
-// @ref LLP 0268#standing-answer [tests]:
+// @ref LLP 0279#standing-answer [tests]:
 test('the express path keeps a standing ask instead of resetting it to sync', async () => {
   const { env, stateDir } = await makeHome()
   await writeFolderAskMode({ stateDir, mode: 'ask' })
@@ -188,10 +188,10 @@ test('the express path keeps a standing ask instead of resetting it to sync', as
   assert.match(stdout.text(), /^ {2}Asking about each one; change later with hyp policy folders sync$/m)
 })
 
-// The lanes' writes ride the config commit (LLP 0268 #one-commit-point):
+// The lanes' writes ride the config commit (LLP 0279 #one-commit-point):
 // with `deferWrite` the lane answers and states its answer, and hands the
 // caller the write to run once the config it belongs to is on disk.
-// @ref LLP 0268#one-commit-point [tests]:
+// @ref LLP 0279#one-commit-point [tests]:
 test('deferWrite answers and states the answer, but hands the write back to the caller', async () => {
   const { env, stateDir } = await makeHome()
   await writeFolderAskMode({ stateDir, mode: 'ask' })
