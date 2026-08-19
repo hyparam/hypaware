@@ -371,11 +371,16 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
   // `clients: 'all'` is the same one loop over the same live registries, so
   // the keep-set cannot drift from what a full run would copy.
   //
-  // Planned without a `stderr`: this pass asks a question rather than
-  // reporting one, and every warning `planClientAssets` has to write was
-  // already written when it planned the run's own copies above.
-  // @ref LLP 0219#prune-on-materialize [implements]: the plan check is over
-  //   every client's contributions, not the one client's share of them.
+  // Planned without a `stderr`. `planClientAssets` documents that an explicit
+  // client list never warns about what it excluded, and this pass exists to ask
+  // about exactly those excluded clients: given a `stderr`, `hyp attach claude`
+  // would print warnings about a `claude-desktop` contribution nobody asked it
+  // to install. The run's own warnings are already on stderr from the plan
+  // above; the ones only this pass can see belong to a run scoped to those
+  // clients, and `--client all` still surfaces every one of them.
+  // @ref LLP 0266#contributions-not-the-run [implements]: the check is asked of
+  //   every client's contributions, re-planned rather than re-derived, and the
+  //   widened pass is silent because its warnings are not this run's to report.
   const { stderr: _planWarnings, ...quiet } = options
   const contributed = options.clients === 'all'
     ? planned
