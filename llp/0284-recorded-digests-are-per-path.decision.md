@@ -84,8 +84,11 @@ record, rather than against the one record the candidate loop is carrying.
   recorded for still fails the gate and still takes the report exit with "has no
   recorded content digest, so nothing proves the bytes are ours". That keeps the
   attach marker demoted to a reporting source (#marker-is-evidence): the marker
-  names paths and never bytes, so a marker-only candidate has an empty digest
-  set and cannot be removed on the marker's word.
+  names paths and never bytes, so a marker-only candidate at a path no ledger
+  row records has an empty digest set and cannot be removed on the marker's
+  word. Where a ledger row does record the path, a marker-only candidate can be
+  removed - but on that row's digest, never on the marker, which is the same
+  evidence any other candidate needs.
 
 - **The user's edit still outranks the retirement.** A file the user took over
   matches no recorded digest for its path, so it is still named and left in
@@ -116,3 +119,15 @@ record, rather than against the one record the candidate loop is carrying.
   and it is untouched here. The manual refresh exists: `hyp skills install`
   defaults to `--client all`, and an explicit attach of the contributing client
   plans the destination.
+
+- **A scoped run still judges candidacy on its own share of the plan.**
+  `keepAll` is the whole run's plan, and a `--client claude` run's plan does not
+  contain what `claude-desktop` contributes, so a shared destination only
+  `claude-desktop` still contributes is a candidate under `claude`'s stale
+  record. That predates this decision: with no intervening rewrite the digests
+  agree and the copy is removed today. What changes is that an intervening
+  rewrite no longer accidentally saves it, because the mismatch it used to
+  produce was never evidence about the bytes in the first place. The fix belongs
+  to candidacy, not to evidence: `keepAll` would have to be asked of every
+  client's contributions rather than of the scoped plan, which is the same
+  question as the open question above and is not settled here.
