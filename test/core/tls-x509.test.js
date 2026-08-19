@@ -171,3 +171,90 @@ test('an expired leaf is rejected by a verifying client', async () => {
   assert.equal(result.authorized, false)
   assert.match(String(result.error), /expired/i)
 })
+
+// #886 finding 1. UTCTime carries a two-digit year, so anything from 2050 on
+// wraps into the 19xx half of RFC 5280's sliding window and the certificate is
+// born expired. That became reachable the moment CA validity went to ten years
+// (LLP 0238#ten-year-validity): a machine whose clock reads 2041 mints a CA
+// whose `notAfter` is 2050, which parses back as 1950.
+// @ref LLP 0266#generalized-time-past-2049 [tests]
+test('a notAfter past 2049 round-trips instead of wrapping into the 19xx window', () => {
+  const notBefore = new Date(Date.UTC(2041, 0, 1))
+  const notAfter = new Date(Date.UTC(2051, 5, 2, 3, 4, 5))
+  const keys = generateKeyPair()
+  const ca = mintCertificate({
+    subject: CA_SUBJECT,
+    issuer: CA_SUBJECT,
+    publicKey: keys.publicKey,
+    signingKey: keys.privateKey,
+    notBefore,
+    notAfter,
+    isCa: true,
+    permittedDnsNames: [HOST],
+  })
+
+  const parsed = new crypto.X509Certificate(ca.der)
+  assert.equal(new Date(parsed.validFrom).getTime(), notBefore.getTime())
+  assert.equal(new Date(parsed.validTo).getTime(), notAfter.getTime())
+  // The date is only correct if it was encoded as GeneralizedTime (tag 0x18);
+  // UTCTime (tag 0x17) has nowhere to put the century.
+  assert.equal(ca.der.includes(Buffer.from('20510602030405Z', 'ascii')), true)
+})
+
+// The other half of the same boundary: dates UTCTime can hold must keep using
+// it, because that is what every parser expects below 2050 and switching would
+// be a silent encoding change for every certificate this product mints.
+// @ref LLP 0266#generalized-time-past-2049 [tests]
+test('a notAfter inside the UTCTime window is still encoded as UTCTime', () => {
+  const notBefore = new Date(Date.UTC(2026, 0, 1))
+  const notAfter = new Date(Date.UTC(2035, 5, 2, 3, 4, 5))
+  const keys = generateKeyPair()
+  const ca = mintCertificate({
+    subject: CA_SUBJECT,
+    issuer: CA_SUBJECT,
+    publicKey: keys.publicKey,
+    signingKey: keys.privateKey,
+    notBefore,
+    notAfter,
+    isCa: true,
+    permittedDnsNames: [HOST],
+  })
+
+  const parsed = new crypto.X509Certificate(ca.der)
+  assert.equal(new Date(parsed.validTo).getTime(), notAfter.getTime())
+  assert.equal(ca.der.includes(Buffer.from('350602030405Z', 'ascii')), true)
+  assert.equal(ca.der.includes(Buffer.from('20350602030405Z', 'ascii')), false)
+})
+
+// #886 finding 3. An IP literal is printable ASCII, so the host guard let it
+// through and it was encoded as a dNSName - a name form no TLS client matches
+// against an IP connection, inside a CA that excludes all IP space anyway
+// (LLP 0235#ca-name-constraints). The mint succeeded and the handshake failed
+// with nothing naming the cause.
+// @ref LLP 0266#ip-literals-are-refused [tests]
+test('an IP-literal host is refused rather than minted as a dNSName', () => {
+  const keys = generateKeyPair()
+  /** @param {Partial<Parameters<typeof mintCertificate>[0]>} extra */
+  const mint = (extra) => mintCertificate({
+    subject: [['2.5.4.3', 'leaf']],
+    issuer: CA_SUBJECT,
+    publicKey: keys.publicKey,
+    signingKey: keys.privateKey,
+    notBefore: new Date(Date.now() - 60_000),
+    notAfter: new Date(Date.now() + 86_400_000),
+    isCa: false,
+    .../** @type {any} */ (extra),
+  })
+
+  for (const literal of ['10.0.0.5', '::1', '2001:db8::1', '[::1]']) {
+    assert.throws(() => mint({ dnsNames: [literal] }), /IP literal/, `SAN ${literal}`)
+    assert.throws(
+      () => mint({ isCa: true, permittedDnsNames: [literal] }),
+      /IP literal/,
+      `constraint ${literal}`
+    )
+  }
+
+  // A hostname that merely looks numeric in one label is still a hostname.
+  assert.doesNotThrow(() => mint({ dnsNames: ['10.0.0.5.nip.io'] }))
+})

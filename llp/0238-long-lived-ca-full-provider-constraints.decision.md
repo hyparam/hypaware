@@ -8,7 +8,9 @@
 **Related:** LLP 0234, LLP 0235, LLP 0236, LLP 0237
 **Extended-by:** LLP 0262 (accepted 2026-08-17; the long-lived CA is not
 part of capturing the `claude` client; it remains the credential for any
-client still routed through the proxy)
+client still routed through the proxy), LLP 0266 (accepted 2026-08-19;
+a stored CA is reused when it covers the requested hosts, so narrowing the
+configured upstream set no longer strands the trust grant)
 
 > The interception CA becomes a per-machine, ten-year credential whose name
 > constraints permit every provider host HypAware can ever intercept, so the
@@ -79,6 +81,11 @@ independent of which providers this install has configured. All IP space
 stays excluded (LLP 0235's encoding rules and tests carry forward
 unchanged). Enabling Codex capture later therefore reuses the same CA and
 the same trust grant: one certificate, one dialog, every provider.
+
+*Extended by LLP 0266#stored-superset-is-reusable: a stored CA is reused when
+its permitted set covers the requested hosts, not only when it equals them, so
+removing an operator-configured upstream no longer re-mints. The invariant
+below is unchanged.*
 
 This supersedes the mint-from-routing-table rule of
 LLP 0235#ca-name-constraints while keeping its invariant: the constraint set

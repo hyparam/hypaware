@@ -15,6 +15,8 @@ import {
   readLocalCaInfo,
 } from '../../../../src/core/tls/ca.js'
 
+import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
+
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
@@ -491,9 +493,32 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   // @ref LLP 0238#full-provider-constraints [implements]
   /** @type {string[]} */
   const hostList = []
+  /** @type {string[]} */
+  const ipLiteralHosts = []
   for (const u of upstreams) {
     const host = hostOfBaseUrl(u.base_url)
-    if (host) hostList.push(host)
+    if (!host) continue
+    // An IP-literal `base_url` names a host this CA can never vouch for: every
+    // permitted name it carries is a `dNSName`, which no TLS client matches
+    // against a connection made to an IP, and the whole IP space is in
+    // `excludedSubtrees` by design (LLP 0235#ca-name-constraints). Skipping it
+    // here rather than letting the mint refuse it keeps one such upstream from
+    // taking the install's other interception down with it.
+    // @ref LLP 0266#ip-literals-are-refused [implements]
+    if (isIpLiteralHost(host)) {
+      ipLiteralHosts.push(host)
+      continue
+    }
+    hostList.push(host)
+  }
+  if (ipLiteralHosts.length > 0) {
+    ctx.log.warn('aigw.interception_host_unsupported', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      hosts: [...new Set(ipLiteralHosts)],
+      reason: 'an IP-literal upstream base_url cannot be intercepted: the local CA ' +
+        'constrains dNSName and excludes all IP space, so its traffic is tunnelled ' +
+        'blind and unrecorded; give the upstream a DNS name to capture it',
+    })
   }
   const hosts = [...new Set(hostList)]
   if (hosts.length === 0) {

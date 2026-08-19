@@ -236,12 +236,17 @@ async function loadLocalCa(paths, hosts, now) {
   if (Number.isNaN(notAfter.getTime())) return undefined
   if (notAfter.getTime() - now.getTime() < CA_RENEW_WITHIN_DAYS * 86_400_000) return undefined
 
-  // The stored constraint set must be exactly the hosts asked for. Callers
-  // now always ask for the full provider list (LLP 0238), so a mismatch means
-  // a CA minted under the old routing-table rule - regenerate it once and the
-  // new trust grant covers every provider from then on.
+  // The stored constraint set must *cover* the hosts asked for, not equal them.
+  // Only widening needs a new CA; narrowing does not, and requiring equality
+  // meant an install that had once configured an upstream outside the static
+  // provider list silently re-minted the moment that upstream was removed from
+  // config - stranding the one keychain trust grant the user gave by password
+  // dialog, which is the entire reason the CA is long-lived, and failing every
+  // proxied handshake until they re-attach and re-approve. A CA minted under
+  // the old routing-table rule is still a strict subset of the full provider
+  // list callers now ask for, so it still regenerates once (LLP 0238).
+  // @ref LLP 0266#stored-superset-is-reusable [implements]
   const permitted = permittedHosts(cert)
-  if (permitted.length !== hosts.length) return undefined
   for (const host of hosts) {
     if (!permitted.includes(host)) return undefined
   }

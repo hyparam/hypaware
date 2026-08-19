@@ -656,8 +656,16 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     // HTTPS request the client makes rather than merely its capture, and the
     // `prev_env` backup would be deleted along with the marker. Reverse the
     // proxy keys by the same still-ours-then-restore-or-remove rule.
+    //
+    // `recordDamaged`, not `markerPort !== undefined`: every genuine pre-record
+    // legacy marker carries a `port`, so gating on the port ran this on plain
+    // base-URL legacy detaches too. Proxy mode did not exist when those markers
+    // were written, so any `HTTPS_PROXY` or `NODE_EXTRA_CA_CERTS` beside one is
+    // the user's own - and the reversal reported it as HypAware residue of
+    // unknown provenance (#886 finding 2).
     // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
-    if (markerPort !== undefined) {
+    // @ref LLP 0266#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
+    if (recordDamaged && markerPort !== undefined) {
       reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
     }
 
