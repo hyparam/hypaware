@@ -148,6 +148,23 @@ test('status reports recorded when any advertised recorder does not hold the id'
       assert.equal(out.ignored, false)
       assert.equal(out.recorders[0].status, 'ignored')
       assert.equal(out.recorders[1].status, 'not_ignored')
+
+      // The headline speaks for the recorder that is still recording, which
+      // here is NOT the first entry of the inventory. Every other recorder
+      // gets its own line, so the gateway's `ignored` - the fact a user
+      // reading "this session IS being recorded" most needs beside it - is
+      // printed, and the recorder the headline already covered is not
+      // repeated. A blind `slice(1)` did the exact opposite of both.
+      const human = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
+      assert.equal(await runSessionStatus([], human.ctx), 1)
+      const text = human.stdout()
+      assert.match(text, /recorder gateway at .*: ignored \(1 ignored\)/)
+      assert.equal((text.match(/^recorder /gm) ?? []).length, 1, 'only the non-headline recorder gets a line')
+      assert.doesNotMatch(text, /recorder claude-telemetry at/)
+      // Both endpoints still carry the per-responder trust disclosure.
+      assert.equal((text.match(/nothing proves the responder/g) ?? []).length, 2)
+      assert.ok(text.includes(listenerBase), 'the headline recorder endpoint is named')
+      assert.ok(text.includes(gatewayBase), 'the other recorder endpoint is named')
     })
   })
 })

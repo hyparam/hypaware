@@ -267,6 +267,14 @@ export async function runSessionStatus(argv, ctx) {
       recorders: [],
     })
   }
+  // A resolvable extra recorder with no resolvable gateway narrows what this
+  // answer covers, so say it out loud here for the same reason `runMutation`
+  // does: an `ignored` that never asked the gateway must not read as an
+  // `ignored` everywhere. stderr, so the `--json` document stays parseable.
+  // @ref LLP 0249#milestones [implements]: status and mutations report the same recorder inventory, gaps included
+  if (resolvedTargets.gatewayError) {
+    ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
+  }
 
   /** @type {SessionStatusOutcome[]} */
   const outcomes = []
@@ -573,7 +581,7 @@ function writeStatus(ctx, json, report) {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
     ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
-    writeRecorderStatusLines(ctx, report.recorders.slice(1))
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
@@ -583,12 +591,12 @@ function writeStatus(ctx, json, report) {
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    writeRecorderTrustNotes(ctx, report.recorders.slice(1))
+    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
     ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
-    writeRecorderStatusLines(ctx, report.recorders.slice(1))
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
@@ -598,13 +606,36 @@ function writeStatus(ctx, json, report) {
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    writeRecorderTrustNotes(ctx, report.recorders.slice(1))
+    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   }
 
   if (report.status === 'ignored') return 0
   if (report.status === 'not_ignored') return SESSION_EXIT_NOT_IGNORED
   return SESSION_EXIT_UNKNOWN
+}
+
+/**
+ * The per-recorder rows the headline has NOT already spoken for.
+ *
+ * The headline reports one outcome (`report.endpoint` / `endpoint_source` and
+ * `total` are that outcome's), and it is not always `recorders[0]`: the
+ * aggregate takes the first `not_ignored` answer, so with the gateway
+ * `ignored` and a second recorder `not_ignored` the headline describes the
+ * second recorder. A blind `slice(1)` then re-printed that recorder and
+ * dropped the gateway's answer from the output entirely. Matching on
+ * `endpoint` is exact because the inventory carries no duplicate endpoints:
+ * `resolveAdvertisedRecordersForCli` drops any advertised endpoint equal to
+ * the gateway's.
+ *
+ * @param {SessionStatusReport} report
+ * @returns {SessionStatusOutcome[]}
+ * @ref LLP 0256#cli-posts-to-both [implements]: every addressed recorder's answer is reported, exactly once
+ */
+function secondaryRecorders(report) {
+  const spokenFor = report.recorders.findIndex((outcome) => outcome.endpoint === report.endpoint)
+  if (spokenFor === -1) return report.recorders
+  return report.recorders.filter((_, index) => index !== spokenFor)
 }
 
 /**

@@ -393,13 +393,28 @@ export async function dispatch(argv, opts = {}) {
     return 2
   }
 
+  // A core-owned group whose every subcommand is contributed by ONE plugin
+  // (`session`, filled entirely by @hypaware/ai-gateway) has no children at
+  // all when that plugin is inactive, and the group shell still matches. Its
+  // empty subcommand table, and its `expected one of:` with nothing after it,
+  // are the "unknown" answer LLP 0153 exists to prevent, and they contradict
+  // what top-level help promises ("run it anyway: hyp names the plugin that
+  // provides it").
+  const emptyGroup =
+    matched.command.group === true && listGroupChildren(registry, matched.command.name).length === 0
+
   // A canonical task group (`client`, `query`, `admin`) is core-owned, so it
   // still matches when a deeper plugin command is inactive. Check that miss
   // before running the group command or an unavailable plugin leaf would be
-  // misreported as an unknown subcommand.
+  // misreported as an unknown subcommand. An empty group is probed on its own
+  // canonical tokens instead of argv, so `hyp session`, `hyp session --help`,
+  // and `hyp session zzz` all resolve to the same answer: no subcommand of an
+  // absent plugin can be reached by any spelling.
+  // @ref LLP 0153#unavailable-not-unknown [implements]: an empty core group reports the plugin that fills it, not an empty list
   // @ref LLP 0248#aliases [implements]: canonical and legacy plugin paths preserve inactive-plugin repair
-  if (matched.command.group === true && matched.rest.length > 0 && !isHelpFlag(matched.rest[0])) {
-    const inactive = await findInactivePluginForCommand(helpDiscovery, argv)
+  if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
+    const probe = emptyGroup ? matched.command.name.split(' ') : argv
+    const inactive = await findInactivePluginForCommand(helpDiscovery, probe)
     if (inactive) {
       renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
       if (ownsKernel) await stopBootStartedSources(kernel)
@@ -851,13 +866,35 @@ function renderJourneyHelpSection(stdout, title, rows, category, preferred) {
 }
 
 /**
+ * The four sections `renderHelp` prints, in the order it prints them. Every
+ * row has to land in one of them.
+ */
+const HELP_SECTIONS = ['getting-started', 'explore-share', 'capture-movement', 'additional']
+
+/**
+ * Which section a row belongs to. A category outside `HELP_SECTIONS` falls
+ * back to `additional` rather than matching nothing: the registry invents a
+ * category for any registration that omits one (`command.name.split(' ')[0]`,
+ * so `foo bar` becomes `foo`), and a third-party command may declare whatever
+ * it likes in its manifest. Matching on the raw value dropped such a command
+ * from `hyp --help` silently, with no error and nothing in the output to say
+ * it existed, which is the one outcome help must not produce.
+ *
+ * @param {string | undefined} category
+ * @returns {string}
+ */
+function helpSectionFor(category) {
+  return category !== undefined && HELP_SECTIONS.includes(category) ? category : 'additional'
+}
+
+/**
  * @param {Map<string, { summary: string, category: string | undefined }>} rows
  * @param {string} category
  * @param {string[]} preferred
  */
 function orderedHelpNames(rows, category, preferred) {
   const available = [...rows.entries()]
-    .filter(([, row]) => (row.category ?? 'additional') === category)
+    .filter(([, row]) => helpSectionFor(row.category) === category)
     .map(([name]) => name)
   const rank = new Map(preferred.map((name, index) => [name, index]))
   return available.sort((a, b) => {

@@ -253,12 +253,25 @@ export function renderClientStatusText(rows, stdout) {
 }
 
 /**
+ * Where the recorder's listener is bound, read from the report's source
+ * snapshot.
+ *
+ * Liveness-gated, exactly like the `client_telemetry_stale` diagnostic in
+ * `hyp status` (src/core/daemon/status.js): "the listener is bound to X" is
+ * not a claim a dead daemon's persisted snapshot can support, and a restart
+ * is what moves an ephemeral port back. Without the gate, `hyp client status`
+ * boots with no plugins, falls back to the last `status.json`, and reports
+ * `[endpoint drift]` for a stopped daemon while `hyp status` correctly stays
+ * silent, so the two surfaces this projection exists to reconcile disagree.
+ *
  * @param {HypAwareStatusReport} report
  * @param {string | null} sourceName
  * @returns {{ endpoint: string | null, port: number | null }}
+ * @ref LLP 0248#client-status [implements]: the projection reports what the overall status collector would report, drift gate included
  */
 function listenerEndpointFromReport(report, sourceName) {
   if (!sourceName) return { endpoint: null, port: null }
+  if (!report.daemon?.running) return { endpoint: null, port: null }
   const source = report.sources.find((entry) => entry.name === sourceName)
   if (!source?.details || typeof source.details !== 'object') return { endpoint: null, port: null }
   const details = /** @type {Record<string, unknown>} */ (source.details)

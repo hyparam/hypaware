@@ -16,6 +16,7 @@ function buffer() {
 function report() {
   return /** @type {any} */ ({
     layered: null,
+    daemon: { installed: true, loaded: true, running: true, platform: 'linux' },
     clients: [
       {
         name: 'claude',
@@ -105,4 +106,25 @@ test('a filtered client projection cannot leak another client recorder health', 
   const stdout = buffer()
   renderClientStatusText(codexOnly, stdout)
   assert.doesNotMatch(stdout.text(), /claude|capture gap|endpoint drift/)
+})
+
+// The drift line is a claim about where the listener is bound *now*. A stopped
+// daemon leaves its last snapshot on disk, and `hyp client status` boots with
+// no plugins, so that snapshot is all this projection can see. `hyp status`
+// gates its equivalent `client_telemetry_stale` diagnostic on daemon liveness
+// for exactly that reason, and the two surfaces must not disagree.
+// @ref LLP 0248#client-status [tests]: a dead daemon's persisted port makes no drift claim here either
+test('a stopped daemon reports no listener endpoint and no drift', () => {
+  const source = report()
+  source.daemon.running = false
+  const rows = projectClientStatus(source, source.clients)
+  const claude = rows.find((row) => row.name === 'claude')
+
+  assert.equal(claude?.listener_endpoint, null)
+  assert.equal(claude?.endpoint_drift, null)
+
+  const stdout = buffer()
+  renderClientStatusText(rows, stdout)
+  assert.match(stdout.text(), /telemetry: http:\/\/127\.0\.0\.1:4319 -> listener not running/)
+  assert.doesNotMatch(stdout.text(), /endpoint drift/)
 })

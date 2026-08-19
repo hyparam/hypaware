@@ -17,14 +17,14 @@ const DEFAULT_MAX_CELL = 200
 const DEFAULT_MAX_BYTES = 32_768
 
 const SEARCH_USAGE =
-  'usage: hyp vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>] [--max-cell <n>] [--max-bytes <n>]'
+  'usage: hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>] [--max-cell <n>] [--max-bytes <n>]'
 
 /**
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx
  */
 export async function runVector(_argv, ctx) {
-  ctx.stdout.write('hyp vector <subcommand>\n')
+  ctx.stdout.write('hyp query vector <subcommand>\n')
   ctx.stdout.write('  search <query>   similarity search across configured indexes\n')
   ctx.stdout.write('  status           per-index shard coverage and staleness\n')
   return 0
@@ -72,7 +72,7 @@ export async function runVectorSearch(argv, ctx) {
   } catch (err) {
     const kind = /** @type {HypError} */ (err)?.hypErrorKind
     const message = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`hyp vector search: ${message}\n`)
+    ctx.stderr.write(`hyp query vector search: ${message}\n`)
     return kind === 'vector_no_indexes' ? 2 : 1
   }
 }
@@ -142,7 +142,7 @@ export function parseVectorSearchArgv(argv) {
     if (token === '--index' || token === '--dataset') {
       const value = argv[i + 1]
       if (value === undefined || value.startsWith('--')) {
-        return { ok: false, error: `hyp vector search: ${token} expects a name` }
+        return { ok: false, error: `hyp query vector search: ${token} expects a name` }
       }
       if (token === '--index') index = value
       else dataset = value
@@ -151,7 +151,7 @@ export function parseVectorSearchArgv(argv) {
       const value = argv[i + 1]
       const n = Number(value)
       if (value === undefined || !Number.isInteger(n) || n <= 0) {
-        return { ok: false, error: `hyp vector search: --top-k expects a positive integer (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query vector search: --top-k expects a positive integer (got ${value ?? '<missing>'})` }
       }
       topK = n
       i += 1
@@ -160,7 +160,7 @@ export function parseVectorSearchArgv(argv) {
     } else if (token === '--format') {
       const value = argv[i + 1]
       if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
-        return { ok: false, error: `hyp vector search: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query vector search: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
       }
       format = value
       i += 1
@@ -168,7 +168,7 @@ export function parseVectorSearchArgv(argv) {
       const value = argv[i + 1]
       const n = Number(value)
       if (value === undefined || !Number.isInteger(n) || n < 0) {
-        return { ok: false, error: `hyp vector search: ${token} expects a non-negative integer (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query vector search: ${token} expects a non-negative integer (got ${value ?? '<missing>'})` }
       }
       if (token === '--max-cell') maxCell = n
       else maxBytes = n
