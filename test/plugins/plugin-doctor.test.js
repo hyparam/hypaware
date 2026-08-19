@@ -348,3 +348,50 @@ test('a dry run does not start a source the plugin starts from activate()', asyn
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+test('a manifest command entry with no summary names the blank, not two wordings', async () => {
+  // `summary` is optional on a manifest command entry, so this is the shape a
+  // plugin author most often lands on. It is still drift (top-level help lists
+  // the command with no description), but the message has to say which side is
+  // missing or the author goes looking for a second wording that is not there.
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run' }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(finding)
+  assert.match(finding.message, /has no summary in the manifest/)
+  assert.equal(finding.message.includes('two different summaries'), false)
+  assert.ok(finding.repair.some((r) => r.includes('"summary": "Run the demo"')))
+})
+
+test('a multi-word group whose subcommands are declared is not warned about', async () => {
+  // Group prefixes are not single tokens: dispatch resolves `hyp query cache
+  // --help` through the longest declared prefix, so `registerGroup({ name:
+  // 'query cache' })` is correct and must not be reported as describing a
+  // group nothing lists.
+  const root = await fixture({
+    manifest: baseManifest({
+      contributes: {
+        commands: [
+          { name: 'query cache list', summary: 'List cached datasets' },
+          { name: 'query cache purge', summary: 'Purge the cache' },
+        ],
+      },
+    }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'query cache list', plugin: '@test/example', summary: 'List cached datasets', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.register({ name: 'query cache purge', plugin: '@test/example', summary: 'Purge the cache', usage: 'u', run: async () => 0 })\n` +
+      `  ctx.commands.registerGroup({ name: 'query cache', plugin: '@test/example', summary: 'Query cache maintenance' })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  assert.equal(report.diagnostics.length, 0, JSON.stringify(report.diagnostics))
+})

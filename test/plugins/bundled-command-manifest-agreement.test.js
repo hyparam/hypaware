@@ -86,11 +86,14 @@ for (const dir of dirs) {
   test(`${dir}: the manifest and activate() agree on commands`, async () => {
     const report = await diagnosePlugin(path.join(workspace, dir), { knownCapabilities })
 
-    // A dry run that never reached `activate()` registers nothing, which would
-    // make the diff below vacuously clean. Fail on the cause instead.
-    const fatal = report.diagnostics.filter(
-      (d) => d.kind === 'entrypoint_import_failed' || d.kind === 'activate_missing' || d.kind === 'manifest_invalid'
-    )
+    // A dry run that never reached the END of `activate()` registers nothing,
+    // or only the prefix it got to, which would make the diff below vacuously
+    // clean. Fail on the cause instead. `activate_threw` counts: the doctor
+    // still runs the diff after a throw on purpose, but a bundled plugin must
+    // not pass this gate by having registered nothing to disagree about.
+    // @ref LLP 0267#d2 [tests]: a plugin whose dry run never registers anything cannot pass by registering nothing
+    const FATAL = new Set(['entrypoint_import_failed', 'activate_missing', 'manifest_invalid', 'activate_threw'])
+    const fatal = report.diagnostics.filter((d) => FATAL.has(d.kind))
     assert.deepEqual(fatal, [], `${dir}: the command diff cannot run:\n${render(fatal)}`)
 
     assert.deepEqual(

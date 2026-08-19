@@ -328,17 +328,29 @@ function checkCommandHelp(manifest, registered, out) {
     const declaredSummary = declared.get(command.name)
     if (declaredSummary === undefined) continue
     if (declaredSummary !== command.summary) {
+      // `summary` is optional on a manifest command entry, so the blank case
+      // is the common one and deserves to be named rather than reported as
+      // two wordings. It is still drift: top-level help renders the blank,
+      // group help renders the registration.
+      const blank = declaredSummary.length === 0
       out.push({
         kind: 'command_help_drift',
         severity: 'error',
         location: '/contributes/commands',
-        message:
-          `command '${command.name}' has two different summaries: the manifest says ` +
-          `'${declaredSummary}' and activate() registers '${command.summary}'`,
-        repair: [
-          `Top-level help reads the manifest and group help reads the registration, so the two disagree on screen`,
-          `Pick one wording and use it in both hypaware.plugin.json and ctx.commands.register`,
-        ],
+        message: blank
+          ? `command '${command.name}' has no summary in the manifest, but activate() registers ` +
+            `'${command.summary}': top-level help lists the command with no description`
+          : `command '${command.name}' has two different summaries: the manifest says ` +
+            `'${declaredSummary}' and activate() registers '${command.summary}'`,
+        repair: blank
+          ? [
+              `Top-level help reads the manifest, so an entry with no summary lists the command blank`,
+              `Add "summary": "${command.summary}" to the contributes.commands entry for '${command.name}'`,
+            ]
+          : [
+              `Top-level help reads the manifest and group help reads the registration, so the two disagree on screen`,
+              `Pick one wording and use it in both hypaware.plugin.json and ctx.commands.register`,
+            ],
       })
     }
     if (command.hidden) {
@@ -356,7 +368,11 @@ function checkCommandHelp(manifest, registered, out) {
   }
 
   for (const group of registered.commandGroups) {
-    if ([...declared.keys()].some((name) => name.split(' ')[0] === group.name)) continue
+    // A group prefix is not always one token: `resolveGroupHelp` walks every
+    // leading prefix (`lead.slice(0, depth).join(' ')`), so `query cache` is a
+    // registrable group. Comparing head tokens only would warn about a group
+    // that renders correctly for `hyp query cache --help`.
+    if ([...declared.keys()].some((name) => name === group.name || name.startsWith(`${group.name} `))) continue
     out.push({
       kind: 'command_help_drift',
       severity: 'warn',
