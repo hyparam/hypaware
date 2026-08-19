@@ -157,6 +157,18 @@ by the parameterized test, not by the table.
    which is where they were before this decision. Widening it means passing the
    option at each call site, and each one wants a look at whether a value there
    can start with a dash.
+
+   *Answered: yes.* D1 already stated the rule for every visible core command;
+   only the mechanism was short. `STRICT_SHORT_FLAGS` in `verb_codec.js` is now
+   passed at each direct call site that binds a positional (`backfill`,
+   `backfill plan`, `ignore`/`unignore`, `plugin install`, `plugin update`,
+   `policy set`/`show`/`unset`/`client`/`folders`, `purge`, `query maintain`,
+   `sink maintain`, `sync`). The per-site look found one legitimate
+   dash-leading value, `hyp join`'s opaque token positional, so `join` stays
+   lenient; `query sql` is a verb and keeps the lenient reading D1 carved out.
+   `test/core/cli-arg-validation.test.js` iterates the visible command set for
+   the short-flag case rather than the table, so a new call site cannot
+   re-open the gap.
 3. **Does the plugin surface want the same guarantee?** The parameterized test
    is scoped to core commands. Holding plugin commands to it would mean either a
    registration-level schema (a plugin-facing contract change) or a smoke that

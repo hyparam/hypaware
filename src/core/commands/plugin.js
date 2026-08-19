@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
@@ -196,7 +196,7 @@ function parsePluginInstallArgs(argv) {
       yes: { type: 'boolean', default: false },
     },
     positional: ['source'],
-  }, { aliases: { '-y': '--yes' } })
+  }, { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } })
   if ('help' in parsed) return { ok: false, code: 2, message: PLUGIN_INSTALL_USAGE }
   if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
   const p = /** @type {{ source?: string, ref?: string, path?: string, yes: boolean }} */ (parsed.params)
@@ -416,7 +416,7 @@ function parsePluginUpdateArgs(argv) {
       yes: { type: 'boolean', default: false },
     },
     positional: ['plugin'],
-  }, { aliases: { '-y': '--yes' } })
+  }, { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } })
   if ('help' in parsed) return { ok: false, code: 2, message: 'usage: hyp plugin update [plugin] [--yes]' }
   if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
   const p = /** @type {{ plugin?: string, yes: boolean }} */ (parsed.params)
