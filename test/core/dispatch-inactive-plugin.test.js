@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 
 /**
  * The exemplar here is `@hypaware/gascity`, and it should stay a plugin that
@@ -349,4 +350,37 @@ test('dispatch miss on a selected plugin whose activate() threw reports unavaila
   // Neither config repair applies: the entry is already there and enabled.
   assert.equal(stderr.text().includes('add {"name"'), false)
   assert.equal(stderr.text().includes('"enabled": true'), false)
+})
+
+test('an injected kernel is not read as a failed activation', async () => {
+  // The integration API (`src/core/cli/integration.js`) forwards a caller's
+  // own kernel and registry, and dispatch then never boots. There is no
+  // activation record to compare against, so a config-selected plugin whose
+  // command is not in the caller's registry must NOT be reported as one this
+  // run "could not activate": nothing tried.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-injected-kernel-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] }))
+
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['gascity'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    registry: createCommandRegistry(),
+    kernel: /** @type {any} */ ({}),
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 2)
+  assert.equal(stderr.text().includes('could not activate'), false)
+  assert.match(stderr.text(), /unknown command 'gascity'/)
 })

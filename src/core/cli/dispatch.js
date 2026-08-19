@@ -1248,11 +1248,10 @@ export async function activatePluginDependencyClosure({
  *   does not exist. Checked first, because a selected plugin is never also in
  *   the not-selected pool.
  *
- * Exact match ONLY: `token` must equal the first word of a declared command
- * name (`graph` for `graph project`). A typo matches nothing and falls
- * through to the generic unknown-command message. Active plugins never reach
- * here for their own commands: those matched `registry.match`/group help
- * above, so at the miss path `token` is unowned by any active or core command.
+ * Canonical names and compatibility aliases are matched by argv prefix. A typo
+ * matches nothing and falls through to the generic unknown-command message.
+ * Active plugins never reach here for their own commands: those matched
+ * `registry.match` or group help above.
  *
  * Best-effort and cheap: the same manifest discovery `--help` already runs,
  * wrapped so any failure (missing workspace, unreadable config) degrades to
@@ -1260,7 +1259,8 @@ export async function activatePluginDependencyClosure({
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
  * @param {string[]} argv
- * @param {string[]} unavailablePlugins
+ * @param {string[]} unavailablePlugins `bootKernel`'s `unavailablePlugins`: the
+ *   plugins this boot did not get, by any of the routes above.
  * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' | 'selected-unavailable' } | undefined>}
  */
 async function findInactivePluginForCommand(discovery, argv, unavailablePlugins = []) {
@@ -1271,7 +1271,12 @@ async function findInactivePluginForCommand(discovery, argv, unavailablePlugins 
     // command set to reason about, so offer no suggestion.
     if (selection.shadowing.length > 0) return undefined
     // Selected but not running: the config is already right, so the repair is
-    // to find out why the plugin did not come up, not to edit plugins[].
+    // to find out why the plugin did not come up, not to edit plugins[]. Boot
+    // already reports that set, so read it rather than re-derive it by
+    // subtracting the active plugins: the subtraction also fires when a caller
+    // injected its own kernel (`opts.kernel`, the integration API's escape
+    // hatch), where dispatch never booted and an absent plugin proves nothing.
+    // @ref LLP 0219#incomplete-activation-prunes-nothing [constrained-by]: one list holds every way a boot came up short of its plugin set
     // @ref LLP 0267#d5 [implements]: a fourth miss state for a plugin the config selects and the boot did not get
     const unavailable = new Set(unavailablePlugins)
     for (const entry of selection.selectedManifests) {
