@@ -112,10 +112,12 @@ export function projectClaudeTelemetryEvents(events, opts) {
       if (!spooled) continue
       const entry = sessionEntry(sessionId, event)
       mergeBodyFacts(entry.facts, spooled, sessionId, opts.sessionBodyFacts)
-      entry.messages.push(...spooledBodyGapMessages(spooled, {
+      for (const gap of spooledBodyGapMessages(spooled, {
         event,
         usageByRequestId: opts.usageByRequestId,
-      }))
+      })) {
+        entry.messages.push(attributeMessageToEvent(gap, event))
+      }
       continue
     }
 
@@ -123,7 +125,7 @@ export function projectClaudeTelemetryEvents(events, opts) {
 
     const message = messageFromEvent(event, opts.usageByRequestId)
     if (!message) continue
-    sessionEntry(sessionId, event).messages.push(message)
+    sessionEntry(sessionId, event).messages.push(attributeMessageToEvent(message, event))
   }
 
   /** @type {AiGatewayProjectedExchange[]} */
@@ -137,6 +139,14 @@ export function projectClaudeTelemetryEvents(events, opts) {
     if (remembered) {
       entry.facts.systemText ??= remembered.systemText
       entry.facts.tools ??= remembered.tools
+    }
+    // A `user_prompt` event carries no `query_source` of its own, so its row
+    // borrows the session's main-loop value rather than reading null. A
+    // message that DID carry one keeps it.
+    if (entry.facts.querySource) {
+      for (const message of entry.messages) {
+        if (querySourceOf(message) === undefined) stampQuerySource(message, entry.facts.querySource)
+      }
     }
     projections.push(buildProjection({
       sessionId,
@@ -153,6 +163,14 @@ export function projectClaudeTelemetryEvents(events, opts) {
 }
 
 /**
+ * Build the exchange the session's messages hang off, from the facts that are
+ * genuinely session-wide.
+ *
+ * @ref LLP 0252#consequences [implements]: parent_uuid, logical_parent_uuid,
+ *   user_type and permission_mode are left unset and read null on this path;
+ *   `query_source` and `agent.name` are the attribution source, and both are
+ *   per request, so they are stamped per message (`attributeMessageToEvent`)
+ *   rather than here
  * @param {{
  *   sessionId: string,
  *   facts: ClaudeTelemetrySessionFacts,
@@ -183,13 +201,6 @@ function buildProjection({ sessionId, facts, messages, clientName, record }) {
   // exchange-level, exactly where the proxy path puts them.
   if (facts.systemText) projection.system_text = facts.systemText
   if (facts.tools !== undefined) projection.tools = /** @type {any} */ (facts.tools)
-  // @ref LLP 0252#consequences [implements]: `query_source` and `agent.name`
-  // are the attribution source on this path; parent_uuid, logical_parent_uuid,
-  // user_type and permission_mode are left unset and read null.
-  if (facts.agentName) {
-    projection.agent_id = facts.agentName
-    projection.is_sidechain = true
-  }
   if (record?.cwd) projection.cwd = record.cwd
   if (record?.git_branch) projection.git_branch = record.git_branch
   // @ref LLP 0032#capture: repo identity for the graph bridge rides the same
@@ -200,13 +211,69 @@ function buildProjection({ sessionId, facts, messages, clientName, record }) {
 
   /** @type {Record<string, unknown>} */
   const claude = {}
-  if (facts.querySource) claude.query_source = facts.querySource
   if (facts.organizationId) claude.organization_id = facts.organizationId
   if (facts.terminalType) claude.terminal_type = facts.terminalType
   if (Object.keys(claude).length > 0) {
     projection.attributes = /** @type {any} */ ({ claude })
   }
   return projection
+}
+
+/**
+ * Stamp the attribution the EVENT carries onto the message it produced.
+ *
+ * `agent.name` names the Task subagent that issued the request, and its
+ * presence is what marks the row a sidechain; `query_source` says what
+ * kind of query it was. Both are per-request, and a subagent shares its
+ * parent's `session.id`, so the only correct home for either is the
+ * message. Stamping them exchange-level made a row's label (and, for a
+ * body-derived block with no native uuid, its fallback identity scope)
+ * depend on which other events shared the exporter's flush.
+ *
+ * @ref LLP 0262#field-parity-r1 [implements]: `is_sidechain` / `agent_id`
+ *   read from `agent.name`, per event
+ * @param {AiGatewayProjectedMessage} message
+ * @param {ClaudeTelemetryEvent} event
+ * @returns {AiGatewayProjectedMessage}
+ */
+function attributeMessageToEvent(message, event) {
+  const agentName = stringAttr(event, 'agent.name')
+  if (agentName) {
+    message.agent_id = agentName
+    message.is_sidechain = true
+  }
+  const querySource = stringAttr(event, 'query_source')
+  if (querySource) stampQuerySource(message, querySource)
+  return message
+}
+
+/**
+ * @param {AiGatewayProjectedMessage} message
+ * @returns {string | undefined}
+ */
+function querySourceOf(message) {
+  const claude = /** @type {any} */ (message.attributes)?.claude
+  const value = claude?.query_source
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Fold `query_source` into the message's `claude` attribute block without
+ * disturbing the usage block an `api_request` event may already have put
+ * there.
+ *
+ * @param {AiGatewayProjectedMessage} message
+ * @param {string} querySource
+ */
+function stampQuerySource(message, querySource) {
+  const attributes = /** @type {Record<string, unknown>} */ (message.attributes ?? {})
+  const claude = /** @type {Record<string, unknown>} */ (
+    typeof attributes.claude === 'object' && attributes.claude !== null ? attributes.claude : {}
+  )
+  message.attributes = /** @type {any} */ ({
+    ...attributes,
+    claude: { ...claude, query_source: querySource },
+  })
 }
 
 /**
@@ -393,8 +460,14 @@ function mergeSessionFacts(facts, event) {
   facts.userId ??= stringAttr(event, 'user.account_uuid')
   facts.organizationId ??= stringAttr(event, 'organization.id')
   facts.terminalType ??= stringAttr(event, 'terminal.type')
-  facts.querySource ??= stringAttr(event, 'query_source')
-  facts.agentName ??= stringAttr(event, 'agent.name')
+  // @ref LLP 0262#field-parity-r1 [constrained-by]: `agent.name` and
+  // `query_source` are per-EVENT attribution, and a Task subagent runs under
+  // its parent's `session.id`, so neither can become a session fact: hoisted,
+  // one subagent event in a flush stamps the whole batch. `agent.name` is not
+  // hoisted at all; `query_source` is kept only as the default for events that
+  // carry none, and only from events a subagent did not emit, so the borrowed
+  // value is always the main loop's.
+  if (!stringAttr(event, 'agent.name')) facts.querySource ??= stringAttr(event, 'query_source')
   facts.model ??= stringAttr(event, 'model')
   if (event.timestamp && (facts.startedAt === undefined || event.timestamp < facts.startedAt)) {
     facts.startedAt = event.timestamp

@@ -41,8 +41,13 @@ export interface ClaudeTelemetrySessionFacts {
   userId?: string
   organizationId?: string
   terminalType?: string
+  /**
+   * The main loop's `query_source`, kept only as the default for events that
+   * carry none of their own. Per-request attribution (`query_source`,
+   * `agent.name`) belongs on the message: a Task subagent shares its parent's
+   * session id, so a session-level value would stamp its whole batch.
+   */
   querySource?: string
-  agentName?: string
   model?: string
   startedAt?: string
   /**
