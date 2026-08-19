@@ -1957,12 +1957,19 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * "non-macOS platforms skip this entirely"), and with no CA on disk proxy
  * mode was never on, so there is nothing to be trusted or untrusted.
  *
- * The two probes shell out, so each is caught independently: a probe that
+ * The two probes shell out, so each is settled independently: a probe that
  * could not run reports `null` (unknown), never `false`, because "the
  * dialog was cancelled" and "`security` did not run" are different answers
- * and only the first is actionable. The fingerprint is computed locally from
- * the DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
- * not surfaced, so neither needs bounding.
+ * and only the first is actionable. "Did not run" covers one case a try/catch
+ * cannot reach on its own: a probe that never returns. Both probes therefore
+ * spawn on a deadline (`TRUST_PROBE_TIMEOUT_MS`) and reject when it passes,
+ * and they are started concurrently so the worst case is one deadline rather
+ * than the sum of both. An offline or captive-portal host, where macOS trust
+ * evaluation can sit on a revocation fetch indefinitely, then still gets a
+ * rendered report with these lines unknown instead of a `hyp status` that
+ * never prints. The fingerprint is computed locally from the DER and is
+ * `[0-9A-F:]` by construction, and probe stderr is deliberately not surfaced,
+ * so neither of those needs sanitizing.
  *
  * The permitted host set travels with the fingerprint because the grant is
  * wider than any one install uses: the CA is constrained to the whole static
@@ -2002,21 +2009,21 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
   }
   if (!ca) return null
 
+  // Started together, not one after the other: the two probes read
+  // unrelated system state (the login keychain, the launchd environment) and
+  // neither reads the other's answer, so serializing them only adds their
+  // deadlines. On the wedged host this bound exists for that is the
+  // difference between the report stalling for one probe timeout and for
+  // two. `allSettled` keeps the per-probe independence the catches gave: one
+  // rejection reports its own line unknown and leaves the other's answer.
+  const [trustedResult, launchdResult] = await Promise.allSettled([
+    isCaTrustedFn({ certPath: ca.certPath }),
+    isLaunchdEnvSetFn(),
+  ])
   /** @type {boolean | null} */
-  let trusted = null
-  try {
-    trusted = await isCaTrustedFn({ certPath: ca.certPath })
-  } catch {
-    trusted = null
-  }
-
+  const trusted = trustedResult.status === 'fulfilled' ? trustedResult.value : null
   /** @type {boolean | null} */
-  let launchdEnvSet = null
-  try {
-    launchdEnvSet = await isLaunchdEnvSetFn()
-  } catch {
-    launchdEnvSet = null
-  }
+  const launchdEnvSet = launchdResult.status === 'fulfilled' ? launchdResult.value : null
 
   return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
 }

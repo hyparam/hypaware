@@ -204,7 +204,19 @@ async function runClientLifecycle(action, argv, ctx) {
                 error: message,
               }) + '\n'
             )
-          } else {
+          } else if (!promptResult.reported) {
+            // The prompt already said what happened, in terms of the state it
+            // left behind ("the config change already persists ... re-running
+            // resumes from the new state"). `enablement.message` was computed
+            // before that write and reads "not enabled ... add <plugin> to
+            // <config>": printing it under the first line contradicts it and
+            // instructs an edit that has already been made. The guided message
+            // is for the paths that never wrote anything, which includes a
+            // write that itself failed: there the guided remedy is still true
+            // and is the only line naming the config path.
+            // @ref LLP 0174#prompt [implements]: each step reports its own
+            //   failure, so a step that reported one is not re-reported as the
+            //   pre-write refusal
             ctx.stderr.write(`error: ${message}\n`)
           }
         },
@@ -288,7 +300,14 @@ async function runClientLifecycle(action, argv, ctx) {
         }
         if (!client) {
           if (enablement.state !== 'unknown') {
-            reportAttachEnablement({ name, enablement, parsed, ctx })
+            // Same rule as the capability gate above: a prompt that already
+            // reported its own step's failure owns the *human* message. Only
+            // that line is suppressed, exactly as the capability gate
+            // suppresses only its `stderr.write`: the structured warn and the
+            // `--json` payload are the machine record of a failed attach and
+            // no prompt writes either, so dropping them here would lose the
+            // failure from the log and from a scripted caller's output.
+            reportAttachEnablement({ name, enablement, parsed, ctx, quiet: promptResult.reported })
             exitCode = 1
             continue
           }
@@ -387,16 +406,54 @@ async function runClientLifecycle(action, argv, ctx) {
                   `the daemon manages attach for this install, so only its assets are refreshed.\n`
                 )
               }
+              // The three tails below `client.attach()` are reached from here
+              // too, because this branch is a successful attach: it is the
+              // exit an explicit `hyp client attach <client>` takes on a
+              // daemon-managed install, the shape an operator most often runs
+              // it on. Skipping them made this the one path where the re-arm
+              // LLP 0186 specifies never happens and where LLP 0174's step-4
+              // offer, the whole point of the accept path that just ran, is
+              // never made.
+              //
+              // Reached with the settings already in place rather than freshly
+              // written, which changes nothing any tail depends on: the
+              // re-arm's precondition is an explicit `hyp client attach` that
+              // succeeded (LLP 0295 scopes it to the manual re-run, not to a
+              // write having happened), and the offer's is that this
+              // invocation enabled the adapter. With a live endpoint the
+              // marker was validated against it, so "already correct" is the
+              // same fact as "just written"; with no live endpoint to compare
+              // against, a present marker is a no-op success by the pre-#277
+              // rule above, and this is still the explicit re-run the re-arm
+              // is scoped to.
+              //
+              // Ordered re-arm before materialize, the same order the
+              // freshly-wired exit below uses. `materializeAttachAssets`
+              // swallows a per-copy failure, but not everything it does is
+              // guarded (the plan read, the prune pass, the digest of an
+              // installed asset), and a throw there lands in the loop's outer
+              // catch: with the re-arm second, an asset-tail failure would
+              // leave the `refused` marker short-circuiting the reconciler
+              // forever after exactly the explicit re-run that is its only
+              // trigger. The re-arm cannot fail the other way round, since it
+              // logs and swallows its own marker error.
+              // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
+              rearmRefusedAttachMarker({ name, ctx, dryRun: false })
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a
               // daemon-managed install actually reaches. Short-circuiting past
-              // the materialization below would make `hyp attach` install
-              // nothing on exactly the install shape it is most often run on,
+              // the materialization would make `hyp client attach` install nothing on
+              // exactly the install shape it is most often run on,
               // reintroducing the split this change removes. Idempotent and
               // cheap, so running it on a no-op attach costs a stat pass.
               // @ref LLP 0107#every-attach [implements]: every attach path
               //   materializes, including the one with nothing left to wire
               await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: false, json: parsed.json })
+              // @ref LLP 0174#prompt [implements]: step 4's backfill consent
+              //   follows the accept path to whichever attach exit it reaches
+              if (activatedViaPrompt) {
+                await maybeBackfillAfterEnable({ name, ctx })
+              }
               continue
             }
             if (liveEndpoint) {
@@ -456,44 +513,7 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun,
         json: parsed.json,
       })
-      // A successful manual attach is the only re-arm a `refused` marker gets
-      // in this pass: after it, the next reconcile pass must stop
-      // short-circuiting on the marker and re-`perform()` the request key.
-      //
-      // Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose.
-      // A `done` marker is the only record naming the files an org-driven
-      // attach installed, so clearing it would strand them past any later
-      // `hyp detach`, which reads exactly this marker to know what to remove
-      // (LLP 0138#marker-undo). A `failed` marker needs no help: nothing
-      // short-circuits it, so the next pass already retries it. And a dry run
-      // must leave the marker store exactly as it found it, the same way the
-      // detach path returns before its own clear under `--dry-run`.
-      //
-      // The re-arm itself is a drop only when the marker records no
-      // `installed_assets`. One that carries them is the same undo record a
-      // `done` marker is (a refusal on a re-`perform()` carries the earlier
-      // successful attach's copies forward), so it is rewritten to `failed`
-      // rather than dropped: same re-arm, record intact. That branch lives in
-      // `rearmRefusedActionMarker` beside the store it rewrites.
-      //
-      // Best-effort: a marker-store I/O failure must never fail the attach that
-      // just succeeded.
-      // @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
-      if (parsed.dryRun !== true) {
-        try {
-          rearmRefusedActionMarker({
-            stateRoot: readObservabilityEnv(ctx.env).stateDir,
-            kind: 'attach',
-            requestKey: name,
-          })
-        } catch (markerErr) {
-          getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
-            hyp_client: name,
-            error_kind: 'marker_retract_failed',
-            detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
-          })
-        }
-      }
+      rearmRefusedAttachMarker({ name, ctx, dryRun: parsed.dryRun === true })
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated
@@ -523,6 +543,55 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Re-arm a `refused` attach marker after a successful manual attach, the only
+ * re-arm one gets in this pass: after it, the next reconcile pass must stop
+ * short-circuiting on the marker and re-`perform()` the request key.
+ *
+ * Scoped to a `refused` marker, and skipped on `--dry-run`, on purpose. A
+ * `done` marker is the only record naming the files an org-driven attach
+ * installed, so clearing it would strand them past any later `hyp client detach`,
+ * which reads exactly this marker to know what to remove (LLP 0138#marker-undo).
+ * A `failed` marker needs no help: nothing short-circuits it, so the next pass
+ * already retries it. And a dry run must leave the marker store exactly as it
+ * found it, the same way the detach path returns before its own clear under
+ * `--dry-run`.
+ *
+ * The re-arm itself is a drop only when the marker records no
+ * `installed_assets`. One that carries them is the same undo record a `done`
+ * marker is (a refusal on a re-`perform()` carries the earlier successful
+ * attach's copies forward), so it is rewritten to `failed` rather than
+ * dropped: same re-arm, record intact. That branch lives in
+ * `rearmRefusedActionMarker` beside the store it rewrites.
+ *
+ * Best-effort: a marker-store I/O failure must never fail the attach that just
+ * succeeded.
+ *
+ * A function rather than an inline block because attach has two success
+ * exits, the freshly-wired one and the daemon-managed already-current one, and
+ * the second silently had no re-arm at all while this lived in the first.
+ *
+ * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp client attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
+ * @param {{ name: string, ctx: CommandRunContext, dryRun: boolean }} args
+ * @returns {void}
+ */
+function rearmRefusedAttachMarker({ name, ctx, dryRun }) {
+  if (dryRun) return
+  try {
+    rearmRefusedActionMarker({
+      stateRoot: readObservabilityEnv(ctx.env).stateDir,
+      kind: 'attach',
+      requestKey: name,
+    })
+  } catch (markerErr) {
+    getLogger('cmd-attach').warn('client.attach.marker_retract_failed', {
+      hyp_client: name,
+      error_kind: 'marker_retract_failed',
+      detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+    })
+  }
 }
 
 /**
@@ -614,15 +683,21 @@ async function resolveAttachEnablementState({ name, ctx }) {
  * attach failure in this file uses (the capability gate renders its own
  * because it also owns the failure span).
  *
+ * `quiet` drops only the human stderr line, for the caller whose enable
+ * prompt already printed a truer one; the structured warn and the `--json`
+ * payload always run, because no prompt writes either and they are the only
+ * machine-readable record that this attach failed.
+ *
  * @param {{
  *   name: string,
  *   enablement: { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
  *   parsed: { dryRun: boolean, json: boolean },
  *   ctx: CommandRunContext,
+ *   quiet?: boolean,
  * }} args
  * @returns {void}
  */
-function reportAttachEnablement({ name, enablement, parsed, ctx }) {
+function reportAttachEnablement({ name, enablement, parsed, ctx, quiet = false }) {
   getLogger('cmd-attach').warn('client.attach.adapter_inactive', {
     [Attr.COMPONENT]: 'cmd-attach',
     [Attr.OPERATION]: 'client.attach',
@@ -643,6 +718,7 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
     )
     return
   }
+  if (quiet) return
   ctx.stderr.write(`error: ${enablement.message}\n`)
 }
 
@@ -658,6 +734,15 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
  * of them reach {@link enableClientAdapter}, so there is no write, no backup,
  * and no restart to undo.
  *
+ * `reported` distinguishes the two ways this can answer "not activated".
+ * Every early return, the decline, and a failed config write leave the disk
+ * exactly as the caller's pre-write guided error describes it, so that error
+ * is still the right thing to print: `reported` stays false. The failures
+ * *after* the write landed (a failed `restart`/`wait` step, and an
+ * incomplete in-process activation) have already described the state they
+ * left on disk, which that same guided error would deny: `reported` is true
+ * there, and the caller prints nothing more.
+ *
  * @ref LLP 0174#bootstrap-floor [implements]: no local config file at all
  * skips the prompt outright and falls through to the caller's existing
  * `not_enabled` refusal (which already names `hyp init`) rather than asking
@@ -672,7 +757,7 @@ function reportAttachEnablement({ name, enablement, parsed, ctx }) {
  *   parsed: { client: string, json: boolean, dryRun: boolean },
  *   enablement: { state: 'unknown' } | { state: 'not_enabled' | 'disabled_central', errorKind: string, message: string },
  * }} args
- * @returns {Promise<{ activated: boolean }>}
+ * @returns {Promise<{ activated: boolean, reported?: boolean }>}
  */
 async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   // `disabled_central` never reaches this prompt (LLP 0174 #detection): a
@@ -756,7 +841,15 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   })
   if (!result.ok) {
     reportEnableFailure({ name, result, ctx })
-    return { activated: false }
+    // Only a failure *below* the write owns the caller's message. Its report
+    // describes state that now exists on disk ("the config change already
+    // persists"), which the caller's pre-write guided error would deny. A
+    // failed write is the other shape {@link reportEnableFailure} documents:
+    // it changed nothing, so that guided error is still true, and it is the
+    // only line that names the config path and the manual remedy. Suppressing
+    // it there would leave "the config write failed; nothing changed" with no
+    // next step.
+    return { activated: false, reported: (result.failedStep ?? 'write') !== 'write' }
   }
 
   // The write and (if a daemon is installed) the restart already landed; what
@@ -779,7 +872,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
       status: 'failed',
       [Attr.ERROR_KIND]: 'activation_incomplete',
     })
-    return { activated: false }
+    return { activated: false, reported: true }
   }
 
   getLogger('cmd-attach').info('client.attach.enable_prompt', {

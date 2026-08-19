@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -31,6 +31,9 @@ import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 // @ref LLP 0174#prompt [tests]: a config write that already landed means the
 // next invocation never re-prompts, it falls through to the registered/
 // endpoint-unreachable path
+// @ref LLP 0174#prompt [tests]: "each step reports its own failure" means one
+// report, so the pre-write guided error is not printed under a step report
+// that already described the state the write left behind
 
 /** @returns {{ write(chunk: unknown): boolean, text(): string }} */
 function makeBuf() {
@@ -82,9 +85,12 @@ function backupsIn(dir) {
  * pre-loaded with `answer`, and an `activatePluginClosure` stub mimicking
  * real in-process activation.
  *
- * @param {{ home: string, answer?: string }} opts
+ * `activationFails` models the second partial-failure exit: the config write
+ * lands, but this process's own kernel never brings the plugin up.
+ *
+ * @param {{ home: string, answer?: string, activationFails?: boolean }} opts
  */
-function makeNotEnabledCtx({ home, answer }) {
+function makeNotEnabledCtx({ home, answer, activationFails }) {
   /** @type {string[]} */
   const registered = []
   /** @type {{ name: string }[]} */
@@ -119,6 +125,7 @@ function makeNotEnabledCtx({ home, answer }) {
     },
     /** @param {string[]} names */
     activatePluginClosure: async (names) => {
+      if (activationFails) return { activated: [], failed: names }
       for (const name of names) {
         if (!plugins.some((p) => p.name === name)) plugins.push({ name })
       }
@@ -209,6 +216,75 @@ test('accept, write succeeds, restart fails: names the restart step, the backup 
     // Exactly one backup: enableClientAdapter ran (and failed) exactly once,
     // not retried within this invocation.
     assert.equal(backupsIn(path.dirname(localConfigPath(home))).length, 1)
+
+    // And nothing contradicts it. The caller's guided refusal was computed
+    // before the write and says the adapter "is not enabled ... add
+    // @hypaware/claude to <config> and run 'hyp daemon restart'": under the
+    // line above, it denies the write that just landed and instructs an edit
+    // already made. One failure, one report.
+    assert.doesNotMatch(message, /error: the claude adapter is not enabled on this install/)
+    assert.doesNotMatch(message, /enable it with 'hyp setup'/)
+    assert.equal(
+      (message.match(/error: /g) ?? []).length,
+      1,
+      `expected exactly one error line, got:\n${message}`
+    )
+  })
+})
+
+test('accept, write succeeds, in-process activation fails: the activation report is not contradicted either', async () => {
+  await withTempHome(async (home) => {
+    writeLocalConfig(home)
+    // The other partial-failure exit below `enableClientAdapter`: the write
+    // (and, with no daemon marker on disk, no restart at all) succeeded, and
+    // this process could not activate what the config now names.
+    const { ctx, stderr } = makeNotEnabledCtx({ home, answer: 'y', activationFails: true })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 1)
+
+    const message = stderr.text()
+    assert.match(message, /could not activate it in this process/)
+    assert.match(message, /re-run 'hyp client attach claude' to finish/)
+    assert.doesNotMatch(message, /error: the claude adapter is not enabled on this install/)
+    assert.equal(
+      (message.match(/error: /g) ?? []).length,
+      1,
+      `expected exactly one error line, got:\n${message}`
+    )
+  })
+})
+
+test('accept, the write itself fails: the guided remedy still prints, because nothing was written to contradict', async () => {
+  await withTempHome(async (home) => {
+    writeLocalConfig(home)
+    // The third exit below `enableClientAdapter`, and the one that is NOT a
+    // partial failure: an unwritable config dir means neither the `.bak-<ts>`
+    // backup nor the rewrite can land, so the run ends exactly where it
+    // started. `reportEnableFailure`'s own message for this shape says only
+    // that the write failed and that nothing changed; it names no path and no
+    // next step, so the caller's pre-write guided error is the only line that
+    // does, and it is still true. Suppressing it here would be the reverse of
+    // the contradiction the two cases above pin.
+    const configDir = path.dirname(localConfigPath(home))
+    chmodSync(configDir, 0o500)
+    try {
+      const { ctx, stderr } = makeNotEnabledCtx({ home, answer: 'y' })
+      const code = await runAttach(['claude'], ctx)
+      assert.equal(code, 1)
+
+      const message = stderr.text()
+      assert.match(message, /the config write failed/)
+      assert.match(message, /nothing changed/)
+      assert.match(message, /the claude adapter is not enabled on this install/)
+      assert.match(message, /add @hypaware\/claude to /)
+    } finally {
+      chmodSync(configDir, 0o700)
+    }
+
+    // And the disk really is untouched: no entry, no backup.
+    const written = JSON.parse(readFileSync(localConfigPath(home), 'utf8'))
+    assert.deepEqual(written.plugins, [])
+    assert.equal(backupsIn(path.dirname(localConfigPath(home))).length, 0)
   })
 })
 

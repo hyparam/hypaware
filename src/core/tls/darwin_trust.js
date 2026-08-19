@@ -53,9 +53,13 @@ export function loginKeychainPath(homeDir = os.homedir()) {
  *
  * `timeoutMs` bounds the spawn for callers that cannot afford to block on it.
  * Silent is the expectation, not a guarantee: a locked login keychain can put
- * `security` in front of a GUI prompt, and a caller nobody is watching (`hyp
- * status`) would then wait on an answer forever. Left unset the wait is
- * unbounded, which is what an interactive attach wants.
+ * `security` in front of a GUI prompt, and macOS trust evaluation can reach
+ * the network for revocation, so on an offline or captive-portal host this is
+ * not a slow command but one that may never return. A caller nobody is
+ * watching (`hyp status`) would then wait on an answer forever, and reads the
+ * rejection as unknown instead. Left unset the wait is unbounded, which is
+ * what an interactive attach wants.
+ * @ref LLP 0237#consequences [constrained-by]: hyp status has to be able to state the trust line, so the probe behind it must be able to give up
  *
  * @param {object} args
  * @param {string} args.certPath
