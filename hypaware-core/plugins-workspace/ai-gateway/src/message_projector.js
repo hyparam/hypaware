@@ -9,7 +9,7 @@ export const SCHEMA_VERSION = 7
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
- * @import { RegisteredProjector } from './types.js'
+ * @import { RegisteredProjector, ThreadChain } from './types.js'
  */
 
 const DATASET_NAME = 'ai_gateway_messages'
@@ -611,7 +611,7 @@ function canScanCommittedRows(storage) {
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
-  /** @type {Map<string, { seen: Set<string>, last: string | undefined }>} */
+  /** @type {Map<string, ThreadChain>} */
   const messageIdsByConversation = new Map()
   /** @type {Map<string, string>} */
   const conversationStartedAt = new Map()
@@ -639,13 +639,13 @@ export function createAiGatewayConversationState() {
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {string} threadScope
  * @param {string | undefined} agentId
- * @returns {{ seen: Set<string>, last: string | undefined }}
+ * @returns {ThreadChain}
  */
 function threadMessageIds(state, threadScope, agentId) {
   const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
   let chain = state.messageIdsByConversation.get(key)
   if (!chain) {
-    chain = { seen: new Set(), last: undefined }
+    chain = { seen: new Set(), last: undefined, replayLinks: new Map() }
     state.messageIdsByConversation.set(key, chain)
   }
   return chain
@@ -749,8 +749,20 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       lastMessageId: chain.last,
     })
 
+    // A message a rollback un-marked but could NOT unchain (a later
+    // exchange had already chained past it) keeps the predecessor it was
+    // first projected with: this re-projection has to rebuild the row the
+    // failed append never wrote, not hang the thread's earlier turns off
+    // whatever tail has since been chained on. Issue #879. Only the
+    // gateway-derived link is restored, because a projector-supplied
+    // `previous_message_id` already replays identically.
+    const buriedLink = chain.replayLinks.get(identity.messageId)
+    if (buriedLink && !Array.isArray(message.previous_message_id)) {
+      identity.previousMessageId = buriedLink
+    }
+
     if (state.seenMessages.has(identity.messageId)) {
-      chainMessageId(chain, identity.messageId, journal)
+      chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
       continue
     }
 
@@ -788,7 +800,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     // append then fails has to be able to take it back (issue #879).
     state.seenMessages.add(identity.messageId)
     journal?.push(() => { state.seenMessages.delete(identity.messageId) })
-    chainMessageId(chain, identity.messageId, journal)
+    chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
   }
 
   return rows
@@ -799,32 +811,47 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
  * `previous_message_id` tail), pushing the undo onto `journal` when the
  * caller asked for one.
  *
- * The chain undo is CONDITIONAL on this message still being the tail. One
- * conversation state is shared by every in-flight exchange of a listener
- * (the proxy fires `onExchangeFinished` into an unserialized pending set,
- * and `projectExchange` awaits before it expands), so a later exchange can
- * have chained further turns onto the same thread by the time this rollback
- * runs. Unwinding the thread from under those turns would strand them: they
- * stay in `chain.seen`, so nothing re-chains them, and the tail settles on
- * a message from before them - every later row's `previous_message_id` then
- * skips a turn, and a fallback `message_id`, which hashes the tail, stops
- * matching what a re-projection rebuilds. Rolling back the exchange that is
- * still the tail (the sequential case, and the last-in-first-out order this
- * journal replays in) restores the chain exactly; anything else is left
- * alone, which costs at worst a re-projected row and never a broken thread.
+ * The chain undo has TWO shapes, because one conversation state is shared by
+ * every in-flight exchange of a listener (the proxy fires
+ * `onExchangeFinished` into an unserialized pending set, and
+ * `projectExchange` awaits before it expands), so a later exchange can have
+ * chained further turns onto the same thread by the time a rollback runs:
  *
- * @param {{ seen: Set<string>, last: string | undefined }} chain
+ *  - Still the tail (the sequential case, and the last-in-first-out order
+ *    this journal replays in): unchain it. The re-projection re-walks the
+ *    thread and rebuilds the identical link.
+ *  - No longer the tail: leave `chain.seen` and `chain.last` alone and
+ *    record the link this message HAD in `chain.replayLinks`. Unchaining a
+ *    buried message would strand the turns chained after it, which stay in
+ *    `chain.seen` so nothing re-chains them, settling the tail before them
+ *    and making every later row's `previous_message_id` skip a turn. But
+ *    leaving it at that is not enough either: the re-projection would emit
+ *    the buried message hanging off the CURRENT tail, so the thread's
+ *    opening turns would claim to follow turns that actually follow them
+ *    (a forward link, and a cycle once the later turn already links back to
+ *    this one). The replay link is what keeps both properties.
+ *
+ * `chain.replayLinks` entries are deliberately not consumed on read: a
+ * second failed attempt has to replay the same link, and they are bounded by
+ * `chain.seen`, which is already one entry per message.
+ *
+ * @param {ThreadChain} chain
  * @param {string} messageId
+ * @param {string[]} previousMessageId The link this message was projected
+ *   with, restored verbatim if a rollback cannot unchain it.
  * @param {(() => void)[] | undefined} journal
  * @returns {void}
  */
-function chainMessageId(chain, messageId, journal) {
+function chainMessageId(chain, messageId, previousMessageId, journal) {
   if (chain.seen.has(messageId)) return
   const previousLast = chain.last
   chain.seen.add(messageId)
   chain.last = messageId
   journal?.push(() => {
-    if (chain.last !== messageId) return
+    if (chain.last !== messageId) {
+      chain.replayLinks.set(messageId, previousMessageId)
+      return
+    }
     chain.seen.delete(messageId)
     chain.last = previousLast
   })

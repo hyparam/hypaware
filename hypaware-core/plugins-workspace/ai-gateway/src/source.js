@@ -314,6 +314,16 @@ async function launchListener(ctx, state, liveState) {
     // front of it, and the flush-time `dedupeByPartId` only runs for
     // fallback-identity batches, so the replay of a native-identity
     // conversation would commit a second copy of every one of them.
+    //
+    // A rejected append is therefore treated as "nothing landed", which is
+    // true of every failure the spool can report EXCEPT one: `spool.append`
+    // writes the line before it `sync()`s and `close()`s the handle, so an
+    // `EIO`/`ENOSPC` from those last two rejects a record that is already
+    // durable and will still flush. That narrow window is the one case where
+    // this rollback duplicates instead of recovering. It stays a rollback on
+    // purpose: the common failure loses the batch until transcript backfill
+    // finds it, the rare one costs a duplicate part the query layer can be
+    // told about.
     let appended = false
     try {
       const messageRows = await projector.projectExchange(row, { journal })

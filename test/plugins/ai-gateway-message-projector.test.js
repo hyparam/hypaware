@@ -1465,6 +1465,14 @@ test('without a rollback a re-projected exchange still dedups to nothing', async
  * rollback must not unwind the thread from under turns another exchange
  * already chained and wrote: those turns stay in `chain.seen`, nothing
  * re-chains them, and the tail would silently settle before them.
+ *
+ * The buried exchange still has to come back with the links it was projected
+ * with, though. Reading the CURRENT tail on the replay would emit the
+ * thread's opening turns claiming to follow turns that follow them, and the
+ * later exchange already links back to one of them, so the stored
+ * `previous_message_id` graph would contain a cycle: this column's contract
+ * is that the full ancestry is the transitive closure of the link (LLP
+ * 0026#consequences), so a consumer walking it would not terminate.
  */
 test('a rollback does not rewind a thread past turns a later exchange chained', () => {
   const state = createAiGatewayConversationState()
@@ -1507,6 +1515,13 @@ test('a rollback does not rewind a thread past turns a later exchange chained', 
   const u3 = rowsC.find((r) => r.message_id === 'u3')
   assert.ok(u3, 'the new turn projects')
   assert.deepEqual(u3.previous_message_id, ['a2'], 'the thread still runs through the turn B wrote')
+
+  // A's rows come back as A projected them, not hung off B's tail.
+  assert.deepEqual(
+    rowsC.map((r) => [r.message_id, r.previous_message_id]),
+    [['u1', []], ['a1', ['u1']], ['u3', ['a2']]],
+    'the replay rebuilds the rows the failed append never wrote',
+  )
 })
 
 test('a rollback of the newest exchange restores the thread tail exactly', () => {
