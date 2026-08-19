@@ -664,7 +664,7 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     // the user's own - and the reversal reported it as HypAware residue of
     // unknown provenance (#886 finding 2).
     // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
-    // @ref LLP 0266#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
+    // @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
     if (recordDamaged && markerPort !== undefined) {
       reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
     }

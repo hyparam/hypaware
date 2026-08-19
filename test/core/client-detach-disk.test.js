@@ -1116,7 +1116,7 @@ test('#500 finding 3: `hyp detach --json` echoes restored_paths, and never the c
 // `port` - which every genuine pre-record legacy marker does. So a plain
 // base-URL legacy detach ran it too, and told a user their own corporate
 // `NODE_EXTRA_CA_CERTS` was HypAware residue of unknown provenance.
-// @ref LLP 0266#legacy-proxy-reversal-needs-a-damaged-record [tests]
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
 test('#886: a genuine LEGACY marker leaves the user own proxy env alone and unreported', async () => {
   const home = await stageHome()
   try {
@@ -1149,7 +1149,7 @@ test('#886: a genuine LEGACY marker leaves the user own proxy env alone and unre
 // marker whose `managed` record has been corrupted away still carries the
 // fields that route it here, and `HTTPS_PROXY` pointing at a gateway that is no
 // longer attached breaks every HTTPS request the client makes.
-// @ref LLP 0266#legacy-proxy-reversal-needs-a-damaged-record [tests]
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
 test('#886: a DAMAGED proxy marker still has its proxy keys reversed', async () => {
   const home = await stageHome()
   try {

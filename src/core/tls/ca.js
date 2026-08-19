@@ -245,7 +245,7 @@ async function loadLocalCa(paths, hosts, now) {
   // proxied handshake until they re-attach and re-approve. A CA minted under
   // the old routing-table rule is still a strict subset of the full provider
   // list callers now ask for, so it still regenerates once (LLP 0238).
-  // @ref LLP 0266#stored-superset-is-reusable [implements]
+  // @ref LLP 0275#stored-superset-is-reusable [implements]
   const permitted = permittedHosts(cert)
   for (const host of hosts) {
     if (!permitted.includes(host)) return undefined

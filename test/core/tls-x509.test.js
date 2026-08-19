@@ -177,7 +177,7 @@ test('an expired leaf is rejected by a verifying client', async () => {
 // born expired. That became reachable the moment CA validity went to ten years
 // (LLP 0238#ten-year-validity): a machine whose clock reads 2041 mints a CA
 // whose `notAfter` is 2050, which parses back as 1950.
-// @ref LLP 0266#generalized-time-past-2049 [tests]
+// @ref LLP 0275#generalized-time-past-2049 [tests]
 test('a notAfter past 2049 round-trips instead of wrapping into the 19xx window', () => {
   const notBefore = new Date(Date.UTC(2041, 0, 1))
   const notAfter = new Date(Date.UTC(2051, 5, 2, 3, 4, 5))
@@ -204,7 +204,7 @@ test('a notAfter past 2049 round-trips instead of wrapping into the 19xx window'
 // The other half of the same boundary: dates UTCTime can hold must keep using
 // it, because that is what every parser expects below 2050 and switching would
 // be a silent encoding change for every certificate this product mints.
-// @ref LLP 0266#generalized-time-past-2049 [tests]
+// @ref LLP 0275#generalized-time-past-2049 [tests]
 test('a notAfter inside the UTCTime window is still encoded as UTCTime', () => {
   const notBefore = new Date(Date.UTC(2026, 0, 1))
   const notAfter = new Date(Date.UTC(2035, 5, 2, 3, 4, 5))
@@ -231,7 +231,7 @@ test('a notAfter inside the UTCTime window is still encoded as UTCTime', () => {
 // against an IP connection, inside a CA that excludes all IP space anyway
 // (LLP 0235#ca-name-constraints). The mint succeeded and the handshake failed
 // with nothing naming the cause.
-// @ref LLP 0266#ip-literals-are-refused [tests]
+// @ref LLP 0275#ip-literals-are-refused [tests]
 test('an IP-literal host is refused rather than minted as a dNSName', () => {
   const keys = generateKeyPair()
   /** @param {Partial<Parameters<typeof mintCertificate>[0]>} extra */

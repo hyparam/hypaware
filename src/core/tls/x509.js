@@ -25,7 +25,7 @@ import net from 'node:net'
  * mint living longer than a year, and a ten-year CA outlives that assumption.
  *
  * @ref LLP 0235#minted-in-process: the options weighed, and why neither an `openssl` shell-out nor a certificate library survived them
- * @ref LLP 0266#generalized-time-past-2049 [constrained-by]: the encoding scope above, widened by exactly one tag
+ * @ref LLP 0275#generalized-time-past-2049 [constrained-by]: the encoding scope above, widened by exactly one tag
  */
 
 // ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ const TAG_GENERALIZED_TIME = 0x18
  * clock) minted a CA born expired, which was then re-minted on every boot while
  * every intercepted handshake failed with nothing naming the cause.
  *
- * @ref LLP 0266#generalized-time-past-2049 [implements]
+ * @ref LLP 0275#generalized-time-past-2049 [implements]
  * @param {Date} date
  */
 function x509Time(date) {
@@ -260,7 +260,7 @@ function keyIdentifier(spkiDer) {
  * on the upstreams it is about to ask for a CA: skipping one IP-literal
  * upstream is right, letting it fail the whole mint is not.
  *
- * @ref LLP 0266#ip-literals-are-refused [implements]
+ * @ref LLP 0275#ip-literals-are-refused [implements]
  * @param {string} host
  * @returns {boolean}
  */
@@ -287,7 +287,7 @@ export function isIpLiteralHost(host) {
  * certificate nothing would ever accept. Same rule as the non-ASCII case: a
  * certificate that cannot work is refused, not quietly issued.
  *
- * @ref LLP 0266#ip-literals-are-refused [implements]
+ * @ref LLP 0275#ip-literals-are-refused [implements]
  * @param {string} host
  */
 function assertAsciiHost(host) {

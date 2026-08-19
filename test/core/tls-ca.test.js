@@ -300,7 +300,7 @@ test('a CA carrying more subtrees than the bound reports them bounded', async (t
 // wrapped it into the 19xx window: the CA was born expired, `loadLocalCa` saw
 // it inside the renewal window and re-minted on every single boot, and every
 // intercepted handshake failed with nothing naming the cause.
-// @ref LLP 0266#generalized-time-past-2049 [tests]
+// @ref LLP 0275#generalized-time-past-2049 [tests]
 test('a CA minted on a clock past 2039 is not born expired', async (t) => {
   const stateRoot = await tempRoot()
   t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
@@ -326,7 +326,7 @@ test('a CA minted on a clock past 2039 is not born expired', async (t) => {
 // the keychain trust grant the user gave once by password dialog - the whole
 // reason the CA is long-lived (LLP 0238#ten-year-validity). Only widening needs
 // a new CA; a stored superset already vouches for everything asked for.
-// @ref LLP 0266#stored-superset-is-reusable [tests]
+// @ref LLP 0275#stored-superset-is-reusable [tests]
 test('narrowing the host set reuses the stored CA rather than stranding its trust', async (t) => {
   const stateRoot = await tempRoot()
   t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
@@ -347,7 +347,7 @@ test('narrowing the host set reuses the stored CA rather than stranding its trus
 
 // The invariant the exact-match rule was protecting, kept: a CA that cannot
 // vouch for a host being asked for is still regenerated.
-// @ref LLP 0266#stored-superset-is-reusable [tests]
+// @ref LLP 0275#stored-superset-is-reusable [tests]
 test('a stored CA missing a requested host is still regenerated', async (t) => {
   const stateRoot = await tempRoot()
   t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))

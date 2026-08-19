@@ -11,7 +11,7 @@
 #ca-lifecycle one-year validity)
 **Extended-by:** LLP 0262 (accepted 2026-08-17; the `claude` client's
 attach no longer depends on the CA; the CA lifecycle stands for any client
-still routed through the proxy), LLP 0266 (accepted 2026-08-19;
+still routed through the proxy), LLP 0275 (accepted 2026-08-19;
 #minted-in-process gains GeneralizedTime for dates from 2050 and refuses
 IP-literal hosts)
 
@@ -45,10 +45,10 @@ Node can parse and verify certificates but cannot generate them.
 
 ### Minted in process
 
-*Extended by LLP 0266#generalized-time-past-2049: "UTCTime only" rested on
+*Extended by LLP 0275#generalized-time-past-2049: "UTCTime only" rested on
 nothing minted living longer than a year, which LLP 0238's ten-year CA
 outlived, so dates from 2050 are encoded as GeneralizedTime. LLP
-0266#ip-literals-are-refused adds that a certificate host must be a DNS name,
+0275#ip-literals-are-refused adds that a certificate host must be a DNS name,
 which is what the IP-exclusion below already implied.*
 
 **Option 3.** Certificates are assembled as DER in

@@ -504,7 +504,7 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
     // `excludedSubtrees` by design (LLP 0235#ca-name-constraints). Skipping it
     // here rather than letting the mint refuse it keeps one such upstream from
     // taking the install's other interception down with it.
-    // @ref LLP 0266#ip-literals-are-refused [implements]
+    // @ref LLP 0275#ip-literals-are-refused [implements]
     if (isIpLiteralHost(host)) {
       ipLiteralHosts.push(host)
       continue

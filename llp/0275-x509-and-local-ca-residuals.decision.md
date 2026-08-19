@@ -1,4 +1,4 @@
-# LLP 0266: Four residuals in the local CA: time encoding, IP literals, constraint reuse, and legacy proxy reversal
+# LLP 0275: Four residuals in the local CA: time encoding, IP literals, constraint reuse, and legacy proxy reversal
 
 **Type:** Decision
 **Status:** Accepted

@@ -690,7 +690,7 @@ test('an empty routing table with no CA still idles', async (t) => {
 // matches an IP connection against - and the CA excludes all IP space anyway
 // (LLP 0235#ca-name-constraints). An IP upstream must not be able to take the
 // rest of the install's interception down with it either.
-// @ref LLP 0266#ip-literals-are-refused [tests]
+// @ref LLP 0275#ip-literals-are-refused [tests]
 test('an IP-literal upstream is skipped, loudly, without breaking the rest', async (t) => {
   const rig = await bootSource({
     listen: '127.0.0.1:0',
