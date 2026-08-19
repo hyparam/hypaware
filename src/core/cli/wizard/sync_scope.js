@@ -89,6 +89,10 @@ export async function runWizardSyncScope(opts) {
   // row is addressable in the store all the same
   // (`hyp policy client raw-anthropic local-only`), so the ids go to the
   // store and never to the screen.
+  // The store's answer, not the seam's: the seam also drops opt-out
+  // entries for central-classified sources, which this cannot see. That
+  // costs nothing while a hidden pick is non-central by construction, and
+  // the run where it is not is recorded as accepted in LLP 0289 #not-done.
   // @ref LLP 0289#ask-the-store [implements]: the hidden picks reach the lane as ids so their sentence can be checked against the store the export seam reads
   const optedOutAll = new Set(optedOutClientSourceIds(existing))
   const hiddenCandidateSyncs = (opts.candidatesHiddenIds ?? []).some((id) => !optedOutAll.has(id))
@@ -127,7 +131,7 @@ export async function runWizardSyncScope(opts) {
       } else {
         opts.stdout.write('You picked nothing to record, so nothing syncs to your server.\n')
       }
-      return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
+      return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
@@ -286,17 +290,29 @@ async function promptSyncScopeSelection({ opts, ask, confirm, optedOutBefore }) 
 }
 
 /**
+ * The lane's one span. `hidden_picks` and `hidden_picks_syncing` carry the
+ * store answer the no-candidates sentence turns on (LLP 0289
+ * #ask-the-store) so a later "it said nothing syncs but rows shipped" is
+ * triageable from the signal: the count separates "no hidden pick" from
+ * "hidden picks, all withheld", which print the same line. Counts and a
+ * boolean, never the ids - the lane holds them to ask the store, not to
+ * record them (LLP 0202).
+ *
  * @param {WizardSyncScopeResult} result
  * @param {RunWizardSyncScopeOptions} opts
+ * @param {{ hidden_picks_syncing?: boolean }} [extra] attributes only the
+ *   caller knows, folded in when present
  * @returns {Promise<WizardSyncScopeResult>}
  */
-async function finishSpan(result, opts) {
+async function finishSpan(result, opts, extra) {
   await withSpan(
     'wizard.sync_scope.finish',
     {
       [Attr.COMPONENT]: 'wizard',
       [Attr.OPERATION]: 'wizard.sync_scope.finish',
       candidates: opts.candidates.length,
+      hidden_picks: (opts.candidatesHiddenIds ?? []).length,
+      ...(extra ?? {}),
       sources_opted_out: result.optedOut.length,
       status: result.cancelled ? 'cancelled' : result.back ? 'backed' : result.skipped ? 'skipped' : 'ok',
     },

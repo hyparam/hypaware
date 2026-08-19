@@ -112,6 +112,28 @@ same reason. When it lands it consults the same `candidatesHiddenIds`
 answer this doc mints, so the two branches keep agreeing rather than
 disagreeing about one fact. Nothing else about LLP 0281 is affected.
 
+The lane's question is the store's answer, not the seam's. The seam
+withholds `optedOutClientSourceIds(entries)` *minus* the central-classified
+ids (`source_withhold.js`), so a standing entry for a source the org owns
+is inert and the row ships anyway. What makes the equation safe above is
+that a hidden pick is non-central by construction, `lockedSources` being
+exactly the central set - and that holds only while the wizard's locked set
+resolved. It does not always: `computeLockedSafe` swallows a layered
+resolution failure and returns `[]` (LLP 0182), and a converge timeout
+returns `{ lockedSources: [] }` (LLP 0129), both deliberately, because the
+picker is not the org boundary. On such a run a hidden *central* row with a
+stale opt-out - writable before the org adopted the source, and never
+removed when it did - falls into `candidatesHiddenIds`, reads as withheld,
+and the lane prints *"nothing syncs"* while the daemon exports it. Closing
+it needs the lane to tell "no central rows" from "could not tell", which is
+a signal the orchestrator does not send today and which no count or id list
+in this doc supplies; inventing one here would settle a question about the
+degraded path that belongs in its own request. The narrower corner is
+accepted for now over the unconditional wrong claim this doc removes: it
+needs a resolution failure, a stale entry, and a hidden central row at
+once, where the bug fixed here needed only `hyp policy client <name>
+local-only`.
+
 ## References
 
 - LLP 0276, LLP 0202, LLP 0188, LLP 0192, LLP 0191
