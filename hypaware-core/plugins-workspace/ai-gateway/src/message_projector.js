@@ -9,7 +9,7 @@ export const SCHEMA_VERSION = 7
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
- * @import { RegisteredProjector } from './types.js'
+ * @import { ProjectionJournalEntry, RegisteredProjector } from './types.js'
  */
 
 const DATASET_NAME = 'ai_gateway_messages'
@@ -183,6 +183,14 @@ export function createAiGatewayMessageProjector(opts) {
   // @ref LLP 0204#fix [implements]: new sessions must not pay a whole-table scan
   const sessionIndex = createCommittedSessionIndex(storage, log, opts.now)
 
+  // Dedup undo log per emitted row batch, keyed by the array `projectExchange`
+  // returned so the caller needs no extra handle to hand back. Weak because a
+  // caller that writes the rows and moves on must not pin the journal for the
+  // life of the listener; `discardProjection` is the only reader and it runs
+  // in the caller's failure path, while the array is still held.
+  /** @type {WeakMap<Record<string, unknown>[], ProjectionJournalEntry[]>} */
+  const journals = new WeakMap()
+
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
@@ -241,12 +249,38 @@ export function createAiGatewayMessageProjector(opts) {
         sessionIndex
       )
 
-      return aiGatewayRowsFromProjectedExchange(projection, {
+      /** @type {ProjectionJournalEntry[]} */
+      const journal = []
+      const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayId,
         gatewayAttributes: buildGatewayAttributes(input),
         tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
         state,
+        journal,
       })
+      if (journal.length > 0) journals.set(rows, journal)
+      return rows
+    },
+
+    /**
+     * Un-mark the messages behind one `projectExchange` result, for a caller
+     * whose write of those rows failed. Without it the live lane silently
+     * drops them: the projector believes they were stored and never re-emits
+     * them, however many times the client replays the conversation.
+     *
+     * Safe to call with rows this projector did not produce, and safe to call
+     * twice - the second call is a no-op, so a caller cannot resurrect a
+     * message a later exchange has since written.
+     *
+     * @param {Record<string, unknown>[]} rows
+     * @returns {boolean} whether a projection was found and discarded
+     */
+    discardProjection(rows) {
+      const journal = journals.get(rows)
+      if (!journal) return false
+      journals.delete(rows)
+      discardProjectedMessages(state, journal)
+      return true
     },
   }
 }
@@ -617,6 +651,19 @@ export function createAiGatewayConversationState() {
 }
 
 /**
+ * The `state.messageIdsByConversation` key for one thread. Split out of
+ * `threadMessageIds` so a rollback journal entry can name the chain it
+ * belongs to without re-deriving the composition rule.
+ *
+ * @param {string} threadScope
+ * @param {string | undefined} agentId
+ * @returns {string}
+ */
+function chainKeyFor(threadScope, agentId) {
+  return agentId ? `${threadScope}\u0000${agentId}` : threadScope
+}
+
+/**
  * Lazily fetch the per-thread ordered message-id chain. Keyed by
  * `(threadScope, agent_id)` where `threadScope = conversation_id ??
  * session_id`: a subagent (agent_id set) gets its own chain, separate
@@ -636,7 +683,7 @@ export function createAiGatewayConversationState() {
  * @returns {{ seen: Set<string>, last: string | undefined }}
  */
 function threadMessageIds(state, threadScope, agentId) {
-  const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
+  const key = chainKeyFor(threadScope, agentId)
   let chain = state.messageIdsByConversation.get(key)
   if (!chain) {
     chain = { seen: new Set(), last: undefined }
@@ -672,6 +719,7 @@ function threadMessageIds(state, threadScope, agentId) {
  *   gatewayAttributes?: Record<string, unknown>,
  *   tsStart?: string,
  *   state?: ReturnType<typeof createAiGatewayConversationState>,
+ *   journal?: ProjectionJournalEntry[],
  * }} [opts]
  * @returns {Record<string, unknown>[]}
  */
@@ -679,6 +727,13 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   const gatewayId = opts.gatewayId || 'hypaware-local'
   const state = opts.state ?? createAiGatewayConversationState()
   const gatewayAttributes = opts.gatewayAttributes ?? {}
+  // Optional undo log for the dedup mutations below. Only the live lane
+  // passes one: its rows still have to survive a storage append that can
+  // fail, and a projected-but-unwritten message must not stay marked seen.
+  // @ref LLP 0026#consequences [implements]: the seen-set is what makes a
+  //   replay of committed history a no-op, so it may only carry messages a
+  //   write actually kept.
+  const journal = opts.journal
   const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
 
   // session_id is the partition key and the session container (always
@@ -772,13 +827,53 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     }
 
     state.seenMessages.add(identity.messageId)
-    if (!chain.seen.has(identity.messageId)) {
+    const chainedHere = !chain.seen.has(identity.messageId)
+    // Recorded BEFORE the chain mutation so `previousChainLast` is the tail
+    // this message displaced, which is what an unwind has to restore.
+    journal?.push({
+      chainKey: chainKeyFor(threadScope, agentId),
+      messageId: identity.messageId,
+      previousChainLast: chain.last,
+      chainedHere,
+    })
+    if (chainedHere) {
       chain.seen.add(identity.messageId)
       chain.last = identity.messageId
     }
   }
 
   return rows
+}
+
+/**
+ * Undo the dedup mutations one `aiGatewayRowsFromProjectedExchange` call
+ * made, so the messages it projected are eligible again.
+ *
+ * The live lane projects a message and only then hands its rows to storage.
+ * Marking the message seen during projection means an append failure loses
+ * it for the life of the process: the client replays the whole conversation
+ * on its next exchange, the seen-set says "already written", and the row is
+ * never re-emitted. Rolling forward instead (mark seen only after the append
+ * resolves) is not an option: the mark is also what keeps two concurrent
+ * exchanges carrying the same history from both emitting it, and that guard
+ * has to hold across the await.
+ *
+ * Entries are unwound in reverse so `chain.last` lands back on the tail the
+ * first discarded message displaced, not on some intermediate one.
+ *
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {ProjectionJournalEntry[]} journal
+ */
+function discardProjectedMessages(state, journal) {
+  for (let i = journal.length - 1; i >= 0; i--) {
+    const entry = journal[i]
+    state.seenMessages.delete(entry.messageId)
+    if (!entry.chainedHere) continue
+    const chain = state.messageIdsByConversation.get(entry.chainKey)
+    if (!chain) continue
+    chain.seen.delete(entry.messageId)
+    chain.last = entry.previousChainLast
+  }
 }
 
 /**

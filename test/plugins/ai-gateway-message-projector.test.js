@@ -1299,6 +1299,106 @@ function settledProjection(projecting) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// discardProjection: the undo for a caller whose write of the projected rows
+// failed. The projector marks a message seen DURING projection (it has to: the
+// mark is also what stops two concurrent exchanges carrying the same history
+// from both emitting it), so an append that never lands needs the mark taken
+// back or the message is dropped for the life of the listener.
+// ---------------------------------------------------------------------------
+
+test('discardProjection re-emits the discarded messages, byte-identical, on the next replay', async () => {
+  const turns = [
+    [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
+    [
+      { role: 'user', content: 'one', message_id: 'uuid-1' },
+      { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+    ],
+  ]
+  let turn = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-discard',
+        messages: turns[Math.min(turn++, turns.length - 1)],
+      }),
+    })],
+  })
+
+  const first = await projector.projectExchange(exchange())
+  assert.equal(first.length, 1, 'the first turn projects its one message')
+  assert.equal(projector.discardProjection(first), true, 'the projection is known and discardable')
+
+  const replay = await projector.projectExchange(exchange())
+  assert.deepEqual(
+    replay.map((row) => row.message_id),
+    ['uuid-1', 'uuid-2'],
+    'the discarded message is projected again alongside the new one'
+  )
+  assert.deepEqual(replay[0], first[0], 'the re-emitted row is identical to the one that was lost')
+})
+
+test('discardProjection restores the thread chain, so the replay relinks in order', async () => {
+  const turns = [
+    [
+      { role: 'user', content: 'one', message_id: 'uuid-1' },
+      { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+    ],
+    [
+      { role: 'user', content: 'one', message_id: 'uuid-1' },
+      { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+      { role: 'user', content: 'three', message_id: 'uuid-3' },
+    ],
+  ]
+  let turn = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-chain',
+        messages: turns[Math.min(turn++, turns.length - 1)],
+      }),
+    })],
+  })
+
+  const lost = await projector.projectExchange(exchange())
+  projector.discardProjection(lost)
+
+  const replay = await projector.projectExchange(exchange())
+  assert.deepEqual(
+    replay.map((row) => [row.message_id, row.previous_message_id]),
+    [['uuid-1', []], ['uuid-2', ['uuid-1']], ['uuid-3', ['uuid-2']]],
+    'previous_message_id follows the replayed order, not the chain tail the failed turn left behind'
+  )
+})
+
+test('discardProjection is a no-op for rows it did not produce, and for a second call', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-idempotent',
+        messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
+      }),
+    })],
+  })
+
+  assert.equal(projector.discardProjection([]), false, 'an unknown row array discards nothing')
+
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(projector.discardProjection(rows), true)
+  // A second call must not resurrect the message: by then a later exchange may
+  // already have written it, and re-emitting would be the duplicate the
+  // seen-set exists to prevent.
+  assert.equal(projector.discardProjection(rows), false, 'discarding twice is not a second undo')
+  const replay = await projector.projectExchange(exchange())
+  assert.deepEqual(replay.map((row) => row.message_id), ['uuid-1'], 'the message comes back exactly once')
+})
+
 /**
  * Minimal `ExtendedQueryStorageService`-shaped stub exposing only the
  * committed-partition read surface the projector feature-detects:

@@ -190,6 +190,26 @@ export interface StartedProxy {
 export type RegisteredProjector = AiGatewayExchangeProjector & { _seq: number }
 
 /**
+ * One undoable dedup mutation the row expansion made for a single projected
+ * message. The live lane collects these per exchange so an append failure can
+ * put the message back in play instead of leaving it marked seen and never
+ * re-emitted.
+ *
+ * `previousChainLast` is the per-thread tail this message displaced, captured
+ * before the mutation; `chainedHere` records whether this call was the one
+ * that chained the id at all, since a message already in the thread chain
+ * (seen on an earlier exchange under a different dedup path) must not have the
+ * chain rewound on its behalf.
+ */
+export interface ProjectionJournalEntry {
+  /** Key into `messageIdsByConversation`: thread scope, plus agent id when set. */
+  chainKey: string
+  messageId: string
+  previousChainLast: string | undefined
+  chainedHere: boolean
+}
+
+/**
  * Mutable state owned by the ai-gateway plugin instance. Both the
  * `AiGatewayCapability` facade (what adapter plugins see) and the running
  * source read from this object: the API mutates it via `register*` calls,

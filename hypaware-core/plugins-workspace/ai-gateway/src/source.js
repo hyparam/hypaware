@@ -299,10 +299,26 @@ async function launchListener(ctx, state, liveState) {
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
+    // Reported on the failure line below: an operator reading only
+    // `aigw.exchange_write_failed` has to be able to tell "these rows are
+    // eligible again on the next replay" from "these rows are gone".
+    let rowsRolledBack = 0
     try {
       const messageRows = await projector.projectExchange(row)
       if (messageRows.length > 0) {
-        await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        try {
+          await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        } catch (err) {
+          // The projector marked these message ids seen while projecting, and
+          // `appendRows` rejecting means the rows are not in the spool. Put
+          // them back in play: the client replays the whole conversation on
+          // its next exchange, and without this the seen-set answers "already
+          // written" forever, so the live lane loses them for the life of the
+          // process. Scoped to the append alone - a failure after it must not
+          // re-emit rows that did land.
+          if (projector.discardProjection(messageRows)) rowsRolledBack = messageRows.length
+          throw err
+        }
         liveState.rowsWritten += messageRows.length
         // Recorded only after the append resolves: "recent clients" in
         // `hyp status` must mean rows that landed, not rows that were
@@ -336,6 +352,7 @@ async function launchListener(ctx, state, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         upstream: row.upstream,
         error: message,
+        rows_rolled_back: rowsRolledBack,
       })
     }
   }
