@@ -338,10 +338,25 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
   with that inbound channel off. No admin rights are needed and the
   machine-wide system keychain is not touched. On other platforms trust
   stays file-scoped to the client's own settings. `hyp status` shows the
-  fingerprint and whether the keychain still trusts it.
-  `hyp detach <client>` keeps the CA and the trust, so re-attaching does not
-  ask again; `hyp detach <client> --purge` and `hyp daemon uninstall` remove
-  both.
+  fingerprint, every host the CA is permitted to vouch for, and whether the
+  keychain still trusts it. `hyp detach <client>` keeps the CA and the
+  trust, so re-attaching does not ask again; `hyp detach <client> --purge`
+  and `hyp daemon uninstall` remove both.
+- **On macOS, a proxy attach also leaves a login-session variable behind.**
+  Bun picks its trust store before any settings file is read, so a keychain
+  root only counts if `NODE_USE_SYSTEM_CA=1` is already in the process
+  environment. The attach that trusted the CA therefore ran `launchctl
+  setenv NODE_USE_SYSTEM_CA 1` and installed a small LaunchAgent,
+  `~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist`,
+  whose only job is to re-run that command at each login. It stays a login
+  item on your machine until it is removed, and it is a session-wide
+  variable that other Node programs read too. `launchctl setenv` reaches
+  processes launched after it, so a terminal app that was already running
+  must be fully quit and reopened. `hyp detach <client>` unsets the
+  variable and removes the agent, as do `hyp detach <client> --purge` and
+  `hyp daemon uninstall`; `hyp attach claude` unwinds it when it migrates a
+  previously proxied machine; and `hyp status` shows whether the variable is
+  currently live.
 - **Only the hosts a registered upstream names are decrypted.** Every other
   host the client talks to is tunnelled through without being decrypted.
 - **What gets recorded does not change.** Only the recorded API paths are

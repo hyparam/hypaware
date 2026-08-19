@@ -271,7 +271,7 @@ export async function runSessionStatus(argv, ctx) {
   // answer covers, so say it out loud here for the same reason `runMutation`
   // does: an `ignored` that never asked the gateway must not read as an
   // `ignored` everywhere. stderr, so the `--json` document stays parseable.
-  // @ref LLP 0249#milestones [implements]: status and mutations report the same recorder inventory, gaps included
+  // @ref LLP 0266#milestones [implements]: status and mutations report the same recorder inventory, gaps included
   if (resolvedTargets.gatewayError) {
     ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
   }
@@ -504,7 +504,7 @@ async function runMutation(argv, ctx, method, usage) {
  *
  * @param {CommandRunContext} ctx
  * @returns {{ targets: Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>, gatewayError?: string }}
- * @ref LLP 0249#milestones [implements]: session status and mutations use one recorder inventory
+ * @ref LLP 0266#milestones [implements]: session status and mutations use one recorder inventory
  */
 function resolveRecorderTargetsForCli(ctx) {
   const gateway = resolveGatewayEndpointForCli(ctx)

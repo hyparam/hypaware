@@ -1,4 +1,4 @@
-# LLP 0249: Focused CLI compatibility rollover
+# LLP 0266: Focused CLI compatibility rollover
 
 **Type:** Plan
 **Status:** Draft

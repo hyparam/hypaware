@@ -29,7 +29,7 @@ Before editing:
    - `llp/0009-cli-registry.spec.md`
    - `llp/0011-setup-and-onboarding.decision.md`
    - `llp/0248-task-oriented-cli-rollover.decision.md`
-   - `llp/0249-cli-compatibility-rollover.plan.md`
+   - `llp/0266-cli-compatibility-rollover.plan.md`
    - `llp/0256-session-ignore-reaches-the-listener.decision.md`
    - `llp/0257-claude-telemetry-listener-source.spec.md`
    - `llp/0258-attach-injects-telemetry-via-settings-env.decision.md`
@@ -210,7 +210,7 @@ Draft rationale and rollout documents are untracked at this checkpoint:
 
 ```text
 llp/0248-task-oriented-cli-rollover.decision.md
-llp/0249-cli-compatibility-rollover.plan.md
+llp/0266-cli-compatibility-rollover.plan.md
 ```
 
 Research and this handoff are under:

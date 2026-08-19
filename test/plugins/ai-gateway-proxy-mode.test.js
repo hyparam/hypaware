@@ -555,10 +555,13 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   const echoPort = echoAddress && typeof echoAddress === 'object' ? echoAddress.port : 0
   t.after(() => new Promise((resolve) => echo.close(() => resolve(undefined))))
 
-  /** @type {{ level: string, event: string }[]} */
+  /** @type {{ level: string, event: string, attrs: Record<string, unknown> }[]} */
   const logged = []
   /** @param {string} level */
-  const record = (level) => (/** @type {string} */ event) => logged.push({ level, event })
+  const record = (level) => (
+    /** @type {string} */ event,
+    /** @type {Record<string, unknown> | undefined} */ attrs
+  ) => logged.push({ level, event, attrs: attrs ?? {} })
   const ctx = /** @type {any} */ ({
     // proxy_mode deliberately absent, as if the operator turned it back off.
     config: {
@@ -576,7 +579,17 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   const details = /** @type {any} */ ((await source.status()).details)
   assert.equal(details.proxy_mode, false)
   assert.match(details.proxy_mode_error, /a local CA is installed/)
-  assert.equal(logged.some((l) => l.event === 'aigw.proxy_mode_stale_ca'), true)
+  const staleWarn = logged.find((l) => l.event === 'aigw.proxy_mode_stale_ca')
+  assert.ok(staleWarn, 'the stale-CA warning is emitted')
+
+  // The warning has to name a remedy that actually works. Attach deliberately
+  // leaves the CA on disk (it offers the trust back rather than taking it), so
+  // telling the operator to re-attach leaves the install exactly as degraded
+  // as it was, every time, until the CA is gone.
+  // @ref LLP 0262#migration [tests]: the stale-CA remedy cannot be a plain re-attach
+  const reason = String(staleWarn.attrs.reason ?? '')
+  assert.match(reason, /hyp client detach claude --purge/)
+  assert.doesNotMatch(reason, /run `hyp attach claude` to move it back/)
 
   // The tunnel is still served, so an already-attached client keeps its egress
   // instead of losing all HTTPS. (The byte-level round trip is covered by

@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-13
 **Related:** LLP 0217 (the effectiveness verdict and the retry stamp this extends), LLP 0199 (the baseline gate both sit on), LLP 0207 (the recognition path that writes the same stamp)
-**Extended-by:** [LLP 0220](./0220-maintenance-walk-survives-a-partition.decision.md) (the tick in which the attempt fails is reported too: `failed` is this tick's error, beside the `compactionAttemptFailed` skip an earlier one recorded)
+**Extended-by:** [LLP 0220](./0220-maintenance-walk-survives-a-partition.decision.md) (the tick in which the attempt fails is reported too: `failed` is this tick's error, beside the `compactionAttemptFailed` skip an earlier one recorded); [LLP 0228](./0228-maintenance-skips-are-a-standing-surface.decision.md) (the standing record this document describes stops being a `hyp query maintain` line and a span attribute: the daemon tick summarizes both skip reasons into `status.json`, where `hyp status` finds them)
 
 > The stamp a failed compaction retry writes records the moment the attempt
 > failed, so the ticks that skip the partition afterwards can say why. A

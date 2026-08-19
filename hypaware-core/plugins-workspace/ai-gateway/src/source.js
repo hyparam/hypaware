@@ -432,9 +432,14 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   if (!config.proxyMode) {
     // Proxy mode is off, but a CA on disk means a client was attached in proxy
     // mode at some point and may still have `HTTPS_PROXY` pointing here. Serve
-    // blind tunnels so its egress keeps working, and say so loudly: the repair
-    // is a re-attach (or a detach), and nothing else on the machine will
-    // volunteer that.
+    // blind tunnels so its egress keeps working, and say so loudly: nothing
+    // else on the machine will volunteer that this install is in the degraded
+    // state. A plain re-attach is NOT the remedy: attach leaves the CA where
+    // it is on purpose (the trust is offered back, never taken), so the file
+    // that puts the install in this state survives the re-attach. The
+    // remedies that land are removing the CA (`hyp client detach claude --purge`,
+    // then re-attach) or turning `proxy_mode` back on.
+    // @ref LLP 0262#migration [constrained-by]: attach offers the CA back rather than removing it, so it cannot clear this state on its own
     const stale = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
     if (stale) {
       liveState.interceptionError = 'proxy_mode is off but a local CA is installed'
@@ -442,7 +447,8 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         ca_cert_path: stale.certPath,
         reason: 'serving blind tunnels so an already-attached client keeps working; ' +
-          'run `hyp client attach claude` to reconcile it, or `hyp client detach claude`',
+          're-attaching leaves this CA on disk, so run `hyp client detach claude --purge` ' +
+          'and re-attach to clear the proxy residue, or turn proxy_mode back on',
       })
       return { tunnelOnly: true }
     }
