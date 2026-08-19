@@ -3,9 +3,8 @@
 /**
  * Compaction is the second, harder half of the session-context eviction bug.
  *
- * The read window (LLP 0254 #policy-inline, pinned by
- * `claude-telemetry-session-context-window.test.js`) decides what the reader
- * sees of a file the writer kept. These tests are about the file itself: once
+ * The read window (LLP 0254 #policy-inline) decides what the reader sees of a
+ * file the writer kept. These tests are about the file itself: once
  * `session-context.jsonl` genuinely reaches its cap, compaction rewrites it,
  * and dropping purely by position takes out whichever sessions have been
  * quiet, however live they are. A session whose record leaves the disk cannot
@@ -13,10 +12,15 @@
  * `undetermined`, the listener withholds the batch, and the session's spooled
  * bodies are deleted unread.
  *
- * @ref LLP 0286#newest-per-session [tests]: a session's newest record is
- *   evicted last, so compaction cannot silence a live session
- * @ref LLP 0286#writer-cap-is-clamped [tests]: the caller's compaction cap
- *   never exceeds the module constant the reader's window is derived from
+ * The two rules are coupled, so the tests exercise them together: retaining a
+ * session's record past the window every reader actually reads leaves it on
+ * disk and invisible, which is the same defect through the other door.
+ *
+ * @ref LLP 0286#endpoints-evicted-last [tests]: a session's endpoints are evicted
+ *   last, so compaction cannot silence a live session nor strand its opening
+ *   rows without a session-start record
+ * @ref LLP 0286#writer-cap-is-clamped [tests]: what compaction keeps is inside
+ *   the window the default reader reads
  */
 
 import assert from 'node:assert/strict'
@@ -27,10 +31,13 @@ import test from 'node:test'
 
 import {
   SESSION_CONTEXT_MAX_BYTES,
+  SESSION_CONTEXT_READ_TAIL_BYTES,
   appendSessionContext,
   pickLatestMatching,
   readSessionContext,
 } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+
+const RETAINED = Math.min(SESSION_CONTEXT_MAX_BYTES, SESSION_CONTEXT_READ_TAIL_BYTES)
 
 test('compaction keeps a quiet session while a noisy neighbour fills the file', async () => {
   const env = await stageEnv()
@@ -46,11 +53,18 @@ test('compaction keeps a quiet session while a noisy neighbour fills the file', 
     assert.equal(quiet?.cwd, '/repo/quiet', 'the quiet session lost its only record')
     assert.equal(pickLatestMatching(records, { sessionId: 'noisy-session' })?.ts, record('noisy-session', '/repo/noisy', 40).ts)
 
-    // Presence, not history: what compaction gives up is the noisy session's
-    // older records, and the file stays bounded while it does.
+    // Endpoints, not history: what compaction gives up is the noisy session's
+    // interior records, while its session start survives alongside its latest,
+    // and the file stays bounded throughout.
     const noisy = records.filter((entry) => entry.session_id === 'noisy-session')
-    const firstNoisyTs = record('noisy-session', '/repo/noisy', 1).ts
-    assert.ok(!noisy.some((entry) => entry.ts === firstNoisyTs), 'the oldest noisy record survived')
+    assert.ok(
+      noisy.some((entry) => entry.ts === record('noisy-session', '/repo/noisy', 1).ts),
+      'the noisy session lost its session-start record'
+    )
+    assert.ok(
+      !noisy.some((entry) => entry.ts === record('noisy-session', '/repo/noisy', 20).ts),
+      'an interior noisy record survived, so nothing was actually evicted'
+    )
     const stat = await fs.stat(env.stateFile)
     assert.ok(stat.size <= opts.maxBytes * 2, `file grew to ${stat.size} bytes`)
   } finally {
@@ -58,7 +72,34 @@ test('compaction keeps a quiet session while a noisy neighbour fills the file', 
   }
 })
 
-test('compaction clamps a caller cap wider than the module cap', async () => {
+test('compaction keeps a session-start record so an opening row still settles', async () => {
+  const env = await stageEnv()
+  try {
+    const opts = { maxBytes: 1400 }
+    // Long-dead single-record sessions, each one competing for the same cap.
+    for (let i = 0; i < 20; i++) {
+      await appendSessionContext(env.stateFile, record(`dead-${i}`, `/repo/dead-${i}`, i), opts)
+    }
+    // A live session that opened in an ignored dir and then changed out of it.
+    await appendSessionContext(env.stateFile, record('live', '/repo/ignored', 30), opts)
+    await appendSessionContext(env.stateFile, record('live', '/repo/ignored', 31), opts)
+    await appendSessionContext(env.stateFile, record('live', '/repo/clean', 32), opts)
+    await appendSessionContext(env.stateFile, record('live', '/repo/clean', 33), opts)
+
+    const records = await readSessionContext(env.stateFile)
+    const live = records.filter((entry) => entry.session_id === 'live')
+    // LLP 0085 resolves an opening row against the record live at the row's own
+    // time. Without the session-start record, `pickRecordForRow` finds nothing
+    // at-or-before the row and falls back to the earliest survivor: the clean
+    // cwd, which retains a row settlement exists to drop.
+    assert.equal(live[0]?.cwd, '/repo/ignored', 'the live session lost its session-start record')
+    assert.equal(live.at(-1)?.cwd, '/repo/clean', 'the live session lost its latest record')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('compaction clamps a caller cap wider than the window the reader reads', async () => {
   const env = await stageEnv()
   try {
     const padding = 'p'.repeat(8 * 1024)
@@ -66,24 +107,48 @@ test('compaction clamps a caller cap wider than the module cap', async () => {
       await appendSessionContext(
         env.stateFile,
         record(`sess-${i}`, `/repo/${padding}/${i}`, i),
-        // Four times the module cap: the reader's window is a module constant
-        // with no per-call seam, so a wider writer cap keeps records no reader
-        // can see.
+        // Four times the module cap: readers call `readSessionContext` with no
+        // opts, so a wider writer cap keeps records no reader can see.
         { maxBytes: SESSION_CONTEXT_MAX_BYTES * 4 }
       )
     }
 
     const stat = await fs.stat(env.stateFile)
     assert.ok(
-      stat.size <= SESSION_CONTEXT_MAX_BYTES,
-      `file grew to ${stat.size} bytes, past the ${SESSION_CONTEXT_MAX_BYTES}-byte module cap`
+      stat.size <= RETAINED,
+      `file grew to ${stat.size} bytes, past the ${RETAINED}-byte retained window`
     )
 
-    // Everything the writer kept is inside the window the reader is allowed
-    // to assume it may read.
+    // Everything the writer kept is inside the window the DEFAULT reader reads.
     const onDisk = (await fs.readFile(env.stateFile, 'utf8')).split('\n').filter(Boolean).length
-    const read = await readSessionContext(env.stateFile, { maxBytes: SESSION_CONTEXT_MAX_BYTES })
+    const read = await readSessionContext(env.stateFile)
     assert.equal(read.length, onDisk)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a quiet session stays readable once the file reaches the module cap', async () => {
+  const env = await stageEnv()
+  try {
+    // No opts: the module's own constants, which is what the hook uses.
+    const padding = 'p'.repeat(4 * 1024)
+    await appendSessionContext(env.stateFile, { ...record('quiet-session', '/repo/quiet', 0), git_branch: padding })
+    for (let i = 1; i <= 300; i++) {
+      await appendSessionContext(env.stateFile, { ...record('noisy-session', '/repo/noisy', i), git_branch: padding })
+    }
+
+    const stat = await fs.stat(env.stateFile)
+    assert.ok(stat.size > RETAINED / 2, `file only reached ${stat.size} bytes, so no compaction ran`)
+
+    // The default reader is the one every caller uses: `createSessionContextReader`,
+    // settlement and backfill all call `readSessionContext` with no opts.
+    const records = await readSessionContext(env.stateFile)
+    assert.equal(
+      pickLatestMatching(records, { sessionId: 'quiet-session' })?.cwd,
+      '/repo/quiet',
+      'the quiet session is on disk but outside the window any reader reads'
+    )
   } finally {
     await env.cleanup()
   }

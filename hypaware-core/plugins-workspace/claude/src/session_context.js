@@ -141,32 +141,40 @@ function recordFrom(value) {
  *
  * Two rules decide what survives.
  *
- * The cap is the module's, not the caller's: `opts.maxBytes` is clamped to
- * `SESSION_CONTEXT_MAX_BYTES`. The reader's window is a module constant and
- * `createSessionContextReader` has no seam to thread a per-call cap through,
- * so a caller compacting to a wider window would keep records no reader can
- * see, which is the silent eviction this file exists to avoid.
+ * The cap is the module's, not the caller's: `opts.maxBytes` is clamped to the
+ * SMALLER of `SESSION_CONTEXT_MAX_BYTES` and `SESSION_CONTEXT_READ_TAIL_BYTES`.
+ * Every reader calls `readSessionContext` with no opts
+ * (`createSessionContextReader`, settlement, backfill), so the tail constant is
+ * the real limit on what any reader can see; retaining past it keeps records on
+ * disk that no reader will ever read, which is the silent eviction this file
+ * exists to avoid, reached through the other door. Widening the retained window
+ * means widening the read window first.
  *
- * Eviction is oldest-first, but a session's NEWEST record is evicted last.
- * Dropping purely by position takes out whichever sessions have been quiet,
- * however live they are: one neighbour firing the hook on every Bash call can
- * push a session that spent the turn reading files off the disk entirely. The
- * reader only ever asks for a session's latest record
- * (`pickLatestMatching`), so holding one record per session costs almost
- * nothing and is the difference between an attributed session and an
- * `undetermined` one whose spooled bodies are deleted unread.
+ * Eviction is oldest-first, but a session's own EARLIEST and NEWEST records are
+ * evicted last. Dropping purely by position takes out whichever sessions have
+ * been quiet, however live they are: one neighbour firing the hook on every
+ * Bash call can push a session that spent the turn reading files off the disk
+ * entirely. Ingest asks only for a session's latest record
+ * (`pickLatestMatching`), so the newest is what presence costs; settlement
+ * resolves an OPENING row against the record live at that row's own time
+ * (LLP 0085), which for an opening row is the session-start record, so the
+ * earliest is what a correct drop costs. Two records per session buys both. The
+ * alternative is an `undetermined` session whose spooled bodies are deleted
+ * unread, or an opening row in an ignored dir resolved against a later clean
+ * cwd and retained: a leak, which is the direction that cannot be taken back.
  *
- * @ref LLP 0286#writer-cap-is-clamped [implements]: the caller's cap may not
- *   exceed the constant the reader's window is derived from
- * @ref LLP 0286#newest-per-session [implements]: a session's newest record is
- *   the last thing compaction gives up
+ * @ref LLP 0286#writer-cap-is-clamped [implements]: the retained window may not
+ *   exceed the window readers are able to read
+ * @ref LLP 0286#endpoints-evicted-last [implements]: a session's session-start and
+ *   latest records are the last things compaction gives up
  * @param {string} filePath
  * @param {{ maxBytes?: number, maxRecords?: number }} opts
  */
 async function compactSessionContextIfNeeded(filePath, opts) {
   const maxBytes = Math.min(
     positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES,
-    SESSION_CONTEXT_MAX_BYTES
+    SESSION_CONTEXT_MAX_BYTES,
+    SESSION_CONTEXT_READ_TAIL_BYTES
   )
   const maxRecords = positiveInt(opts.maxRecords) ?? SESSION_CONTEXT_MAX_RECORDS
   let stat
@@ -186,11 +194,16 @@ async function compactSessionContextIfNeeded(filePath, opts) {
 /**
  * Render the retained records, evicting until the body fits both bounds.
  *
- * Eviction order: older records of a session that has a newer one first
- * (oldest first), then the per-session newest records (oldest first), so a
- * session only loses its last record when every session's history is already
- * gone. The final record standing is never evicted, matching the byte loop
- * this replaces.
+ * Eviction runs in two tiers, oldest-first within each: a session's INTERIOR
+ * records (the ones with both an older and a newer record of their own session)
+ * go first, then its ENDPOINTS (its earliest and its newest record, which are
+ * the same record for a single-record session). So a session gives up its middle
+ * before either endpoint, and gives up an endpoint only once every session's
+ * middle is already gone. The final record standing is never evicted, matching
+ * the byte loop this replaces.
+ *
+ * Earliest is by append order rather than by `ts`, because append order is the
+ * order the hook observed and a record's `ts` is optional.
  *
  * @param {SessionContextRecord[]} records append-ordered, any session
  * @param {{ maxBytes: number, maxRecords: number }} bounds
@@ -201,15 +214,21 @@ function compactBody(records, { maxBytes, maxRecords }) {
   const sizes = lines.map((line) => Buffer.byteLength(line, 'utf8') + 1)
   /** @type {Map<string, number>} */
   const newestBySession = new Map()
-  records.forEach((record, index) => newestBySession.set(record.session_id, index))
-  const newest = new Set(newestBySession.values())
+  /** @type {Map<string, number>} */
+  const earliestBySession = new Map()
+  records.forEach((record, index) => {
+    newestBySession.set(record.session_id, index)
+    if (!earliestBySession.has(record.session_id)) earliestBySession.set(record.session_id, index)
+  })
+  const endpoints = new Set([...newestBySession.values(), ...earliestBySession.values()])
 
   const dropped = new Array(records.length).fill(false)
   let kept = records.length
   let bytes = sizes.reduce((sum, size) => sum + size, 0)
+  const indexes = records.map((_, index) => index)
   const order = [
-    ...records.map((_, index) => index).filter((index) => !newest.has(index)),
-    ...[...newest].sort((a, b) => a - b),
+    ...indexes.filter((index) => !endpoints.has(index)),
+    ...indexes.filter((index) => endpoints.has(index)),
   ]
   for (const index of order) {
     if (kept <= maxRecords && bytes <= maxBytes) break
