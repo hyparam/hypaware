@@ -1,5 +1,6 @@
 import type {
   PickerDetectProbe,
+  PluginActivityProbeManifest,
   PluginAttachProbeManifest,
   PluginContributionManifest,
   PluginClientLaunchManifest,
@@ -40,6 +41,13 @@ export interface ClientDescriptor {
    * (LLP 0198#split).
    */
   launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, from
+   * `contributes.client.activity_probe`. Read by the `hyp status`
+   * capture-health probe (LLP 0257#status-and-health); absent for a
+   * client whose activity leaves no scannable trail.
+   */
+  activityProbe?: PluginActivityProbeManifest
 }
 
 /**

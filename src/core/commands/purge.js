@@ -10,6 +10,7 @@ import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { purgeCache } from '../cache/purge.js'
+import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
 
 /**
@@ -34,6 +35,10 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
  * purge-then-re-record is idempotent server-side and never resurrects rows via
  * a stale watermark.
  *
+ * "Cache-only" describes where it reaches, not that rows are the only thing it
+ * removes: it also empties the raw-body capture spool, which is a transit area
+ * holding bodies no row has been made from yet (LLP 0253).
+ *
  * @ref LLP 0104 [implements]: the `hyp purge` verb (targeted, cache-only, confirmed), with non-destructive marking left intact
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -46,7 +51,7 @@ export async function runPurge(argv, ctx) {
     return 2
   }
 
-  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const { hypHome, stateDir } = readObservabilityEnv(ctx.env)
   const resolver = createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(stateDir) })
   const target = buildTarget(parsed, ctx, resolver)
 
@@ -91,12 +96,27 @@ export async function runPurge(argv, ctx) {
     return 1
   }
 
+  // The capture spool, emptied whatever the target was. The files in it are
+  // raw request and response bodies that have not been projected yet, so
+  // leaving them would let the next batch write rows the user just deleted -
+  // and a targeted purge cannot tell which of them belong to its target,
+  // because a spooled body carries no cwd. They are transient by design and
+  // recoverable from the client's own transcript, so emptying them costs
+  // detail at worst.
+  // @ref LLP 0253#purge-and-detach-sweep [implements]: `hyp purge` removes the
+  //   spool directory's contents
+  const swept = await sweepCaptureSpool(captureSpoolRoot(hypHome))
+
   getLogger('cache').info('purge.result', {
     [Attr.COMPONENT]: 'cmd-purge',
     [Attr.OPERATION]: 'purge.result',
     target_kind: target.kind,
     rows_deleted: summary.rowsDeleted,
     partitions_affected: summary.partitionsAffected,
+    // Counts and bytes only: a spooled body's filename is the client's, and
+    // its content is a raw prompt.
+    spool_files_removed: swept.filesRemoved,
+    spool_bytes_removed: swept.bytesRemoved,
     // A count, never a path. The near-miss decision is otherwise visible only
     // on stderr, so a smoke could assert the user-visible result without any
     // internal signal that the spelling predicate actually ran the branch.
@@ -122,11 +142,29 @@ export async function runPurge(argv, ctx) {
       resurrectable,
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
+      spoolFilesRemoved: swept.filesRemoved,
     }) + '\n')
   } else {
     ctx.stdout.write(
       `purged ${summary.rowsDeleted} row${summary.rowsDeleted === 1 ? '' : 's'} ` +
       `from ${summary.partitionsAffected} partition${summary.partitionsAffected === 1 ? '' : 's'}\n`
+    )
+    // Reported only when it did something: a machine with no body-writing
+    // client attached has an empty (or absent) spool on every purge, and a
+    // standing "swept 0 files" line would train the reader to skip the line
+    // that matters on the machine where it is not zero.
+    if (swept.filesRemoved > 0) {
+      ctx.stdout.write(
+        `also emptied the capture spool: ${swept.filesRemoved} ` +
+        `raw body file${swept.filesRemoved === 1 ? '' : 's'} deleted\n`
+      )
+    }
+  }
+
+  if (swept.failed > 0) {
+    ctx.stderr.write(
+      `note: ${swept.failed} item${swept.failed === 1 ? '' : 's'} in the capture spool ` +
+      `(${captureSpoolRoot(hypHome)}) could not be removed; delete the directory by hand\n`
     )
   }
 

@@ -1,0 +1,27 @@
+askLineOnce must answer with the line that answered it (review 2 of #785)
+
+The `rl.on('line', done)` added in 2843b78 takes the LAST line of a
+burst rather than the first. Readline emits `line` only while no
+question is pending, so the handler fires for everything typed or
+pasted past the answer, and it fires synchronously while the question
+hands its own answer back a microtask later. A stdin delivering
+"n\ny\n" in one chunk therefore answered `y`.
+
+That is the one direction an irreversible `[y/N]` must never drift in:
+`hyp purge`, `hyp report delete` and `hyp attach`'s enable prompt read
+a typed `n` as a confirmation. Reproduced on a real pty, where a paced
+`n` is still correct but a pasted "n\ny\n" proceeded with the delete;
+both `rl.question` and the pre-2843b78 asker returned "n" there, so it
+was a regression introduced by the fix rather than a pre-existing gap.
+
+The line is now held rather than settled on, and read only at EOF and
+only if the question never answered. That keeps 2843b78's two cases
+(an answer delivered in the same burst as the EOF, and the
+unterminated last line readline routes past the question) and drops
+the overwrite. On every input where `rl.question` answers at all,
+`askLineOnce` now returns exactly what it returns.
+
+Three regression tests, each verified to fail against 2843b78's body
+and pass against this one.
+
+Co-Authored-By: Claude <noreply@anthropic.com>

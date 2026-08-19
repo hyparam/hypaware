@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-18
 **Related:** LLP 0012, LLP 0023, LLP 0028, LLP 0030
+**Extended-by:** [LLP 0261](./0261-absent-column-pad-value-per-path.decision.md)
+(#capture's "padding absent physical columns to null" holds only on the
+column-stream path; the row path pads with a cell reading `undefined` post
+LLP 0241, and whether the split collapses is an open question)
 
 > The context graph is a shared substrate for many sources (LLP 0023). When two
 > sources describe the **same real-world entity**, they should land on **one
