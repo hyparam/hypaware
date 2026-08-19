@@ -550,12 +550,19 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       // @ref LLP 0114#init-writes-no-listen [implements]: the preset leaves listen unset so the default install keeps its fallback
       {
         name: '@hypaware/ai-gateway',
-        // Claude still requires the gateway capability as its normalized
-        // exchange writer, but its OTEL attach sends no model traffic through
-        // the gateway and therefore composes neither proxy mode nor an
-        // Anthropic upstream.
-        // @ref LLP 0262#capture [implements]: OTEL is the producer and the gateway capability remains the projection seam
-        config: { upstreams: [] },
+        config: {
+          // No `proxy_mode`: this preset writes literally what the picker fold
+          // composes, and the claude row stopped declaring
+          // `gateway_proxy_mode` when its attach became otel-only. Writing the
+          // key here would mint a CA on first boot that nothing in this
+          // install ever presents, and hand `hyp status` a proxy-trust block
+          // reporting keychain and launchd state no attach on this machine
+          // can ever change.
+          // Claude still requires the gateway capability as its normalized
+          // exchange writer, but OTEL sends no model traffic through it.
+          // @ref LLP 0262#capture [implements]: OTEL is the producer and the gateway capability remains the projection seam
+          upstreams: [],
+        },
       },
       {
         name: '@hypaware/otel',

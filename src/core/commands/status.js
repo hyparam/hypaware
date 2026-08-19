@@ -513,6 +513,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
+        // Whether the CA is live or residue, which neither probe above can
+        // answer and which decides whether purging it is safe. Tri-state like
+        // its siblings: `null` means the config could not be read, which a
+        // consumer must not read as "proxy_mode is off".
+        proxy_mode_configured: report.proxyTrust.proxyModeConfigured,
       }
       : null,
     diagnostics: report.diagnostics.map((d) => ({
@@ -748,6 +753,48 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
+    // Three facts with no verb is what this block used to be, and since
+    // LLP 0262 the claude attach neither installs nor reads either mechanism,
+    // so nothing else on the machine names what acts on them. What the note
+    // may say depends on whether the CA is live: `proxy_mode: true` has the
+    // gateway re-mint and present it on every start, so a purge there is not
+    // tidying up, it is deleting the key the running interception terminates
+    // TLS with. Residue gets the purge; live proxy capture gets told what
+    // still depends on the CA and nothing to run; a config we could not read
+    // gets neither, because "cannot tell" is not "safe to delete".
+    //
+    // The live branch names no client: `proxy_mode` is retained for codex,
+    // claude-desktop, openclaw, hermes, and raw SDK traffic, so the client
+    // this CA is actually serving here is not knowable from the trust state.
+    // The residue branch has to name one, because `hyp client detach` takes a
+    // client; that command detaches it as well as purging, which the note
+    // states rather than leaving the user to discover it.
+    // @ref LLP 0262#migration [implements]: the CA and any trust it was granted outlive the migration and end at `detach --purge`, never at another attach
+    if (report.proxyTrust.proxyModeConfigured === null) {
+      stdout.write(
+        '    note:           the config could not be read, so whether this CA is live or residue is unknown\n'
+      )
+      stdout.write(
+        '                    fix the config first: purging a CA a proxy_mode gateway presents breaks capture\n'
+      )
+    } else if (report.proxyTrust.proxyModeConfigured) {
+      stdout.write(
+        '    note:           proxy_mode is on, so the gateway still terminates TLS with this CA\n'
+      )
+      stdout.write(
+        '                    the clients captured through the proxy need it; turn proxy_mode off before purging\n'
+      )
+    } else {
+      stdout.write(
+        '    note:           only proxy_mode capture uses this CA, and no plugin here is configured for it\n'
+      )
+      stdout.write(
+        "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
+      )
+      stdout.write(
+        '                    it detaches claude on the way, so re-attach it afterwards to keep capturing\n'
+      )
+    }
   }
 
   stdout.write(`  cache:           ${cacheRoot}\n`)
@@ -906,20 +953,23 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 }
 
 /**
- * The keychain half of the `proxy trust` block. An untrusted CA carries the
- * repair with it because the repair is one command and the state is otherwise
- * silent: capture keeps working, so nothing else in the report will ever
- * mention it (LLP 0237#attach-anyway-on-refusal). `null` is a probe that could
- * not run, which is a different answer from "not trusted" and says so.
+ * The keychain half of the `proxy trust` block. A bare state, with no repair
+ * attached: the repair used to be `hyp client attach claude`, and since LLP 0262 that
+ * attach writes an OTEL settings block and touches neither the keychain nor
+ * the launchd environment, so naming it would point the user at a command that
+ * cannot change this line. Nor does an untrusted CA break Remote Control any
+ * more: the OTEL attach repoints no base URL, so the inbound channel the trust
+ * grant existed for never meets the proxy. What does act on the CA is named
+ * once, by the block itself. `null` is a probe that could not run, which is a
+ * different answer from "not trusted" and says so.
  *
+ * @ref LLP 0262#requirements [constrained-by]: R6 - the base URL is never repointed, so Remote Control no longer rests on this trust
  * @param {boolean | null} trusted
  * @returns {string}
  */
 function describeCaTrust(trusted) {
   if (trusted === true) return 'trusted'
-  if (trusted === false) {
-    return 'not trusted - Remote Control inbound will not work, run `hyp client attach claude` to retry'
-  }
+  if (trusted === false) return 'not trusted'
   return 'unknown - the keychain probe could not run'
 }
 
@@ -945,14 +995,16 @@ function describePermittedHosts(hosts) {
 }
 
 /**
- * The launchd half of the `proxy trust` block. Same tri-state, same reason.
+ * The launchd half of the `proxy trust` block. Same tri-state, and the same
+ * reason for stating rather than prescribing: nothing sets `NODE_USE_SYSTEM_CA`
+ * on this machine any more, so an unset variable has no repair to carry.
  *
  * @param {boolean | null} set
  * @returns {string}
  */
 function describeLaunchdEnv(set) {
   if (set === true) return `${ENV_VAR_NAME}=1 set`
-  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp client attach claude\` to set it`
+  if (set === false) return `${ENV_VAR_NAME} not set`
   return 'unknown - the launchctl probe could not run'
 }
 

@@ -901,11 +901,23 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * config write is still the repair the gateway's own stale-CA warning asks
  * for.
  *
+ * No bundled picker row declares `gateway_proxy_mode` since LLP 0262: the
+ * `claude` row was the only one, and dropped it when its attach became
+ * otel-only. The rule stays generic for any client still captured by the
+ * proxy (LLP 0243's composition rule is unchanged); what it must never do is
+ * fire for a client whose attach repoints no base URL, because every clause
+ * of the question below would then be false.
+ *
  * Never throws into the attach: the caller downgrades any escape to a
  * warning, because base-URL attach is what this install already does and
  * remains the working fallback.
  *
- * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write, the restart, and the coming trust dialog
+ * The question names the config write and the restart, and says where the CA
+ * is trusted. It no longer promises a macOS trust dialog: no production path
+ * calls the trust-store writer since the claude attach went otel-only, so a
+ * yes mints the CA and stops there.
+ *
+ * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write and the restart
  * @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports instead of prompting
  * @ref LLP 0244#non-interactive [implements]: non-TTY and --json attaches never migrate; they emit the one-line pointer
  * @param {{ name: string, ctx: CommandRunContext, parsed: { client: string, dryRun: boolean, json: boolean } }} args
@@ -913,7 +925,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  */
 async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
   // A dry run changes nothing and promises nothing, so it says nothing.
-  // `hyp attach all` never prompts mid-run either (same posture as
+  // `hyp client attach all` never prompts mid-run either (same posture as
   // maybeInteractiveEnableAttach above), but it does not return here: it
   // falls through to the one-line pointer below, because LLP 0244
   // #non-interactive owes every non-migrating attach shape the line naming
@@ -997,8 +1009,9 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     ctx,
     `${capitalizeClientLabel(name)} can attach through HypAware's local HTTPS proxy instead of a ` +
     `repointed base URL, which keeps Remote Control working. Switching writes proxy_mode ` +
-    `into the local config and restarts the daemon; macOS will then ask to trust the ` +
-    `HypAware Local CA. Switch this install to proxy mode now? [y/N] `
+    `into the local config and restarts the daemon, which mints the HypAware Local CA; ` +
+    `nothing adds that CA to a system trust store, so the client trusts it through its own ` +
+    `settings. Switch this install to proxy mode now? [y/N] `
   )
   if (!accepted) {
     ctx.stderr.write(

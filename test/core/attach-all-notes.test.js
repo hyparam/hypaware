@@ -90,6 +90,8 @@ test('hyp client attach all: a catalog-known client missing from the live regist
     })
     const code = await runAttach(['all'], ctx)
     assert.equal(code, 0, stderr.text())
+    // Nothing on stderr: no bundled client row declares proxy attach since
+    // LLP 0262, so `attach all` owes no migration pointer either.
     assert.equal(stderr.text(), '')
 
     const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:'))
@@ -107,6 +109,7 @@ test('hyp client attach all: the note does not change the exit code, only real a
     const { ctx, stdout, stderr } = makeCtx({ home, registered: ['claude', 'claude-desktop'] })
     const code = await runAttach(['all'], ctx)
     assert.equal(code, 0, stderr.text())
+    // No migration pointer on stderr (see above).
     assert.equal(stderr.text(), '')
 
     const notes = stdout.text().split('\n').filter((l) => l.startsWith('note:')).sort()

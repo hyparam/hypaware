@@ -80,6 +80,7 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
       hosts: ['api.anthropic.com'],
       trusted: true,
       launchdEnvSet: true,
+      proxyModeConfigured: false,
     })
 
     const text = renderText(report, path.join(stateRoot, 'cache'))
@@ -87,6 +88,16 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
     assert.ok(text.includes(`ca fingerprint: ${ca.fingerprint}`), 'the fingerprint is on the text surface')
     assert.match(text, /login keychain: trusted\n/)
     assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA=1 set\n/)
+    // Both are residue on an otel-attached machine with no proxy_mode gateway:
+    // nothing installs them any more, so the block names the one command that
+    // acts on what it reports.
+    assert.match(text, /note: {11}only proxy_mode capture uses this CA/)
+    assert.match(text, /hyp client detach claude --purge/)
+    assert.doesNotMatch(text, /hyp client attach claude/)
+    // The command named is not a CA-only purge: it runs the full detach for
+    // `claude` first, which strips the managed `env` block that is this
+    // machine's whole capture path. Advice that ends capture has to say so.
+    assert.match(text, /it detaches claude on the way, so re-attach it afterwards to keep capturing/)
 
     const json = renderStatusJson({
       report,
@@ -99,6 +110,7 @@ test('hyp status reports the trust state alongside the CA fingerprint, and the l
       permitted_hosts: ['api.anthropic.com'],
       ca_trusted: true,
       launchd_env_set: true,
+      proxy_mode_configured: false,
     })
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
@@ -192,8 +204,11 @@ test('a permitted host carrying terminal control bytes cannot repaint hyp status
 
 // The state this exists for: the dialog was cancelled, or a re-mint stranded
 // the trust. Capture keeps working, so nothing else in the report degrades and
-// only this line can say so.
-test('a CA the keychain does not trust is stated, with the repair, on both surfaces', async () => {
+// only this line can say so. Since LLP 0262 no attach installs either
+// mechanism, so neither line may name `hyp client attach claude` as the repair: the
+// only command that acts on what this block reports is the purge.
+// @ref LLP 0262#migration [tests]: the trust block names the purge, never an attach that would not touch the keychain
+test('a CA the keychain does not trust is stated, without an attach that cannot fix it', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
     const ca = await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
@@ -206,8 +221,10 @@ test('a CA the keychain does not trust is stated, with the repair, on both surfa
 
     const text = renderText(report, path.join(stateRoot, 'cache'))
     assert.ok(text.includes(`ca fingerprint: ${ca.fingerprint}`))
-    assert.match(text, /login keychain: not trusted - .*hyp client attach claude/)
-    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set - .*hyp client attach claude/)
+    assert.match(text, /login keychain: not trusted\n/)
+    assert.match(text, /launchd env: {4}NODE_USE_SYSTEM_CA not set\n/)
+    assert.doesNotMatch(text, /hyp client attach claude/, 'attach installs neither mechanism now')
+    assert.match(text, /hyp client detach claude --purge/)
     // The report is still healthy: capture works without keychain trust
     // (LLP 0237#attach-anyway-on-refusal), which is exactly why the line has
     // to exist.
@@ -221,6 +238,118 @@ test('a CA the keychain does not trust is stated, with the repair, on both surfa
     })
     assert.equal(json.proxy_trust?.ca_trusted, false)
     assert.equal(json.proxy_trust?.launchd_env_set, false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A `proxy_mode: true` gateway re-mints and presents this CA on every start,
+// so the purge the block names for residue would delete the key the running
+// interception terminates TLS with, and the next start would mint a different
+// one. The note must not offer it there.
+// @ref LLP 0262#migration [tests]: the purge is named for a CA nothing here uses, never for one a live proxy_mode gateway depends on
+test('a live proxy_mode gateway is never told to purge the CA it is using', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({
+        version: 2,
+        plugins: [{
+          name: '@hypaware/ai-gateway',
+          config: {
+            proxy_mode: true,
+            upstreams: [{
+              name: 'anthropic',
+              base_url: 'https://api.anthropic.com',
+              path_prefix: '/v1/messages',
+            }],
+          },
+        }],
+      }) + '\n'
+    )
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.proxyTrust?.proxyModeConfigured, true)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.match(text, /proxy_mode is on, so the gateway still terminates TLS with this CA/)
+    assert.doesNotMatch(text, /hyp client detach claude --purge/, 'the purge would break live capture')
+    assert.doesNotMatch(text, /hyp client attach claude/)
+    // proxy_mode is retained for codex, claude-desktop, openclaw, hermes and
+    // raw SDK traffic (LLP 0262 #migration), so the trust state cannot say
+    // which client this CA is serving and the note must not guess one.
+    assert.doesNotMatch(text, /the claude attach does not use it/)
+
+    const json = renderStatusJson({
+      report,
+      clientNames: [],
+      datasets: [],
+      cacheRoot: path.join(stateRoot, 'cache'),
+    })
+    assert.equal(json.proxy_trust?.proxy_mode_configured, true)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A gateway entry the config disables is not what runs, so its `proxy_mode`
+// key does not make this CA live. Reading it as live would withhold the purge
+// from the one machine where purging is unambiguously safe.
+test('a disabled gateway entry does not make the CA live', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({
+        version: 2,
+        plugins: [{
+          name: '@hypaware/ai-gateway',
+          enabled: false,
+          config: { proxy_mode: true },
+        }],
+      }) + '\n'
+    )
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.proxyTrust?.proxyModeConfigured, false)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.match(text, /hyp client detach claude --purge/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The population this protects: a config the user has just broken, on a
+// machine whose gateway is still running `proxy_mode: true` from its last
+// good boot. `config` is null there, and rounding that to "proxy_mode is off"
+// would hand exactly that machine the purge for the CA its live interception
+// terminates TLS with.
+// @ref LLP 0262#migration [tests]: the purge is offered for a CA nothing here uses, and a config we cannot read is not proof of that
+test('a config that will not parse is reported as unknown, not as proxy_mode off', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    await fs.writeFile(defaultConfigPath(hypHome), '{ this is not json\n')
+    await ensureLocalCa({ stateRoot, hosts: ['api.anthropic.com'] })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.proxyTrust?.proxyModeConfigured, null)
+
+    const text = renderText(report, path.join(stateRoot, 'cache'))
+    assert.match(text, /whether this CA is live or residue is unknown/)
+    assert.doesNotMatch(text, /hyp client detach claude --purge/, 'the CA may be in live use')
+    assert.doesNotMatch(text, /hyp client attach claude/)
+
+    const json = renderStatusJson({
+      report,
+      clientNames: [],
+      datasets: [],
+      cacheRoot: path.join(stateRoot, 'cache'),
+    })
+    assert.equal(json.proxy_trust?.proxy_mode_configured, null)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
