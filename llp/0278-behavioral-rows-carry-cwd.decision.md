@@ -1,4 +1,4 @@
-# LLP 0266: `claude_telemetry_events` rows carry `cwd`, so the export seam can withhold them
+# LLP 0278: `claude_telemetry_events` rows carry `cwd`, so the export seam can withhold them
 
 **Type:** Decision
 **Status:** Accepted
