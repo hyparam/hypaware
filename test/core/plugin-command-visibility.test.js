@@ -117,7 +117,7 @@ test('manifest hidden commands stay out of pre-boot top-level help', async () =>
     name: '@hypaware/gascity',
     commands: [
       { name: 'demo run', summary: 'Public workflow row' },
-      { name: 'demo plumbing', summary: 'Internal mechanism row', hidden: true },
+      { name: 'plumbing execute', summary: 'Internal mechanism row', hidden: true },
     ],
   })
   await fs.writeFile(
@@ -136,7 +136,7 @@ test('manifest hidden commands stay out of pre-boot top-level help', async () =>
 
   assert.equal(code, 0)
   const out = stdout.text()
-  assert.match(out, /demo\s+Subcommands: run/)
+  assert.match(out, /Additional commands:[\s\S]*\bdemo\b/)
   assert.equal(out.includes('plumbing'), false, 'a hidden manifest command must not reach top-level help')
 })
 
@@ -186,7 +186,11 @@ test('the credential helper contract is an internal mechanism in manifest and re
   assert.equal(credential.hidden, true, 'the helper contract must be hidden in the runtime registry too')
 
   // Public claude-account surfaces stay visible.
-  for (const name of ['claude-account login', 'claude-account logout', 'claude-account status']) {
+  for (const name of [
+    'client claude-account login',
+    'client claude-account logout',
+    'client claude-account status',
+  ]) {
     assert.notEqual(registered.get(name)?.hidden, true, `${name} is a public surface`)
   }
 })
@@ -247,8 +251,8 @@ test('public diagnostics carry long help', async () => {
   const desktop = await collectRegisteredCommands(activateClaudeDesktop)
   const account = await collectRegisteredCommands(activateClaudeAccount)
   for (const cmd of [
-    desktop.get('claude-desktop status'),
-    account.get('claude-account status'),
+    desktop.get('client claude-desktop status'),
+    account.get('client claude-account status'),
   ]) {
     assert.ok(cmd, 'diagnostic command missing')
     assert.equal(typeof cmd.help, 'string', `${cmd.name}: a visible diagnostic needs long help`)
@@ -265,7 +269,7 @@ test('group help hides the credential helper but keeps the public claude-account
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['claude-account', '--help'], {
+  const code = await dispatch(['client', 'claude-account', '--help'], {
     stdout,
     stderr,
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },

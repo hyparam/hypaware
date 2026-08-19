@@ -436,8 +436,6 @@ export interface PluginCommandManifest {
   audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** Compatibility spellings used for inactive-plugin ownership checks. */
   aliases?: string[]
-  /** Callable contract omitted from manifest-derived help. */
-  hidden?: boolean
   summary?: string
   usage?: string
   /**
