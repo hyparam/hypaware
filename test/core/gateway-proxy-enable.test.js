@@ -9,12 +9,17 @@ import test from 'node:test'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { enableGatewayProxyMode } from '../../src/core/config/gateway_proxy_enable.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { ensureLocalCa } from '../../src/core/tls/ca.js'
 
 /**
  * The LLP 0244 #enable-write shape: `enableGatewayProxyMode` sets one key on
  * the existing local gateway entry (never appends, never rewrites the rest),
  * declines when the gateway block is centrally managed or absent, and after
  * the restart waits for the CA the proxy attach preflights on.
+ *
+ * LLP 0259 adds one entry state to the same function: `proxy_mode` already
+ * on with no CA on disk is a stranded install, not "nothing to do", and its
+ * repair is the restart half with the write skipped.
  *
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -111,13 +116,14 @@ test('a bare local gateway entry (no config block) gains one holding only proxy_
 
 /* ------------------------------ the refusals ----------------------------- */
 
-test('already on in the effective config: no write, no backup', async () => {
+test('already on in the effective config, with the CA on disk: no write, no backup', async () => {
   const { hypHome, configPath } = await stageHome()
   const raw = JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway', config: { proxy_mode: true, upstreams: [ANTHROPIC] } }],
   }, null, 2) + '\n'
   await fs.writeFile(configPath, raw)
+  await ensureLocalCa({ stateRoot: path.join(hypHome, 'hypaware'), hosts: ['api.anthropic.com'] })
 
   const result = await enableGatewayProxyMode({
     ctx: makeCtx(hypHome),
@@ -130,6 +136,113 @@ test('already on in the effective config: no write, no backup', async () => {
   assert.equal(result.outcome, 'already')
   assert.equal(await fs.readFile(configPath, 'utf8'), raw)
   assert.deepEqual(await backupsIn(hypHome), [])
+})
+
+/* ------------------------------- the re-mint ----------------------------- */
+
+// The `hyp detach claude --purge` residue: the CA is gone by design and the
+// key stays on, so `already` was answering "nothing to do" about a machine
+// that could no longer serve what its config asked for. The repair is the
+// restart half of this same function, with the write skipped.
+// @ref LLP 0259#repair-is-a-restart [tests]: proxy_mode with no CA restarts and waits, and writes nothing
+test('proxy_mode on with no CA: the restart runs, the config is never rewritten', async () => {
+  const { hypHome, configPath } = await stageHome()
+  const raw = JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { proxy_mode: true, upstreams: [ANTHROPIC] } }],
+  }, null, 2) + '\n'
+  await fs.writeFile(configPath, raw)
+  let restarts = 0
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: true }),
+    restartDaemon: async () => { restarts += 1 },
+    waitForBind: async () => ({ bound: true, endpoint: 'http://127.0.0.1:18521' }),
+    waitForCaFn: async () => ({ ready: true, certPath: '/state/tls/ca-cert.pem' }),
+  })
+
+  assert.equal(result.ok, true, result.message ?? '')
+  assert.equal(result.outcome, 'remint')
+  assert.equal(restarts, 1)
+  assert.deepEqual(result.steps, { write: 'n/a', restart: 'ok', wait: 'ok', ca: 'ok' })
+  assert.equal(result.caReady, true)
+  assert.equal(await fs.readFile(configPath, 'utf8'), raw, 'the config is untouched')
+  assert.deepEqual(await backupsIn(hypHome), [], 'and no backup copy was made for a write that never happened')
+})
+
+// A re-mint writes nothing, so it has nothing for the LLP 0031 merge to drop:
+// a fleet host is repaired exactly like a solo one, where the migration's own
+// write would have to decline.
+// @ref LLP 0259#repair-is-a-restart [tests]: central ownership does not block a repair that touches no config
+test('a centrally-managed gateway is still re-minted: no write to collide', async () => {
+  const { hypHome, configPath } = await stageHome()
+  const seedPath = centralSeedPath(path.join(hypHome, 'hypaware'))
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { proxy_mode: true, upstreams: [ANTHROPIC] } }],
+  }) + '\n')
+  const raw = JSON.stringify({ version: 2, plugins: [] }, null, 2) + '\n'
+  await fs.writeFile(configPath, raw)
+  let restarts = 0
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: true }),
+    restartDaemon: async () => { restarts += 1 },
+    waitForBind: async () => ({ bound: true }),
+    waitForCaFn: async () => ({ ready: true, certPath: '/state/tls/ca-cert.pem' }),
+  })
+
+  assert.equal(result.ok, true, result.message ?? '')
+  assert.equal(result.outcome, 'remint')
+  assert.equal(restarts, 1)
+  assert.equal(await fs.readFile(configPath, 'utf8'), raw)
+})
+
+test('a re-mint with no daemon service reports ok with daemonInstalled false, so the caller names the ladder', async () => {
+  const { hypHome, configPath } = await stageHome()
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { proxy_mode: true, upstreams: [ANTHROPIC] } }],
+  }, null, 2) + '\n')
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: false }),
+    restartDaemon: async () => {
+      throw new Error('must not restart a service that does not exist')
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.outcome, 'remint')
+  assert.equal(result.daemonInstalled, false)
+  assert.deepEqual(result.steps, { write: 'n/a', restart: 'n/a', wait: 'n/a', ca: 'n/a' })
+})
+
+test('a re-mint whose CA never appears fails the ca step, still with no write', async () => {
+  const { hypHome, configPath } = await stageHome()
+  const raw = JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { proxy_mode: true, upstreams: [ANTHROPIC] } }],
+  }, null, 2) + '\n'
+  await fs.writeFile(configPath, raw)
+
+  const result = await enableGatewayProxyMode({
+    ctx: makeCtx(hypHome),
+    daemonStatus: async () => ({ installed: true }),
+    restartDaemon: async () => {},
+    waitForBind: async () => ({ bound: true }),
+    waitForCaFn: async () => ({ ready: false }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'failed')
+  assert.equal(result.failedStep, 'ca')
+  assert.deepEqual(result.steps, { write: 'n/a', restart: 'ok', wait: 'ok', ca: 'failed' })
+  assert.equal(await fs.readFile(configPath, 'utf8'), raw)
 })
 
 // @ref LLP 0244#central-managed [tests]: a fleet-owned gateway block is reported, never locally shadowed

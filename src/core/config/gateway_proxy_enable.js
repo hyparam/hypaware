@@ -8,7 +8,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { loadConfigFile, prepareLocalConfigWrite } from './schema.js'
-import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
+import { defaultStateRoot, readLocalCaInfo, waitForLocalCa } from '../tls/ca.js'
 
 /**
  * @import { CommandRunContext, HypAwareV2Config, PluginConfigInstance, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -40,6 +40,12 @@ const CA_WAIT_DEFAULT_MS = 15_000
  * dropped as a collision by the LLP 0031 merge), and a config with no gateway
  * in any layer has a bigger problem than proxy mode.
  * @ref LLP 0244#enable-write [implements]: the consented switch reuses the enable steps with one new write shape, then waits for the CA
+ *
+ * One entry state skips the write and runs the rest: `proxy_mode` already on
+ * with no CA on disk. That is not "nothing to do" but a stranded install
+ * (`hyp detach --purge` removes the CA and leaves the key set), and the
+ * restart-and-wait half of this function is exactly its repair.
+ * @ref LLP 0259#repair-is-a-restart [implements]: `remint` reuses steps 2 and 3 with no config write
  *
  * @param {{
  *   ctx: CommandRunContext,
@@ -134,12 +140,32 @@ export async function enableGatewayProxyMode({
         // still decides what this function may write.
       }
 
-      if (effectiveGateway?.config?.proxy_mode === true) {
-        result.ok = true
-        result.outcome = 'already'
-        span.setAttribute('outcome', 'already')
-        span.setAttribute('status', 'ok')
-        return result
+      // `proxy_mode` already on splits in two. With a CA on disk the install
+      // is genuinely in proxy mode and there is nothing to do. With none, the
+      // config and the machine disagree: `hyp detach --purge` deleted the CA
+      // and the running daemon has no reason to re-mint, so an attach from
+      // here silently writes base-URL mode. That second state is a repair,
+      // not a migration - the intent is already recorded, so the write is
+      // skipped and only the restart runs.
+      // @ref LLP 0259#repair-is-a-restart [implements]: the CA-missing half of `already` restarts instead of returning, and writes nothing
+      const remint = effectiveGateway?.config?.proxy_mode === true
+      if (remint) {
+        /** @type {boolean} */
+        let caPresent
+        try {
+          caPresent = (await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env, homeDir) })) !== undefined
+        } catch {
+          caPresent = false
+        }
+        if (caPresent) {
+          result.ok = true
+          result.outcome = 'already'
+          span.setAttribute('outcome', 'already')
+          span.setAttribute('status', 'ok')
+          return result
+        }
+        result.outcome = 'remint'
+        span.setAttribute('outcome', 'remint')
       }
 
       // Central ownership is decided by the central layer NAMING the plugin,
@@ -149,8 +175,11 @@ export async function enableGatewayProxyMode({
       // produces a daemon that restarts without proxy mode and a CA wait
       // that can only time out (found live, 2026-08-17).
       // @ref LLP 0244#central-managed [implements]: the local CLI never fights the central layer over the gateway block
+      // A re-mint writes nothing, so it has nothing for the central layer to
+      // collide with: the restart is purely local and repairs a fleet host
+      // exactly as it repairs a solo one.
       const localGateway = (base.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN)
-      if (centralGateway || !localGateway) {
+      if (!remint && (centralGateway || !localGateway)) {
         const outcome = centralGateway ? 'central_managed' : 'no_gateway'
         result.outcome = outcome
         result.message = centralGateway
@@ -163,37 +192,42 @@ export async function enableGatewayProxyMode({
 
       // ---- Step 1: the guarded local write ----------------------------------
 
-      const nextPlugins = (base.plugins ?? []).map((entry) =>
-        entry === localGateway
-          ? { ...entry, config: { ...(entry.config ?? {}), proxy_mode: true } }
-          : entry
-      )
-      const nextConfig = { ...base, plugins: nextPlugins }
+      // Skipped entirely on a re-mint: the key the write would set is already
+      // there, and rewriting it would churn a config (and a backup copy) for
+      // no change, on a host whose gateway block may not even be ours.
+      if (!remint) {
+        const nextPlugins = (base.plugins ?? []).map((entry) =>
+          entry === localGateway
+            ? { ...entry, config: { ...(entry.config ?? {}), proxy_mode: true } }
+            : entry
+        )
+        const nextConfig = { ...base, plugins: nextPlugins }
 
-      try {
-        const guard = await prepareLocalConfigWrite({
-          targetPath: configPath,
-          force: true,
-          ...(now ? { now } : {}),
-        })
-        if (!guard.proceed) {
-          return fail(result, span, log, 'write', 'config_write_failed', guard.message ?? 'config write refused')
+        try {
+          const guard = await prepareLocalConfigWrite({
+            targetPath: configPath,
+            force: true,
+            ...(now ? { now } : {}),
+          })
+          if (!guard.proceed) {
+            return fail(result, span, log, 'write', 'config_write_failed', guard.message ?? 'config write refused')
+          }
+          if (guard.backupPath) result.backupPath = guard.backupPath
+          await fs.mkdir(path.dirname(configPath), { recursive: true })
+          await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8')
+        } catch (err) {
+          return fail(result, span, log, 'write', 'config_write_failed', describeError(err))
         }
-        if (guard.backupPath) result.backupPath = guard.backupPath
-        await fs.mkdir(path.dirname(configPath), { recursive: true })
-        await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8')
-      } catch (err) {
-        return fail(result, span, log, 'write', 'config_write_failed', describeError(err))
-      }
 
-      result.steps.write = 'ok'
-      result.outcome = 'enabled'
-      log.info('config.gateway_proxy_enable.write', {
-        [Attr.COMPONENT]: 'config',
-        config_path: configPath,
-        ...(result.backupPath ? { backup_path: result.backupPath } : {}),
-        status: 'ok',
-      })
+        result.steps.write = 'ok'
+        result.outcome = 'enabled'
+        log.info('config.gateway_proxy_enable.write', {
+          [Attr.COMPONENT]: 'config',
+          config_path: configPath,
+          ...(result.backupPath ? { backup_path: result.backupPath } : {}),
+          status: 'ok',
+        })
+      }
 
       // ---- Step 2: restart the daemon and wait for the gateway to bind ------
 
@@ -210,10 +244,13 @@ export async function enableGatewayProxyMode({
       if (!svc.installed) {
         // The write is the whole job here; the daemon ladder in attach names
         // what to run next, same as adapter enablement (LLP 0174
-        // #bootstrap-floor).
+        // #bootstrap-floor). On a re-mint there was no write and a restart is
+        // the whole job, so nothing at all happened: `ok` with
+        // `daemonInstalled: false` is what tells the caller to name the
+        // install-and-start ladder instead of claiming a repair.
         result.ok = true
         span.setAttribute('daemon_installed', false)
-        span.setAttribute('outcome', 'enabled')
+        span.setAttribute('outcome', result.outcome)
         span.setAttribute('status', 'ok')
         return result
       }
@@ -250,7 +287,7 @@ export async function enableGatewayProxyMode({
       // proxy-mode daemon and a base-URL attach.
       const waitCa = waitForCaFn ?? waitForLocalCa
       const caWait = await waitCa({
-        stateRoot: defaultStateRoot(ctx.env),
+        stateRoot: defaultStateRoot(ctx.env, homeDir),
         timeoutMs: caTimeoutMs ?? CA_WAIT_DEFAULT_MS,
         ...(sleep ? { sleep } : {}),
         ...(now ? { now } : {}),
@@ -265,7 +302,7 @@ export async function enableGatewayProxyMode({
       }
       result.steps.ca = 'ok'
       result.ok = true
-      span.setAttribute('outcome', 'enabled')
+      span.setAttribute('outcome', result.outcome)
       span.setAttribute('status', 'ok')
       log.info('config.gateway_proxy_enable.ready', {
         [Attr.COMPONENT]: 'config',

@@ -837,14 +837,17 @@ export interface GatewayProxyEnableResult {
   ok: boolean
   /**
    * `enabled`: the key was written and every step that applied succeeded.
-   * `already`: the effective config has the key, nothing to do.
+   * `already`: the effective config has the key and the CA is on disk,
+   * nothing to do. `remint`: the effective config has the key but no CA
+   * exists, so no write was needed and only the restart-and-wait steps ran
+   * to make the gateway mint one (LLP 0259).
    * `central_managed`: the gateway block comes from the central layer, so
    * the local CLI declines to write. `no_gateway`: no layer has a gateway
    * entry. `failed`: a step broke (see `failedStep`/`message`); when
    * `steps.write` is `ok` the key nonetheless persisted on disk, with
    * `backupPath` naming the pre-write copy.
    */
-  outcome: 'enabled' | 'already' | 'central_managed' | 'no_gateway' | 'failed'
+  outcome: 'enabled' | 'already' | 'remint' | 'central_managed' | 'no_gateway' | 'failed'
   /** The local config layer the write targeted. */
   configPath: string
   /** Set when the guard copied the existing config aside before replacing it. */

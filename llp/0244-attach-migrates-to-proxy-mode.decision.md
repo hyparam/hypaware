@@ -7,7 +7,10 @@
 **Date:** 2026-08-17
 **Related:** LLP 0031, LLP 0174, LLP 0181, LLP 0232, LLP 0233, LLP 0242,
 LLP 0243
-**Extended-by:** LLP 0262 (accepted 2026-08-17; the migration machinery
+**Extended-by:** LLP 0259 (#attach-offers: the gate reads the CA as well as
+the config, so `proxy_mode: true` with no CA reaches a repair instead of
+returning; #central-managed does not apply to that repair, which writes
+nothing); LLP 0262 (accepted 2026-08-17; the migration machinery
 here is retargeted, not reverted: `hyp attach claude` migrates a proxy-mode
 install to the OTEL mode, unwinding the launchd environment and offering
 `detach --purge` for the CA trust)
