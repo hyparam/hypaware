@@ -73,3 +73,22 @@ export function perSignalOtlpOverrides(env) {
     (key) => Object.hasOwn(env, key) && otlpOverrideIsSet(env[key])
   )
 }
+
+/**
+ * Whether a key from {@link OTLP_PER_SIGNAL_OVERRIDE_KEYS} is a headers key.
+ *
+ * The list holds two different hazards and they must not be reported with one
+ * sentence. An endpoint or protocol key outranks what attach wrote and the
+ * export stops arriving; a headers key routes nothing at all, and its harm is
+ * the opposite direction - a collector credential riding requests aimed at a
+ * loopback listener. Telling a user with an unrelated `OTEL_EXPORTER_OTLP_HEADERS`
+ * that none of their telemetry is captured is the false alarm this list is
+ * otherwise careful to avoid.
+ *
+ * @ref LLP 0271#the-key-list [implements]: the headers keys are on the list from the other side of the same hazard
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function isOtlpHeadersOverride(key) {
+  return key.endsWith('_HEADERS')
+}

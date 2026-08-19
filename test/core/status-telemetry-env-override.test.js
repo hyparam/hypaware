@@ -205,3 +205,83 @@ test('a traces-only key redirects nothing this attach turns on, so it is not rai
     await cleanup(hypHome, home)
   }
 })
+
+// `hyp status` promises that "repair: lines are commands you can run directly"
+// (core_commands.js). `unset A, B` is the one shape where that promise fails
+// silently: bash exits 0 and unsets only `B`, leaving the key that was eating
+// capture still exported while the user believes they ran the fix. Two keys is
+// exactly the shape issue #858 was reported with.
+test('the repair unsets every key in one runnable command, not a comma list', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const home = await makeClientHome()
+  try {
+    writeDaemon(stateRoot)
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: '',
+    }))
+    const found = report.diagnostics.find((d) => d.kind === 'client_telemetry_env_override')
+    assert.ok(found, 'expected a client_telemetry_env_override diagnostic')
+    const unsetLine = found.repair.find((r) => r.startsWith('unset '))
+    assert.ok(unsetLine, `expected an unset repair line, got ${JSON.stringify(found.repair)}`)
+    const command = unsetLine.split('#')[0].trim()
+    assert.equal(
+      command,
+      'unset OTEL_EXPORTER_OTLP_LOGS_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
+    )
+    assert.doesNotMatch(command, /,/)
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+// A headers key routes nothing. It is on the list for the opposite hazard
+// (LLP 0271 #the-key-list): a collector credential riding requests aimed at the
+// loopback listener. Reporting it with the redirect sentence would tell a user
+// whose capture is working perfectly that none of it is captured, on every
+// `hyp status` run - the standing false alarm that teaches people to skip the
+// line that matters.
+test('a headers key is reported as a credential leak, not as lost capture', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const home = await makeClientHome()
+  try {
+    writeDaemon(stateRoot)
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
+    }))
+    const found = report.diagnostics.find((d) => d.kind === 'client_telemetry_env_override')
+    assert.ok(found, 'expected a client_telemetry_env_override diagnostic')
+    assert.match(found.message, /OTEL_EXPORTER_OTLP_HEADERS/)
+    assert.doesNotMatch(found.message, /none of it is captured/)
+    assert.doesNotMatch(found.message, /outrank/)
+    assert.doesNotMatch(found.message, /sekrit/)
+    assert.equal(report.overall, 'healthy')
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+// Both hazards at once are two findings, because they have two different
+// consequences and two different sentences. The routing one must keep its
+// "none of it is captured" claim; the headers one must not acquire it.
+test('a routing key and a headers key are reported apart', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const home = await makeClientHome()
+  try {
+    writeDaemon(stateRoot)
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318',
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
+    }))
+    const found = report.diagnostics.filter((d) => d.kind === 'client_telemetry_env_override')
+    assert.equal(found.length, 2)
+    const routing = found.find((d) => d.message.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
+    const headers = found.find((d) => d.message.includes('OTEL_EXPORTER_OTLP_HEADERS'))
+    assert.ok(routing && headers)
+    assert.match(routing.message, /none of it is captured/)
+    assert.doesNotMatch(routing.message, /OTEL_EXPORTER_OTLP_HEADERS/)
+    assert.doesNotMatch(headers.message, /none of it is captured/)
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})

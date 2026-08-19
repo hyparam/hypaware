@@ -12,7 +12,7 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
-import { perSignalOtlpOverrides } from '../../../../src/core/config/otlp_precedence.js'
+import { isOtlpHeadersOverride, perSignalOtlpOverrides } from '../../../../src/core/config/otlp_precedence.js'
 import { CLAUDE_OTEL_MIN_VERSION, CLAUDE_UPDATE_HINT, isBelowClaudeVersion } from './claude_version.js'
 
 /**
@@ -204,10 +204,21 @@ function perSignalOverrideWarnings(env, processEnv) {
     const fix = inSettings.has(key)
       ? 'Remove it from the settings env block, or point it at the same local listener'
       : 'Unset it in the shell profile or launchd entry that exports it, or point it at the same local listener'
+    // A headers key routes nothing, so the redirect sentence would be false of
+    // it. Its hazard runs the other way (LLP 0271 #the-key-list): it carries a
+    // collector's credential, and this attach is about to make Claude Code
+    // send it to a loopback listener. Saying "your telemetry goes elsewhere"
+    // to someone whose telemetry arrives fine is the false alarm that gets the
+    // true warnings skipped.
+    const harm = isOtlpHeadersOverride(key)
+      ? 'Claude Code will attach it to every OTLP request it sends to the local ' +
+        'listener hypaware just pointed it at, handing that listener whatever ' +
+        'collector credential the value carries. '
+      : 'It outranks the telemetry settings hypaware just wrote, so Claude Code ' +
+        'will export there instead - or nowhere at all, if the value is empty - ' +
+        'including the prompt and response text this attach turns on. '
     out.push(
-      `${where} and outranks the endpoint hypaware just wrote; ` +
-      'Claude Code will export there instead, including the prompt and response ' +
-      'text this attach turns on. ' + fix + ', then re-run hyp client attach claude ' +
+      `${where}. ` + harm + fix + ', then re-run hyp client attach claude ' +
       'and start a fresh claude session'
     )
   }

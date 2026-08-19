@@ -501,3 +501,45 @@ test('a key present in both the shell and settings warns once', async (t) => {
   const hits = warnings.filter((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
   assert.equal(hits.length, 1, `expected one warning, got ${JSON.stringify(hits)}`)
 })
+
+// A headers key carries no endpoint and outranks nothing attach wrote, so the
+// redirect sentence would be false of it. It is on the list for the opposite
+// hazard (LLP 0271 #the-key-list): the credential it carries is about to ride
+// requests aimed at the loopback listener. Telling a user whose telemetry
+// arrives fine that Claude Code "will export there instead" is the false alarm
+// that gets the true warnings skipped.
+// @ref LLP 0271#the-key-list [tests]
+test('a headers key is warned about as a credential leak, not a redirect', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  assert.equal(warnings.length, 1)
+  const warned = warnings[0]
+  assert.match(warned, /OTEL_EXPORTER_OTLP_HEADERS/)
+  assert.match(warned, /credential/)
+  assert.doesNotMatch(warned, /outranks/)
+  assert.doesNotMatch(warned, /export there instead/)
+  assert.doesNotMatch(warned, /sekrit/)
+})
+
+// The routing keys keep the redirect sentence, and keep it apart from the
+// headers one: two hazards, two consequences, two lines.
+test('a routing key and a headers key get their own sentences', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318',
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
+    },
+  })
+  const warnings = (result.changed && result.warnings) || []
+  const routing = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
+  const headers = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_HEADERS'))
+  assert.ok(routing && headers, JSON.stringify(warnings))
+  assert.match(routing, /outranks/)
+  assert.doesNotMatch(headers, /outranks/)
+})
