@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
-import { CORE_COMMAND_ARGS } from '../../src/core/cli/command_args.js'
+import { CORE_COMMAND_ARGS, parseCoreCommandArgv } from '../../src/core/cli/command_args.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 
 /**
@@ -21,6 +21,11 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
  */
 
 const UNKNOWN_FLAG = '--definitely-not-a-real-flag'
+// Only `--` tokens read as flags in the codec, so a single-dash typo used to
+// bind as a positional value instead: `hyp query refresh -f` exited 1 on the
+// dataset '-f', and `hyp report get k p id -o out.html` fetched an artifact
+// named after the file the caller meant to write.
+const UNKNOWN_SHORT_FLAG = '-Z'
 const HYP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-arg-validation-'))
 
 function makeBuf() {
@@ -81,6 +86,33 @@ for (const name of COMMANDS) {
     assert.equal(stdout, '', `hyp ${name} wrote to stdout while refusing: ${stdout}`)
   })
 }
+
+for (const name of Object.keys(CORE_COMMAND_ARGS)) {
+  test(`hyp ${name} rejects an unknown short flag with exit 2`, async () => {
+    const { code, stderr, stdout } = await run([...name.split(' '), UNKNOWN_SHORT_FLAG])
+    assert.equal(code, 2, `hyp ${name} ${UNKNOWN_SHORT_FLAG} exited ${code}\nstdout: ${stdout}\nstderr: ${stderr}`)
+    assert.ok(
+      stderr.includes(UNKNOWN_SHORT_FLAG),
+      `hyp ${name} exited 2 without naming ${UNKNOWN_SHORT_FLAG}\nstderr: ${stderr}`
+    )
+    assert.equal(stdout, '', `hyp ${name} wrote to stdout while refusing: ${stdout}`)
+  })
+}
+
+test('a short flag in a trailing positional slot refuses rather than binding as a value', () => {
+  const ctx = { stdout: makeBuf(), stderr: makeBuf() }
+  const parsed = parseCoreCommandArgv(
+    'report get',
+    ['weekly', '2026-W01', 'abc', '--output', 'out.html'],
+    /** @type {any} */ (ctx)
+  )
+  assert.ok(parsed.ok && parsed.params.output === 'out.html', 'the long form still binds')
+
+  const short = parseCoreCommandArgv('report get', ['weekly', '2026-W01', 'abc', '-o', 'out.html'], /** @type {any} */ (ctx))
+  assert.equal(short.ok, false)
+  assert.equal(/** @type {{ ok: false, code: number }} */ (short).code, 2)
+  assert.match(ctx.stderr.text(), /unknown flag -o/)
+})
 
 /**
  * The other half of the contract: a flag a command's usage line advertises

@@ -453,7 +453,13 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // adds is the refusal for everything neither they nor the readers below
   // name, which used to be dropped in silence.
   const gate = parseCoreCommandArgv('remote login', argv, ctx)
-  if (!gate.ok) return { exitCode: gate.code, reason: gate.code === 0 ? 'ok' : 'usage' }
+  // `code: 0` is the help path, which printed usage and signed nobody in, so
+  // it gets its own reason: 'ok' would tell a LoginOutcome reader the sign-in
+  // succeeded (LLP 0179#outcome), and the wizard branches on that.
+  if (!gate.ok) {
+    if (gate.code === 0) return { exitCode: 0, reason: 'help' }
+    return { exitCode: gate.code, reason: 'usage' }
+  }
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
   // as the target 'acme'.
