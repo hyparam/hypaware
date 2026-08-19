@@ -460,19 +460,22 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     if (gate.code === 0) return { exitCode: 0, reason: 'help' }
     return { exitCode: gate.code, reason: 'usage' }
   }
-  // The target name is the first positional. Skip the VALUE slot of a
-  // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
-  // as the target 'acme'.
+  // Read the target and the mode flags out of what the gate parsed, never out
+  // of argv. The codec also accepts the `--flag=true` form for a boolean, so
+  // `argv.includes('--no-forward')` was false for `--no-forward=true`: a token
+  // the gate had just blessed, dropped in silence, and the machine enrolled
+  // for fleet forwarding against an explicit opt-out. Same class the `report`
+  // group closed for `--json` and `--yes`.
   // A bare `hyp remote login` (no target) signs in to the default target: an
   // explicit query.default_remote, else the shipped built-in central server.
   // @ref LLP 0062#bare-remote [implements]: bare `remote login` resolves the default target, the companion of bare `--remote`
-  const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0] ?? effectiveDefaultRemote(ctx.config)
-  const forceBrowser = argv.includes('--browser')
-  const noBrowser = argv.includes('--no-browser')
+  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const forceBrowser = gate.params.browser === true
+  const noBrowser = gate.params['no-browser'] === true
   // Enrollment opt-outs (LLP 0063): --no-forward signs in for queries only;
   // --no-daemon provisions the sink but leaves the service install by hand.
-  const noForward = argv.includes('--no-forward')
-  const noDaemon = argv.includes('--no-daemon')
+  const noForward = gate.params['no-forward'] === true
+  const noDaemon = gate.params['no-daemon'] === true
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY

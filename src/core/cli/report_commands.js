@@ -196,7 +196,7 @@ export async function runReportPublish(argv, ctx) {
   url.searchParams.set('kind', kind)
   url.searchParams.set('period', period)
   if (title) url.searchParams.set('title', title)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report publish' }, (token) =>
     fetch(url, {
@@ -255,7 +255,7 @@ export async function runReportList(argv, ctx) {
     const value = gate.params[flag]
     if (value !== undefined) url.searchParams.set(flag, String(value))
   }
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report list' }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
@@ -318,7 +318,7 @@ export async function runReportGet(argv, ctx) {
   // segment, never the separators.
   const suffix = fileSegments.flatMap((s) => s.split('/')).map(encodeURIComponent).join('/')
   const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}/${suffix}`)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report get' }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
@@ -392,7 +392,7 @@ export async function runReportDelete(argv, ctx) {
     }
   }
   const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}`)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report delete' }, (token) =>
     fetch(url, { method: 'DELETE', headers: { authorization: `Bearer ${token}` } })
@@ -447,13 +447,19 @@ function resolveReportsTarget(argv, ctx, cmd) {
  * which must name its org explicitly; a scoped credential pins its own org
  * and a mismatching param is a server-side 403, never a merge.
  *
- * @param {string[]} argv
+ * Reads the gate's parsed params, never argv: `valueFlag()` drops a value whose
+ * first character is `-` and takes the FIRST occurrence, while the codec
+ * validates the LAST. So `--org -acme` was blessed and then sent as no org at
+ * all (exit 0, nothing on stderr), and `--org a --org b` validated 'b' and sent
+ * 'a'. Same class as the `--title` and `--limit` drops above.
+ *
+ * @param {Record<string, unknown>} params the gate's parsed params
  * @param {URL} url
  */
-function applyOrgParam(argv, url) {
-  const org = valueFlag(argv, '--org')
+function applyOrgParam(params, url) {
   // `--org=''` is the admin single-org form, so presence matters, not truthiness.
-  if (org.present && org.value !== undefined) url.searchParams.set('org', org.value)
+  const org = params.org
+  if (org !== undefined) url.searchParams.set('org', String(org))
 }
 
 /**

@@ -96,9 +96,9 @@ for (const name of COMMANDS) {
 
 // The short-flag half of D1 covers the same surface as the long-flag half.
 // It first shipped riding on `parseCoreCommandArgv()`, so it reached only the
-// commands in `CORE_COMMAND_ARGS`; the twelve that call `parseCommandArgv()`
-// directly and bind a positional still read `-Z` as that positional, four of
-// them exiting 0 (`hyp policy show -Z` reported on a directory named `-Z`).
+// commands in `CORE_COMMAND_ARGS`; every command that calls `parseCommandArgv()`
+// directly and binds a positional still read `-Z` as that positional, several
+// of them exiting 0 (`hyp policy show -Z` reported on a directory named `-Z`).
 // Iterating the visible set instead of the table is what keeps a new call site
 // from re-opening the gap.
 for (const name of COMMANDS.filter((cmd) => !SHORT_FLAG_LENIENT.has(cmd))) {
@@ -124,6 +124,26 @@ test('the verb family stays lenient, so a greedy SQL positional still carries -1
   assert.equal(code, 0, `hyp query sql refused a dash-leading SQL token\nstdout: ${stdout}\nstderr: ${stderr}`)
   assert.deepEqual(JSON.parse(stdout), [{ n: -1 }])
 })
+
+/**
+ * The hand-written `if (!name)` / `if (!dataset)` guards these commands used to
+ * carry were replaced by the schema's `required`, which tests only
+ * `!== undefined`. An empty argument therefore stopped being refused: `hyp
+ * remote add "" https://x` exited 0 and wrote a remote called '', and `hyp
+ * query schema ""` exited 0 printing `dataset: `. On a command line an empty
+ * token is an unset shell variable, not a value.
+ */
+for (const argv of [
+  ['remote', 'add', '', 'https://example.com'],
+  ['remote', 'remove', ''],
+  ['query', 'schema', ''],
+]) {
+  test(`hyp ${argv.join(' ')} refuses an empty required positional with exit 2`, async () => {
+    const { code, stdout, stderr } = await run(argv)
+    assert.equal(code, 2, `exited ${code}\nstdout: ${stdout}\nstderr: ${stderr}`)
+    assert.match(stderr, /missing required/)
+  })
+}
 
 test('a short flag in a trailing positional slot refuses rather than binding as a value', () => {
   const ctx = { stdout: makeBuf(), stderr: makeBuf() }

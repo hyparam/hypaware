@@ -204,7 +204,13 @@ export function argvToParams(inputSchema, argv, opts = {}) {
 
   applyDefaults(props, params)
 
-  const missing = requiredMissing(inputSchema, params)
+  // On a command line an empty argument is an unset shell variable, not a
+  // value: `hyp remote add "$NAME" "$URL"` with NAME unset must not register a
+  // remote called ''. The hand-written `if (!name)` guards this schema replaced
+  // refused it; `required` alone tests only `!== undefined`, so it did not.
+  // The MCP path below keeps the plain test: there a JSON `""` is explicit.
+  // @ref LLP 0266#one-contract [implements]: an empty required positional is unusable input, so it is a usage error like any other
+  const missing = requiredMissing(inputSchema, params, true)
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
   return { ok: true, params }
@@ -478,11 +484,15 @@ function applyDefaults(props, params) {
 /**
  * @param {VerbInputSchema} inputSchema
  * @param {Record<string, unknown>} params
+ * @param {boolean} [emptyStringIsMissing] argv only: an empty token is an unset
+ *   shell variable, not a value
  * @returns {string | undefined}
  */
-function requiredMissing(inputSchema, params) {
+function requiredMissing(inputSchema, params, emptyStringIsMissing = false) {
   for (const name of inputSchema.required ?? []) {
-    if (params[name] === undefined) return name
+    const value = params[name]
+    if (value === undefined) return name
+    if (emptyStringIsMissing && value === '') return name
   }
   return undefined
 }
