@@ -9,6 +9,7 @@ import {
   computeMessageId,
   createAiGatewayConversationState,
   createAiGatewayMessageProjector,
+  rollbackAiGatewayStateJournal,
   SESSION_INDEX_REBUILD_MS,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
@@ -1421,3 +1422,39 @@ function collectingLogger(sink) {
     error: make('error'),
   }
 }
+
+/**
+ * The live projector's dedup state is per-listener and outlives every
+ * exchange, and row expansion commits to it before the caller's
+ * `appendRows` has had a chance to fail. `journal` + rollback is how a
+ * caller keeps that state describing what landed. Issue #879.
+ */
+test('a journaled projection can be rolled back so the same exchange projects again', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const first = await projector.projectExchange(exchange(), { journal })
+  assert.ok(first.length > 0)
+
+  // Stand-in for the append the caller could not complete.
+  rollbackAiGatewayStateJournal(journal)
+  assert.equal(journal.length, 0)
+
+  const retry = await projector.projectExchange(exchange())
+  assert.deepEqual(retry.map((r) => r.part_id), first.map((r) => r.part_id))
+  assert.deepEqual(retry.map((r) => r.previous_message_id), first.map((r) => r.previous_message_id))
+})
+
+test('without a rollback a re-projected exchange still dedups to nothing', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  const first = await projector.projectExchange(exchange())
+  assert.ok(first.length > 0)
+  const again = await projector.projectExchange(exchange())
+  assert.equal(again.length, 0)
+})

@@ -8,6 +8,7 @@ import {
 import {
   aiGatewayRowsFromProjectedExchange,
   createAiGatewayConversationState,
+  rollbackAiGatewayStateJournal,
 } from './message_projector.js'
 
 /**
@@ -46,23 +47,39 @@ export function createProjectedExchangeWriter(opts) {
      * Expand one projection into rows, drop the parts some other
      * producer already stored, and append what is left.
      *
+     * Expansion marks its messages seen in the process-lifetime state
+     * BEFORE the append runs, so a rejecting write is rolled back here.
+     * This method's caller is a producer that retries (the Claude OTEL
+     * listener answers HTTP 500 and the client re-POSTs the batch);
+     * without the rollback that retry finds every message already seen,
+     * writes nothing, and reports `rowsWritten: 0` as though the batch
+     * had been empty. Issue #879.
+     *
      * @param {AiGatewayProjectedExchange} projection
      * @param {AiGatewayRecordOptions} [recordOpts]
      * @returns {Promise<AiGatewayRecordResult>}
      */
     async record(projection, recordOpts = {}) {
+      /** @type {(() => void)[]} */
+      const journal = []
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
         ...(gatewayId ? { gatewayId } : {}),
         ...(recordOpts.gatewayAttributes ? { gatewayAttributes: recordOpts.gatewayAttributes } : {}),
         state,
+        journal,
       })
       if (rows.length === 0) return { rowsWritten: 0, rowsSkipped: 0 }
-      const fresh = await dedupeStoredPartIds(rows, storage)
-      if (fresh.length > 0) {
-        if (tablePath === undefined) tablePath = aiGatewayTablePath(storage)
-        await storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], fresh)
+      try {
+        const fresh = await dedupeStoredPartIds(rows, storage)
+        if (fresh.length > 0) {
+          if (tablePath === undefined) tablePath = aiGatewayTablePath(storage)
+          await storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], fresh)
+        }
+        return { rowsWritten: fresh.length, rowsSkipped: rows.length - fresh.length }
+      } catch (err) {
+        rollbackAiGatewayStateJournal(journal)
+        throw err
       }
-      return { rowsWritten: fresh.length, rowsSkipped: rows.length - fresh.length }
     },
   }
 }

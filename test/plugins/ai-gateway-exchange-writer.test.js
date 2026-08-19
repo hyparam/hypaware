@@ -117,3 +117,59 @@ test('recording without a storage service fails loudly', async () => {
     /storage service/
   )
 })
+
+/**
+ * Row expansion mutates the writer's process-lifetime dedupe state while
+ * building rows, but the write that makes those rows real happens after.
+ * A producer that retries a failed delivery (the OTEL listener answers
+ * HTTP 500 and Claude Code re-POSTs the batch) must find the state as it
+ * was before the failed attempt, or the retry projects zero rows and the
+ * batch is lost with `rowsWritten: 0` and no error. Issue #879.
+ *
+ * @ref LLP 0252#projection-unchanged [tests]: the dedupe belongs to the
+ *   dataset owner, so it is the dataset owner that has to keep it agreeing
+ *   with what actually landed
+ */
+test('a failed append leaves the dedupe as it was, so the retry writes the batch', async () => {
+  const storage = makeStorage()
+  const realAppendRows = storage.appendRows.bind(storage)
+  let failNext = true
+  storage.appendRows = async (tablePath, columns, rows) => {
+    if (failNext) {
+      failNext = false
+      throw new Error('ENOSPC: no space left on device')
+    }
+    return realAppendRows(tablePath, columns, rows)
+  }
+
+  const api = createAiGatewayApi(createGatewayState(), { storage: /** @type {any} */ (storage) })
+  await assert.rejects(
+    () => api.recordProjectedExchange(/** @type {any} */ (projection('s1'))),
+    /ENOSPC/
+  )
+  assert.equal(storage.appended.length, 0)
+
+  const retry = await api.recordProjectedExchange(/** @type {any} */ (projection('s1')))
+  assert.deepEqual(retry, { rowsWritten: 2, rowsSkipped: 0 })
+  assert.deepEqual(storage.appended.map((r) => r.part_id), ['uuid-user#0', 'uuid-asst#0'])
+})
+
+test('a rolled-back exchange still dedupes normally once it has landed', async () => {
+  const storage = makeStorage()
+  const realAppendRows = storage.appendRows.bind(storage)
+  let failNext = true
+  storage.appendRows = async (tablePath, columns, rows) => {
+    if (failNext) {
+      failNext = false
+      throw new Error('ENOSPC: no space left on device')
+    }
+    return realAppendRows(tablePath, columns, rows)
+  }
+
+  const api = createAiGatewayApi(createGatewayState(), { storage: /** @type {any} */ (storage) })
+  await assert.rejects(() => api.recordProjectedExchange(/** @type {any} */ (projection('s1'))), /ENOSPC/)
+  await api.recordProjectedExchange(/** @type {any} */ (projection('s1')))
+  const third = await api.recordProjectedExchange(/** @type {any} */ (projection('s1')))
+  assert.deepEqual(third, { rowsWritten: 0, rowsSkipped: 0 })
+  assert.equal(storage.appended.length, 2)
+})
