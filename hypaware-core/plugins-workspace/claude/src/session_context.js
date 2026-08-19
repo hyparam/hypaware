@@ -7,7 +7,33 @@ import { atomicWriteFile, isPlainObject, stringValue } from 'hypaware/core/util'
 
 export const SESSION_CONTEXT_MAX_BYTES = 1024 * 1024
 export const SESSION_CONTEXT_MAX_RECORDS = 4096
-export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
+
+/**
+ * The reader's window over the file, derived from the writer's own bound
+ * rather than chosen next to it.
+ *
+ * Compaction rewrites the file down to `SESSION_CONTEXT_MAX_BYTES`, so every
+ * record inside that window is one the writer deliberately kept. A narrower
+ * read window discards some of them, and it discards them by position: the
+ * records pushed out are whichever sessions have been quiet, however live they
+ * are. Two concurrent sessions are enough - a neighbour firing the hook on
+ * every Bash call evicts a session that has been reading files all turn.
+ *
+ * On the OTEL ingest path that is not a nullable column. `resolveSessionUsagePolicy`
+ * reads a missing record as `undetermined`, and the listener answers
+ * `undetermined` by withholding the batch and deleting the session's spooled
+ * bodies unread, so a window narrower than the writer's cap is silent content
+ * loss for a session nobody opted out. The doubling on top covers the moment
+ * between the append that crosses the cap and the compaction that follows it,
+ * and one compaction that failed (compaction is best-effort: the hook must
+ * never interrupt Claude Code). Past that the tail read stays as the backstop
+ * against a file that stopped being bounded at all.
+ *
+ * @ref LLP 0254#policy-inline [constrained-by]: the hook's cwd is what the
+ *   ingest verdict is resolved from, so the reader may not lose a record the
+ *   writer is still holding
+ */
+export const SESSION_CONTEXT_READ_TAIL_BYTES = SESSION_CONTEXT_MAX_BYTES * 2
 
 /**
  * Session-context channel. Phase 2 swapped the HTTP endpoint
