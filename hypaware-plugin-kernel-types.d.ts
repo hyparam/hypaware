@@ -436,10 +436,26 @@ export interface PluginCommandManifest {
   audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** Compatibility spellings used for inactive-plugin ownership checks. */
   aliases?: string[]
-  /** Callable contract omitted from manifest-derived help. */
-  hidden?: boolean
   summary?: string
   usage?: string
+  /**
+   * True when the command is an internal mechanism rather than CLI
+   * surface: it keeps dispatching, and it keeps its manifest entry, but
+   * it is absent from `hyp --help` and from its group's help. For a
+   * command whose caller is a program (a credential-helper wrapper, an
+   * in-process orchestration step), not a person (LLP 0268).
+   *
+   * Declaring it hidden rather than deleting the entry is deliberate,
+   * the same display-filter-not-catalog-deletion rule LLP 0202 set for
+   * hidden picker rows: the declaration is what lets the dispatch-miss
+   * path name the owning plugin ("unavailable", not "unknown",
+   * LLP 0153) and what the manifest/registration parity tests compare.
+   *
+   * The runtime registration must set `CommandRegistration.hidden` to
+   * match; the manifest field governs pre-boot help, the registration
+   * field governs post-boot group help.
+   */
+  hidden?: boolean
 }
 
 export interface PluginConfigSectionManifest {
@@ -962,6 +978,13 @@ export interface CommandRegistration {
   help?: string
   /** Compatibility spellings. Indexed for dispatch and omitted from help. */
   aliases?: string[]
+  /**
+   * True when the command is an internal mechanism, not CLI surface:
+   * it still dispatches, but core drops it from top-level help and
+   * from its group table. A plugin command that sets this must also
+   * set `hidden` on its manifest entry, which is what governs the
+   * pre-boot help rendered before any plugin is loaded (LLP 0268).
+   */
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }

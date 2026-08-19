@@ -194,6 +194,16 @@ ctx.commands.register({
 })
 ```
 
+Every declared command is public CLI surface: it appears in `hyp --help` and
+in its group's subcommand table, and a visible diagnostic should carry a
+`help` string explaining what its output means. A command whose caller is a
+program rather than a person (a wrapper script, an orchestration step another
+command drives) is an *internal mechanism*: keep the manifest entry, so a
+dispatch miss can still name the owning plugin, and set `hidden: true` on
+**both** the manifest entry and the `register` call. The manifest flag governs
+the help rendered before boot; the registration flag governs group help after
+it. See [LLP 0268](../llp/0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).
+
 ### Skills
 
 Materialize a skill into client skill directories. Declare

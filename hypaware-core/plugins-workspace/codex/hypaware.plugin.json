@@ -19,6 +19,9 @@
     }
   },
   "contributes": {
+    "commands": [
+      { "name": "codex-hook classify-cwd", "summary": "Internal Codex hook: nag to classify an unclassified folder on an enrolled machine", "hidden": true }
+    ],
     "client": {
       "name": "codex",
       "skill_dir": ".codex/skills",
