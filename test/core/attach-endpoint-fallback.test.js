@@ -149,7 +149,7 @@ test('attach without endpoint: installed-but-unreachable daemon names hyp daemon
     // reachable: this case names the lifecycle command only, and must not
     // gain the daemon-install mention. The command it names has to be one
     // the dispatcher accepts, so it is `hyp daemon start`, never `hyp start`.
-    // @ref LLP 0174#bootstrap-floor [tests]: the installed-but-unreachable give-up message stays the restart-only one
+    // @ref LLP 0174#bootstrap-floor [tests]: only the not-installed case gains the daemon-install mention, so this one still names the start command alone
     installFakeDaemonService(home)
     /** @type {string[]} */
     const attachCalls = []

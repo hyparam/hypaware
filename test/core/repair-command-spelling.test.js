@@ -30,15 +30,25 @@ import { installFakeDaemonService } from '../helpers/daemon_service_fixture.js'
 // the registry rather than loosening the assertion if that day comes.
 
 /**
- * Quoted or parenthesized `hyp <argv...>` mentions inside a message.
+ * Every `hyp <argv...>` mention inside a message, whether or not the message
+ * wrapped it in backticks, quotes, or parentheses.
  *
- * The captured body is everything up to the closing delimiter rather than a
+ * Requiring an opening delimiter made the scan agree with a message's
+ * punctuation instead of its content, and that hole is wide enough to let the
+ * very regression this file exists to catch back in: drop the quotes around
+ * the second mention in the no-daemon-installed message and `hyp start` is
+ * skipped silently, while the surviving first mention keeps the
+ * `names.length > 0` floor below satisfied, so every case stays green.
+ *
+ * The captured body runs to the first delimiter or end of line rather than a
  * run of lowercase words, because a mention that carries a flag or a
  * placeholder (`hyp start --foreground`) is exactly the kind that must still
- * be resolved: a pattern that matched nothing there would skip it silently and
- * let the unrunnable-repair regression back in while the suite stayed green.
+ * be resolved. An undelimited mention therefore drags the prose after it into
+ * the argv, which is what makes it fail to resolve, and that is the right
+ * answer: a repair a reader cannot tell apart from the sentence around it is
+ * not a spelling they can copy into a shell either.
  */
-const HYP_MENTION = /[`'(]+hyp ([^`'")\n]+)[`')]+/g
+const HYP_MENTION = /(?<![\w-])hyp ([^`'")\n]+)/g
 
 /**
  * @param {string} text
