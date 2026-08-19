@@ -23,6 +23,7 @@ hyp query overview --json                              # orientation map: which 
 hyp cache status
 hyp query schema <table> --format json
 hyp query sql "<sql>" --format json
+hyp query grep "<text>" --format json                   # full-text search over recorded messages (see below)
 hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp cache refresh <dataset>
 ```
@@ -33,11 +34,21 @@ hyp cache refresh <dataset>
 - **Run the plain colored render only when the user asked to see the overview itself.** It is a terminal block for a person, not an agent input.
 - **`--days <n>` widens the window** and overrides the budget, whatever it costs. A budget refusal names the same lever in reverse (a shorter window).
 
-The core query subcommands are `overview`, `schema`, and `sql`; active plugins may add `graph` or `vector`. Cache operations live under `hyp cache`. There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands; answer questions with `hyp query sql`, and discover datasets from `hyp cache status`.
+The core query subcommands are `overview`, `schema`, `sql`, and `grep`; active plugins may add `graph` or `vector`. Cache operations live under `hyp cache`. There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands; answer questions with `hyp query sql`, and discover datasets from `hyp cache status`.
+
+## Full-text search: `hyp query grep`
+
+`hyp query grep "<pattern>"` searches recorded messages without SQL: case-insensitive substring by default, `--regex` for a pattern, scoped with `--session-id <id>` (and `--chain-id <id>`), `--from`/`--to` (YYYY-MM-DD), `--limit <n>` (default 50). Hits arrive newest first, one row per matched column, each carrying `session_id`/`message_id`/`part_id` locators that pivot straight into `hyp query sql` or a narrower grep. `--remote <target>` runs the same search against a server. Prefer it over `LIKE '%...%'` SQL for "which sessions mention X": same answer, and its index tier skips whole files a SQL scan would read.
+
+- **Coverage: only ten columns are searched** (`content_text`, `tool_name`, `tool_args`, `session_id`, `conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`). **Zero hits is not evidence the text is absent** from system prompts (`system_text`), tool definitions (`tools`), `attributes`, or `raw_frame`; read those with `hyp query sql`.
+- **Truncation is a notice, not an error.** `grep: more matches exist beyond the limit` on stderr means narrow with `--from`/`--to` or `--session-id`, or raise `--limit`; only the newest matches were shown.
+- **Speed tracks index coverage, correctness never does.** Compacted files are served through sidecar indexes; newer files are brute-scanned. `hyp query status` prints `grep index: N of M data files indexed`, so a slow search over deep unindexed history is expected, not broken.
+- **A literal shorter than 5 characters defeats the index**: the n-gram index cannot prune for it, so every candidate file is read in full. The answer stays exact; prefer a longer literal when one exists.
+- Local-only rows are withheld with a stderr count, exactly as in SQL; `--include-local-only` is the same informed-consent override.
 
 ## Remote queries (other HypAware hosts)
 
-By default `hyp query` is local-only. Add `--remote <target>` to run the same SQL against a remote HypAware host over its MCP endpoint (`/v1/mcp`): `hyp` acts as an MCP client, calls the remote `query_sql`, and renders with the same formatter. Only read-class tools are reachable remotely (`query_sql`, `graph_neighbors`), and the credential is **query-scoped** (read/compute only: it cannot author configs or mint tokens), distinct from the server's operator/admin token, which never leaves the server.
+By default `hyp query` is local-only. Add `--remote <target>` to run the same SQL against a remote HypAware host over its MCP endpoint (`/v1/mcp`): `hyp` acts as an MCP client, calls the remote `query_sql`, and renders with the same formatter. Only read-class tools are reachable remotely (`query_sql`, `grep_search`, `graph_neighbors`), and the credential is **query-scoped** (read/compute only: it cannot author configs or mint tokens), distinct from the server's operator/admin token, which never leaves the server.
 
 - **Discover targets with `hyp remote list`** (`--json` for machine output); never invent a target name. It reflects local config and credential status only, and is **not a liveness check**. The real test is running a `--remote` query: rows back means reachable and authorized, while a 401 or timeout tells you which half failed. A target may be reachable only over a private network (a tailnet / `100.x` address), so a timeout often means you are off that network, not that the server is down.
 - **Setup.** `hyp remote add <name> <url>` takes the server **base** URL (e.g. `https://host:8740`) and derives `<base>/v1/mcp`; a URL already ending in `/v1/mcp` is honored verbatim. Then `hyp remote login <name>` (browser sign-in by default, `--token-file <path>` or piped stdin for a static token, never a CLI argument). A per-target env var `HYP_REMOTE_TOKEN_<NAME>` (name uppercased, non-alphanumeric runs to `_`, so `prod` is `HYP_REMOTE_TOKEN_PROD`) is checked first and wins over the stored token.
@@ -47,7 +58,7 @@ By default `hyp query` is local-only. Add `--remote <target>` to run the same SQ
 
 ### Two ways a host's MCP may be attached
 
-A HypAware host exposes its read-class verbs (`query_sql`, `graph_neighbors`) as **MCP tools**, reachable by two independent routes: via `hyp --remote` (the CLI path above, discovered with `hyp remote list`), or via a **direct client connection**, where the host's `/v1/mcp` is registered in this client's MCP config out of band and surfaces them as the `mcp__hypaware__*` tools already in your toolset, with no `hyp` in the data path. The **same server may be attached both ways at once**, pointing at the identical URL; expect that overlap rather than treating it as two servers.
+A HypAware host exposes its read-class verbs (`query_sql`, `grep_search`, `graph_neighbors`) as **MCP tools**, reachable by two independent routes: via `hyp --remote` (the CLI path above, discovered with `hyp remote list`), or via a **direct client connection**, where the host's `/v1/mcp` is registered in this client's MCP config out of band and surfaces them as the `mcp__hypaware__*` tools already in your toolset, with no `hyp` in the data path. The **same server may be attached both ways at once**, pointing at the identical URL; expect that overlap rather than treating it as two servers.
 
 Both routes run the identical `query_sql` operation, so the data is the same, but the surfaces are not byte-identical. The MCP tool returns the **full structured result** (every matching row, as JSON) with **no ~32KB display budget**, so a large result can overflow the AI client's own output limit and spill to a file; `hyp --remote` applies the budget and prints `notice: showing N of M rows …`, which you lift with `--max-bytes 0` or `--output <file>`.
 

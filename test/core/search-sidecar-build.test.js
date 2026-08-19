@@ -9,7 +9,7 @@ import path from 'node:path'
 
 import { urlToPath } from '../../src/core/cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../../src/core/cache/iceberg/store.js'
-import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { cacheStatus, maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { executeGrepSearch } from '../../src/core/search/grep_service.js'
@@ -155,6 +155,13 @@ test('maintenance compaction finalizes files and builds their sidecars', async (
   const res = await executeGrepSearch({ storage, query: 'needle', limit: 10, includeLocalOnly: true })
   assert.equal(res.hits.length, 2)
   assert.equal(res.scannedFiles, 0)
+
+  // Coverage is observable from cacheStatus: indexed equals the data-file
+  // count on the grep dataset, and the field stays absent elsewhere.
+  const status = await cacheStatus({ cacheRoot })
+  const partition = status.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(partition)
+  assert.equal(partition.indexedFileCount, partition.dataFileCount)
 })
 
 test('sidecars do not re-trigger compaction: the data-file counters exclude them', async () => {

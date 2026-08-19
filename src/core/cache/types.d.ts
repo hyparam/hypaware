@@ -360,6 +360,8 @@ export interface CacheStatusPartition {
   deleteFileCount?: number
   lastRetentionCutoffDate?: string
   layout?: 'epoch' | 'source-table'
+  /** Data files with a grep sidecar beside them; present only on the grep dataset's partitions. */
+  indexedFileCount?: number
 }
 
 export interface CacheStatusReport {

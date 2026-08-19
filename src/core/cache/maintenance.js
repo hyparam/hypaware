@@ -619,6 +619,13 @@ export async function cacheStatus({ cacheRoot }) {
     } else {
       status.layout = cursor.epoch > 0 || cursor.rowCount > 0 ? 'epoch' : undefined
     }
+    // Grep-index coverage, for the one dataset that carries sidecars: how
+    // many of the partition's data files a search serves through an index
+    // rather than a brute scan. Reported so "grep is slow on deep history"
+    // is diagnosable from `hyp query status` instead of from tracing.
+    if (part.dataset === GREP_DATASET) {
+      status.indexedFileCount = countIndexedDataFiles(liveDir)
+    }
     statusPartitions.push(status)
   }
 
@@ -1517,6 +1524,30 @@ function countDataFiles(tableDir) {
     return fs.readdirSync(dataDir, { withFileTypes: true })
       .filter((e) => e.isFile() && e.name.endsWith('.parquet') && !e.name.endsWith('.index.parquet'))
       .length
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * How many of the table's data files have a grep sidecar beside them. A
+ * pure directory scan (no metadata load), matching the cost profile of
+ * the other status counters; the pairing rule is the sidecar naming
+ * contract (`<file>.index.parquet`).
+ *
+ * @param {string} tableDir
+ * @returns {number}
+ */
+function countIndexedDataFiles(tableDir) {
+  const dataDir = path.join(tableDir, 'data')
+  try {
+    const names = new Set(fs.readdirSync(dataDir))
+    let count = 0
+    for (const name of names) {
+      if (!name.endsWith('.parquet') || name.endsWith('.index.parquet')) continue
+      if (names.has(name.replace(/\.parquet$/, '.index.parquet'))) count += 1
+    }
+    return count
   } catch {
     return 0
   }
