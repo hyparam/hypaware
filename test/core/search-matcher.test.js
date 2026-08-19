@@ -146,14 +146,63 @@ test('a JSON cell is searchable, not silently skipped', () => {
 
 test('cellText renders only the shapes a searchable cell can hold', () => {
   assert.equal(cellText('plain'), 'plain')
-  assert.equal(cellText({ a: 1 }), '{"a":1}')
-  assert.equal(cellText([1, 'two']), '[1,"two"]')
+  // A decoded JSON cell renders as its keys and primitive leaves, one per
+  // line, not as serialized text: the serialization carries the escapes
+  // rather than the characters the user searched for.
+  assert.equal(cellText({ a: 1 }), 'a\n1')
+  assert.equal(cellText([1, 'two']), '1\ntwo')
+  assert.equal(cellText({ outer: { inner: 'leaf' } }), 'outer\ninner\nleaf')
   assert.equal(cellText(null), '')
   assert.equal(cellText(undefined), '')
   assert.equal(cellText(42), '')
-  const cyclic = /** @type {Record<string, unknown>} */ ({})
+  // A cycle costs the branch that revisits, not the whole cell.
+  const cyclic = /** @type {Record<string, unknown>} */ ({ file_path: 'a.js' })
   cyclic.self = cyclic
-  assert.equal(cellText(cyclic), '')
+  assert.equal(cellText(cyclic), 'file_path\na.js\nself')
+})
+
+test('a JSON cell is searched as its decoded text, escapes and all', () => {
+  // JSON.stringify would store a Windows path as C:\\Users\\me and a
+  // shell command's newline as the two characters \\n, so a literal query
+  // for either would miss the very cell it names.
+  const args = { path: 'C:\\Users\\me', command: 'cd /repo\nnpm test', quoted: 'say "hi"' }
+  assert.equal(compileMatcher('C:\\Users\\me', false).rowTest({ tool_args: args }), true)
+  assert.equal(compileMatcher('cd /repo\nnpm test', false).rowTest({ tool_args: args }), true)
+  assert.equal(compileMatcher('say "hi"', false).rowTest({ tool_args: args }), true)
+  // The keys are searchable too, so a query naming a tool argument finds it.
+  assert.equal(compileMatcher('command', false).rowTest({ tool_args: args }), true)
+})
+
+test('test, locate and makeSnippet agree with rowTest on a JSON cell', () => {
+  // The consumer loop is: rowTest the row, then test each allowlisted cell
+  // and snippet the ones that matched. A per-cell predicate that only takes
+  // strings makes that loop report a hit with no matched columns, or throw
+  // on value.slice, for exactly the column the row matched through.
+  const matcher = compileMatcher('file_path', false)
+  const cell = { file_path: 'src/core/search/matcher.js' }
+  assert.equal(matcher.rowTest({ tool_args: cell }), true)
+  assert.equal(matcher.test(cell), true)
+  assert.deepEqual(matcher.locate(cell), { index: 0, length: 9 })
+  assert.equal(makeSnippet(cell, matcher), 'file_path\nsrc/core/search/matcher.js')
+  // A cell shape that carries no text stays a clean miss rather than a throw.
+  assert.equal(matcher.test(null), false)
+  assert.equal(makeSnippet(undefined, matcher), '')
+})
+
+test('a snippet stays bounded when the match itself is unbounded', () => {
+  // .*needle.* is what an rg-trained user types, and it matches the whole
+  // cell. The window is the promise, so the matched run is clamped before
+  // it opens: a megabyte body must not be serialized into the hit.
+  const value = 'x'.repeat(5000) + 'needle' + 'y'.repeat(5000)
+  const greedy = makeSnippet(value, compileMatcher('.*needle.*', true))
+  // The window opens at the match, which a greedy pattern starts at the
+  // head of the cell, and the clamp closes it a bounded distance later.
+  assert.ok(greedy.length <= SNIPPET_BEFORE + SNIPPET_AFTER * 2 + 3, `snippet was ${greedy.length} chars`)
+  assert.equal(greedy.endsWith('...'), true)
+  // A pattern that matches at the needle still windows around the needle.
+  const narrow = makeSnippet(value, compileMatcher('n[e]+dle', true))
+  assert.ok(narrow.length <= SNIPPET_BEFORE + SNIPPET_AFTER * 2 + 6)
+  assert.equal(narrow.includes('needle'), true)
 })
 
 test('a snippet edge never cuts a surrogate pair in half', () => {

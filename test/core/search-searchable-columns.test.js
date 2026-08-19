@@ -59,3 +59,15 @@ test('the scan projection is the allowlist plus the readers own columns', () => 
     assert.ok(SCAN_COLUMNS.includes(column), `${column} must be decodable by a brute scan`)
   }
 })
+
+test('the allowlist cannot be mutated out from under the scan projection', () => {
+  // SCAN_COLUMNS is a load-time snapshot, so a mutated allowlist would make
+  // a column searchable while the brute scan never decodes it: a hit on one
+  // tier and a silent zero on the other.
+  assert.throws(() => SEARCHABLE_COLUMNS.add('system_text'), /constant/)
+  assert.throws(() => SEARCHABLE_COLUMNS.delete('content_text'), /constant/)
+  assert.throws(() => SEARCHABLE_COLUMNS.clear(), /constant/)
+  assert.equal(SEARCHABLE_COLUMNS.has('system_text'), false)
+  assert.equal(SEARCHABLE_COLUMNS.has('content_text'), true)
+  assert.equal(SCAN_COLUMNS.includes('system_text'), false)
+})

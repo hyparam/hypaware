@@ -25,7 +25,7 @@
  * @ref LLP 0264#shared [implements]: the allowlist is hoisted here and imported by the server, because two drifting copies would make the same query lie on one side
  * @ref LLP 0265#out-of-scope [constrained-by]: no config knob for indexed columns; the allowlist is the shared constant by decision
  */
-export const SEARCHABLE_COLUMNS = new Set([
+export const SEARCHABLE_COLUMNS = constantSet([
   'content_text',
   'tool_name',
   'tool_args',
@@ -37,6 +37,30 @@ export const SEARCHABLE_COLUMNS = new Set([
   'git_branch',
   'git_remote',
 ])
+
+/**
+ * A Set that cannot be added to, deleted from, or cleared. `SCAN_COLUMNS`
+ * below is a load-time snapshot of the allowlist, so a caller mutating the
+ * exported Set would make a column searchable process-wide while the brute
+ * scan never decodes it: searchable on the row predicate, silently zero on
+ * the scan that never reads the column, which is the exact drift the
+ * sharing removes. `Object.freeze` does not reach `Set.prototype.add`, so
+ * the mutators are replaced rather than relied on.
+ *
+ * @param {string[]} columns
+ * @returns {Set<string>}
+ */
+function constantSet(columns) {
+  const set = new Set(columns)
+  for (const method of ['add', 'delete', 'clear']) {
+    Object.defineProperty(set, method, {
+      value: () => {
+        throw new Error('SEARCHABLE_COLUMNS is a constant, not configuration')
+      },
+    })
+  }
+  return Object.freeze(set)
+}
 
 /**
  * The columns a brute scan has to decode: the searchable set plus every
