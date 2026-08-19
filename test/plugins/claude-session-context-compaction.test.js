@@ -145,6 +145,52 @@ test('compaction clamps a caller cap wider than the window the reader reads', as
   }
 })
 
+test('the writer keeps no record the reader cannot see', async () => {
+  const env = await stageEnv()
+  try {
+    const staged = filler(RETAINED + Math.floor(RETAINED / 8))
+    await fs.writeFile(env.stateFile, staged, 'utf8')
+    const before = await fs.stat(env.stateFile)
+    assert.ok(
+      before.size > RETAINED,
+      'precondition: the file starts out past the readable window'
+    )
+
+    await appendSessionContext(env.stateFile, record('sess-live', '/repo/live', 9999))
+
+    const onDisk = (await fs.readFile(env.stateFile, 'utf8')).split('\n').filter(Boolean).length
+    const records = await readSessionContext(env.stateFile)
+    assert.equal(
+      records.length,
+      onDisk,
+      `every retained line must be readable: ${onDisk} on disk, ${records.length} readable`
+    )
+    assert.equal(
+      pickLatestMatching(records, { sessionId: 'sess-live' })?.cwd,
+      '/repo/live',
+      'the record just appended must survive compaction'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a narrower maxBytes is still honored', async () => {
+  const env = await stageEnv()
+  try {
+    for (let i = 0; i < 8; i++) {
+      await appendSessionContext(env.stateFile, record(`sess-${i}`, `/repo/${i}`, i), {
+        maxBytes: 240,
+        maxRecords: 3,
+      })
+    }
+    const stat = await fs.stat(env.stateFile)
+    assert.ok(stat.size <= 240, 'the clamp is a ceiling, so a smaller cap still applies')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('a quiet session stays readable once the file reaches the module cap', async () => {
   const env = await stageEnv()
   try {
@@ -186,12 +232,27 @@ function record(sessionId, cwd, tick) {
   }
 }
 
+/** @param {number} targetBytes */
+function filler(targetBytes) {
+  const lines = []
+  let bytes = 0
+  for (let tick = 0; bytes < targetBytes; tick++) {
+    const line = JSON.stringify(
+      record('sess-noisy', '/repo/busy-with-a-long-enough-path', tick)
+    ) + '\n'
+    lines.push(line)
+    bytes += Buffer.byteLength(line, 'utf8')
+  }
+  return lines.join('')
+}
+
 /**
  * @returns {Promise<{ stateFile: string, cleanup: () => Promise<void> }>}
  */
 async function stageEnv() {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-session-compaction-'))
   const stateFile = path.join(homeDir, '.hyp', 'state', '@hypaware-claude', 'session-context.jsonl')
+  await fs.mkdir(path.dirname(stateFile), { recursive: true })
   return {
     stateFile,
     cleanup: async () => {
