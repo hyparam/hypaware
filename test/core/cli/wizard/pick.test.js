@@ -1349,3 +1349,77 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
     ['anthropic', 'openai']
   )
 })
+
+// --- an answer-less config is not a reconfigure (LLP 0277) ---
+// @ref LLP 0277#answer-less [tests]: a config that records no pick answer
+// seeds like no config at all; one that does keeps the LLP 0183 behavior
+
+test('runWizardPick: an answer-less config (hyp remote add before init) still seeds from detection', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // Exactly what `hyp remote add` writes on a machine that never onboarded:
+  // a config file with no `plugins` key. Before the fix this classified the
+  // run as a reconfigure, and the empty read-back beat the detection seed,
+  // so both detected clients arrived unchecked and no defaults gate showed.
+  await seedLocalConfig(tmp, {
+    version: 2,
+    query: { remotes: { prod: { url: 'https://example.com' } } },
+  })
+  const { prompt, state: menuState } = capturingPrompt(['claude'])
+  const { confirm, state: gateState } = capturingConfirm('accept')
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt, confirm,
+    detect: async () => new Set(['claude', 'codex']),
+    confirmOverwrite: async () => true,
+  }))
+  // The defaults gate rendered from detection and named both rows.
+  assert.ok(gateState.question, 'the defaults gate must show; detection is the seed')
+  assert.ok(gateState.question.items.some((/** @type {string} */ i) => /Claude Code/.test(i)))
+  assert.ok(gateState.question.items.some((/** @type {string} */ i) => /Codex/.test(i)))
+  // Accepting it picked the detected rows without opening the menu.
+  assert.equal(menuState.question, null)
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
+})
+
+test('runWizardPick: an answer-less config carries its keys forward and takes the first-run export default', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    query: { remotes: { prod: { url: 'https://example.com' } } },
+  })
+  const { prompt } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'accept',
+    detect: async () => new Set(['claude']),
+    confirmOverwrite: async () => true,
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  // Answer-less is a seeding classification, not a license to discard the
+  // file: the remote the user added survives the write.
+  assert.equal(written.query.remotes.prod.url, 'https://example.com')
+  // The export question was never answered either, so the first-run
+  // local-parquet default applies instead of a read-back "keep-local".
+  assert.equal(result.exportPicked, 'local-parquet')
+  assert.ok(written.sinks.local, 'the first-run parquet export sink is composed')
+})
+
+test('runWizardPick: plugins: [] is an answer - detection does not re-seed an emptied install', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  // An empty plugins array cannot be told apart from a deliberately emptied
+  // install, so it keeps the LLP 0183 reconfigure behavior: detection labels
+  // but does not check.
+  await seedLocalConfig(tmp, { version: 2, plugins: [] })
+  const { prompt, state } = capturingPrompt(['claude'])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
+    detect: async () => new Set(['claude']),
+    confirmOverwrite: async () => true,
+  }))
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.notEqual(claudeRow.checked, true)
+  assert.match(claudeRow.label, /detected/)
+})
