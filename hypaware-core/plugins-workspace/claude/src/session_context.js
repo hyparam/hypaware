@@ -76,9 +76,18 @@ export function defaultSessionContextFile(stateDir) {
  * the reader picks newest-by-line (interleaving across lines just
  * means another writer will land its record on the next line).
  *
+ * `opts.maxBytes` is the writer's compaction cap and must not exceed
+ * `SESSION_CONTEXT_MAX_BYTES`. The reader's window is a module constant
+ * derived from that default (`SESSION_CONTEXT_READ_TAIL_BYTES`), and
+ * `createSessionContextReader` has no seam to thread a per-call cap through,
+ * so a caller that compacts to a wider window keeps records the reader cannot
+ * see and reopens the silent eviction that window closes. Raising the cap
+ * means raising the constant, not passing a larger option here.
+ *
  * @param {string} filePath
  * @param {SessionContextRecord} record
- * @param {{ maxBytes?: number, maxRecords?: number }} [opts]
+ * @param {{ maxBytes?: number, maxRecords?: number }} [opts] `maxBytes` must be
+ *   `<= SESSION_CONTEXT_MAX_BYTES`; see above.
  * @returns {Promise<void>}
  */
 export async function appendSessionContext(filePath, record, opts = {}) {
