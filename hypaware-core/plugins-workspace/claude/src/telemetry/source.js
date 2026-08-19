@@ -636,12 +636,25 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         state.bodiesMissing += spooled.missing
         state.bodiesUnparseable += spooled.unparseable
         span.setAttribute('body_count', spooled.bodies.size)
+        // An unparseable body is deleted inside the read above, not by the
+        // post-write delete below, so its bytes have to come off the gauge
+        // here. Without this the only thing that ever corrected `spool_bytes`
+        // for those files was the next sweep, and `hyp status` read the gauge
+        // in between and reported bytes for content already off the disk.
+        // @ref LLP 0257#status-and-health [implements]: S16 - the published
+        //   number is the spool's CURRENT byte size, so every arm that removes
+        //   a file has to take its bytes off it
+        if (spooled.unparseableBytes > 0) {
+          state.spoolBytes = Math.max(0, state.spoolBytes - spooled.unparseableBytes)
+        }
         if (spooled.unparseable > 0) {
           span.setAttribute('bodies_unparseable', spooled.unparseable)
+          span.setAttribute('bodies_unparseable_bytes', spooled.unparseableBytes)
           ctx.log.warn('claude.telemetry.body_unparseable', {
             [Attr.PLUGIN]: PLUGIN_NAME,
             error_kind: 'body_unparseable',
             body_count: spooled.unparseable,
+            body_bytes: spooled.unparseableBytes,
           })
         }
         for (const ref of spooled.refused) {
