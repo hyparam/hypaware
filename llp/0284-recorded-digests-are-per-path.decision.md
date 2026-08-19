@@ -131,3 +131,8 @@ record, rather than against the one record the candidate loop is carrying.
   to candidacy, not to evidence: `keepAll` would have to be asked of every
   client's contributions rather than of the scoped plan, which is the same
   question as the open question above and is not settled here.
+
+  **Superseded-by: LLP 0288** (#candidacy-is-asked-of-every-client): settled
+  there. `keepAll` is re-planned with `clients: 'all'`, so candidacy asks
+  every client's contributions and a scoped run no longer reads another
+  client's live contribution as retired.

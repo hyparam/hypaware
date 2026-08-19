@@ -1291,6 +1291,47 @@ test('a dest another client rewrote is still ours to remove, and never blamed on
   assert.match(third.stdout, /removed retired skill 'hypaware-privacy'/)
 })
 
+test('a scoped run leaves a shared dest another client still contributes', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const sharedSource = await writeSkillSource(home, 'hypaware-privacy', 'privacy body\n')
+
+  const kept = { name: 'hypaware-query', sourceDir: keptSource, clients: ['claude'] }
+  const both = { name: 'hypaware-privacy', sourceDir: sharedSource, clients: ['claude', 'claude-desktop'] }
+  await installWith({ env, skills: [kept, both] })
+
+  const skillsDir = path.join(home, '.claude', 'skills')
+  const dest = path.join(skillsDir, 'hypaware-privacy')
+  assert.ok(await exists(path.join(dest, 'SKILL.md')))
+
+  // The skill narrows to `claude-desktop` alone, and a `claude-desktop`-scoped
+  // run rewrites the bytes there. Only that client's record learns the new
+  // digest, so `claude`'s record is now both stale and no longer contributed.
+  const desktopOnly = { name: 'hypaware-privacy', sourceDir: sharedSource, clients: ['claude-desktop'] }
+  await fs.writeFile(path.join(sharedSource, 'SKILL.md'), 'privacy body, revised\n', 'utf8')
+  await installWith({ env, client: 'claude-desktop', skills: [kept, desktopOnly] })
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'privacy body, revised\n')
+
+  // A `claude`-scoped run reaches that record. The path is absent from *its*
+  // plan and the bytes match a digest recorded for it, so candidacy asked of
+  // the scoped plan alone would delete a copy `claude-desktop` is contributing
+  // right now - silently, since the reconciler threads no stdout, and for good,
+  // since `claude-desktop`'s `assets_key` did not change and nothing re-copies.
+  const third = await installWith({ env, client: 'claude', skills: [kept, desktopOnly] })
+
+  assert.equal(third.code, 0)
+  assert.ok(await exists(dest), 'a destination another client still contributes is not retired')
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'privacy body, revised\n')
+  assert.doesNotMatch(third.stdout, /removed retired skill 'hypaware-privacy'/)
+  assert.doesNotMatch(third.stderr, /hypaware-privacy/)
+
+  // And once no client contributes it, the ordinary prune still reaches it: the
+  // carried record is what makes that possible.
+  const fourth = await installWith({ env, skills: [kept] })
+  assert.equal(await exists(dest), false, 'retired everywhere is still removed')
+  assert.match(fourth.stdout, /removed retired skill 'hypaware-privacy'/)
+})
+
 function makeBuf() {
   let value = ''
   return {
