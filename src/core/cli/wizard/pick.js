@@ -640,6 +640,13 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
       screen = 'menu'
     } else {
       try {
+        const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet))
+        // Whether this menu arrives with a state worth keeping: a locked
+        // row, or one the seed already checked (the config on disk, a
+        // re-entry's selection, detection). Exactly the predicate behind
+        // `defaultRows`, read off the rows that render so the flag below
+        // can never disagree with the boxes on screen.
+        const hasChecked = options.some((o) => o.checked === true)
         const sourceRaw = await ask({
           pickType: 'sources',
           // No keys in the title: the TUI's hint line and the numbered
@@ -651,7 +658,19 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
           // fallback prints the same text as plain text.
           // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
           ...(opts.progress ? { progress: opts.progress } : {}),
-          options: visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
+          options,
+          // The TUI multiselect always renders and keeps the checked state;
+          // the numbered fallback only does so for a question that asks.
+          // Without this the non-TTY menu printed bare labels and read a
+          // bare enter as "collect nothing", so a reconfigure that walked
+          // gate then menu then enter rewrote a seeded config to collect
+          // nothing - past an overwrite confirm that defaults to yes.
+          // Opted in only when a box is actually checked: with none there
+          // is no state to keep, so enter stays the historical empty
+          // selection and a dropped terminal still cancels the run rather
+          // than carrying it into the daemon install with no sources.
+          // @ref LLP 0274#pick-menu [implements]: the pick menu keeps its checked state on a bare enter, and only where it has one
+          ...(hasChecked ? { enterKeepsChecked: true } : {}),
           ...(hasGate || opts.allowBack ? { allowBack: true } : {}),
         })
         return {
