@@ -6,6 +6,9 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0049, LLP 0030, LLP 0050, LLP 0069, LLP 0100, LLP 0103
+**Extended-by:** LLP 0253 (#purge-and-detach-sweep: accepted 2026-08-17; every form of the verb also empties the raw-body capture spool, which holds
+un-projected bodies rather than cached rows; the target shapes, the
+confirmation gate, and the cache-only stance here are unchanged)
 
 > Retroactive deletion arrives as its own destructive verb. `hyp purge`
 > removes already-cached rows by subtree, by session, by resolved-`ignore`

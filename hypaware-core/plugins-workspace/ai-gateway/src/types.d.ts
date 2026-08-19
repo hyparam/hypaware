@@ -255,6 +255,23 @@ export type SessionEndpointResolution =
   | { ok: false; error: string }
 
 /**
+ * One recorder's outcome for a `hyp session ignore` / `unignore` write. The
+ * verb addresses every recorder hosting the control route (the gateway plus
+ * whatever a live daemon snapshot advertises, LLP 0256 #cli-posts-to-both)
+ * and reports each outcome; `ignored` / `total` are present exactly when
+ * `ok` is true, `error` exactly when it is not.
+ */
+export interface SessionMutationOutcome {
+  recorder: string
+  endpoint: string
+  endpointSource: 'daemon_status' | 'config_listen'
+  ok: boolean
+  ignored?: boolean
+  total?: number
+  error?: string
+}
+
+/**
  * What `hyp session status` reports, in `--json` field order. It carries the
  * PROVENANCE of both inputs alongside the answer (`session_id_source` /
  * `session_id_evidence`, `endpoint_source`) because an `ignored: true` rests on
