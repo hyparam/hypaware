@@ -127,9 +127,13 @@ export async function runReportRender(argv, ctx) {
 export async function runReportPublish(argv, ctx) {
   const gate = parseCoreCommandArgv('report publish', argv, ctx)
   if (!gate.ok) return gate.code
-  const source = positionals(argv, VALUE_FLAGS)[0]
-  const kind = valueFlag(argv, '--kind').value
-  const period = valueFlag(argv, '--period').value
+  // As in `report list` and `report delete`: read what the gate parsed, not
+  // argv. `valueFlag()` drops a value whose first character is `-`, so reading
+  // `--title` from argv published `--title '-Q3 rollup'` with no title at all,
+  // exit 0 - a token the gate had just blessed, silently discarded.
+  const source = /** @type {string | undefined} */ (gate.params.source)
+  const kind = /** @type {string | undefined} */ (gate.params.kind)
+  const period = /** @type {string | undefined} */ (gate.params.period)
   // @ref LLP 0155#period-explicit [constrained-by]: period is the coverage window only the generator knows; never default it from the current date
   if (!source || !kind || !period) {
     ctx.stderr.write('usage: hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]\n')
@@ -187,7 +191,7 @@ export async function runReportPublish(argv, ctx) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
-  const title = valueFlag(argv, '--title').value
+  const title = /** @type {string | undefined} */ (gate.params.title)
   const url = new URL(resolved.endpoint)
   url.searchParams.set('kind', kind)
   url.searchParams.set('period', period)
@@ -244,9 +248,12 @@ export async function runReportList(argv, ctx) {
     return 2
   }
   const url = new URL(resolved.endpoint)
+  // Same reason `--json` below reads the gate: `valueFlag()` drops a value
+  // whose first character is `-`, so `--limit -5` used to list with the
+  // server's default and exit 0 instead of refusing the token.
   for (const flag of ['kind', 'period', 'limit', 'before']) {
-    const value = valueFlag(argv, `--${flag}`).value
-    if (value !== undefined) url.searchParams.set(flag, value)
+    const value = gate.params[flag]
+    if (value !== undefined) url.searchParams.set(flag, String(value))
   }
   applyOrgParam(argv, url)
 

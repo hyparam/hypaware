@@ -11,8 +11,6 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { CORE_COMMAND_ARGS, parseCoreCommandArgv } from '../../src/core/cli/command_args.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
-import { argvToParams } from '../../src/core/cli/verb_codec.js'
-import { querySqlVerb } from '../../src/core/query/verb.js'
 
 /**
  * One argument-validation contract for every visible core command: a token
@@ -115,10 +113,16 @@ for (const name of COMMANDS.filter((cmd) => !SHORT_FLAG_LENIENT.has(cmd))) {
   })
 }
 
-test('the verb family stays lenient, so a greedy SQL positional still carries -1', () => {
-  const parsed = argvToParams(querySqlVerb.inputSchema, ['select', '-1', 'as', 'n'])
-  assert.ok(parsed.ok, `the verb codec refused a dash-leading SQL token: ${!parsed.ok && parsed.error}`)
-  assert.equal(parsed.ok && parsed.params.sql, 'select -1 as n')
+// Drive the command, not the codec. Calling `argvToParams()` without
+// `strictShortFlags` only re-proves that the lenient reading is lenient: it
+// would still pass if `query sql`'s own call site started opting in, which is
+// the regression `SHORT_FLAG_LENIENT` takes this command out of the
+// parameterized case to allow. Running the invocation the exemption exists for
+// is what makes tightening that call site fail here.
+test('the verb family stays lenient, so a greedy SQL positional still carries -1', async () => {
+  const { code, stdout, stderr } = await run(['query', 'sql', 'select', '-1', 'as', 'n', '--format', 'json'])
+  assert.equal(code, 0, `hyp query sql refused a dash-leading SQL token\nstdout: ${stdout}\nstderr: ${stderr}`)
+  assert.deepEqual(JSON.parse(stdout), [{ n: -1 }])
 })
 
 test('a short flag in a trailing positional slot refuses rather than binding as a value', () => {
