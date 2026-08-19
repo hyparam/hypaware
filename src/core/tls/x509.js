@@ -1,6 +1,7 @@
 // @ts-check
 
 import crypto from 'node:crypto'
+import net from 'node:net'
 
 /**
  * A minimal X.509 v3 certificate minter: DER by hand, signature via
@@ -16,11 +17,15 @@ import crypto from 'node:crypto'
  * with a fixed extension set - and that is a few hundred lines of DER.
  *
  * Scope limits, deliberately: EC P-256 keys with ECDSA-SHA256 signatures only,
- * UTCTime only (valid to 2049, and nothing we mint lives longer than a year),
- * and only the extensions the interception path needs. This is not a general
- * certificate authority.
+ * DNS names only (never an IP literal), and only the extensions the
+ * interception path needs. This is not a general certificate authority.
+ *
+ * Times are UTCTime below 2050 and GeneralizedTime from 2050 on, which is what
+ * RFC 5280 4.1.2.5 requires. LLP 0235's "UTCTime only" rested on nothing we
+ * mint living longer than a year, and a ten-year CA outlives that assumption.
  *
  * @ref LLP 0235#minted-in-process: the options weighed, and why neither an `openssl` shell-out nor a certificate library survived them
+ * @ref LLP 0275#generalized-time-past-2049 [constrained-by]: the encoding scope above, widened by exactly one tag
  */
 
 // ---------------------------------------------------------------------------
@@ -124,18 +129,40 @@ const derBoolean = (v) => tlv(0x01, Buffer.from([v ? 0xff : 0x00]))
 /** @param {string} s */
 const utf8String = (s) => tlv(0x0c, Buffer.from(s, 'utf8'))
 
+/** UTCTime, `YYMMDDHHMMSSZ`. */
+const TAG_UTC_TIME = 0x17
+
+/** GeneralizedTime, `YYYYMMDDHHMMSSZ`. */
+const TAG_GENERALIZED_TIME = 0x18
+
 /**
- * UTCTime, `YYMMDDHHMMSSZ`. Correct only through 2049; certificates dated
- * beyond that must use GeneralizedTime, which we never mint.
+ * A validity date, encoded the way RFC 5280 4.1.2.5 requires: UTCTime through
+ * 2049, GeneralizedTime from 2050 on.
  *
+ * UTCTime carries a two-digit year, read against a sliding window that puts
+ * 50-99 in the 1900s, so it cannot express 2050 at all - such a date reads back
+ * as 1950. That was unreachable while nothing we mint lived longer than a year,
+ * and became reachable the moment CA validity went to ten years: a machine
+ * whose clock is past 2039 (a dead RTC battery, a VM restored with a skewed
+ * clock) minted a CA born expired, which was then re-minted on every boot while
+ * every intercepted handshake failed with nothing naming the cause.
+ *
+ * @ref LLP 0275#generalized-time-past-2049 [implements]
  * @param {Date} date
  */
-function utcTime(date) {
+function x509Time(date) {
+  const year = date.getUTCFullYear()
+  if (!Number.isFinite(year)) throw new Error('certificate validity must be a valid Date')
+  if (year < 1950 || year > 9999) {
+    throw new Error(`certificate validity year ${year} is outside what X.509 can encode`)
+  }
   /** @param {number} n */
   const p = (n) => String(n).padStart(2, '0')
-  const body = p(date.getUTCFullYear() % 100) + p(date.getUTCMonth() + 1) + p(date.getUTCDate()) +
+  const utc = year < 2050
+  const body = (utc ? p(year % 100) : String(year)) +
+    p(date.getUTCMonth() + 1) + p(date.getUTCDate()) +
     p(date.getUTCHours()) + p(date.getUTCMinutes()) + p(date.getUTCSeconds()) + 'Z'
-  return tlv(0x17, Buffer.from(body, 'ascii'))
+  return tlv(utc ? TAG_UTC_TIME : TAG_GENERALIZED_TIME, Buffer.from(body, 'ascii'))
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +253,30 @@ function keyIdentifier(spkiDer) {
 }
 
 /**
- * Reject a host that cannot be encoded as an IA5String.
+ * Whether a host string is an IP literal rather than a DNS name, with an
+ * IPv6 URL host's brackets tolerated because `URL.hostname` keeps them.
+ *
+ * Deliberately `net.isIP`, which is the same normalised judgement `URL` already
+ * made: `URL` canonicalises every legacy IPv4 spelling (`0x7f.1`, decimal
+ * integers) to dotted quad before this ever sees it.
+ *
+ * Exported because the gateway has to make the same judgement one step earlier,
+ * on the upstreams it is about to ask for a CA: skipping one IP-literal
+ * upstream is right, letting it fail the whole mint is not.
+ *
+ * @ref LLP 0275#ip-literals-are-refused [implements]
+ * @param {string} host
+ * @returns {boolean}
+ */
+export function isIpLiteralHost(host) {
+  if (typeof host !== 'string') return false
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+  return net.isIP(bare) !== 0
+}
+
+/**
+ * Reject a host that cannot be encoded as an IA5String, or that is not a DNS
+ * name at all.
  *
  * `Buffer.from(host, 'ascii')` masks each code unit to 7 bits rather than
  * failing, so an internationalised name silently becomes a different name:
@@ -234,6 +284,22 @@ function keyIdentifier(spkiDer) {
  * issued for the wrong host is worse than a refusal, and callers hand us
  * hostnames from config.
  *
+ * An IP literal is printable ASCII, so it used to pass, and every host here is
+ * encoded as a `dNSName`. A client that connected to an IP address checks the
+ * certificate's `iPAddress` SANs and only those (RFC 6125; Node's
+ * `checkServerIdentity` does exactly this), so a `dNSName` entry is never even
+ * looked at: the mint succeeded and produced a certificate nothing would ever
+ * accept. Same rule as the non-ASCII case: a certificate that cannot work is
+ * refused, not quietly issued.
+ *
+ * Not the CA's IP `excludedSubtrees`, which is a different thing: RFC 5280
+ * 4.2.1.10 applies a name-constraint subtree only to its own name form, so an
+ * excluded IP range says nothing about a `dNSName` SAN. What the exclusion does
+ * settle is that emitting an `iPAddress` SAN instead would not help either,
+ * which is why supporting IP literals is a design change rather than a wider
+ * guard here (LLP 0275#ip-literals-are-refused).
+ *
+ * @ref LLP 0275#ip-literals-are-refused [implements]
  * @param {string} host
  */
 function assertAsciiHost(host) {
@@ -245,6 +311,13 @@ function assertAsciiHost(host) {
     throw new Error(
       `certificate host must be printable ASCII, got ${JSON.stringify(host)}; ` +
       'punycode-encode an internationalised name before minting'
+    )
+  }
+  if (isIpLiteralHost(host)) {
+    throw new Error(
+      `certificate host must be a DNS name, got the IP literal ${JSON.stringify(host)}; ` +
+      'this minter emits dNSName entries only, and a client connected to an IP ' +
+      'matches iPAddress SANs alone, so such a certificate could never be accepted'
     )
   }
 }
@@ -369,7 +442,7 @@ export function mintCertificate({
     integer(serial),
     sigAlg,
     distinguishedName(issuer),
-    seq(utcTime(notBefore), utcTime(notAfter)),
+    seq(x509Time(notBefore), x509Time(notAfter)),
     distinguishedName(subject),
     spkiDer,
     explicit(3, seq(...exts))

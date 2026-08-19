@@ -656,8 +656,31 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     // HTTPS request the client makes rather than merely its capture, and the
     // `prev_env` backup would be deleted along with the marker. Reverse the
     // proxy keys by the same still-ours-then-restore-or-remove rule.
+    //
+    // `recordDamaged`, not `markerPort !== undefined`: every genuine pre-record
+    // legacy marker carries a `port`, so gating on the port ran this on plain
+    // base-URL legacy detaches too. Proxy mode did not exist when those markers
+    // were written, so any `HTTPS_PROXY` or `NODE_EXTRA_CA_CERTS` beside one is
+    // the user's own - and the reversal reported it as HypAware residue of
+    // unknown provenance (#886 finding 2).
+    //
+    // And never when `mode` positively names a non-proxy attach. `mode` is one
+    // of the fields that routes a marker here as damaged in the first place, so
+    // it usually survives, and only a proxy attach ever writes these two keys;
+    // without this the same false provenance claim comes back one case over,
+    // for a damaged base-URL or otel marker beside the user's own corporate
+    // bundle. Absent `mode` is *not* that evidence, though, so it still runs:
+    // a marker damaged badly enough to lose `mode` as well can still be a proxy
+    // one holding `prev_env`, and skipping it there would leave `HTTPS_PROXY`
+    // pointing at a gateway that no longer exists. That is safe because every
+    // mutation below is separately gated on the value being ours (`HTTPS_PROXY`
+    // must still equal our gateway URL) or on a recorded prior; only the
+    // warnings claim provenance, and with no `mode` at all "the undo record is
+    // unreadable" is exactly true.
     // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
-    if (markerPort !== undefined) {
+    // @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
+    const modeSaysNotProxy = marker.mode === 'base_url' || marker.mode === 'otel'
+    if (recordDamaged && !modeSaysNotProxy && markerPort !== undefined) {
       reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
     }
 
