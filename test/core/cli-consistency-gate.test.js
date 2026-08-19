@@ -26,7 +26,7 @@
  * @ref LLP 0181#the-rule [constrained-by]: the sweep dispatches only help and unknown-subcommand argv, so no command body reaches a service manager
  */
 
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -52,6 +52,30 @@ const SHORT_OPTION = /^-[a-zA-Z]$/
  * input.
  */
 const SWEEP_TIMEOUT_MS = 60_000
+
+// `dispatch` calls `installObservability()` with no argument, and that reads
+// the real `process.env` rather than the `env` the harness injects below. With
+// `HYP_DEV_TELEMETRY=1` exported (what the hermetic smokes set) the JSONL
+// exporters write `<real HYP_HOME>/hypaware/dev-telemetry/*.jsonl` for every
+// help render, while the `readdir(hypHome)` guard on the temp home still sees
+// an empty directory: green, but not inert. Clearing the two variables that arm
+// an exporter is what actually reaches `readObservabilityEnv()`. `node --test`
+// runs each file in its own process, so this cannot leak to a sibling suite.
+delete process.env.HYP_DEV_TELEMETRY
+delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+
+/**
+ * Every temp directory `harness()` minted, removed once the file is done: the
+ * sweeps call it once per test, so leaving them behind litters `os.tmpdir()`
+ * with a couple of dozen directories per run.
+ *
+ * @type {string[]}
+ */
+const tempDirs = []
+
+after(async () => {
+  await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })))
+})
 
 /**
  * A bare group command built by `makeGroupCommand` is recognizable by the
@@ -96,6 +120,7 @@ function coreRegistry() {
 async function harness(registry = coreRegistry()) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cli-gate-home-'))
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cli-gate-ws-'))
+  tempDirs.push(hypHome, workspaceDir)
   // Without an explicit `cacheRoot` the kernel falls back to
   // `process.env.HYP_HOME`, i.e. the developer's real `~/.hyp`, which the
   // `readdir(hypHome)` guard below could never see.
@@ -115,7 +140,13 @@ async function harness(registry = coreRegistry()) {
       stderr,
       // `resolveConfigPath` honours `HYP_CONFIG` ahead of `HYP_HOME`, so an
       // exported one would aim the help path at the developer's real config.
-      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      env: {
+        ...process.env,
+        HYP_HOME: hypHome,
+        HYP_CONFIG: '',
+        HYP_DEV_TELEMETRY: '',
+        OTEL_EXPORTER_OTLP_ENDPOINT: '',
+      },
       registry,
       kernel,
       workspaceDir,
