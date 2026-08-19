@@ -911,6 +911,21 @@ export interface CommandRegistry {
    * cannot shadow a command or show up as its own subcommand.
    */
   registerGroup(group: CommandGroupRegistration): void
+  /**
+   * Release a registered command name, along with every alias pointing at
+   * it. Accepts whatever `get` accepts (primary name or alias), is
+   * idempotent, and is a no-op on an unknown name. Exists so a retracted
+   * verb can give back the CLI surface its registration claimed.
+   *
+   * Optional on purpose. The kernel accepts an injected command registry,
+   * and `VerbRegistry.unregister` feature-detects this member before
+   * calling it, so a registry that predates the affordance is tolerated
+   * rather than fatal. Typing it required would narrow that check to
+   * always-true for anyone compiling against these declarations and
+   * invite its removal, which is what turns an older kernel into a boot
+   * failure. `createCommandRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): CommandRegistration | undefined
   getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
@@ -1723,6 +1738,25 @@ export interface VerbRegistration {
 
 export interface VerbRegistry {
   register(verb: VerbRegistration): void
+  /**
+   * Release a claimed verb name: the name map, the tool map, and the CLI
+   * command projected from a verb under that name (and only that one; a
+   * plugin's own same-named command survives). By-name, idempotent, and a
+   * no-op on an unknown name.
+   *
+   * This is what lets a host displace a kernel-shipped verb with its own
+   * implementation of the same tool: it takes the name back, then
+   * registers. Callers should re-check `getByTool` afterwards rather than
+   * trust the removal, since registering into a still-held tool slot
+   * throws (LLP 0264 §verb).
+   *
+   * Optional on purpose: plugins declare a kernel semver *range*, so a
+   * plugin built against these declarations can be loaded by a kernel
+   * that predates this member. Feature-detect it (`typeof
+   * verbs.unregister === 'function'`) rather than assume it. The kernel's
+   * own `createVerbRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): VerbRegistration | undefined
   getByTool(tool: string): VerbRegistration | undefined
   list(): VerbRegistration[]
