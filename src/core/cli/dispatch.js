@@ -32,7 +32,7 @@ import { colorizeStderr } from './style.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  * @import { MaterializeError } from '../../../src/core/sinks/types.js'
@@ -353,12 +353,13 @@ export async function dispatch(argv, opts = {}) {
     }
     // Not a group either. Before the generic "unknown command", see whether
     // the leading token exactly names a command declared by a plugin that is
-    // bundled/installed but NOT active in the effective config. If so the
-    // command is *unavailable*, not unknown: report which plugin provides it
-    // and how to enable it, instead of implying the feature does not exist. A
+    // bundled/installed but whose commands never reached the registry: not
+    // selected by the effective config, or selected and not activated. If so
+    // the command is *unavailable*, not unknown: report which plugin provides
+    // it and what to do, instead of implying the feature does not exist. A
     // genuine typo matches nothing here and still gets the generic message.
     // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
-    const inactive = await findInactivePluginForCommand(helpDiscovery, argv)
+    const inactive = await findInactivePluginForCommand(helpDiscovery, argv, failedPlugins)
     if (inactive) {
       // One renderer for both miss paths (here and the group probe below), so
       // the same condition cannot print two different repair lines depending
@@ -400,7 +401,7 @@ export async function dispatch(argv, opts = {}) {
   // @ref LLP 0248#aliases [implements]: canonical and legacy plugin paths preserve inactive-plugin repair
   if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
     const probe = emptyGroup ? matched.command.name.split(' ') : argv
-    const inactive = await findInactivePluginForCommand(helpDiscovery, probe)
+    const inactive = await findInactivePluginForCommand(helpDiscovery, probe, failedPlugins)
     // A non-empty group already matched, so only a *deeper* command can be the
     // unavailable one. `longestCommandPrefix` falls back to the flag-stripped
     // invocation, which collapses `hyp query --json` to the bare group token
@@ -1232,14 +1233,31 @@ export async function activatePluginDependencyClosure({
 /**
  * On a dispatch miss, resolve whether the argv prefix names a command or
  * compatibility alias declared by a plugin that is bundled or installed but
- * NOT active in the effective config. Returns the owning plugin so the caller
- * can say "unavailable, here's how to enable it" instead of "unknown".
+ * whose commands are not in the registry. Returns the owning plugin so the
+ * caller can say "unavailable, here's how to fix it" instead of "unknown".
  *
- * Exact match ONLY: `token` must equal the first word of a declared command
- * name (`graph` for `graph project`). A typo matches nothing and falls
- * through to the generic unknown-command message. Active plugins never reach
- * here for their own commands: those matched `registry.match`/group help
- * above, so at the miss path `token` is unowned by any active or core command.
+ * Two ways a declared command can be missing, and they need different repairs:
+ *
+ * - the config does not select the plugin at all (LLP 0153's case): add or
+ *   enable it, per {@link classifyInactiveState};
+ * - the config *does* select it, but this boot did not get it. Its `activate()`
+ *   threw, the dep graph eliminated it for an unsatisfied `requires`, or the
+ *   boot profile withheld it. Editing the config fixes none of those, and
+ *   before this case existed the command fell through to "unknown command" -
+ *   telling a user their own configured feature does not exist. Checked first,
+ *   because a selected plugin is never also in the not-selected pool.
+ *
+ * The fourth route into `unavailablePlugins`, a manifest that would not load,
+ * is deliberately not matched here and still falls through to the generic
+ * message: boot names such a plugin by the directory it failed in rather than
+ * by a plugin name (`src/core/runtime/boot.js`, `unloadable`), and an
+ * unreadable manifest declares no commands to match `argv` against in the
+ * first place.
+ *
+ * Canonical names and compatibility aliases are matched by argv prefix. A typo
+ * matches nothing and falls through to the generic unknown-command message.
+ * Active plugins never reach here for their own commands: those matched
+ * `registry.match` or group help above.
  *
  * Best-effort and cheap: the same manifest discovery `--help` already runs,
  * wrapped so any failure (missing workspace, unreadable config) degrades to
@@ -1247,15 +1265,35 @@ export async function activatePluginDependencyClosure({
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
  * @param {string[]} argv
- * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' } | undefined>}
+ * @param {string[]} unavailablePlugins `bootKernel`'s `unavailablePlugins`: the
+ *   plugins this boot did not get, by any of the routes above.
+ * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' | 'selected-unavailable' } | undefined>}
  */
-async function findInactivePluginForCommand(discovery, argv) {
+async function findInactivePluginForCommand(discovery, argv, unavailablePlugins = []) {
   if (!Array.isArray(argv) || argv.length === 0 || argv[0].startsWith('-')) return undefined
   try {
     const selection = await computeBootSelection(discovery)
     // A shadow collision makes real boot throw; there is no dispatchable
     // command set to reason about, so offer no suggestion.
     if (selection.shadowing.length > 0) return undefined
+    // Selected but not running: the config is already right, so the repair is
+    // to find out why the plugin did not come up, not to edit plugins[]. Boot
+    // already reports that set, so read it rather than re-derive it by
+    // subtracting the active plugins: the subtraction also fires when a caller
+    // injected its own kernel (`opts.kernel`, the integration API's escape
+    // hatch), where dispatch never booted and an absent plugin proves nothing.
+    // @ref LLP 0219#incomplete-activation-prunes-nothing [constrained-by]: one list holds every way a boot came up short of its plugin set
+    // @ref LLP 0267#d5 [implements]: a fourth miss state for a plugin the config selects and the boot did not get
+    const unavailable = new Set(unavailablePlugins)
+    for (const entry of selection.selectedManifests) {
+      const name = /** @type {PluginName} */ (entry.manifest.name)
+      if (!unavailable.has(name)) continue
+      for (const cmd of entry.manifest.contributes?.commands ?? []) {
+        if (!cmd || typeof cmd.name !== 'string') continue
+        const invoked = longestCommandPrefix(argv, commandManifestNames(cmd))
+        if (invoked) return { token: invoked, plugin: name, state: 'selected-unavailable' }
+      }
+    }
     // Inactive = in the boot pool but not selected for a `config` boot. Walk
     // in pool order (bundled, then excluded, then installed) so the first
     // declaring plugin wins a head-token collision, matching boot's own
@@ -1299,16 +1337,22 @@ function longestCommandPrefix(argv, names) {
 /**
  * @param {{
  *   stderr: { write(chunk: string): unknown },
- *   inactive: { token: string, plugin: PluginName, state: 'absent'|'disabled-local'|'disabled-central' },
+ *   inactive: { token: string, plugin: PluginName, state: 'absent'|'disabled-local'|'disabled-central'|'selected-unavailable' },
  *   discovery: { configPath: string },
  *   env: NodeJS.ProcessEnv,
  * }} args
  */
 function renderInactivePluginError({ stderr, inactive, discovery, env }) {
   stderr.write(
-    `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
+    inactive.state === 'selected-unavailable'
+      ? `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which your config selects but this run could not activate\n`
+      : `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
   )
-  if (inactive.state === 'disabled-central') {
+  if (inactive.state === 'selected-unavailable') {
+    stderr.write(
+      `  repair: the plugin is configured but unavailable this run; run 'hyp status' for why, then re-run this command\n`
+    )
+  } else if (inactive.state === 'disabled-central') {
     stderr.write(
       `  repair: ${inactive.plugin} is disabled by the organization (central) config and cannot be enabled locally; ask your administrator to enable it\n`
     )
@@ -1321,6 +1365,21 @@ function renderInactivePluginError({ stderr, inactive, discovery, env }) {
       `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`
     )
   }
+}
+
+/**
+ * Does `manifest` declare a command whose first word is `token`?
+ *
+ * @param {PluginManifest} manifest
+ * @param {string} token
+ * @returns {boolean}
+ */
+function declaresCommandHead(manifest, token) {
+  for (const cmd of manifest.contributes?.commands ?? []) {
+    if (!cmd || typeof cmd.name !== 'string') continue
+    if (cmd.name.split(' ')[0] === token) return true
+  }
+  return false
 }
 
 /**

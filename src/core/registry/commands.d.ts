@@ -1,3 +1,5 @@
+import type { CommandGroupRegistration } from '../../../hypaware-plugin-kernel-types.d.ts'
+
 export type {
   CommandRegistry,
   CommandRegistration,
@@ -17,4 +19,6 @@ export declare function createCommandRegistry(): import('../../../hypaware-plugi
   // registry injected by an older kernel is a feature-detect and not a
   // boot failure, but the registry this factory builds always has it.
   unregister(name: string): void
+  /** Every registered group description, sorted by name. Groups are not in `list()`. */
+  listGroups(): CommandGroupRegistration[]
 }
