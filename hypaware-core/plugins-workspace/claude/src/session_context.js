@@ -40,9 +40,13 @@ export function defaultSessionContextFile(stateDir) {
  * the reader picks newest-by-line (interleaving across lines just
  * means another writer will land its record on the next line).
  *
+ * `opts.maxBytes` is the writer's compaction cap, and it may only narrow the
+ * module default: see `clampToReadableWindow`.
+ *
  * @param {string} filePath
  * @param {SessionContextRecord} record
- * @param {{ maxBytes?: number, maxRecords?: number }} [opts]
+ * @param {{ maxBytes?: number, maxRecords?: number }} [opts] `maxBytes` is
+ *   clamped to `SESSION_CONTEXT_MAX_BYTES`; a larger value has no effect.
  * @returns {Promise<void>}
  */
 export async function appendSessionContext(filePath, record, opts = {}) {
@@ -143,7 +147,7 @@ function recordFrom(value) {
  * @param {{ maxBytes?: number, maxRecords?: number }} opts
  */
 async function compactSessionContextIfNeeded(filePath, opts) {
-  const maxBytes = positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES
+  const maxBytes = clampToReadableWindow(positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES)
   const maxRecords = positiveInt(opts.maxRecords) ?? SESSION_CONTEXT_MAX_RECORDS
   let stat
   try {
@@ -192,6 +196,32 @@ async function readTail(filePath, maxBytes) {
   } finally {
     await handle?.close().catch(() => undefined)
   }
+}
+
+/**
+ * The writer may never keep more of the file than a reader will look at.
+ *
+ * `appendSessionContext` takes a per-call compaction cap, but the read side
+ * has no matching seam: `createSessionContextReader` (the reader the live
+ * projector and the telemetry listener use) tail-reads at a module constant
+ * and takes no options. So a caller that compacts to a window wider than
+ * `SESSION_CONTEXT_MAX_BYTES` keeps records that no reader ever sees, which is
+ * indistinguishable from the hook never having recorded them.
+ *
+ * That is not a nullable column on the ingest path: an unseen record resolves
+ * to an `undetermined` usage policy, the listener withholds the batch, and the
+ * session's spooled bodies are deleted unread. Clamping keeps the invariant
+ * structural rather than a JSDoc promise. Narrowing stays allowed: a smaller
+ * cap only ever keeps less than the reader can see.
+ *
+ * @ref LLP 0254#policy-inline [constrained-by]: the hook's cwd is what the
+ *   ingest verdict is resolved from, so the writer may not retain a record
+ *   outside the window the reader reads
+ *
+ * @param {number} maxBytes
+ */
+function clampToReadableWindow(maxBytes) {
+  return Math.min(maxBytes, SESSION_CONTEXT_MAX_BYTES)
 }
 
 /** @param {unknown} value */
