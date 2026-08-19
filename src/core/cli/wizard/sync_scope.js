@@ -9,6 +9,7 @@ import { LOCKED_LABEL_SUFFIX } from './pick.js'
 import {
   ClientSyncListUnreadableError,
   clientSyncListPath,
+  optedOutClientSourceIds,
   readClientSyncEntries,
   writeClientSyncEntries,
 } from '../../usage-policy/index.js'
@@ -42,8 +43,11 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
  * through that same display filter; when it is empty the step prints its
  * position plus the always-sync fact - or, with no org row to name
  * either, the nothing-picked fact, which only reads "nothing syncs" when
- * `lockedHidden` and `candidatesHidden` both say no filtered-out row is
- * standing - instead of prompting, so the counter never skips a number.
+ * `lockedHidden` and `candidatesHiddenIds` both say no filtered-out row is
+ * standing - instead of prompting, so the counter never skips a number. A
+ * hidden pick the store already withholds is not standing, which is why
+ * the picks arrive as ids and the locked rows as a count (LLP 0289
+ * #ask-the-store).
  *
  * The write has editor semantics over the shown candidates only: entries
  * for sources not shown (a previously opted-out source the user unpicked
@@ -79,6 +83,15 @@ export async function runWizardSyncScope(opts) {
 
   const candidateIds = new Set(opts.candidates.map((d) => d.id))
   const optedOutBefore = new Set(existing.filter((e) => candidateIds.has(e.source)).map((e) => e.source))
+  // The one question the lane may ask about a row it may not show: does a
+  // hidden pick still ship? `optedOutBefore` cannot answer it - it is
+  // computed over `candidateIds`, the *visible* candidates - and a hidden
+  // row is addressable in the store all the same
+  // (`hyp policy client raw-anthropic local-only`), so the ids go to the
+  // store and never to the screen.
+  // @ref LLP 0289#ask-the-store [implements]: the hidden picks reach the lane as ids so their sentence can be checked against the store the export seam reads
+  const optedOutAll = new Set(optedOutClientSourceIds(existing))
+  const hiddenCandidateSyncs = (opts.candidatesHiddenIds ?? []).some((id) => !optedOutAll.has(id))
 
   if (opts.candidates.length === 0) {
     // Led by a blank line like every other block this lane prints, so the
@@ -91,18 +104,23 @@ export async function runWizardSyncScope(opts) {
     // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
     // the fleet's own capture still ships, so the line may not claim
     // nothing syncs; it just has no row to attribute it to. With no locked
-    // row but a hidden row among the picks - a carried raw source (LLP 0202
-    // #carry-through) on a run whose org config has not converged - capture
-    // still ships and the fleet does not own it, so the line names neither
-    // the row nor an owner. Only with nothing standing at all is nothing
-    // picked and nothing synced.
+    // row but a hidden row among the picks that the store does not already
+    // withhold - a carried raw source (LLP 0202 #carry-through) on a run
+    // whose org config has not converged - capture still ships and the
+    // fleet does not own it, so the line names neither the row nor an
+    // owner. Only with nothing standing at all is nothing picked and
+    // nothing synced. The locked branch needs no such check: an org row
+    // always syncs (LLP 0188 #locked) and the export seam drops opt-out
+    // entries for central-classified sources, so a store entry for one is
+    // inert.
     // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a filtered-out row stands
+    // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
     if ((opts.locked ?? []).length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
         opts.stdout.write(
           'You picked nothing to record, but capture your fleet manages directly still syncs to your server.\n'
         )
-      } else if ((opts.candidatesHidden ?? 0) > 0) {
+      } else if (hiddenCandidateSyncs) {
         opts.stdout.write(
           'You picked nothing to record, but capture already set up on this machine still syncs to your server.\n'
         )

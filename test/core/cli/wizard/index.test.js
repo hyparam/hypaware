@@ -9,6 +9,8 @@ import { EventEmitter } from 'node:events'
 
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
+import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
+import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
@@ -484,7 +486,7 @@ test('runInitWizard: a hidden locked row stays off the sync-scope screen', async
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor], 'the hidden org row is filtered out, the visible one kept')
   assert.equal(opts._syncOpts.lockedHidden, 1, 'the lane is told a locked row was withheld, without being given the row')
-  assert.equal(opts._syncOpts.candidatesHidden, 0, 'nothing hidden among the picks')
+  assert.deepEqual(opts._syncOpts.candidatesHiddenIds, [], 'nothing hidden among the picks')
 })
 
 // The candidate list takes the same filter. A carried hidden row (LLP 0202
@@ -506,7 +508,59 @@ test('runInitWizard: a hidden picked row is not a sync-scope candidate', async (
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.candidates, [claudeDescriptor], 'the hidden row is not offered as an opt-out candidate')
   assert.equal(opts._syncOpts.lockedHidden, 0, 'nothing locked, so nothing was withheld from the locked list')
-  assert.equal(opts._syncOpts.candidatesHidden, 1, 'the lane is told a picked row was withheld, so it never claims nothing syncs')
+  assert.deepEqual(
+    opts._syncOpts.candidatesHiddenIds,
+    ['raw-anthropic'],
+    'the lane is given the withheld pick by id, so it can ask the store whether it still syncs (LLP 0289 #ask-the-store)'
+  )
+})
+
+// The sentence the empty-candidate branch prints when a hidden row was
+// withheld from the screen is a claim about the export seam, and the export
+// seam reads the client policy store (LLP 0188 #opt-out). A hidden picked
+// row is addressable there ('hyp policy client raw-anthropic local-only'),
+// so with a standing entry the row does not ship and the lane must not say
+// it does. Driven through the real sync lane, so the assertion is on what
+// the user reads rather than on the lane's inputs.
+// @ref LLP 0289#ask-the-store [tests]:
+test('runInitWizard: a hidden picked row with a standing opt-out does not make the lane claim capture syncs', async () => {
+  const home = await tmpHome()
+  const stateDir = path.join(home, '.hyp', 'hypaware')
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
+  const catalog = emptyCatalog()
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'] }),
+    syncScope: runWizardSyncScope,
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /nothing syncs to your server/, 'the only standing pick is withheld by the store, so nothing ships')
+  assert.doesNotMatch(text, /still syncs to your server/)
+  assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
+})
+
+// The boundary of the same case: no entry in the store, so the carried
+// hidden row does ship and the sentence LLP 0276 minted is the true one.
+// @ref LLP 0289#ask-the-store [tests]:
+test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that says capture still syncs', async () => {
+  const home = await tmpHome()
+  const catalog = emptyCatalog()
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'] }),
+    syncScope: runWizardSyncScope,
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /still syncs to your server/)
+  assert.doesNotMatch(text, /nothing syncs to your server/)
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
