@@ -115,7 +115,8 @@ function buildCoreCommands(registry) {
         '                    cache (bare --remote uses query.default_remote, else the\n' +
         "                    shipped default; manage targets with 'hyp remote').\n" +
         "See 'hyp query <subcommand> --help' for which flags a subcommand supports\n" +
-        '(overview/status/schema/refresh/maintain are local-only and ignore --remote).',
+        '(overview/schema/refresh/maintain are local-only; query status rejects\n' +
+        '--remote with exit 2 rather than answering about the wrong host).',
     }),
     {
       name: 'query overview',
