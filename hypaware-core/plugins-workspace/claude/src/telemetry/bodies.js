@@ -52,7 +52,10 @@ const GAP_BLOCK_TYPES = new Set([
  *
  * A file that fails to parse is deleted immediately and counted: the
  * same session is recoverable from transcript backfill, and an
- * undeleted body is a raw prompt sitting on disk.
+ * undeleted body is a raw prompt sitting on disk. Its size is reported
+ * alongside the count, because a deletion the caller cannot size leaves
+ * the published `spool_bytes` gauge high until the next sweep restates
+ * it - reporting bytes for content that is already off the disk.
  * @ref LLP 0252#project-then-delete [implements]: an unprojectable body is
  *   deleted and counted, not retried forever
  *
@@ -64,6 +67,7 @@ const GAP_BLOCK_TYPES = new Set([
  *   consumedBytes: number,
  *   missing: number,
  *   unparseable: number,
+ *   unparseableBytes: number,
  *   refused: string[],
  * }>}
  */
@@ -75,6 +79,7 @@ export async function loadSpooledBodies(events, opts) {
   let consumedBytes = 0
   let missing = 0
   let unparseable = 0
+  let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
 
@@ -103,7 +108,19 @@ export async function loadSpooledBodies(events, opts) {
     const body = parseMaybeJson(raw.toString('utf8'))
     if (!isPlainObject(body)) {
       unparseable += 1
-      await fs.rm(file, { force: true }).catch(() => {})
+      try {
+        await fs.rm(file, { force: true })
+        // Sized only once the unlink succeeded, matching the projected arm:
+        // a file that is still there (EPERM, a read-only spool) is still
+        // occupying the cap, and subtracting it would under-report the gauge
+        // rather than over-report it.
+        // @ref LLP 0253#byte-cap [implements]: the published byte size tracks
+        //   what left the disk, whichever arm removed the file
+        unparseableBytes += raw.length
+      } catch {
+        // The sweep's problem, not this batch's: the content is recoverable
+        // from transcript backfill either way.
+      }
       continue
     }
     bodies.set(ref, {
@@ -115,7 +132,7 @@ export async function loadSpooledBodies(events, opts) {
     consumedBytes += raw.length
   }
 
-  return { bodies, consumedFiles, consumedBytes, missing, unparseable, refused }
+  return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }
 }
 
 /**

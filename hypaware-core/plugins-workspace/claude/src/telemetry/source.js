@@ -638,6 +638,13 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         const spooled = await loadSpooledBodies(events, { spoolDir })
         state.bodiesMissing += spooled.missing
         state.bodiesUnparseable += spooled.unparseable
+        // The read arm deletes an unparseable body on the spot, so the gauge
+        // has to come down here too: this file was on disk when the sweep last
+        // sized the spool, and without the subtraction `hyp status` reports
+        // its bytes for up to a sweep interval after it was removed.
+        // @ref LLP 0253#byte-cap [implements]: the published byte size is what
+        //   is on disk, whichever arm removed the file
+        state.spoolBytes = Math.max(0, state.spoolBytes - spooled.unparseableBytes)
         span.setAttribute('body_count', spooled.bodies.size)
         if (spooled.unparseable > 0) {
           span.setAttribute('bodies_unparseable', spooled.unparseable)
