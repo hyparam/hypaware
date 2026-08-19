@@ -912,7 +912,12 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
  * warning, because base-URL attach is what this install already does and
  * remains the working fallback.
  *
- * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write, the restart, and the coming trust dialog
+ * The question names the config write and the restart, and says where the CA
+ * is trusted. It no longer promises a macOS trust dialog: nothing in the tree
+ * calls `installCaTrust` since the claude attach went otel-only, so a yes
+ * mints the CA and stops there.
+ *
+ * @ref LLP 0244#attach-offers [implements]: one consented question, default no, naming the config write and the restart
  * @ref LLP 0244#central-managed [implements]: a fleet-owned gateway block reports instead of prompting
  * @ref LLP 0244#non-interactive [implements]: non-TTY and --json attaches never migrate; they emit the one-line pointer
  * @param {{ name: string, ctx: CommandRunContext, parsed: { client: string, dryRun: boolean, json: boolean } }} args
@@ -1004,8 +1009,9 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     ctx,
     `${capitalizeClientLabel(name)} can attach through HypAware's local HTTPS proxy instead of a ` +
     `repointed base URL, which keeps Remote Control working. Switching writes proxy_mode ` +
-    `into the local config and restarts the daemon; macOS will then ask to trust the ` +
-    `HypAware Local CA. Switch this install to proxy mode now? [y/N] `
+    `into the local config and restarts the daemon, which mints the HypAware Local CA; ` +
+    `nothing adds that CA to a system trust store, so the client trusts it through its own ` +
+    `settings. Switch this install to proxy mode now? [y/N] `
   )
   if (!accepted) {
     ctx.stderr.write(

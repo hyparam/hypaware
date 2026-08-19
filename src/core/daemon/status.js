@@ -1867,6 +1867,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const proxyTrust = await collectProxyTrust({
     platform,
     stateRoot,
+    config,
     isCaTrustedFn: opts.isCaTrusted
       ?? ((args) => probeCaTrusted({ ...args, timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
     isLaunchdEnvSetFn: opts.isLaunchdEnvSet
@@ -1988,9 +1989,15 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * that names the same grant, and applied here at collection like every other
  * label in this file so `--json` carries exactly what was printed.
  *
+ * The effective config rides along because the CA alone cannot say whether
+ * it is live or residue: `proxy_mode: true` makes the gateway re-mint and
+ * present it on every start, and that is the difference between "this file
+ * is safe to purge" and "purging this file breaks the running interception".
+ *
  * @param {object} args
  * @param {NodeJS.Platform} args.platform
  * @param {string} args.stateRoot
+ * @param {HypAwareV2Config | null} args.config
  * @param {(args: { certPath: string }) => Promise<boolean>} args.isCaTrustedFn
  * @param {() => Promise<boolean>} args.isLaunchdEnvSetFn
  * @returns {Promise<ProxyTrustReport | null>}
@@ -1998,7 +2005,7 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so a grant wider than the configured providers stays informed
  * @ref LLP 0239#terminals-predating-attach [implements]: hyp status reports whether the variable is present in the launchd environment
  */
-async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchdEnvSetFn }) {
+async function collectProxyTrust({ platform, stateRoot, config, isCaTrustedFn, isLaunchdEnvSetFn }) {
   if (platform !== 'darwin') return null
   /** @type {LocalCaInfo | undefined} */
   let ca
@@ -2025,7 +2032,16 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
   /** @type {boolean | null} */
   const launchdEnvSet = launchdResult.status === 'fulfilled' ? launchdResult.value : null
 
-  return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
+  const gateway = (config?.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN_NAME)
+  const proxyModeConfigured = gateway?.config?.proxy_mode === true
+
+  return {
+    caFingerprint: ca.fingerprint,
+    hosts: displayableCaHosts(ca.hosts),
+    trusted,
+    launchdEnvSet,
+    proxyModeConfigured,
+  }
 }
 
 /**

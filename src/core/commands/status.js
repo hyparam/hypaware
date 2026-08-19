@@ -513,6 +513,9 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
+        // Whether the CA is live or residue, which neither probe above can
+        // answer and which decides whether purging it is safe.
+        proxy_mode_configured: report.proxyTrust.proxyModeConfigured,
       }
       : null,
     diagnostics: report.diagnostics.map((d) => ({
@@ -748,19 +751,30 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
-    // The block only ever renders on a CA a past proxy attach minted, and
-    // since LLP 0262 the claude attach neither installs nor reads either
-    // mechanism. So the block names the one command that acts on what it
-    // reports instead of leaving three facts with no verb. Unconditional:
-    // the CA on disk is itself something the purge removes, whatever the two
-    // probes answered.
+    // Three facts with no verb is what this block used to be, and since
+    // LLP 0262 the claude attach neither installs nor reads either mechanism,
+    // so nothing else on the machine names what acts on them. What the note
+    // may say depends on whether the CA is live: `proxy_mode: true` has the
+    // gateway re-mint and present it on every start, so a purge there is not
+    // tidying up, it is deleting the key the running interception terminates
+    // TLS with. Residue gets the purge; live proxy capture gets told what
+    // still depends on the CA and nothing to run.
     // @ref LLP 0262#migration [implements]: the CA and any trust it was granted outlive the migration and end at `detach --purge`, never at another attach
-    stdout.write(
-      '    note:           only proxy_mode capture uses this CA, and the claude attach no longer does\n'
-    )
-    stdout.write(
-      "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
-    )
+    if (report.proxyTrust.proxyModeConfigured) {
+      stdout.write(
+        '    note:           proxy_mode is on, so the gateway still terminates TLS with this CA\n'
+      )
+      stdout.write(
+        '                    the claude attach does not use it; turn proxy_mode off before purging\n'
+      )
+    } else {
+      stdout.write(
+        '    note:           only proxy_mode capture uses this CA, and no plugin here is configured for it\n'
+      )
+      stdout.write(
+        "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
+      )
+    }
   }
 
   stdout.write(`  cache:           ${cacheRoot}\n`)

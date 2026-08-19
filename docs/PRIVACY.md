@@ -78,25 +78,13 @@ those, that trust setting is still on your account until you remove it, and
 `hyp status` says so. It never needed admin rights, and the machine-wide
 system keychain and other user accounts were never modified.
 
-**What else macOS attach leaves behind.** The keychain root only takes
-effect if `NODE_USE_SYSTEM_CA=1` is in the environment before Claude Code
-starts, so attach also runs `launchctl setenv NODE_USE_SYSTEM_CA 1` and
-installs a LaunchAgent at
-`~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist` that
-re-runs that one command at each login. What it runs is `/bin/launchctl`
-itself, once, which sets the variable and exits: there is no resident
-process, no HypAware code in it, and nothing is sent anywhere. It is still a
-login item on your machine, and a session-wide variable that other Node
-programs will also read. `hyp client detach claude` unsets the variable and
-removes the agent, as do `hyp client detach claude --purge` and
-`hyp daemon uninstall`.
-
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
-permitted to vouch for, whether the keychain still trusts it, and whether
-the launchd variable is live. `hyp client detach claude` deliberately keeps
-the CA and the trust in place, so re-attaching later does not ask for your
-password again; `hyp client detach claude --purge` and `hyp daemon uninstall`
-remove the CA and its keychain trust.
+permitted to vouch for, whether the login keychain still trusts it, and
+whether the historic launchd variable is live. `hyp client detach claude` deliberately leaves
+the CA and any trust from an earlier release in place, because a detach is
+not a statement about the certificate and no attach re-creates the grant;
+`hyp client detach claude --purge` and `hyp daemon uninstall` remove the CA and its
+keychain trust.
 
 ## Where it goes
 
