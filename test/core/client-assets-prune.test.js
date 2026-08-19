@@ -64,13 +64,18 @@ async function writeSkillSource(root, name, body) {
  * `clients` defaults to `['claude']`; a test that needs two clients sharing one
  * physical directory names them explicitly.
  *
+ * `client` is the `--client` filter the command runs under, defaulting to the
+ * command's own default of `all`. A test that needs the scoped shape every
+ * attach path actually uses (`clients: [name]`) names one client.
+ *
  * @param {{
  *   env: NodeJS.ProcessEnv,
+ *   client?: string,
  *   skills?: { name: string, sourceDir: string, clients?: string[] }[],
  *   agents?: { name: string, sourceFile: string, clients?: string[] }[],
  * }} args
  */
-async function installWith({ env, skills = [], agents = [] }) {
+async function installWith({ env, client, skills = [], agents = [] }) {
   const { kernel, registry } = kernelAndRegistry()
   for (const skill of skills) {
     kernel.skills.register({
@@ -90,7 +95,8 @@ async function installWith({ env, skills = [], agents = [] }) {
   }
   const stdout = makeBuf()
   const stderr = makeBuf()
-  const code = await dispatch(['skills', 'install'], { stdout, stderr, env, registry, kernel })
+  const argv = client ? ['skills', 'install', '--client', client] : ['skills', 'install']
+  const code = await dispatch(argv, { stdout, stderr, env, registry, kernel })
   return { code, stdout: stdout.text(), stderr: stderr.text() }
 }
 
@@ -595,6 +601,83 @@ test('a destination another client in the same run planned is never pruned', asy
     'privacy body\n',
     'the copy this run made must survive the same run'
   )
+})
+
+/*
+ * @ref LLP 0219#prune-on-materialize [tests]: the plan the keep-set is asked of
+ * is every client's contributions, not the ones this scoped run installs for.
+ */
+test('a client-scoped run never prunes a destination another client still contributes', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const sharedSource = await writeSkillSource(home, 'hypaware-privacy', 'privacy body\n')
+
+  // `claude` and `claude-desktop` both declare `.claude/skills`, so the privacy
+  // skill has one physical destination recorded under both clients.
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource, clients: ['claude'] },
+      { name: 'hypaware-privacy', sourceDir: sharedSource, clients: ['claude', 'claude-desktop'] },
+    ],
+  })
+
+  const shared = path.join(home, '.claude', 'skills', 'hypaware-privacy')
+  assert.ok(await exists(path.join(shared, 'SKILL.md')))
+
+  // The upgrade narrows the privacy skill to `claude-desktop`, and the next
+  // attach is scoped to `claude` - which is the shape every attach path uses.
+  // The dest is still contributed, just by a client outside this run's filter,
+  // so nothing about it is retired.
+  const second = await installWith({
+    env,
+    client: 'claude',
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource, clients: ['claude'] },
+      { name: 'hypaware-privacy', sourceDir: sharedSource, clients: ['claude-desktop'] },
+    ],
+  })
+
+  assert.equal(second.code, 0)
+  assert.doesNotMatch(
+    second.stdout,
+    /removed retired skill 'hypaware-privacy'/,
+    'a scoped run must not read another client\'s live contribution as retired'
+  )
+  assert.equal(
+    await fs.readFile(path.join(shared, 'SKILL.md'), 'utf8'),
+    'privacy body\n',
+    'the shared skill claude-desktop still contributes must survive a claude-scoped run'
+  )
+})
+
+test('a client-scoped run still prunes a destination no client contributes any more', async () => {
+  const { home, env } = await makeHome()
+  const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
+  const retiredSource = await writeSkillSource(home, 'hypaware-ignore', 'retired body\n')
+
+  await installWith({
+    env,
+    skills: [
+      { name: 'hypaware-query', sourceDir: keptSource, clients: ['claude'] },
+      { name: 'hypaware-ignore', sourceDir: retiredSource, clients: ['claude', 'claude-desktop'] },
+    ],
+  })
+
+  const retired = path.join(home, '.claude', 'skills', 'hypaware-ignore')
+  assert.ok(await exists(retired))
+
+  // Widening the keep-set past this run's filter must not become "a scoped run
+  // prunes nothing": a name no manifest declares any more is still retired.
+  const second = await installWith({
+    env,
+    client: 'claude',
+    skills: [{ name: 'hypaware-query', sourceDir: keptSource, clients: ['claude'] }],
+  })
+
+  assert.equal(second.code, 0)
+  assert.match(second.stdout, /removed retired skill 'hypaware-ignore'/)
+  assert.equal(await exists(retired), false)
 })
 
 test('a recorded destination outside the client asset directories is refused out loud', async () => {

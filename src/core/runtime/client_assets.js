@@ -299,11 +299,12 @@ export async function removeClientAssets(dests, baseDirs) {
  *    an org-driven attach, including one made by a version that predates the
  *    ledger) the `installed_assets` list on the client's attach marker, which
  *    is already the record `hyp detach` acts on (LLP 0138 #marker-undo).
- * 2. **The path is not in this run's plan**, for *any* client - it is retired,
- *    not merely a copy that failed, and not a path another client in the same
- *    run is contributing to. Destinations are physical paths and two clients
- *    can declare the same asset directory (`claude` and `claude-desktop` both
- *    declare `.claude/skills`), so the check is over the whole run's plan.
+ * 2. **No client's live contributions name that path** - it is retired, not
+ *    merely a copy that failed, and not a path another client is contributing
+ *    to. Destinations are physical paths and two clients can declare the same
+ *    asset directory (`claude` and `claude-desktop` both declare
+ *    `.claude/skills`), so the check is over what every client contributes,
+ *    not over the clients this run happens to be scoped to.
  * 3. **It is a direct child of one of this client's own asset directories** -
  *    the exact shape the copy side writes, and no deeper - checked here and
  *    again by {@link removeClientAssets}, whose input is persisted JSON either
@@ -353,11 +354,33 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
   //   rule is chosen over per-plugin attribution because this is a delete path
   const activationIncomplete = (options.failedPlugins?.length ?? 0) > 0
 
-  // Every destination this run's plan contains, across every client. A dest is
-  // a physical path, and two clients can share an asset directory, so "not in
-  // the plan" has to be asked of the whole plan or a path one client is
-  // contributing right now reads as another client's retired copy.
-  const keepAll = new Set(planned.map(({ dest }) => dest))
+  // Every destination the live contributions name, across every client this
+  // machine has a descriptor for - not only the clients this run was asked to
+  // install for. A dest is a physical path and two clients can share an asset
+  // directory (`claude` and `claude-desktop` both declare `.claude/skills`),
+  // so "not contributed" has to be asked of every client or a path one client
+  // is contributing right now reads as another client's retired copy.
+  //
+  // The scope this is asked of is the *contributions*, never the run: every
+  // attach path is client-scoped (`hyp attach` and the reconciler pass one
+  // name, the wizard finale passes the picked ones), so a plan filtered to the
+  // run's clients contains no other client's share by construction and would
+  // read a shared, still-contributed dest as retired on the very next scoped
+  // attach. Nothing then re-installs it: a probe-less client like
+  // `claude-desktop` is never attached by the reconciler. Re-planning with
+  // `clients: 'all'` is the same one loop over the same live registries, so
+  // the keep-set cannot drift from what a full run would copy.
+  //
+  // Planned without a `stderr`: this pass asks a question rather than
+  // reporting one, and every warning `planClientAssets` has to write was
+  // already written when it planned the run's own copies above.
+  // @ref LLP 0219#prune-on-materialize [implements]: the plan check is over
+  //   every client's contributions, not the one client's share of them.
+  const { stderr: _planWarnings, ...quiet } = options
+  const contributed = options.clients === 'all'
+    ? planned
+    : planClientAssets({ ...quiet, clients: 'all' })
+  const keepAll = new Set(contributed.map(({ dest }) => dest))
 
   // A client this run did not install for keeps every record it had: this pass
   // learned nothing about it.
@@ -400,16 +423,16 @@ async function reconcileClientAssetLedger({ options, planned, installed }) {
       // record of the copy that is still sitting there from last time, or the
       // next run would read the path as never ours and leave it forever.
       //
-      // Asked of the **whole run's** plan, exactly as the candidate loop above
-      // is, and for the same reason: a dest is a physical path and two clients
-      // can share an asset directory. Asked of this client's share alone, a dest
-      // that moved to another client whose copy failed is neither a candidate
-      // (the plan contains it) nor carried (this client no longer plans it), so
-      // its record is dropped and the copy still sitting on disk becomes
-      // permanently unprunable and unreportable - the leave-behind LLP 0219
-      // exists to end. Two records for one dest under two clients is the price,
-      // and it is no price at all: candidates are keyed by dest per client and
-      // `fs.rm` is forced and idempotent.
+      // Asked of **every client's contributions**, exactly as the candidate loop
+      // above is, and for the same reason: a dest is a physical path and two
+      // clients can share an asset directory. Asked of this client's share
+      // alone, a dest that moved to another client whose copy failed is neither
+      // a candidate (something contributes it) nor carried (this client no
+      // longer contributes it), so its record is dropped and the copy still
+      // sitting on disk becomes permanently unprunable and unreportable - the
+      // leave-behind LLP 0219 exists to end. Two records for one dest under two
+      // clients is the price, and it is no price at all: candidates are keyed by
+      // dest per client and `fs.rm` is forced and idempotent.
       for (const record of ledger) {
         if (record.client !== client) continue
         if (!keepAll.has(record.dest) || landed.has(record.dest)) continue
