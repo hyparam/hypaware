@@ -21,7 +21,17 @@ Invoke as `/llp-create <title>` with an optional title, or `/llp-create` and the
 
 ### 1. Determine the next LLP number
 
-Scan all files in `llp/` (including subdirectories and `llp/tombstones/`) that match the pattern `NNNN-*.md`. Extract the numeric prefix of each. The next number is `max(existing) + 1`, zero-padded to four digits.
+Run `node scripts/llp-numbers.js next` and use what it prints.
+
+**Do not read the number off the tree you have checked out.** The branch you are on is not the corpus: numbers are minted on every branch at once, and a document minted on a branch you cannot see claims its number just as firmly as one on the default branch. Three branches cut from the same master each took `max(llp/) + 1`, each got the same answer, and git reported no conflict because their slugs differed ([issue #907](https://github.com/hyparam/hypaware/issues/907)). LLP 0156 settles the rule: a fresh number sits above the highest claimed **anywhere**, including branches without an open PR, and including `llp/tombstones/`, because a retired number is never reused.
+
+`scripts/llp-numbers.js` is that rule:
+
+- `next` prints the next free number across every ref that could still merge, zero-padded.
+- `check` exits nonzero when a number this branch mints is already claimed elsewhere. It runs in CI (`.github/workflows/llp-check.yml`) and in `npm test`.
+- `survey` lists every collision across every ref, including the settled ones stale branches still carry.
+
+Fetch first (`git fetch --prune`) or the scan only sees the refs you already had. If the repository is not a git checkout, fall back to `max(existing) + 1` over `llp/` and say that you did, so the number is known to be a guess.
 
 If another LLP tree exists in a non-standard location (some projects use `docs/site/content/llp/` or similar), include it in the scan. Check the project's root LLP or `CLAUDE.md` / `AGENTS.md` for any documented LLP locations.
 
