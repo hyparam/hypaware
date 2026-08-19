@@ -129,7 +129,7 @@ function rewriteStatement(statement, registry, ctes, outer) {
   if (statement.type === 'compound') {
     rewriteStatement(statement.left, registry, ctes, outer)
     rewriteStatement(statement.right, registry, ctes, outer)
-    rewriteCompoundOrderBy(statement, registry, ctes)
+    rewriteCompoundOrderBy(statement, registry, ctes, outer)
     return
   }
   rewriteSelect(statement, registry, ctes, outer)
@@ -144,35 +144,125 @@ function rewriteStatement(statement, registry, ctes, outer) {
  * back in the wrong order with none of them missing. That is quieter than the
  * empty result issue #860 reported, not louder.
  *
- * Only an unqualified name is typed. The compound binds no relation of its
- * own, so there is no qualifier this walk can resolve; `byRelation` and
- * `bound` are empty and no enclosing scope is passed, so a qualified
- * reference here is left alone rather than risking an outer relation that
- * happens to share a branch's alias. That costs a coercion and never
- * mis-types one, which is the trade the rest of this file already makes.
+ * A qualified reference here is typed from those same output columns rather
+ * than refused. The compound binds no relation of its own, and squirreling
+ * evaluates this clause against the combined output row, whose column names
+ * carry no qualifier: its identifier lookup falls through to the bare name, so
+ * `m.message_created_at` reads exactly what `message_created_at` reads, for
+ * any `m` at all - a branch's alias, a branch's table name, or a name neither
+ * branch binds. Leaving the qualified spelling alone therefore left the
+ * wrong-order answer (and a swallowed uncoercible literal) one character away
+ * from the unqualified spelling this function fixes.
+ *
+ * Two qualifiers reach a different value before that fallback, so neither is
+ * registered. One an enclosing select binds is a correlated reference the
+ * evaluator resolves against the outer row first, so it is left to the ordinary
+ * chain in `qualifiedIsTimestamp`, which is why `outer` is threaded in rather
+ * than dropped. One an output column name is or ends with is struct field
+ * access (`item.name` reads a field of the struct column `item`), which the
+ * evaluator reads before the outer row as well, so it goes in `bound` and the
+ * outward walk stops here.
  *
  * @param {SetOperationStatement} statement
  * @param {QueryRegistry} registry
  * @param {Map<string, InferredColumn[] | undefined>} ctes
+ * @param {TimestampScope | undefined} outer enclosing scope, for a correlated reference
  * @ref LLP 0272#scope [implements]: every clause is rewritten alike, and a set operation's ORDER BY is one of them
  */
-function rewriteCompoundOrderBy(statement, registry, ctes) {
+function rewriteCompoundOrderBy(statement, registry, ctes, outer) {
   if (statement.orderBy.length === 0) return
   // The positionally paired list `#complete` already computes: a name is a
   // TIMESTAMP only when both sides carry one into it, so a `UNION` of a
   // TIMESTAMP with a STRING types nothing here either.
-  const columns = inferColumns(statement, registry, ctes) ?? []
+  const types = columnTypes(inferColumns(statement, registry, ctes) ?? [])
   /** @type {Set<string>} */
   const agreed = new Set()
-  for (const [name, isTimestamp] of columnTypes(columns)) {
+  for (const [name, isTimestamp] of types) {
     if (isTimestamp) agreed.add(name)
   }
+  // A nested statement resolves against its own FROM with this clause behind
+  // it, so it gets the plain scope: the qualifiers below are this clause's
+  // reading of its own output row and mean nothing one level down.
   /** @type {TimestampScope} */
-  const scope = { agreed, byRelation: new Map(), bound: new Set() }
+  const nested = { agreed, byRelation: new Map(), bound: new Set(), outer }
+  /** @type {Map<string, Set<string>>} */
+  const byRelation = new Map()
+  /** @type {Set<string>} */
+  const bound = new Set()
+  for (const prefix of qualifiersOf(statement.orderBy.map((item) => item.expr))) {
+    // A shadowed qualifier goes in `bound`, which is what `bound` is for: the
+    // evaluator reads struct access before the outer row too, so the outward
+    // walk has to stop here rather than type the name from an enclosing
+    // relation that happens to share the qualifier.
+    if (shadowsOutputColumn(prefix, types)) {
+      bound.add(prefix.toLowerCase())
+      continue
+    }
+    if (boundOutward(prefix.toLowerCase(), outer)) continue
+    byRelation.set(prefix.toLowerCase(), agreed)
+  }
+  /** @type {TimestampScope} */
+  const scope = { agreed, byRelation, bound, outer }
   for (const item of statement.orderBy) {
-    rewriteExprStatements(item.expr, registry, ctes, scope)
+    rewriteExprStatements(item.expr, registry, ctes, nested)
     rewriteExpr(item.expr, scope)
   }
+}
+
+/**
+ * Every qualifier these expressions use, in their own case. Bounded by the
+ * clause because the qualifier a compound's `ORDER BY` resolves is not drawn
+ * from a relation list: any name at all falls through to the output column, so
+ * there is nothing to enumerate except what was written.
+ *
+ * @param {ExprNode[]} nodes
+ * @returns {Set<string>}
+ */
+function qualifiersOf(nodes) {
+  /** @type {Set<string>} */
+  const prefixes = new Set()
+  /** @param {ExprNode} node */
+  function walk(node) {
+    if (node.type === 'identifier' && node.prefix !== undefined) prefixes.add(node.prefix)
+    for (const child of childExprs(node)) walk(child)
+  }
+  for (const node of nodes) walk(node)
+  return prefixes
+}
+
+/**
+ * Whether an output column of the compound could make this qualifier mean
+ * something other than "ignore me": the column itself (`item.name` is a field
+ * of the struct `item`), a column already written with it (`m.id`, which the
+ * evaluator matches exactly), or a column ending in it. Any of those is read
+ * before the bare-name fallback, and this walk cannot type what they hold.
+ *
+ * @param {string} prefix
+ * @param {Map<string, boolean>} types the compound's output columns
+ * @returns {boolean}
+ */
+function shadowsOutputColumn(prefix, types) {
+  for (const name of types.keys()) {
+    if (name === prefix || name.startsWith(`${prefix}.`) || name.endsWith(`.${prefix}`)) return true
+  }
+  return false
+}
+
+/**
+ * Whether an enclosing select binds this qualifier, columns readable or not.
+ * Such a reference is correlated: the evaluator resolves it against the outer
+ * row before it falls back to the bare output column, so this clause must let
+ * the ordinary outward walk answer it.
+ *
+ * @param {string} prefix lower-cased qualifier
+ * @param {TimestampScope | undefined} outer
+ * @returns {boolean}
+ */
+function boundOutward(prefix, outer) {
+  for (let current = outer; current !== undefined; current = current.outer) {
+    if (current.bound.has(prefix)) return true
+  }
+  return false
 }
 
 /**
