@@ -3,6 +3,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+// A zone-less literal (`'2026-08-18T21:00:00'`) is *local* time, which is the
+// whole reason LLP 0272 made docs/ACCEPTANCE.md keep its trailing `Z`. The
+// cases below name exact row sets, so the file pins the zone rather than
+// passing only on a UTC host. Set before the first Date is constructed.
+process.env.TZ = 'UTC'
+
 import { parseSql } from 'squirreling'
 
 import { executeQuerySql } from '../../src/core/query/sql.js'
@@ -125,6 +131,10 @@ test('a string bound on a TIMESTAMP column selects the rows it names (issue #860
     // the space-separated form is ordinary SQL, and neither parser accepts it
     // raw, so the coercion normalizes the separator rather than refusing
     ["message_created_at >= '2026-08-18 21:00:00Z'", [3, 4]],
+    // minute precision is a legal ISO instant both evaluators already parse,
+    // so it must select rows rather than be refused as uncoercible
+    ["message_created_at >= '2026-08-18T21:00Z'", [3, 4]],
+    ["message_created_at < '2026-08-18T21:00Z'", [1, 2]],
   ]
   /** @type {string[]} */
   const wrong = []
@@ -252,4 +262,57 @@ test('a CTE shadowing a dataset name does not borrow the dataset schema', () => 
     registry
   )
   assert.equal(rewritten.query.where.right.type, 'literal')
+})
+
+// squirreling resolves a CTE reference case-insensitively (it keys its CTE
+// plans by `name.toLowerCase()`), so the shadow check has to as well or the
+// dataset's schema is borrowed for columns the CTE actually supplies.
+test('a CTE shadows a dataset name whatever case it is written in', () => {
+  const registry = registryForMessages()
+  const rewritten = whereOfRewritten(
+    "WITH Ai_Gateway_Messages AS (SELECT '2026-08-18' AS message_created_at) " +
+    "SELECT message_created_at FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z'",
+    registry
+  )
+  assert.equal(rewritten.query.where.right.type, 'literal')
+})
+
+// A qualified reference resolves through its qualifier. A joined derived table
+// can expose a column that shares a dataset column's name and not its type;
+// typing it from the dataset would compare a string cell to a Date, which is
+// false for every row - the silently-wrong answer this whole change exists to
+// prevent, just pointed the other way.
+test('a qualified reference to a derived table is not typed from the dataset', () => {
+  const registry = registryForMessages()
+  const rewritten = whereOfRewritten(
+    'SELECT m.id FROM ai_gateway_messages m ' +
+    'JOIN (SELECT id, date AS message_created_at FROM ai_gateway_messages) s ON m.id = s.id ' +
+    "WHERE s.message_created_at >= '2026-08-18'",
+    registry
+  )
+  assert.equal(rewritten.where.right.type, 'literal')
+})
+
+test('a qualified reference to the base table (by alias or name) is still typed', () => {
+  const registry = registryForMessages()
+  for (const qualifier of ['m', 'ai_gateway_messages']) {
+    const rewritten = whereOfRewritten(
+      `SELECT m.id FROM ai_gateway_messages m WHERE ${qualifier}.message_created_at >= '2026-08-18T21:00:00Z'`,
+      registry
+    )
+    assert.equal(rewritten.where.right.type, 'cast', qualifier)
+  }
+})
+
+// The same Date-against-string comparison is false for every row wherever it
+// sits, so a bound outside WHERE fails the same silent way.
+test('a comparison outside WHERE is typed too', async () => {
+  const rows = await executeQuerySql({
+    query:
+      "SELECT id, CASE WHEN message_created_at >= '2026-08-18T21:00:00Z' THEN 1 ELSE 0 END AS recent " +
+      'FROM ai_gateway_messages ORDER BY id',
+    registry: registryForMessages(),
+    storage,
+  })
+  assert.deepEqual(rows.rows.map((row) => Number(row.recent)), [0, 0, 1, 1])
 })

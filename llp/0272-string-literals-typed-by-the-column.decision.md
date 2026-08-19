@@ -84,8 +84,19 @@ timestamp literal means.
 - A column two in-scope tables type differently is left alone. A wrong
   coercion returns wrong rows, which is the failure this document exists to
   end; declining costs only the pruning.
-- A CTE shadowing a dataset name does not borrow the dataset's schema, and a
-  subquery is typed against its own `FROM`, never the enclosing one.
+- A CTE shadowing a dataset name does not borrow the dataset's schema (matched
+  case-insensitively, as squirreling resolves CTE references), and a subquery is
+  typed against its own `FROM`, never the enclosing one.
+- A **qualified** reference resolves through its qualifier: `s.ts` is typed only
+  when `s` names a base table (or its alias) whose schema declares `ts`
+  TIMESTAMP. A joined derived table can expose a column that shares a dataset
+  column's name and not its type, and typing that one from the dataset would
+  compare a string cell to a `Date` - the same silently-empty answer, pointed
+  the other way. An unqualified reference falls back to the names every base
+  table in scope agrees on.
+- Every clause of the select, not only `WHERE`: the comparison is false for
+  every row wherever it sits, so `select case when ts > '...' then 1 end`,
+  `HAVING`, `JOIN ... ON`, `GROUP BY` and `ORDER BY` are rewritten alike.
 - Comparison operators (`=`, `==`, `!=`, `<>`, `<`, `<=`, `>`, `>=`) and `IN`
   lists, on either side of the operator. `BETWEEN` desugars to two comparisons
   at parse time and is covered by that. `LIKE` against a `TIMESTAMP` is not
@@ -134,6 +145,18 @@ reintroduce the silent empty result through the front door.
   only one, and still sees exactly the AST shapes it already handled.
 
 <a id="not-settled"></a>
+
+## Not settled here: relations the registry cannot name {#not-settled-derived}
+
+A bound is typed from a **dataset schema**, so a select whose `FROM` is a CTE or
+a derived table gets no coercion at all:
+`with c as (select * from ai_gateway_messages) select * from c where ts >= '...'`
+still compares a `Date` to a string and still returns zero rows. Closing that
+means inferring an inner select's output column *types* (through `select *`,
+aliases, and expressions), which is column inference the engine already owns and
+does not export. The shape the issue reported (a bound directly on a dataset)
+is fixed; this residual is named here so the next reader does not read #860 as
+fully closed.
 
 ## Not settled here: coercion for other types {#not-settled}
 
