@@ -20,17 +20,22 @@ import {
 /**
  * `hyp ask [question]`
  *
- * The wizard's closing first ask, made durable. Setup teaches every other
- * closing surface as something you can get back to (the first look prints
- * "See this again anytime: hyp query overview"); a question menu reachable
- * only by re-running `hyp init` would be the exception.
+ * The verb that makes setup's closing questions runnable. Setup prints
+ * them and stops there, deliberately: it may have been invoked from an
+ * installer or a directory the user does not want an agent session rooted
+ * in, so the launch waits for a command run from a directory they chose.
  *
  * With no argument it renders the same four questions and starts the
  * chosen client on the pick. With a question it skips the menu entirely,
  * which is the shape a user reaches for once they know what they want:
  * `hyp ask "which sessions touched the auth module"`.
  *
- * @ref LLP 0198#re-runnable [implements]: the closing list is a verb, not a one-off screen
+ * The working directory is `process.cwd()` by construction: nothing here
+ * overrides it, because where the client starts is the whole reason this
+ * is a separate command.
+ *
+ * @ref LLP 0198#re-runnable [implements]: the questions need a verb, or they are four sentences to retype
+ * @ref LLP 0198#onboarding-list [constrained-by]: the launch boundary is where the user chose the directory
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -43,7 +48,7 @@ export async function runAsk(argv, ctx) {
 
   if (parsed.params.list === true) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
-    writeSuggestedPrompts({ stdout: ctx.stdout, launchable: launchers.length > 0 })
+    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'paste' })
     return 0
   }
   const question = String(parsed.params.question ?? '').trim()
