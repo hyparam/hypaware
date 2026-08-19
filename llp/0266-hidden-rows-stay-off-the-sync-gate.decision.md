@@ -49,10 +49,20 @@ of every enrolled onboarding run.
 
 ## Decision {#sync-gate}
 
-**The sync lane's locked rows go through the same display filter as the
+**The sync lane's rows go through the same display filter as the
 picker's.** `runInitWizard` maps `lockedSources` to descriptors and passes
 the result through `visiblePickerDescriptors` before handing it to
 `runWizardSyncScope`; the lane receives an already-filtered list.
+
+The lane's *candidates* take the same filter, for the same reason. A
+carried hidden row (LLP 0202 §carry-through) reaches `picked.descriptors`
+whenever it is not locked - the team pathway whose org config has not
+converged, or an enrolled machine whose central layer does not declare
+`@hypaware/ai-gateway` - and unfiltered it rendered as an *editable*
+checkbox on the gate the picker had never offered, where unchecking it
+writes a `local-only` policy entry for a source the user was never shown.
+One filter, applied to both row lists, is what makes "absent from every
+wizard screen" true rather than half true.
 
 Two consequences follow, and both are the point:
 
@@ -82,18 +92,39 @@ locked rows. With the filter above that branch becomes reachable with an
 empty locked list - an enrolled machine that picked nothing visible - where
 the sentence names an owner for an empty list.
 
-So the branch splits on whether there is a visible org row to name. With
-none, it states the fact that is actually true: *"You picked nothing to
-record, so nothing syncs to your server."* Both paths stay `noQuestion`, so
-LLP 0191 #back-edges is unaffected and the step counter still does not skip
-a number.
+So the branch splits on whether there is a visible org row to name - and,
+when there is not, on whether a locked row is standing at all. Those are
+different facts and only the second licenses the strong sentence:
+
+- **A visible org row.** *"Everything you picked is managed by your fleet
+  and always syncs"*, over the named rows, exactly as before.
+- **No visible org row, but locked rows filtered out of the display.** This
+  is the enrolled machine of §problem: `raw-anthropic` / `raw-openai` are
+  locked, are contributed by the org's gateway, and under LLP 0188 #locked
+  they always sync and can never be opted out. Nothing was picked, but
+  something *does* leave the machine, so the line may not say otherwise:
+  *"You picked nothing to record, but capture your fleet manages directly
+  still syncs to your server."* It states the fact without naming a row the
+  user has never seen. Saying "nothing syncs" here would trade LLP 0202's
+  over-disclosure for an affirmatively false claim about what leaves the
+  machine, which is the failure LLP 0188 #never-silent exists to prevent.
+- **No locked row at all.** Nothing was picked and nothing syncs: *"You
+  picked nothing to record, so nothing syncs to your server."*
+
+The lane learns which of the last two it is from `lockedHidden`, the count
+of rows the display filter removed. It is a count, not a list: the lane
+must be able to tell the truth about them without being able to name them.
+
+All three paths stay `noQuestion`, so LLP 0191 #back-edges is unaffected
+and the step counter still does not skip a number.
 
 ## Consequences {#consequences}
 
 - `src/core/cli/wizard/index.js` imports `visiblePickerDescriptors` and
-  applies it to `lockedDescriptors`; `runWizardSyncScope` documents that
-  `opts.locked` arrives display-filtered rather than filtering defensively,
-  so there is one filter, not two that can disagree.
+  applies it to both `lockedDescriptors` and the candidate list, and passes
+  `lockedHidden` alongside; `runWizardSyncScope` documents that both row
+  lists arrive display-filtered rather than filtering defensively, so there
+  is one filter, not two that can disagree.
 - LLP 0202 §consequences' line "The sync/opt-out menu is unchanged" is
   superseded by this doc. It was written against the lane as it stood before
   the locked rows were added to the gate (PR #629, two days earlier), where

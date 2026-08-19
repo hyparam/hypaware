@@ -483,6 +483,28 @@ test('runInitWizard: a hidden locked row stays off the sync-scope screen', async
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor], 'the hidden org row is filtered out, the visible one kept')
+  assert.equal(opts._syncOpts.lockedHidden, 1, 'the lane is told a locked row was withheld, without being given the row')
+})
+
+// The candidate list takes the same filter. A carried hidden row (LLP 0202
+// #carry-through) reaches `picked.descriptors` whenever it is not locked -
+// a team join whose org config has not converged, say - and unfiltered the
+// gate offered it as an editable checkbox for a row the picker never showed.
+// @ref LLP 0266#sync-gate [tests]:
+test('runInitWizard: a hidden picked row is not a sync-scope candidate', async () => {
+  const catalog = emptyCatalog()
+  const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('claude', claudeDescriptor)
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ descriptors: [rawDescriptor, claudeDescriptor] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._syncOpts.candidates, [claudeDescriptor], 'the hidden row is not offered as an opt-out candidate')
+  assert.equal(opts._syncOpts.lockedHidden, 0, 'nothing locked, so nothing was withheld from the locked list')
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {

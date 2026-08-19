@@ -76,15 +76,27 @@ export interface RunWizardSyncScopeOptions {
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
-  /** The picked, locked-filtered descriptors (the pick result's `descriptors`). */
+  /**
+   * The picked, locked-filtered descriptors (the pick result's
+   * `descriptors`), arriving display-filtered like `locked` below: a
+   * hidden row (LLP 0202) is off every wizard screen, this one included.
+   */
   candidates: PickerDescriptor[]
   /**
-   * The org's locked (central-layer) descriptors. Always-sync (LLP 0188
-   * #locked) and never editable here, but listed - on the gate and as
-   * checked, disabled menu rows - so "these will sync" states the whole
-   * picture, not only the editable slice (LLP 0190 #sync-gate).
+   * The org's locked (central-layer) descriptors, already display-filtered
+   * (LLP 0266 #sync-gate). Always-sync (LLP 0188 #locked) and never
+   * editable here, but listed - on the gate and as checked, disabled menu
+   * rows - so "these will sync" states the whole picture, not only the
+   * editable slice (LLP 0190 #sync-gate).
    */
   locked?: PickerDescriptor[]
+  /**
+   * How many locked rows the display filter removed from `locked`. The
+   * lane never names them, but it may not tell the user nothing syncs
+   * while they stand: a locked row always syncs (LLP 0188 #locked), and
+   * on an enrolled machine the whole locked set is usually hidden.
+   */
+  lockedHidden?: number
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**

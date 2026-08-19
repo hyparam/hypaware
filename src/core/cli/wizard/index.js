@@ -525,19 +525,29 @@ export async function runInitWizard(opts) {
             // and leading the sync gate with two fleet-labelled rows the
             // picker never offered made the label look like it described the
             // clients underneath it.
-            // @ref LLP 0266#sync-gate [implements]: the sync lane's locked rows go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
-            const lockedDescriptors = visiblePickerDescriptors(
-              picked.lockedSources
-                .map((id) => catalog.pickerDescriptors.get(id))
-                .filter((d) => d !== undefined)
-            )
+            // The candidates go through the same filter: `picked.descriptors`
+            // is the non-locked slice of the picks, and a carried hidden row
+            // (LLP 0202 #carry-through) survives into it whenever that row is
+            // not locked - a join whose org config has not converged yet, say.
+            // Unfiltered it rendered as an editable checkbox for a row the
+            // picker deliberately never offered.
+            // @ref LLP 0266#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
+            const allLockedDescriptors = picked.lockedSources
+              .map((id) => catalog.pickerDescriptors.get(id))
+              .filter((d) => d !== undefined)
+            const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors)
             const syncScope = await syncFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
-              candidates: picked.descriptors,
+              candidates: visiblePickerDescriptors(picked.descriptors),
               locked: lockedDescriptors,
+              // How many locked rows the display filter removed. The lane
+              // never names them, but it must not tell the user nothing syncs
+              // while they stand: a locked row always syncs (LLP 0188 #locked).
+              // @ref LLP 0266#no-candidates [implements]: the no-candidates line separates "no visible org row to name" from "no org row at all"
+              lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
               ...(syncProgress ? { progress: syncProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),
