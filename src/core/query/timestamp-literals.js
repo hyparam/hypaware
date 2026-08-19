@@ -13,8 +13,13 @@ const COMPARISON_OPS = new Set(['=', '==', '!=', '<>', '<', '>', '<=', '>='])
  * ISO date, optionally with a time and a zone. The separator is captured so a
  * space-separated SQL timestamp literal can be normalized to `T` before it
  * reaches either parser, which both require the `T`.
+ *
+ * Seconds are optional: `2026-08-18T21:00` is a legal ISO instant that both
+ * evaluators already parse (each only regex-tests the `YYYY-MM-DD` prefix and
+ * then hands the whole string to `new Date`), so refusing it here would turn
+ * a form that works as a typed literal into an error as a bare one.
  */
-const TIMESTAMP_LITERAL = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*(Z|[+-]\d{2}:?\d{2})?)?$/
+const TIMESTAMP_LITERAL = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}:?\d{2})?)?$/
 
 /**
  * A string literal that cannot be read as a timestamp, in a position where
@@ -32,7 +37,7 @@ export class TimestampLiteralError extends Error {
     super(
       `cannot compare TIMESTAMP column '${column}' to the string literal ` +
       `'${literal}': a timestamp literal must look like YYYY-MM-DD, ` +
-      'YYYY-MM-DDTHH:MM:SS, or YYYY-MM-DDTHH:MM:SSZ'
+      'YYYY-MM-DDTHH:MM, YYYY-MM-DDTHH:MM:SS, or YYYY-MM-DDTHH:MM:SSZ'
     )
     this.name = 'TimestampLiteralError'
     this.code = 'timestamp_literal_uncoercible'
@@ -71,11 +76,15 @@ export function coerceTimestampLiterals(statement, registry) {
 function rewriteStatement(statement, registry, shadowed) {
   if (statement.type === 'with') {
     // A CTE is visible to its siblings that follow it and to the outer query,
-    // and it shadows any dataset of the same name.
+    // and it shadows any dataset of the same name. Held lower-cased because
+    // squirreling resolves a CTE reference case-insensitively (it keys its CTE
+    // plans by `name.toLowerCase()`): a case-sensitive shadow set would let
+    // `WITH Msgs ... FROM msgs` borrow a dataset's schema for columns the CTE
+    // actually supplies.
     const inner = new Set(shadowed)
     for (const cte of statement.ctes) {
       rewriteStatement(cte.query, registry, inner)
-      inner.add(cte.name)
+      inner.add(cte.name.toLowerCase())
     }
     rewriteStatement(statement.query, registry, inner)
     return
@@ -100,15 +109,16 @@ function rewriteSelect(select, registry, shadowed) {
   for (const join of select.joins) {
     if (join.subquery) rewriteStatement(join.subquery.query, registry, shadowed)
   }
-  for (const expr of selectExprs(select)) rewriteExprStatements(expr, registry, shadowed)
+  const exprs = selectExprs(select)
+  for (const expr of exprs) rewriteExprStatements(expr, registry, shadowed)
 
-  const timestampColumns = timestampColumnsInScope(select, registry, shadowed)
-  if (timestampColumns.size > 0) {
-    if (select.where) rewriteExpr(select.where, timestampColumns)
-    if (select.having) rewriteExpr(select.having, timestampColumns)
-    for (const join of select.joins) {
-      if (join.on) rewriteExpr(join.on, timestampColumns)
-    }
+  // Every clause this select holds, not just WHERE: the same
+  // Date-against-string comparison is false for every row wherever it sits,
+  // so `select case when ts > '...' then 1 end` and `order by ts > '...'`
+  // fail the same silent way the reported WHERE did.
+  const scope = timestampScope(select, registry, shadowed)
+  if (scope.agreed.size > 0) {
+    for (const expr of exprs) rewriteExpr(expr, scope)
   }
 }
 
@@ -138,42 +148,58 @@ function selectExprs(select) {
 }
 
 /**
- * Column names this select's base tables agree are TIMESTAMP. A name two
- * tables in scope type differently is dropped rather than guessed at: a wrong
- * coercion returns wrong rows, which is the failure this exists to end.
+ * The TIMESTAMP columns this select's base tables declare, two ways: the
+ * names every base table in scope agrees are TIMESTAMP (for an unqualified
+ * reference), and the names each base table declares under its own name and
+ * alias (for a qualified one). A name two tables type differently is dropped
+ * rather than guessed at, and a relation the registry cannot name at all (a
+ * derived table, a CTE, a table function) contributes nothing, so `s.ts`
+ * against such a relation is never typed from an unrelated dataset that
+ * happens to share the column name: a wrong coercion returns wrong rows,
+ * which is the failure this exists to end.
  *
  * @param {SelectStatement} select
  * @param {QueryRegistry} registry
  * @param {Set<string>} shadowed
- * @returns {Set<string>}
+ * @returns {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }}
  */
-function timestampColumnsInScope(select, registry, shadowed) {
-  /** @type {string[]} */
+function timestampScope(select, registry, shadowed) {
+  /** @type {{ table: string, alias?: string }[]} */
   const tables = []
-  if (select.from?.type === 'table') tables.push(select.from.table)
+  if (select.from?.type === 'table') tables.push({ table: select.from.table, alias: select.from.alias })
   for (const join of select.joins) {
-    if (join.table && !join.subquery && !join.fromFunction) tables.push(join.table)
+    if (join.table && !join.subquery && !join.fromFunction) tables.push({ table: join.table, alias: join.alias })
   }
 
   /** @type {Map<string, boolean>} */
-  const agreed = new Map()
-  for (const table of tables) {
-    if (shadowed.has(table)) continue
-    const schema = registry.getDataset(table)?.schema
-    if (!schema) continue
-    for (const column of schema.columns) {
+  const seenTypes = new Map()
+  /** @type {Map<string, Set<string>>} */
+  const byRelation = new Map()
+  for (const { table, alias } of tables) {
+    if (shadowed.has(table.toLowerCase())) continue
+    // `?.columns` rather than a bare deref: a registration that hands the
+    // kernel a malformed schema must not turn every query touching it into a
+    // TypeError, the same way `hyp backfill` reads it.
+    const columns = registry.getDataset(table)?.schema?.columns
+    if (!columns) continue
+    /** @type {Set<string>} */
+    const declared = new Set()
+    for (const column of columns) {
       const isTimestamp = column.type === 'TIMESTAMP'
-      const seen = agreed.get(column.name)
-      agreed.set(column.name, seen === undefined ? isTimestamp : seen && isTimestamp)
+      if (isTimestamp) declared.add(column.name)
+      const seen = seenTypes.get(column.name)
+      seenTypes.set(column.name, seen === undefined ? isTimestamp : seen && isTimestamp)
     }
+    byRelation.set(table.toLowerCase(), declared)
+    if (alias) byRelation.set(alias.toLowerCase(), declared)
   }
 
   /** @type {Set<string>} */
-  const names = new Set()
-  for (const [name, isTimestamp] of agreed) {
-    if (isTimestamp) names.add(name)
+  const agreed = new Set()
+  for (const [name, isTimestamp] of seenTypes) {
+    if (isTimestamp) agreed.add(name)
   }
-  return names
+  return { agreed, byRelation }
 }
 
 /**
@@ -200,25 +226,25 @@ function rewriteExprStatements(node, registry, shadowed) {
 
 /**
  * @param {ExprNode} node
- * @param {Set<string>} timestampColumns
+ * @param {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }} scope
  */
-function rewriteExpr(node, timestampColumns) {
+function rewriteExpr(node, scope) {
   if (node.type === 'binary' && COMPARISON_OPS.has(node.op)) {
-    const column = timestampOperand(node.left, timestampColumns)
+    const column = timestampOperand(node.left, scope)
     if (column) node.right = coerceOperand(node.right, column)
     else {
-      const flipped = timestampOperand(node.right, timestampColumns)
+      const flipped = timestampOperand(node.right, scope)
       if (flipped) node.left = coerceOperand(node.left, flipped)
     }
   }
   if (node.type === 'in valuelist') {
-    const column = timestampOperand(node.expr, timestampColumns)
+    const column = timestampOperand(node.expr, scope)
     if (column) node.values = node.values.map((value) => coerceOperand(value, column))
   }
   // A nested statement is skipped here on purpose: its columns resolve against
   // its own FROM, so `rewriteExprStatements` types it in its own scope rather
   // than borrowing this select's.
-  for (const child of childExprs(node)) rewriteExpr(child, timestampColumns)
+  for (const child of childExprs(node)) rewriteExpr(child, scope)
 }
 
 /**
@@ -248,18 +274,23 @@ function childExprs(node) {
 }
 
 /**
- * The column name if this operand is a bare reference to a TIMESTAMP column
- * in scope, otherwise undefined. A qualified reference matches on its bare
- * name: aliases are not resolved here, and the scope set already required
- * every table in scope to agree on the type.
+ * The column name if this operand is a reference to a TIMESTAMP column in
+ * scope, otherwise undefined. A qualified reference is resolved through its
+ * qualifier, so `s.message_created_at` against a joined derived table stays a
+ * string comparison even when a base table in the same scope declares that
+ * name TIMESTAMP; an unqualified one falls back to the names every base table
+ * agrees on.
  *
  * @param {ExprNode} node
- * @param {Set<string>} timestampColumns
+ * @param {{ agreed: Set<string>, byRelation: Map<string, Set<string>> }} scope
  * @returns {string | undefined}
  */
-function timestampOperand(node, timestampColumns) {
+function timestampOperand(node, scope) {
   if (node.type !== 'identifier') return undefined
-  return timestampColumns.has(node.name) ? node.name : undefined
+  if (node.prefix !== undefined) {
+    return scope.byRelation.get(node.prefix.toLowerCase())?.has(node.name) ? node.name : undefined
+  }
+  return scope.agreed.has(node.name) ? node.name : undefined
 }
 
 /**
