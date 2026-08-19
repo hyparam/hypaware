@@ -90,6 +90,18 @@ the one nobody sees on a TTY.
   boxes, and its dropped-terminal cancel is pinned by its own test.
 - The shared `legacyNumberedPromptFactory` is unchanged. This is one more
   question opting into an existing contract, not a new one.
+- The flag also widens this question's ask budget from one line to two
+  (`legacyNumberedPromptFactory`: `attempts = 1 + (enterKeepsChecked ? 1 :
+  0)`), so a malformed answer here now costs a re-ask, and a piped script
+  that feeds one shifts every later line by one. On a reconfigure the
+  shifted line lands on the overwrite confirm, which reads its own EOF as
+  the printed `Y` default (LLP 0190 #commit-point), so a scripted `n` meant
+  for that confirm can be eaten by the re-ask and the write proceed. This is
+  the tradeoff LLP 0190 #sync-gate already weighed and accepted for the sync
+  menu, taken here for the same reason: without the re-ask the malformed
+  answer returns the empty selection silently, which is the defect above by
+  another route. Nothing in the tree drives the wizard by piped lines today,
+  and a bare enter (the answer this doc is about) never spends the budget.
 
 ## References
 
