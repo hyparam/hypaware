@@ -2,59 +2,25 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a centrally managed deployment, and contributes the hyp setup wizard's Claude Desktop picker row.",
+  "description": "Attribution stub for Claude Desktop. Gateway capture is removed because it changed the app's account context (LLP 0295). This plugin claims Desktop's transcript entrypoints so the Claude Code backfill does not import Desktop sessions as its own, and carries one hidden recovery command for Macs an older release configured.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
-  "requires": {
-    "capabilities": {
-      "hypaware.ai-gateway": "^2.0.0",
-      "hypaware.anthropic-credential": "^1.0.0"
-    }
-  },
   "contributes": {
     "client": {
       "name": "claude-desktop",
       "skill_dir": ".claude/skills",
       "agent_dir": ".claude/agents",
-      "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"]
+      "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"],
+      "retired": {
+        "reason": "Gateway capture changed Claude Desktop's account context (LLP 0295).",
+        "residue_path": "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist",
+        "repair_command": "client claude-desktop disable"
+      }
     },
-    "picker": [
-      {
-        "name": "claude-desktop",
-        "label": "Claude Desktop",
-        "summary": "Records Claude Desktop conversations and starts a local gateway listener. Needs Claude sign-in and admin approval; setup asks before changing anything.",
-        "detect": { "app_bundle": "/Applications/Claude.app" },
-        "needs_setup": true,
-        "configure_command": "client claude-desktop install",
-        "compose": {
-          "requires_gateway": true,
-          "gateway_upstream": {
-            "name": "anthropic",
-            "base_url": "https://api.anthropic.com",
-            "path_prefix": "/v1/messages",
-            "provider": "anthropic"
-          },
-          "plugins": [
-            { "name": "@hypaware/claude-account", "config": { "mode": "subscription" } },
-            { "name": "@hypaware/claude-desktop" }
-          ]
-        }
-      }
-    ],
     "commands": [
-      { "name": "client claude-desktop profile", "aliases": ["claude-desktop profile"], "category": "capture-movement", "audience": "everyday", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
-      { "name": "client claude-desktop install-helper", "aliases": ["claude-desktop install-helper"], "category": "capture-movement", "audience": "everyday", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
-      { "name": "client claude-desktop status", "aliases": ["claude-desktop status"], "category": "capture-movement", "audience": "everyday", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" },
-      { "name": "client claude-desktop install", "aliases": ["claude-desktop install"], "category": "capture-movement", "audience": "everyday", "summary": "Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt" },
-      { "name": "client claude-desktop verify", "aliases": ["claude-desktop verify"], "category": "capture-movement", "audience": "everyday", "summary": "Verify the Desktop plist install and print the in-app capture-check hint" }
-    ],
-    "config_sections": [
-      {
-        "section": "claude_desktop",
-        "summary": "Desktop profile inputs: { models?, endpoint?, helper_path?, bundle_id? }. Rendered values only; the profile never carries a secret."
-      }
+      { "name": "client claude-desktop disable", "aliases": ["claude-desktop disable"], "category": "capture-movement", "audience": "everyday", "hidden": true, "summary": "Remove the old managed plist and restore Claude Desktop's normal account context" }
     ]
   }
 }

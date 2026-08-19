@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-07-27
 **Related:** LLP 0016, LLP 0024, LLP 0041, LLP 0153, LLP 0116, LLP 0117, LLP 0130, LLP 0131, LLP 0133
+**Superseded-by:** [LLP 0295](./0295-claude-desktop-gateway-capture-disabled.issue.md) (the Desktop picker row and its consent-gated setup command are deleted. #compose-the-whole-dependency-set and #repair-must-be-runnable remain in force for every other client row)
 
 > [LLP 0133](./0133-desktop-solo-sudo-plist.decision.md) shipped
 > `hyp claude-desktop install` and gave the plugin a `needs_setup` picker

@@ -89,6 +89,24 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
               (v) => typeof v === 'string' && v.length > 0
             )
           }
+          // A retirement is only meaningful with a reason, since the reason
+          // is what status and help print. `residue_path` and
+          // `repair_command` ride together or not at all: a residue nobody
+          // can clear is a warning with no repair, which is the shape LLP
+          // 0139#repair-must-be-runnable exists to prevent.
+          // @ref LLP 0295#status-surface [implements]: the retirement and its clearable residue are manifest data, read without booting the plugin
+          const retired = client.retired
+          if (retired && typeof retired.reason === 'string' && retired.reason.length > 0) {
+            const residuePath = retired.residue_path
+            const repairCommand = retired.repair_command
+            descriptor.retired = {
+              reason: retired.reason,
+              ...(typeof residuePath === 'string' && residuePath.length > 0 &&
+                typeof repairCommand === 'string' && repairCommand.length > 0
+                ? { residuePath, repairCommand }
+                : {}),
+            }
+          }
           // A probe with no readable `dir` is dropped here rather than
           // downstream: an accepted-but-empty probe would report "no
           // activity" for a client that is active, which reads as

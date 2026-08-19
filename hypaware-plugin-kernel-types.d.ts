@@ -195,6 +195,20 @@ export interface PluginClientManifest {
    */
   transcript_entrypoints?: string[]
   /**
+   * Set when this client's capture route has been withdrawn. A retired
+   * client keeps its identity - `transcript_entrypoints` still gates the
+   * backfill, the opt-out store still knows its name - but declares no
+   * picker row and offers no setup, so `hyp status` must not prompt the
+   * user to finish a setup that no longer exists (LLP 0295#status-surface).
+   *
+   * `residue_path` is a file an older release left behind that still
+   * affects the app. Status reports it, and only it, as the one condition
+   * a user can still act on; `repair_command` is what clears it. Both are
+   * plugin knowledge, declared here because status reads the static
+   * catalog without booting plugins.
+   */
+  retired?: PluginClientRetiredManifest
+  /**
    * How to start this client on a question, for the wizard's closing
    * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
    * cannot be started on a prompt at all: Claude Desktop is a GUI app
@@ -225,6 +239,35 @@ export interface PluginActivityProbeManifest {
   dir: string
   /** Only files ending in this suffix count (e.g. `.jsonl`); absent means every file. */
   file_suffix?: string
+}
+
+/**
+ * A withdrawn capture route (`contributes.client.retired`).
+ *
+ * Declaring this is not the same as deleting the plugin. A client whose
+ * manifest disappears stops claiming its `transcript_entrypoints`, and
+ * `classifyTranscriptEntrypoint` fails OPEN on an unclaimed entrypoint, so
+ * deletion would let another client's backfill import this one's sessions
+ * as its own. The retired stub stays installed to keep that gate closed.
+ *
+ * @see LLP 0295#attribution-stub
+ */
+export interface PluginClientRetiredManifest {
+  /** Why the route was withdrawn, for status and help text. */
+  reason: string
+  /**
+   * Absolute path to a file an older release left behind that still
+   * changes the client's behavior. Status warns only while it exists, so
+   * the prompt is closable, unlike the setup-completeness prompt a retired
+   * client would otherwise fire forever.
+   */
+  residue_path?: string
+  /**
+   * The command that removes `residue_path`, without the `hyp` prefix.
+   * Required alongside it: a warning whose repair is unrunnable is the
+   * failure LLP 0139#repair-must-be-runnable already named.
+   */
+  repair_command?: string
 }
 
 /**

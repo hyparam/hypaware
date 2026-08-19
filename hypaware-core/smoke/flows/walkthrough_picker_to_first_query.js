@@ -458,14 +458,16 @@ export async function run({ harness, expect }) {
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 8 bundled picker rows: claude, codex, claude-desktop, openclaw,
-    // hermes, raw-anthropic, raw-openai, otel.
+    // 7 bundled picker rows: claude, codex, openclaw, hermes,
+    // raw-anthropic, raw-openai, otel. claude-desktop left the set when its
+    // route was retired (LLP 0295#kill-switch); it contributes a client for
+    // transcript attribution but no row.
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=8',
+      'traces: wizard.pick.start span emitted with sources_available=7',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 8
+        v.sources_available === 7
     )
 
     const writeSpans = traces.filter(

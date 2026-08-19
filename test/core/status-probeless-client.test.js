@@ -108,14 +108,17 @@ test('the gate stops at attach state: client_attach_missing still fires for a pr
   const report = await joinedWithDesktop(hypHome)
 
   const missing = report.diagnostics.filter((d) => d.kind === 'client_attach_missing')
-  // Deliberately NOT gated. LLP 0224 #repair-surface made this the standing
-  // incomplete-setup prompt and stopped the wizard re-offering setup because
-  // it exists, so gating it here would leave a declined Desktop setup with no
-  // surface at all. Pinned so the exception cannot be closed by accident along
-  // with the two state surfaces above.
-  const desktop = missing.find((d) => d.message.includes('claude-desktop'))
-  assert.ok(desktop, `expected client_attach_missing for claude-desktop, got: ${missing.map((d) => d.message).join(' | ')}`)
-  assert.deepEqual(desktop.repair, ['hyp client claude-desktop install'])
+  // Probe-less is still NOT what gates this prompt. What gates it now is
+  // RETIREMENT, which is a different property: claude-desktop happens to be
+  // both, so it is the wrong witness for "probe-less still warns" and is
+  // excluded here rather than asserted (LLP 0295#status-surface). The
+  // exception #544 pinned survives for any probe-less client with a live
+  // route; if one is ever added, assert it here.
+  assert.equal(
+    missing.some((d) => d.message.includes('claude-desktop')),
+    false,
+    'a retired client is skipped by the incomplete-setup prompt entirely'
+  )
   // The probed clients are unaffected in the other direction.
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/claude'")))
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/openclaw'")))

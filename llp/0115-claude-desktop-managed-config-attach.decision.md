@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0016, LLP 0044, LLP 0045, LLP 0061, LLP 0086, LLP 0114, LLP 0116, LLP 0117
+**Superseded-by:** [LLP 0295](./0295-claude-desktop-gateway-capture-disabled.issue.md) (the managed-plist attach is removed: it changes Claude Desktop's account context. The #desktop-rows-are-distinguishable User-Agent stamping survives in `@hypaware/claude` and is untouched)
 
 > Claude Desktop (macOS) has a hidden third-party-inference surface that can
 > point the app at a local gateway: Help -> "Enable Developer Mode" unlocks a

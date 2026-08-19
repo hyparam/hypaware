@@ -288,58 +288,46 @@ test('no bundled plugin manifest fails validation', async () => {
   )
 })
 
-// Regression: the Claude Desktop row shipped a `needs_setup` /
-// `configure_command` pair with NO `compose` block, so ticking it in
-// `hyp init` wrote a config containing none of its plugins. The configure
-// phase then ran `claude-desktop install` against a config the command was
-// not in, exiting nonzero, and the drop-on-failure catch-up hint
-// (`hyp claude-desktop install`) failed identically forever. A row whose
-// configure_command cannot resolve in the config the row itself produced is
-// a dead end, not an error, which is why this is pinned here rather than
-// left to the wizard tests.
-// @ref LLP 0139#compose-the-whole-dependency-set [tests]: the Desktop row composes both plugins its configure_command needs
-test('claude-desktop composes the gateway, the credential plugin, and its own adapter', async () => {
+// Claude Desktop composes nothing because it contributes no picker row at
+// all (LLP 0295#kill-switch). Asserting the id is absent from the catalog is
+// the load-bearing check: `hidden: true` would have left `--source
+// claude-desktop` composing the full gateway route, since LLP 0202
+// #hidden-rows guarantees exactly that for a hidden row.
+// @ref LLP 0295#kill-switch [tests]: no picker id reaches the retired Desktop route
+test('claude-desktop is not a picker source and composes nothing', async () => {
   const d = await realPickerDescriptors()
+  assert.equal(d.has('claude-desktop'), false, 'the row is deleted, not hidden')
   assert.deepEqual(compose(d, ['claude-desktop']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/claude-account', config: { mode: 'subscription' } },
-      { name: '@hypaware/claude-desktop' },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
   })
 })
 
-// `@hypaware/claude-desktop`'s manifest requires the
-// `hypaware.anthropic-credential` capability, which only
-// `@hypaware/claude-account` provides. Composing the adapter without the
-// credential plugin activates neither: the plugin fails its
-// `requireCapability` call, so its commands never register and the
-// dispatcher reports `unknown command 'claude-desktop status'` rather than
-// the capability gap. Half a dependency set is worse than none.
-test('the claude-desktop row composes its required-capability provider, not just its adapter', async () => {
-  const d = await realPickerDescriptors()
-  const names = (compose(d, ['claude-desktop']).plugins ?? []).map((p) => p.name)
-  assert.ok(names.includes('@hypaware/claude-desktop'), 'composes the adapter')
-  assert.ok(names.includes('@hypaware/claude-account'), 'composes the credential capability provider')
-  assert.ok(
-    names.indexOf('@hypaware/claude-account') < names.indexOf('@hypaware/claude-desktop'),
-    'the provider precedes the consumer'
-  )
+// The plugin keeps its client contribution so its transcript entrypoints stay
+// claimed; only the picker row is gone. Pinned because deleting the whole
+// manifest looks like the same change and is not: the backfill gate fails
+// OPEN on an unclaimed entrypoint.
+// @ref LLP 0295#attribution-stub [tests]: the client contribution outlives the picker row
+test('claude-desktop still contributes a client, with its transcript entrypoints', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const desktop = catalog.clientDescriptors.get('claude-desktop')
+  assert.ok(desktop, 'the client descriptor must survive the picker row')
+  assert.deepEqual(desktop.transcriptEntrypoints, ['claude-desktop', 'claude-desktop-3p'])
+  assert.equal(desktop.retired?.repairCommand, 'client claude-desktop disable')
 })
 
-// The Desktop row and the Claude Code row both want the anthropic upstream.
-// The fold dedupes by name, so picking both must not double it.
-test('claude + claude-desktop share one anthropic upstream and one gateway', async () => {
+// Naming Desktop beside a real pick must not perturb that pick.
+test('naming claude-desktop beside another pick changes nothing', async () => {
   const d = await realPickerDescriptors()
   const config = compose(d, ['claude', 'claude-desktop'])
-  const gateways = (config.plugins ?? []).filter((p) => p.name === '@hypaware/ai-gateway')
-  assert.equal(gateways.length, 1)
-  assert.deepEqual(/** @type {any} */ (gateways[0].config).upstreams, [ANTHROPIC])
+  assert.deepEqual(config, compose(d, ['claude']))
+  assert.equal((config.plugins ?? []).some((p) => p.name === '@hypaware/claude-account'), false)
 })
 
 // A `needs_setup` row promises the wizard will run a setup command for it.

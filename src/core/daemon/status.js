@@ -1373,6 +1373,7 @@ export async function collectHypAwareStatus(opts = {}) {
       ],
     })
   }
+  const residueExists = opts.residueExists ?? pathExists
   /** @type {ClientAttachReport[]} */
   const clients = []
   /** @type {CaptureHealthReport[]} */
@@ -1420,15 +1421,51 @@ export async function collectHypAwareStatus(opts = {}) {
     // a plist-reading probe); until that lands, an unclearable prompt beats the
     // only alternative, which is no surface at all.
     // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
-    if (configured && !probe.attached) {
+    // A retired client (LLP 0295) is `configured && !attached` forever: its
+    // route is withdrawn, so no attach will ever happen and no marker will
+    // ever be written. Running the incomplete-setup prompt over it would
+    // print an unclearable warning on every `hyp status`, whose repair is a
+    // command that changes nothing, for a state that is now the DESIRED one.
+    // LLP 0224 #repair-surface accepted an unclearable prompt while setup
+    // was still something a user could finish; with setup deleted that
+    // trade inverts and the prompt points at nothing.
+    //
+    // What is still actionable is residue: a file an older release left
+    // behind that still changes the app. That warns only while the file
+    // exists, so it is closable, and its repair genuinely clears it.
+    // @ref LLP 0295#status-surface [implements]: a retired client reports removable residue, never incomplete setup
+    if (descriptor.retired) {
+      const residue = descriptor.retired.residuePath
+      const repairCommand = descriptor.retired.repairCommand
+      // Gated on `configured`, and that gate is load-bearing rather than
+      // tidiness. LLP 0133 #one-surface put solo and fleet on the SAME file:
+      // an MDM push and HypAware's own sudo write land at one path, differing
+      // only in the placer. So the file's existence alone does not identify
+      // it as ours, and an ungated check would tell someone whose IT
+      // department manages that profile to delete it. The config listing the
+      // plugin is the available evidence that HypAware is the placer here.
+      if (configured && residue && repairCommand && await residueExists(residue)) {
+        const repair = `hyp ${repairCommand}`
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_capture_residue',
+          message: `${clientName} capture is retired but '${residue}' is still installed and still affects the app - run '${repair}'`,
+          repair: [repair],
+        })
+      }
+    } else if (configured && !probe.attached) {
       // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
-      // adapter (claude-desktop: its plist is placed by an attended command
-      // with its own sudo prompt and consent gate, never by attach-on-join)
-      // has to name its own setup command instead, or the repair we print is
-      // one that answers `unknown client`. The command comes from the same
-      // plugin's picker row, which already declares it as `configure_command`.
+      // adapter has to name its own setup command instead, or the repair we
+      // print is one that answers `unknown client`. The command comes from
+      // the same plugin's picker row, which declares it as
+      // `configure_command`.
+      //
+      // claude-desktop was the motivating case and is no longer one: it is
+      // retired, so it never reaches this branch at all (LLP 0295
+      // #status-surface). The fallback stays because the rule is about any
+      // adapterless client, and the bundled set may gain another.
       // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
       const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
       const repair = configureCommand ? `hyp ${configureCommand}` : `hyp client attach ${clientName}`
@@ -2607,5 +2644,23 @@ function repairForConfigError(kind) {
       return ['hyp setup --from-file <config.json>']
     default:
       return []
+  }
+}
+
+/**
+ * Whether a path exists, as a plain boolean. Used for the retired-client
+ * residue check, which must not turn an unreadable path into a status
+ * failure: an unknowable residue reports as absent, matching how every
+ * other optional probe on this surface degrades.
+ *
+ * @param {string} target
+ * @returns {Promise<boolean>}
+ */
+async function pathExists(target) {
+  try {
+    await fsp.access(target)
+    return true
+  } catch {
+    return false
   }
 }

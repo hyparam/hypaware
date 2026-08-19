@@ -107,7 +107,15 @@ test('a corrupt marker fails open (absent, no diagnostic, no degrade) - LLP 0101
   // untouched, so the client probes must read a home with no attach markers.
   // Inheriting the runner's real `$HOME` made the assertion depend on whether
   // whoever ran the suite happens to have HypAware attached.
-  const report = await collectHypAwareStatus({ env: env(hypHome), homeDir: hypHome })
+  // `residueExists` is the same hazard one level out: a retired client's
+  // residue path is a system location no `homeDir` override reaches, so a
+  // developer whose Mac still carries the old Desktop plist would see this
+  // list hold one warning (LLP 0295#status-surface).
+  const report = await collectHypAwareStatus({
+    env: env(hypHome),
+    homeDir: hypHome,
+    residueExists: async () => false,
+  })
   assert.equal(report.firstSyncHoldDeadline, null)
   assert.equal(report.overall, 'healthy', 'a corrupt marker is timing-only; it never degrades overall (fail-open)')
   assert.deepEqual(report.diagnostics, [], 'a corrupt hold marker mints no diagnostic - it is timing-only, not a privacy signal')

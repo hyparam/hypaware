@@ -1079,14 +1079,8 @@ test('ctx.commands.run dispatches a registered command with the same exit code a
   assert.equal(seamErr.text(), 'seamtarget err\n')
 })
 
-test('ctx.commands.run activates a config-enabled plugin the boot profile skipped, so its command dispatches', async () => {
-  // Reproduces the wizard's configure phase (LLP 0139#seam-fresh-activation):
-  // `hyp init` boots `all-available`, which never activates V1-excluded
-  // plugins, and the picker writes the composed config after boot. The seam
-  // must activate the configure command's plugins from a fresh config read
-  // in dependency order (claude-account provides the credential capability
-  // claude-desktop requires at activation), or `claude-desktop install`
-  // misses dispatch and the consent gate is unreachable from the wizard.
+// @ref LLP 0295#kill-switch [tests]: the retired command spellings are gone, the recovery one still reaches dispatch from an old config
+test('ctx.commands.run reaches recovery but not the retired spellings for an old config', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-activate-'))
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
@@ -1106,28 +1100,37 @@ test('ctx.commands.run activates a config-enabled plugin the boot profile skippe
     summary: 'Run a configure command through the seam, like the wizard does',
     usage: 'hyp seamconfigure',
     async run(argv, ctx) {
-      return ctx.commands.run('claude-desktop install', ['--print-commands'])
+      return ctx.commands.run(argv[0], ['--print-commands'])
     },
   })
   const kernel = createKernelRuntime({ commandRegistry: registry })
-  const stdout = makeBuf()
-  const stderr = makeBuf()
 
-  const code = await dispatch(['seamconfigure'], {
-    stdout,
-    stderr,
-    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
-    registry,
-    kernel,
-  })
+  /** @param {string} command */
+  const runSeam = async (command) => {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['seamconfigure', command], {
+      stdout,
+      stderr,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      registry,
+      kernel,
+    })
+    return { code, out: stdout.text(), err: stderr.text() }
+  }
 
-  // `--print-commands` applies nothing, so a clean exit proves the command
-  // dispatched and every step printed instead of exit 2 on a registry miss.
-  assert.equal(code, 0)
-  const out = stdout.text()
-  assert.match(out, /hyp client claude-desktop install-helper/)
-  assert.match(out, /claude-desktop install: done\./)
-  assert.equal(stderr.text().includes('not in the active config'), false)
+  // The retired spelling is simply unknown now. It is not declared in the
+  // manifest, so there is no "unavailable, enable X" answer either: to a
+  // user, `claude-desktop install` never existed.
+  const retired = await runSeam('claude-desktop install')
+  assert.equal(retired.code, 2)
+
+  // The recovery command still dispatches from an old config, and needs no
+  // gateway or credential capability to get there.
+  const recovery = await runSeam('claude-desktop disable')
+  assert.equal(recovery.code, 0)
+  assert.match(recovery.out, /rm -f/)
+  assert.equal(recovery.err.includes('not in the active config'), false)
 })
 
 test('ctx.commands.run does not activate a plugin the effective config leaves out', async () => {

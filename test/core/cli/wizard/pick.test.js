@@ -150,11 +150,8 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 90)
 })
 
-// A needs_setup row (Claude Desktop) is a deliberate opt-in: its configure
-// phase runs a sign-in and a sudo write on the strength of the tick, so a
-// probe's guess must never arrive pre-checked on the user's behalf.
-// @ref LLP 0011#autodetect-vs-default [tests]: detection labels a needs_setup row but never checks it
-test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detected', async () => {
+// @ref LLP 0295#kill-switch [tests]: app detection cannot put the disabled Desktop route back in the menu
+test('runWizardPick: detected claude-desktop stays absent from the menu', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt, state } = capturingPrompt(['codex'])
@@ -164,8 +161,7 @@ test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detec
     detect: async () => new Set(['codex', 'claude-desktop']),
   }))
   const desktopRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
-  assert.equal(desktopRow.checked, undefined, 'a needs_setup row is never pre-checked by detection')
-  assert.match(desktopRow.label, /detected/, 'the detection suggestion stays visible on the label')
+  assert.equal(desktopRow, undefined)
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
@@ -183,10 +179,16 @@ test('runWizardPick: the defaults gate omits a detected needs_setup row, and acc
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
-// A reconfigure reports which picks it carried from the config on disk, so
-// the configure phase can skip a carried needs_setup row's setup question
-// instead of re-asking an answer already given.
-test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured', async () => {
+// Claude Desktop has no picker row at all any more (LLP 0295#kill-switch),
+// so a machine an older release configured cannot re-pick it, and cannot be
+// silently repaired either: the gateway and credential plugins it composed
+// are indistinguishable from an explicitly chosen raw Anthropic source, so
+// reconfigure carries them rather than guessing (LLP 0295#existing-installs).
+// The `@hypaware/claude-desktop` stub is carried for the same reason plus a
+// stronger one: dropping it un-claims Desktop's transcript entrypoints, and
+// the backfill gate fails OPEN on an unclaimed entrypoint.
+// @ref LLP 0295#attribution-stub [tests]: a reconfigure keeps the stub that keeps the transcript gate closed
+test('runWizardPick: reconfiguring an old Desktop-only config offers no Desktop row and keeps the stub', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   await seedLocalConfig(tmp, {
@@ -200,16 +202,24 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
     ],
     query: { cache: { retention: { default_days: 90 } } },
   })
-  const { confirm } = capturingConfirm('accept')
+  const { prompt, state } = capturingPrompt([])
   const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
-  assert.ok(result.sourcesPicked.includes('claude-desktop'))
-  assert.ok(result.previouslyConfigured.includes('claude-desktop'), 'the carried pick is reported')
+
+  // No row to tick, and nothing read back as a Desktop pick.
+  assert.equal(state.question.options.some((/** @type {any} */ o) => o.value === 'claude-desktop'), false)
+  assert.equal(result.sourcesPicked.includes('claude-desktop'), false)
+  assert.equal(result.previouslyConfigured.includes('claude-desktop'), false)
+
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  assert.ok(names.includes('@hypaware/claude-desktop'), 'the attribution stub is carried, not dropped')
+  assert.ok(names.includes('@hypaware/claude-account'), 'the credential provider is not guessed away')
+  assert.ok(names.includes('@hypaware/ai-gateway'), 'the shared gateway is not guessed away')
 })
 
 test('runWizardPick: a fresh pick reports nothing as previously configured', async () => {
@@ -225,11 +235,13 @@ test('runWizardPick: a fresh pick reports nothing as previously configured', asy
   assert.deepEqual(result.previouslyConfigured, [])
 })
 
-// A needs_setup row can still reach the gate off a recorded answer (a config
-// already composing it, or this run's own confirmed selection on a re-entry).
-// There the gate keeps it but says the part that is coming: its configure
-// phase walks a sign-in and a sudo prompt when it is newly picked.
-test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extra-setup suffix', async () => {
+// `claude-desktop` is not a picker id any more, so a seed naming it is a
+// seed naming nothing. It composes no plugin, which is the whole point:
+// LLP 0202 #hidden-rows guarantees a merely *hidden* row still composes on
+// `--source`, so hiding could never have been the kill switch. Deleting the
+// row is.
+// @ref LLP 0295#kill-switch [tests]: no seeding path can compose the retired Desktop route
+test('runWizardPick: a seeded claude-desktop id composes nothing at all', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { confirm, state } = capturingConfirm('accept')
@@ -240,11 +252,12 @@ test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extr
     detect: async () => new Set(),
     initialSelection: ['codex', 'claude-desktop'],
   }))
-  assert.ok(
-    state.question.items.some((/** @type {string} */ i) => /Claude Desktop · needs extra setup/.test(i)),
-    'the gate names the consent still to come'
-  )
-  assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
+  assert.equal(state.question.items.some((/** @type {string} */ i) => /Claude Desktop/.test(i)), false)
+  assert.equal(result.sourcesPicked.includes('claude-desktop'), false)
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  assert.equal(names.includes('@hypaware/claude-desktop'), false)
+  assert.equal(names.includes('@hypaware/claude-account'), false)
 })
 
 // --- the defaults gate (LLP 0190 #pick-gate) ---
@@ -749,7 +762,11 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.pickerDescriptors,
     catalog.clientDescriptors
   )
-  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'openclaw'])
+  // `claude-desktop` left this set when its picker row was deleted
+  // (LLP 0295#kill-switch). Its client contribution still exists - the
+  // attribution stub keeps it - but no row derives it any more, which is
+  // the intended shape: nothing a user can pick attaches Claude Desktop.
+  assert.deepEqual([...derived].sort(), ['claude', 'codex', 'openclaw'])
 })
 
 // --- reconfigure: the existing config, not detection, is the starting state ---

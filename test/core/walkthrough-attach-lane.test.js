@@ -50,9 +50,19 @@ function gatewayCapability(adapters) {
   })
 }
 
-// @ref LLP 0180#decision [tests]: an adapterless client contribution (Claude
-// Desktop) is recorded as noAdapter, never printed as a failed attach
-test('picking claude-desktop records a not-applicable attach, not a failure', async () => {
+// This used to be the witness for LLP 0180#decision: Claude Desktop was an
+// adapterless client contribution, recorded as `noAdapter` rather than
+// printed as a failed attach. With its picker row deleted (LLP 0295
+// #kill-switch) it is no longer derivable as a pick at all, so the stronger
+// statement holds and is what gets pinned: the explicit `--source` path,
+// which LLP 0202#hidden-rows guarantees would still compose a merely HIDDEN
+// row, reaches nothing.
+//
+// LLP 0180's noAdapter lane keeps its implementation and its sibling tests
+// below; it simply has no bundled adapterless client left to exercise it.
+// Restore a witness here if one is ever added.
+// @ref LLP 0295#kill-switch [tests]: `--source claude-desktop` derives no client and attaches nothing
+test('naming claude-desktop as an explicit source derives no client and attaches nothing', async () => {
   const env = await tmpEnv('hypaware-attach-noadapter-')
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -67,12 +77,9 @@ test('picking claude-desktop records a not-applicable attach, not a failure', as
   })
 
   assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['claude-desktop'])
-  assert.deepEqual(result.finale?.attach, [
-    { client: 'claude-desktop', dryRun: false, ok: true, noAdapter: true },
-  ])
-  // The run summary says nothing about a lane that was never applicable.
-  assert.doesNotMatch(stdout.text(), /attach: claude-desktop/)
+  assert.deepEqual(result.clientsPicked, [])
+  assert.deepEqual(result.finale?.attach, [])
+  assert.doesNotMatch(stdout.text(), /claude-desktop/)
   assert.doesNotMatch(stderr.text(), /claude-desktop/)
 })
 

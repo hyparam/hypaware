@@ -166,6 +166,7 @@ export type StatusDiagnosticKind =
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
+  | 'client_capture_residue'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
   | 'client_attached_not_configured'
@@ -550,6 +551,14 @@ export interface CollectStatusOptions {
   isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
   /** Launchd user-environment probe (tests, and any caller that must not shell out). */
   isLaunchdEnvSet?: () => Promise<boolean>
+  /**
+   * Retired-client residue probe (LLP 0295#status-surface). Injectable for
+   * the same reason `isCaTrusted` is: the path it reads is a system
+   * location outside any `homeDir` override, so a test that asserts an
+   * exact diagnostic list would otherwise depend on the developer's own
+   * machine. Defaults to a real filesystem check.
+   */
+  residueExists?: (residuePath: string) => Promise<boolean>
 }
 
 export interface SystemctlResult {

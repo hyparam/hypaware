@@ -248,10 +248,10 @@ test('the client hook commands are declared internal mechanisms, not omitted one
 })
 
 test('public diagnostics carry long help', async () => {
-  const desktop = await collectRegisteredCommands(activateClaudeDesktop)
+  // `@hypaware/claude-desktop` no longer registers a visible diagnostic:
+  // its whole surface is one hidden recovery command (LLP 0295#kill-switch).
   const account = await collectRegisteredCommands(activateClaudeAccount)
   for (const cmd of [
-    desktop.get('client claude-desktop status'),
     account.get('client claude-account status'),
   ]) {
     assert.ok(cmd, 'diagnostic command missing')

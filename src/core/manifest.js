@@ -172,6 +172,10 @@ export function validateManifest(value) {
       /** @type {Record<string, unknown>} */ (m.contributes).commands
     )
     if (!commandCheck.ok) return commandCheck
+    const retiredCheck = validateClientRetired(
+      /** @type {Record<string, unknown>} */ (m.contributes).client
+    )
+    if (!retiredCheck.ok) return retiredCheck
   }
   /** @type {PluginManifest} */
   const manifest = {
@@ -190,6 +194,54 @@ export function validateManifest(value) {
   if (isStringArray(m.compose_with)) manifest.compose_with = /** @type {PluginName[]} */ (m.compose_with)
   if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
   return { ok: true, manifest }
+}
+
+/**
+ * Validate `contributes.client.retired`, and only that block. The rest of
+ * the client contribution stays opaque here like every sibling category,
+ * for the reason `validateCommandContributions` states at length: a fatal
+ * rejection aborts `loadManifest`, so `hyp plugin doctor` never reaches its
+ * shape checks and one malformed field takes the plugin's sources, sinks
+ * and datasets with it.
+ *
+ * `retired` earns the exception on the same grounds `hidden` does. It is
+ * not help metadata: it decides whether `hyp status` runs the live-route
+ * diagnostics over this client or the residue check instead. A misspelled
+ * `residue_path`, or a `residue_path` with no `repair_command` beside it,
+ * silently removes the only surface that tells an affected user their app
+ * is still redirected - and it removes it exactly on the machines that
+ * needed it. A warning that quietly stops firing is worse than a manifest
+ * that refuses to load.
+ *
+ * @param {unknown} client
+ * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ * @ref LLP 0295#status-surface [implements]: the retirement block is refused rather than silently dropped, because dropping it removes the recovery surface
+ */
+function validateClientRetired(client) {
+  if (!isPlainObject(client)) return { ok: true }
+  const retired = /** @type {Record<string, unknown>} */ (client).retired
+  if (retired === undefined) return { ok: true }
+  if (!isPlainObject(retired)) {
+    return invalid('contributes.client retired must be an object when present')
+  }
+  const r = /** @type {Record<string, unknown>} */ (retired)
+  if (typeof r.reason !== 'string' || r.reason.length === 0) {
+    return invalid('contributes.client retired requires a reason (non-empty string)')
+  }
+  for (const key of ['residue_path', 'repair_command']) {
+    const value = r[key]
+    if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
+      return invalid(`contributes.client retired ${key} must be a non-empty string when present`)
+    }
+  }
+  // The pair is the unit. A residue nobody can clear is a warning with no
+  // repair (LLP 0139#repair-must-be-runnable); a repair with no residue to
+  // detect never fires. Either alone is a manifest that means to report
+  // recoverable state and cannot.
+  if ((r.residue_path === undefined) !== (r.repair_command === undefined)) {
+    return invalid('contributes.client retired residue_path and repair_command must be declared together')
+  }
+  return { ok: true }
 }
 
 /**

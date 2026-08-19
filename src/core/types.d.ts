@@ -35,6 +35,13 @@ export interface ClientDescriptor {
    */
   transcriptEntrypoints?: string[]
   /**
+   * Set when this client's capture route is withdrawn, from
+   * `contributes.client.retired`. Read by `hyp status`, which skips the
+   * setup-completeness prompt for a retired client and reports its
+   * `residuePath` instead (LLP 0295#status-surface).
+   */
+  retired?: ClientRetiredDescriptor
+  /**
    * How to start this client on a question, from
    * `contributes.client.launch`. Read by the wizard's first ask and
    * `hyp ask`; absent for a client that cannot be started on a prompt
@@ -77,6 +84,19 @@ export interface PickerDescriptor {
    * the local-layer config for this pick (`PluginPickerContribution.compose`).
    */
   compose?: PluginPickerCompose
+}
+
+/**
+ * A withdrawn capture route, folded from
+ * `contributes.client.retired`. The client keeps its identity so its
+ * transcript entrypoints stay claimed (LLP 0295#attribution-stub); this
+ * only tells the status surface not to ask the user to finish a setup
+ * that no longer exists.
+ */
+export interface ClientRetiredDescriptor {
+  reason: string
+  residuePath?: string
+  repairCommand?: string
 }
 
 export interface PluginCatalog {
