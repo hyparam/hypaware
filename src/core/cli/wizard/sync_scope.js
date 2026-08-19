@@ -35,7 +35,7 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
  * always sync (LLP 0188 #locked), so the gate lists them - fleet-suffixed
  * - and the menu renders them checked and disabled, keeping "these will
  * sync" the whole picture rather than the editable slice. `opts.locked`
- * arrives already display-filtered (LLP 0266 #sync-gate): a hidden row is
+ * arrives already display-filtered (LLP 0276 #sync-gate): a hidden row is
  * locked on every enrolled machine and was never offered, so naming it
  * here would label a screen the user cannot connect to anything they did.
  * `candidates` is the pick result's locked-filtered descriptor list, put
@@ -88,12 +88,12 @@ export async function runWizardSyncScope(opts) {
     // Three ways to reach this line, and they are not the same fact. With
     // org rows to name, everything picked is the fleet's and always syncs.
     // With none nameable but locked rows still standing - the enrolled
-    // machine whose locked set is entirely hidden (LLP 0266 #sync-gate) -
+    // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
     // the fleet's own capture still ships, so the line may not claim
     // nothing syncs; it just has no row to attribute it to. With no locked
     // row at all, nothing was picked and nothing syncs, and claiming the
     // fleet manages it would invent an owner for an empty list.
-    // @ref LLP 0266#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a locked row stands
+    // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a locked row stands
     if ((opts.locked ?? []).length === 0) {
       opts.stdout.write(
         (opts.lockedHidden ?? 0) > 0

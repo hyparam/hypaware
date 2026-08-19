@@ -469,7 +469,7 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
 // this filter the sync gate led with two fleet-labelled rows the picker had
 // deliberately never offered, and the label read as if it described the
 // client rows beneath them.
-// @ref LLP 0266#sync-gate [tests]:
+// @ref LLP 0276#sync-gate [tests]:
 test('runInitWizard: a hidden locked row stays off the sync-scope screen', async () => {
   const catalog = emptyCatalog()
   const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
@@ -490,7 +490,7 @@ test('runInitWizard: a hidden locked row stays off the sync-scope screen', async
 // #carry-through) reaches `picked.descriptors` whenever it is not locked -
 // a team join whose org config has not converged, say - and unfiltered the
 // gate offered it as an editable checkbox for a row the picker never showed.
-// @ref LLP 0266#sync-gate [tests]:
+// @ref LLP 0276#sync-gate [tests]:
 test('runInitWizard: a hidden picked row is not a sync-scope candidate', async () => {
   const catalog = emptyCatalog()
   const claudeDescriptor = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }

@@ -531,7 +531,7 @@ export async function runInitWizard(opts) {
             // not locked - a join whose org config has not converged yet, say.
             // Unfiltered it rendered as an editable checkbox for a row the
             // picker deliberately never offered.
-            // @ref LLP 0266#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
+            // @ref LLP 0276#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
             const allLockedDescriptors = picked.lockedSources
               .map((id) => catalog.pickerDescriptors.get(id))
               .filter((d) => d !== undefined)
@@ -546,7 +546,7 @@ export async function runInitWizard(opts) {
               // How many locked rows the display filter removed. The lane
               // never names them, but it must not tell the user nothing syncs
               // while they stand: a locked row always syncs (LLP 0188 #locked).
-              // @ref LLP 0266#no-candidates [implements]: the no-candidates line separates "no visible org row to name" from "no org row at all"
+              // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible org row to name" from "no org row at all"
               lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
               ...(syncProgress ? { progress: syncProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),

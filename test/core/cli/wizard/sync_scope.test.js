@@ -340,10 +340,10 @@ test('zero candidates with org rows: prints the position and the fleet line, pro
 })
 
 // The same no-question path with nothing for the fleet to own. Reachable on
-// an enrolled machine whose only locked rows are hidden (LLP 0266
+// an enrolled machine whose only locked rows are hidden (LLP 0276
 // #sync-gate) and that picked nothing visible: claiming the fleet manages
 // "everything you picked" would invent an owner for an empty list.
-// @ref LLP 0266#sync-gate [tests]:
+// @ref LLP 0276#sync-gate [tests]:
 test('zero candidates and no org rows: says nothing syncs, never names the fleet', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
@@ -366,12 +366,12 @@ test('zero candidates and no org rows: says nothing syncs, never names the fleet
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
 
-// The third no-question fact: the enrolled machine of LLP 0266 §problem,
+// The third no-question fact: the enrolled machine of LLP 0276 §problem,
 // whose only locked rows are the hidden `raw-*` pair. Nothing was picked,
 // but the org's gateway rows are locked, always sync, and cannot be opted
 // out (LLP 0188 #locked) - so the line must not claim nothing leaves the
 // machine, while still never naming a row the picker withheld.
-// @ref LLP 0266#no-candidates [tests]:
+// @ref LLP 0276#no-candidates [tests]:
 test('zero candidates with only hidden org rows: does not claim nothing syncs', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()

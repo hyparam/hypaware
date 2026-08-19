@@ -1,4 +1,4 @@
-# LLP 0266: A hidden picker row stays off the sync gate too
+# LLP 0276: A hidden picker row stays off the sync gate too
 
 **Type:** Decision
 **Status:** Accepted

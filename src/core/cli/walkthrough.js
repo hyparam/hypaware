@@ -1342,7 +1342,7 @@ function mergeSink(composed, prior) {
  * deliberately emptied install, and re-seeding that from detection would
  * re-consent to capture on the user's behalf.
  *
- * @ref LLP 0267#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
  * @param {HypAwareV2Config} config
  * @returns {boolean}
  */

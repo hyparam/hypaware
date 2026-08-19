@@ -84,7 +84,7 @@ export interface RunWizardSyncScopeOptions {
   candidates: PickerDescriptor[]
   /**
    * The org's locked (central-layer) descriptors, already display-filtered
-   * (LLP 0266 #sync-gate). Always-sync (LLP 0188 #locked) and never
+   * (LLP 0276 #sync-gate). Always-sync (LLP 0188 #locked) and never
    * editable here, but listed - on the gate and as checked, disabled menu
    * rows - so "these will sync" states the whole picture, not only the
    * editable slice (LLP 0190 #sync-gate).

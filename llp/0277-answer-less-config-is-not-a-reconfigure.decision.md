@@ -1,4 +1,4 @@
-# LLP 0267: An answer-less config does not make a reconfigure
+# LLP 0277: An answer-less config does not make a reconfigure
 
 **Type:** Decision
 **Status:** Accepted

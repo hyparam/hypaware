@@ -124,7 +124,7 @@ export async function resolvePickSeeding(opts) {
   // opened onboarding with every detected row unchecked. An answer-less
   // config still reaches the composition fold (its keys carry forward);
   // it just does not stand in for an answer nobody gave.
-  // @ref LLP 0267#answer-less [implements]: a config that records no pick answer seeds like no config at all
+  // @ref LLP 0277#answer-less [implements]: a config that records no pick answer seeds like no config at all
   const recordsAnswer = existing !== undefined && configRecordsPickAnswer(existing)
   const configured = existing && recordsAnswer ? configuredPickerSources(existing, descriptors) : undefined
 
@@ -329,7 +329,7 @@ export async function runWizardPick(opts) {
       sources_configured: configured?.size ?? 0,
       // Keyed to the recorded answer, not to bare file existence: a run
       // seeding from detection must not report itself as a reconfigure.
-      // @ref LLP 0267#answer-less [implements]: the reconfigure attribute follows the answer-keyed classification
+      // @ref LLP 0277#answer-less [implements]: the reconfigure attribute follows the answer-keyed classification
       reconfigure: configured !== undefined,
       status: 'ok',
     },
@@ -373,7 +373,7 @@ export async function runWizardPick(opts) {
     // answer-less file (`hyp remote add` before the first init) never
     // answered the export question either, and reading it re-answered
     // "keep-local" on the user's behalf.
-    // @ref LLP 0267#answer-less [implements]: an answer-less config does not stand in for the export answer
+    // @ref LLP 0277#answer-less [implements]: an answer-less config does not stand in for the export answer
     exportChoice = configured !== undefined && existing
       ? configuredExportChoice(existing)
       : /** @type {PickerExport} */ ('local-parquet')

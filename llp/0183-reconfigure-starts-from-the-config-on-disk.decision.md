@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Config
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
-**Extended-by:** LLP 0267 (a config that records no pick answer seeds like no config at all; #seed-from-config's "no config" carve-out is keyed to the pick answer, not the file)
+**Extended-by:** LLP 0277 (a config that records no pick answer seeds like no config at all; #seed-from-config's "no config" carve-out is keyed to the pick answer, not the file)
 **Related:** LLP 0129 (the returning gate that routes a reconfigure), LLP 0137 (retention is never asked; the pathway defaults it), LLP 0011 (detection seeds, never forces), LLP 0130 (manifest-sourced picker rows), LLP 0031 (layered config), LLP 0135 (wizard orchestration), LLP 0132 (managed local additions)
 
 > `hyp init` on a configured machine regenerates the local config from

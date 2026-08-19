@@ -1350,8 +1350,8 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
   )
 })
 
-// --- an answer-less config is not a reconfigure (LLP 0267) ---
-// @ref LLP 0267#answer-less [tests]: a config that records no pick answer
+// --- an answer-less config is not a reconfigure (LLP 0277) ---
+// @ref LLP 0277#answer-less [tests]: a config that records no pick answer
 // seeds like no config at all; one that does keeps the LLP 0183 behavior
 
 test('runWizardPick: an answer-less config (hyp remote add before init) still seeds from detection', async () => {
