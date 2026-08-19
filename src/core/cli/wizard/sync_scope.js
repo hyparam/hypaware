@@ -34,10 +34,16 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
  * Locked (org-configured) sources are shown but never editable: they
  * always sync (LLP 0188 #locked), so the gate lists them - fleet-suffixed
  * - and the menu renders them checked and disabled, keeping "these will
- * sync" the whole picture rather than the editable slice. `candidates` is
- * the pick result's locked-filtered descriptor list; when it is empty the
- * step prints its position plus the always-sync fact instead of
- * prompting, so the counter never skips a number.
+ * sync" the whole picture rather than the editable slice. `opts.locked`
+ * arrives already display-filtered (LLP 0276 #sync-gate): a hidden row is
+ * locked on every enrolled machine and was never offered, so naming it
+ * here would label a screen the user cannot connect to anything they did.
+ * `candidates` is the pick result's locked-filtered descriptor list, put
+ * through that same display filter; when it is empty the step prints its
+ * position plus the always-sync fact - or, with no org row to name
+ * either, the nothing-picked fact, which only reads "nothing syncs" when
+ * `lockedHidden` and `candidatesHidden` both say no filtered-out row is
+ * standing - instead of prompting, so the counter never skips a number.
  *
  * The write has editor semantics over the shown candidates only: entries
  * for sources not shown (a previously opted-out source the user unpicked
@@ -79,6 +85,32 @@ export async function runWizardSyncScope(opts) {
     // no-question path is not the one that runs into its neighbour.
     opts.stdout.write('\n')
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
+    // Four ways to reach this line, and they are not the same fact. With
+    // org rows to name, everything picked is the fleet's and always syncs.
+    // With none nameable but locked rows still standing - the enrolled
+    // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
+    // the fleet's own capture still ships, so the line may not claim
+    // nothing syncs; it just has no row to attribute it to. With no locked
+    // row but a hidden row among the picks - a carried raw source (LLP 0202
+    // #carry-through) on a run whose org config has not converged - capture
+    // still ships and the fleet does not own it, so the line names neither
+    // the row nor an owner. Only with nothing standing at all is nothing
+    // picked and nothing synced.
+    // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a filtered-out row stands
+    if ((opts.locked ?? []).length === 0) {
+      if ((opts.lockedHidden ?? 0) > 0) {
+        opts.stdout.write(
+          'You picked nothing to record, but capture your fleet manages directly still syncs to your server.\n'
+        )
+      } else if ((opts.candidatesHidden ?? 0) > 0) {
+        opts.stdout.write(
+          'You picked nothing to record, but capture already set up on this machine still syncs to your server.\n'
+        )
+      } else {
+        opts.stdout.write('You picked nothing to record, so nothing syncs to your server.\n')
+      }
+      return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
+    }
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
