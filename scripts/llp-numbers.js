@@ -31,6 +31,9 @@ const EXCLUDED_DIRS = new Set(['reviews'])
 /** `NNNN-slug.type.md`, the filename convention of LLP 0000. */
 const DOC_PATTERN = /^(\d{4})-.*\.md$/
 
+/** What `partialScan` answers when the path is not a git checkout at all. */
+export const NOT_A_CHECKOUT = 'not a git checkout, so there is no corpus to scan'
+
 /** Where the default branch is looked for, first hit wins. */
 const BASE_CANDIDATES = ['refs/remotes/origin/master', 'refs/remotes/origin/main', 'refs/heads/master', 'refs/heads/main']
 
@@ -118,8 +121,10 @@ export function collisions(refFiles, only = null) {
 
 /**
  * The documents a branch adds: present at the tip, absent at the point it left
- * the default branch. Basenames, so that renaming a document already on the base
- * (the repair LLP 0156 prescribes) does not read as a fresh mint.
+ * the default branch. Basenames, so that a document the branch only moved between
+ * directories (into `llp/tombstones/`, say) is not read as a fresh mint. A
+ * renumber, the repair LLP 0156 prescribes, does change the basename and so does
+ * read as a mint, which is the point: the number it moves to has to be free too.
  *
  * @param {string[]} baseFiles paths at the merge base
  * @param {string[]} headFiles paths at the tip
@@ -140,8 +145,8 @@ export function addedDocs(baseFiles, headFiles) {
  * @returns {string[]}
  */
 export function mergeableRefs(repoRoot) {
-  const out = git(repoRoot, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes'])
-  const refs = out.split('\n').filter(line => line !== '' && !/\/HEAD$/.test(line))
+  const out = tryGit(repoRoot, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes'])
+  const refs = (out ?? '').split('\n').filter(line => line !== '' && !/\/HEAD$/.test(line))
   refs.push('HEAD')
   return refs
 }
@@ -192,20 +197,32 @@ export function mintedNumbers(repoRoot) {
 }
 
 /**
+ * Why this checkout cannot answer the question, or null when it can. A clone
+ * fetched shallow or with a single branch (what `actions/checkout` hands a job
+ * that does not ask for more) carries one ref and no default branch, so every
+ * mode reads a corpus of one: `next` hands back a number other branches already
+ * took, and `check` finds no base to diff against and passes. That is issue
+ * #907 wearing this script's own clothes, so it is reported rather than answered
+ * silently.
+ *
+ * @param {string} repoRoot
+ * @returns {string | null}
+ */
+export function partialScan(repoRoot) {
+  if (tryGit(repoRoot, ['rev-parse', '--git-dir']) === null) return NOT_A_CHECKOUT
+  if (tryGit(repoRoot, ['rev-parse', '--is-shallow-repository']) === 'true') return 'a shallow clone, so the history it carries is not the corpus'
+  if (!BASE_CANDIDATES.some(ref => tryGit(repoRoot, ['rev-parse', '--verify', '--quiet', ref]) !== null)) {
+    return 'a checkout with no default-branch ref, so the branches it carries are not the corpus'
+  }
+  return null
+}
+
+/**
  * @param {string} filePath
  * @returns {string}
  */
 function basename(filePath) {
   return filePath.split('/').pop() ?? filePath
-}
-
-/**
- * @param {string} repoRoot
- * @param {string[]} args
- * @returns {string}
- */
-function git(repoRoot, args) {
-  return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trimEnd()
 }
 
 /**
@@ -259,6 +276,14 @@ export function run(argv, repoRoot, write, writeError) {
   if (mode !== 'next' && mode !== 'check' && mode !== 'survey') {
     writeError('usage: llp-numbers.js next | check | survey\n')
     return 2
+  }
+  const partial = partialScan(repoRoot)
+  if (partial === NOT_A_CHECKOUT) {
+    writeError(`${repoRoot} is ${partial}. Mint by hand from max(llp/) + 1, and say that you did.\n`)
+    return 2
+  }
+  if (partial !== null) {
+    writeError(`warning: this is ${partial}. Run \`git fetch --prune --unshallow\` and fetch every branch, or this answer is a guess.\n`)
   }
   const refFiles = refFilesFromGit(repoRoot, mergeableRefs(repoRoot))
   const next = nextFreeNumber(refFiles)

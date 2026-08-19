@@ -41,8 +41,10 @@ actually shipped in V1.
   `git fetch --prune`. Numbers are minted on every branch at once, so the tree
   you have checked out is not the corpus: three branches each read
   `max(llp/) + 1` and each got the same answer (issue #907). The same script
-  gates it (`check` in `npm test` and in CI, `survey` to see every collision
-  across every ref).
+  gates it: `check` in the `cross-branch-numbers` CI job, which fetches every
+  branch first, and in `npm test` wherever the clone carries them (a shallow or
+  single-branch checkout skips it and says so). `survey` shows every collision
+  across every ref.
 
 ## Code Style
 

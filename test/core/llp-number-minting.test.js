@@ -27,6 +27,8 @@ import {
   mergeableRefs,
   mintedNumbers,
   nextFreeNumber,
+  NOT_A_CHECKOUT,
+  partialScan,
   refFilesFromGit,
   run,
 } from '../../scripts/llp-numbers.js'
@@ -228,9 +230,37 @@ test('an unknown mode is a usage error, not a silent pass', t => {
   assert.equal(run(['fix'], repo, () => {}, () => {}), 2)
 })
 
+// A checkout that carries one branch and no default branch answers every mode
+// from a corpus of one, which is the defect of issue #907 rather than a pass.
+// `actions/checkout` hands exactly that to any job that does not ask for more,
+// so the condition is detected rather than assumed away.
+test('a checkout that cannot see the corpus says so instead of answering', t => {
+  assert.equal(partialScan(collidedRepo(t)), null)
+
+  const alone = emptyRepo(t)
+  writeDoc(alone, 'llp/0100-a.spec.md')
+  commit(alone, 'one branch, no default branch, no remote')
+  git(alone, ['checkout', '-q', '-b', 'topic'])
+  git(alone, ['branch', '-q', '-D', 'master'])
+  assert.match(String(partialScan(alone)), /no default-branch ref/)
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['next'], alone, () => {}, text => err.push(text)), 0)
+  assert.match(err.join(''), /^warning: /)
+
+  assert.equal(partialScan(path.join(os.tmpdir(), 'llp-numbers-no-such-checkout')), NOT_A_CHECKOUT)
+})
+
 // The in-suite half of the gate: what this branch mints has to be free in this
-// repository, not only in a fixture.
-test('this branch mints no number another ref already claims', () => {
+// repository, not only in a fixture. It can only answer that where the clone
+// carries the other branches, so it says why it is skipping rather than passing
+// green on a shallow or single-branch checkout that never looked.
+test('this branch mints no number another ref already claims', t => {
+  const partial = partialScan(REPO_ROOT)
+  if (partial !== null) {
+    t.skip(`this is ${partial}: fetch every branch to run this check`)
+    return
+  }
   const refFiles = refFilesFromGit(REPO_ROOT, mergeableRefs(REPO_ROOT))
   assert.ok(refFiles.size > 0, 'expected at least one readable ref')
   const found = collisions(refFiles, mintedNumbers(REPO_ROOT).numbers)
