@@ -89,7 +89,7 @@ export async function activate(ctx) {
   ctx.commands.register({ name: 'enrichment propose', aliases: ['enrich propose'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Run one T1 propose tick now', usage: 'hyp enrichment propose', run: runEnrichPropose })
   ctx.commands.register({ name: 'enrichment curate', aliases: ['enrich curate'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Run one T2 curate tick now', usage: 'hyp enrichment curate', run: runEnrichCurate })
   ctx.commands.register({ name: 'enrichment backfill', aliases: ['enrich backfill'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Enrich ALL history (propose every session, curate via the Batch API)', usage: 'hyp enrichment backfill [--propose-only|--curate-only]', run: runEnrichBackfill })
-  ctx.commands.register({ name: 'enrichment status', aliases: ['enrich status'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Show enrichment watermarks and counts', usage: 'hyp enrichment status', run: runEnrichStatus })
+  ctx.commands.register({ name: 'enrichment status', aliases: ['enrich status'], plugin: PLUGIN_NAME, category: 'additional', audience: 'operator', summary: 'Show enrichment watermarks and prospect/committed counts', usage: 'hyp enrichment status', run: runEnrichStatus })
 
   ctx.log.info('enrich.activated', {
     source_dataset: config.source_dataset,

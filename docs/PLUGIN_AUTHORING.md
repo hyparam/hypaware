@@ -356,8 +356,8 @@ and how to fix it:
 | `activate_missing` | The entrypoint exports no `activate` function | Add `export async function activate(ctx) { ... }` |
 | `activate_threw` | `activate(ctx)` threw during the dry run | Only register in `activate()`; defer work to `start()`/`create()` |
 | `contribution_not_registered` | Manifest declares something `activate()` never registered | Add the matching `ctx.<registry>.register(...)` call |
-| `contribution_undeclared` (warn) | `activate()` registered something the manifest doesn't declare (a `hidden` command is exempt: omitting it is how it stays out of help) | Add it to `contributes.*` so it appears in help/discovery |
-| `command_help_drift` | A declared command's manifest summary and registered summary differ, or a declared command is registered `hidden`. An entry with no `summary` at all counts: top-level help then lists the command blank | Make both say the same thing; a `hidden` command belongs out of the manifest |
+| `contribution_undeclared` (warn) | `activate()` registered something the manifest doesn't declare | Add it to `contributes.*` so discovery and inactive-command ownership stay complete |
+| `command_help_drift` | A declared command's manifest summary or `hidden` visibility differs from its registration. An entry with no `summary` at all counts: top-level help then lists the command blank | Make the summary and visibility agree on both sides |
 | `command_help_drift` (warn) | `ctx.commands.registerGroup` describes a group the manifest declares no command under | Declare the group's subcommands, or drop the `registerGroup` call |
 | `capability_unresolved` | A required capability has no provider, or none in the required version range | Install a provider matching the range, widen the range, or drop the requirement |
 | `capability_unprovided` (warn) | Manifest says it provides a capability `activate()` never provided | Call `ctx.provideCapability(...)` |

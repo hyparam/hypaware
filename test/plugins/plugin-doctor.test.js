@@ -282,9 +282,7 @@ test('a verb-projected command is compared like any other command', async () => 
   assert.match(finding.message, /Counts rows/)
 })
 
-test('a hidden command is not reported as undeclared', async () => {
-  // Omitting an internal command from the manifest is how it stays out of
-  // pre-boot help (LLP 0009); the doctor must not push authors to declare it.
+test('an undeclared hidden command is reported like any missing manifest contribution', async () => {
   const root = await fixture({
     manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
     index:
@@ -295,10 +293,25 @@ test('a hidden command is not reported as undeclared', async () => {
   })
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  const finding = report.diagnostics.find((d) => d.kind === 'contribution_undeclared')
+  assert.ok(finding)
+  assert.match(finding.message, /demo-hook fire/)
+})
+
+test('a command hidden in both manifest and registration agrees', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo', hidden: true }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', hidden: true, run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
   assert.equal(report.diagnostics.length, 0)
 })
 
-test('a declared command registered as hidden is an error', async () => {
+test('manifest and registration visibility drift is an error', async () => {
   const root = await fixture({
     manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
     index:
@@ -310,7 +323,23 @@ test('a declared command registered as hidden is an error', async () => {
   assert.equal(report.ok, false)
   const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
   assert.ok(finding)
-  assert.match(finding.message, /registers it as hidden/)
+  assert.match(finding.message, /different visibility/)
+})
+
+test('a manifest-hidden command registered visible is also visibility drift', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo', hidden: true }] } }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  ctx.commands.register({ name: 'demo run', plugin: '@test/example', summary: 'Run the demo', usage: 'u', run: async () => 0 })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'command_help_drift')
+  assert.ok(finding)
+  assert.match(finding.message, /manifest marks it hidden/)
+  assert.match(finding.message, /registers it as visible/)
 })
 
 test('a group description with no declared subcommand is a warning', async () => {
@@ -396,12 +425,7 @@ test('a multi-word group whose subcommands are declared is not warned about', as
   assert.equal(report.diagnostics.length, 0, JSON.stringify(report.diagnostics))
 })
 
-test('a group whose registered commands are all hidden is not warned about', async () => {
-  // The hidden exemption and the group warning have to agree. A client-hook
-  // namespace is registered hidden and, per LLP 0267 #d3, left out of the
-  // manifest on purpose; warning that "the manifest declares no command under
-  // it" would ask the author to advertise what `hidden` exists to hide, and
-  // the bundled gate treats warnings as failures.
+test('a legacy undeclared all-hidden group gets only the contribution warning', async () => {
   const root = await fixture({
     manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
     index:
@@ -413,7 +437,8 @@ test('a group whose registered commands are all hidden is not warned about', asy
   })
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
-  assert.equal(report.diagnostics.length, 0, JSON.stringify(report.diagnostics))
+  assert.equal(report.diagnostics.length, 1, JSON.stringify(report.diagnostics))
+  assert.equal(report.diagnostics[0].kind, 'contribution_undeclared')
 })
 
 test('a group with a visible command under it is still warned about', async () => {

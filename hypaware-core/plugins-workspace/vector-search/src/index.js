@@ -89,7 +89,7 @@ export async function activate(ctx) {
     plugin: PLUGIN_NAME,
     category: 'explore-share',
     audience: 'everyday',
-    summary: 'Similarity search across configured vector indexes',
+    summary: 'Similarity search across configured local vector indexes',
     usage: 'hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
     run: runVectorSearch,
   })

@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-08-18
 **Related:** LLP 0005, LLP 0009, LLP 0034, LLP 0153, LLP 0154, LLP 0214
+**Extended-by:** LLP 0268 (#not-deletion replaces D3's manifest-omission mechanism with matched `hidden: true` declarations)
 
 > [LLP 0009 #layered-help](./0009-cli-registry.spec.md) says the help levels
 > "read the same registry, so they cannot drift". That holds for core and not
@@ -68,6 +69,8 @@ The test fails on an unreachable `activate()` as well, so a plugin whose dry run
 never registers anything cannot pass by registering nothing.
 
 ### D3: a hidden command is omitted from the manifest, and that is not a finding {#d3}
+
+> Extended by [LLP 0268 #not-deletion](./0268-plugin-commands-classified-as-surface-or-mechanism.decision.md#not-deletion): hidden commands now remain in the manifest and set `hidden: true` on both the declaration and registration.
 
 LLP 0009 #top-level-help-lists-plugin-commands-without-booting makes manifest
 omission the mechanism by which an internal command stays out of help. The

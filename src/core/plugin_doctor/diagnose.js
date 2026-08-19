@@ -280,11 +280,6 @@ function checkContributions(manifest, registered, out) {
     const declaredSet = new Set(declared)
     for (const name of registered[key]) {
       if (!declaredSet.has(name)) {
-        // A hidden command is deliberately absent from the manifest: omission
-        // is how an internal command (the client hooks) stays out of pre-boot
-        // help, so flagging it pushes authors to advertise what `hidden` hides.
-        // @ref LLP 0267#d3 [implements]: manifest omission is the mechanism, not an oversight
-        if (key === 'commands' && isHiddenCommand(registered, name)) continue
         out.push({
           kind: 'contribution_undeclared',
           severity: 'warn',
@@ -325,8 +320,9 @@ function checkContributions(manifest, registered, out) {
 function checkCommandHelp(manifest, registered, out) {
   const declared = declaredCommands(manifest)
   for (const command of registered.commandDetails) {
-    const declaredSummary = declared.get(command.name)
-    if (declaredSummary === undefined) continue
+    const declaration = declared.get(command.name)
+    if (declaration === undefined) continue
+    const declaredSummary = declaration.summary
     if (declaredSummary !== command.summary) {
       // `summary` is optional on a manifest command entry, so the blank case
       // is the common one and deserves to be named rather than reported as
@@ -353,15 +349,18 @@ function checkCommandHelp(manifest, registered, out) {
             ],
       })
     }
-    if (command.hidden) {
+    if (declaration.hidden !== Boolean(command.hidden)) {
       out.push({
         kind: 'command_help_drift',
         severity: 'error',
         location: '/contributes/commands',
-        message: `manifest declares command '${command.name}' but activate() registers it as hidden`,
+        message:
+          `command '${command.name}' has different visibility: the manifest marks it ` +
+          `${declaration.hidden ? 'hidden' : 'visible'} but activate() registers it as ` +
+          `${command.hidden ? 'hidden' : 'visible'}`,
         repair: [
-          `A hidden command is left out of the manifest; declaring it advertises a command help never lists`,
-          `Drop the manifest entry, or drop the hidden flag on the registration`,
+          `The manifest controls pre-boot help and the registration controls post-boot help`,
+          `Set hidden: true on both sides for an internal mechanism, or omit it from both for CLI surface`,
         ],
       })
     }
@@ -373,12 +372,11 @@ function checkCommandHelp(manifest, registered, out) {
     // registrable group. Comparing head tokens only would warn about a group
     // that renders correctly for `hyp query cache --help`.
     if ([...declared.keys()].some((name) => name === group.name || name.startsWith(`${group.name} `))) continue
-    // A group whose registered commands are ALL hidden is correctly absent
-    // from the manifest: D3 makes omission the mechanism that keeps an
-    // internal command out of pre-boot help, so warning here would ask the
-    // author to declare exactly what `hidden` exists to hide, and the bundled
-    // gate (D2) would then fail with no way to satisfy both rules at once.
-    // @ref LLP 0267#d3 [constrained-by]: the group warning must not undo the hidden exemption
+    // Third-party plugins written before manifest visibility existed can still
+    // register an all-hidden group without a manifest declaration. The missing
+    // command receives the ordinary contribution warning; avoid adding a
+    // second warning for its group shell.
+    // @ref LLP 0268#not-deletion [constrained-by]: new hidden commands stay declared, with visibility matched on both sides
     if (registersOnlyHidden(registered, group.name)) continue
     out.push({
       kind: 'command_help_drift',
@@ -392,18 +390,6 @@ function checkCommandHelp(manifest, registered, out) {
       ],
     })
   }
-}
-
-/**
- * Is `name` registered with `hidden: true`? An unregistered name answers
- * false: a command that never registered is a different finding.
- *
- * @param {RegisteredSnapshot} registered
- * @param {string} name
- * @returns {boolean}
- */
-function isHiddenCommand(registered, name) {
-  return registered.commandDetails.some((c) => c.name === name && c.hidden)
 }
 
 /**
@@ -422,21 +408,24 @@ function registersOnlyHidden(registered, group) {
 }
 
 /**
- * `contributes.commands` as a name to summary map. A declared command with no
- * summary keeps the empty string, which is exactly what top-level help renders
- * for it.
+ * `contributes.commands` as a name to help metadata map. A declared command
+ * with no summary keeps the empty string, which is exactly what top-level help
+ * renders for it.
  *
  * @param {PluginManifest} manifest
- * @returns {Map<string, string>}
+ * @returns {Map<string, { summary: string, hidden: boolean }>}
  */
 function declaredCommands(manifest) {
-  /** @type {Map<string, string>} */
+  /** @type {Map<string, { summary: string, hidden: boolean }>} */
   const byName = new Map()
   const entries = manifest.contributes?.commands
   if (!Array.isArray(entries)) return byName
   for (const entry of entries) {
     if (!isObject(entry) || typeof entry.name !== 'string' || entry.name.length === 0) continue
-    byName.set(entry.name, typeof entry.summary === 'string' ? entry.summary : '')
+    byName.set(entry.name, {
+      summary: typeof entry.summary === 'string' ? entry.summary : '',
+      hidden: entry.hidden === true,
+    })
   }
   return byName
 }
