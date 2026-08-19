@@ -139,3 +139,19 @@ test('a verb registry without a command registry unregisters cleanly', () => {
   assert.doesNotThrow(() => verbs.unregister('demo verb'))
   assert.equal(verbs.getByTool('demo_verb'), undefined)
 })
+
+test('unregister retracts a projection a different registry made over the same command registry', () => {
+  // A runtime re-created over a shared command registry: the second
+  // registry's own projection is skipped because the name is taken, but
+  // the command under that name is still a verb projection and retraction
+  // has to give it back. Tracking "did *this* registry project it" would
+  // leave the stale command routing `hyp demo verb` at the released verb.
+  const commands = createCommandRegistry()
+  const first = createVerbRegistry({ commandRegistry: commands })
+  first.register(makeVerb())
+  const second = createVerbRegistry({ commandRegistry: commands })
+  second.register(makeVerb())
+  second.unregister('demo verb')
+  assert.equal(commands.get('demo verb'), undefined)
+  assert.equal(commands.has('demo verb'), false)
+})

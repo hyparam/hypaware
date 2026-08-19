@@ -129,3 +129,27 @@ function makeBuf() {
     },
   }
 }
+
+test('unregister retracts a core verb command projected before the kernel booted', () => {
+  // The real boot path, and the one the affordance exists for: dispatch
+  // runs `registerCoreCommands`, which pre-projects every core verb so
+  // `hyp --help` renders without booting, then boot builds the runtime
+  // over that same command registry, so the verb registry skips its own
+  // projection. Retraction still has to release the CLI name, or a host
+  // that displaces the verb keeps answering `hyp query sql` with the
+  // kernel implementation it just took the tool slot from.
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const runtime = createKernelRuntime({ commandRegistry: registry })
+  assert.ok(registry.get('query sql'))
+  assert.ok(runtime.verbs.getByTool('query_sql'))
+
+  runtime.verbs.unregister('query sql')
+
+  assert.equal(runtime.verbs.getByTool('query_sql'), undefined)
+  assert.equal(registry.get('query sql'), undefined)
+  assert.equal(registry.has('query sql'), false)
+  // `hyp query sql` no longer routes at the retracted command: the bare
+  // group command is the longest registered prefix left.
+  assert.equal(registry.match(['query', 'sql'])?.command.name, 'query')
+})

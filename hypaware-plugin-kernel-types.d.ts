@@ -1711,8 +1711,9 @@ export interface VerbRegistry {
   register(verb: VerbRegistration): void
   /**
    * Release a claimed verb name: the name map, the tool map, and the CLI
-   * command the registration projected (and only that one). By-name,
-   * idempotent, and a no-op on an unknown name.
+   * command projected from a verb under that name (and only that one; a
+   * plugin's own same-named command survives). By-name, idempotent, and a
+   * no-op on an unknown name.
    *
    * This is what lets a host displace a kernel-shipped verb with its own
    * implementation of the same tool: it takes the name back, then

@@ -1,6 +1,6 @@
 // @ts-check
 
-import { verbToCommand } from '../cli/verb_command.js'
+import { isVerbProjection, verbToCommand } from '../cli/verb_command.js'
 
 /**
  * @import { CommandRegistry, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -25,12 +25,6 @@ export function createVerbRegistry(opts = {}) {
   const byName = new Map()
   /** @type {Map<string, VerbRegistration>} */
   const byTool = new Map()
-  // Verb names whose CLI command *this* registry projected. `register`
-  // skips projection when a command already occupies the name, so the
-  // set is what tells retraction apart from deleting somebody else's
-  // command of the same name.
-  /** @type {Set<string>} */
-  const projected = new Set()
 
   return {
     register(verb) {
@@ -48,22 +42,21 @@ export function createVerbRegistry(opts = {}) {
       // a verb whose name a command already occupies) must not double-register.
       if (commandRegistry && !commandAlreadyRegistered(commandRegistry, verb.name)) {
         commandRegistry.register(verbToCommand(verb))
-        projected.add(verb.name)
       }
     },
-    // Release a claimed verb name: both maps, plus the CLI command the
-    // registration projected (and only that one). By-name, idempotent,
-    // and a no-op on an unknown name, because the caller that needs it
-    // feature-detects it at daemon boot and re-checks `getByTool` after:
-    // a throw here would take boot down, and a half-removal would leave
-    // the tool slot held and the caller silently degraded.
+    // Release a claimed verb name: both maps, plus the CLI command a verb
+    // projection put under that name (and only that one). By-name,
+    // idempotent, and a no-op on an unknown name, because the caller that
+    // needs it feature-detects it at daemon boot and re-checks `getByTool`
+    // after: a throw here would take boot down, and a half-removal would
+    // leave the tool slot held and the caller silently degraded.
     // @ref LLP 0264#verb [implements]: a server host displaces the kernel-shipped twin by taking the name back, so archive-backed grep_search keeps the tool slot
     unregister(name) {
       const verb = byName.get(name)
       if (!verb) return
       byName.delete(name)
       if (byTool.get(verb.tool) === verb) byTool.delete(verb.tool)
-      if (projected.delete(name)) retractCommand(commandRegistry, name)
+      retractCommand(commandRegistry, name)
     },
     get(name) {
       return byName.get(name)
@@ -137,14 +130,27 @@ function commandAlreadyRegistered(registry, name) {
 }
 
 /**
- * Retract a projected command. Tolerates a command registry that predates
- * `unregister`, the same way {@link commandAlreadyRegistered} tolerates one
- * without `has`: the verb is still released from both maps, the stale CLI
- * command is the only thing left behind.
+ * Retract the CLI command a released verb name is entitled to, which is
+ * whatever `verbToCommand` projected under it. The test is identity, not
+ * bookkeeping: `register` skips its own projection when the name is
+ * already taken, and on the real boot path it always is, because
+ * `registerCoreCommands` pre-projects every core verb into the same
+ * command registry so `hyp --help` renders before the kernel boots. A
+ * ledger of "names *this* registry projected" is empty for exactly the
+ * core verbs a host wants to displace, so it would leave `hyp query sql`
+ * running the verb the host just took the tool slot from.
+ *
+ * A plugin's own command that merely shares the name is not a projection
+ * and survives. Tolerates a command registry that predates `unregister`,
+ * the same way {@link commandAlreadyRegistered} tolerates one without
+ * `has`: the verb is still released from both maps, the stale CLI command
+ * is the only thing left behind.
  *
  * @param {CommandRegistry | undefined} registry
  * @param {string} name
  */
 function retractCommand(registry, name) {
-  if (registry && typeof registry.unregister === 'function') registry.unregister(name)
+  if (!registry || typeof registry.unregister !== 'function') return
+  if (!isVerbProjection(registry.get(name))) return
+  registry.unregister(name)
 }
