@@ -85,8 +85,10 @@ export async function runWizardSyncScope(opts) {
     // no-question path is not the one that runs into its neighbour.
     opts.stdout.write('\n')
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
-    // Four ways to reach this line, and they are not the same fact. With
-    // org rows to name, everything picked is the fleet's and always syncs.
+    // Five ways to reach this line, and they are not the same fact. With
+    // org rows to name and nothing else standing, everything picked is the
+    // fleet's and always syncs; with a hidden pick standing beside them the
+    // fleet sentence narrows to the rows it owns (below).
     // With none nameable but locked rows still standing - the enrolled
     // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
     // the fleet's own capture still ships, so the line may not claim
@@ -109,6 +111,20 @@ export async function runWizardSyncScope(opts) {
       } else {
         opts.stdout.write('You picked nothing to record, so nothing syncs to your server.\n')
       }
+      return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
+    }
+    // A hidden pick standing beside the org rows breaks the exhaustive
+    // reading of the fleet sentence: the carried row (LLP 0202
+    // #carry-through) is in `sources`, composes into the *local* layer, and
+    // syncs, so "everything you picked is managed by your fleet" hands the
+    // fleet an owner's claim over capture it does not own. The org rows get
+    // a sentence scoped to themselves, and the machine's own capture gets
+    // the line the no-locked branch already uses - a count, never a name.
+    // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it
+    if ((opts.candidatesHidden ?? 0) > 0) {
+      opts.stdout.write('Your fleet manages these and they always sync:\n')
+      for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
+      opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
     }
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')

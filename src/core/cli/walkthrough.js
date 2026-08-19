@@ -1331,26 +1331,6 @@ function mergeSink(composed, prior) {
 }
 
 /**
- * Whether a local config on disk records a pick answer at all, as opposed
- * to having been created by a config writer that never asked one. The
- * discriminator is the `plugins` key: {@link composePickerConfig} always
- * writes a `plugins` array (a record-nothing pick still composes the
- * export pair), while the side-channel writers (`hyp remote add` /
- * `remove`) create-or-augment the file without ever touching `plugins`.
- *
- * `plugins: []` counts as an answer: it cannot be told apart from a
- * deliberately emptied install, and re-seeding that from detection would
- * re-consent to capture on the user's behalf.
- *
- * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
- * @param {HypAwareV2Config} config
- * @returns {boolean}
- */
-export function configRecordsPickAnswer(config) {
-  return Array.isArray(config.plugins)
-}
-
-/**
  * The picker rows an existing local config already collects: the inverse
  * of {@link composePickerConfig}'s per-descriptor fold. A row counts as
  * configured when everything its `compose` contribution asks for is

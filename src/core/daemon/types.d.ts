@@ -401,6 +401,18 @@ export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether anything on this machine records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to a config existing only
+   * because a writer that never asked one created it. True when the local
+   * layer records a pick answer, or when the central layer carries capture of
+   * its own (the fleet having answered on the machine's behalf); the bare
+   * `@hypaware/central` enrollment seed is not such an answer.
+   * `hyp remote add` and the enrolling `hyp remote login` before the first
+   * `hyp init` leave `configExists` true and this false; that pair is what the
+   * returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a

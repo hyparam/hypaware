@@ -80,6 +80,12 @@ forbids.
 
 ## Consequences {#consequences}
 
+> **Extended-by: [LLP 0281 §returning-gate](./0281-deferred-874-residuals.decision.md#returning-gate).**
+> The residual below - the returning gate still keying on `configExists &&
+> configValid` - is closed there: the gate reads a new
+> `HypAwareStatusReport.configRecordsAnswer` and takes the first-run path on
+> an answer-less config.
+
 - `hyp remote add` → `hyp remote login` → `hyp init` behaves like the
   first run it is: detected clients arrive pre-checked and gated.
 - A genuine reconfigure is unchanged: any composer-written config has
