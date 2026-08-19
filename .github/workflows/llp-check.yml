@@ -8,6 +8,13 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   duplicate-numbers:
     runs-on: ubuntu-latest
@@ -40,3 +47,18 @@ jobs:
         run: git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
       - name: No newly minted LLP number is claimed elsewhere
         run: node scripts/llp-numbers.js check
+
+  required:
+    name: LLP required
+    if: ${{ always() }}
+    needs: [duplicate-numbers, cross-branch-numbers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          DUPLICATE_NUMBERS_RESULT: ${{ needs.duplicate-numbers.result }}
+          CROSS_BRANCH_NUMBERS_RESULT: ${{ needs.cross-branch-numbers.result }}
+        run: |
+          test "$DUPLICATE_NUMBERS_RESULT" = success
+          test "$CROSS_BRANCH_NUMBERS_RESULT" = success
