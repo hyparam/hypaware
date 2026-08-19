@@ -31,7 +31,7 @@ import {
   writePidFile,
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
-import { statusFilePath, writeStatusFile } from './status.js'
+import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 
 /**
  * @import { AiGatewayCapability, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
@@ -703,6 +703,30 @@ export async function runDaemon(opts = {}) {
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
           })
+          // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
+          // stops discarding the report. A partition this walk deliberately
+          // left fragmented was, until now, a span attribute and nothing
+          // else, so an operator who did not have tracing on when the tick
+          // ran had no way to find it at all.
+          const skips = summarizeMaintenanceSkips(report)
+          persist({ maintenance: skips })
+          span.setAttribute('partitions_visited', skips.partitionsVisited)
+          span.setAttribute('partitions_skipped', skips.skippedTotal)
+          if (skips.skippedTotal > 0) {
+            // The log line is the record and the status file is the
+            // discovery (LLP 0228#status-file-is-the-surface). One line per
+            // tick, not one per partition: the counts are the fact, and the
+            // status file already names the worst of them.
+            fileLog.warn('daemon.maintenance_skipped', {
+              partitions_visited: skips.partitionsVisited,
+              partitions_skipped: skips.skippedTotal,
+              compaction_ineffective: skips.reasons.compaction_ineffective,
+              compaction_attempt_failed: skips.reasons.compaction_attempt_failed,
+              worst: skips.partitions[0]
+                ? `${skips.partitions[0].dataset}/${skips.partitions[0].partition}`
+                : null,
+            })
+          }
           // @ref LLP 0220#tick-reports-degraded [implements]: the walk now
           // survives a partition that throws, so the rejected promise has
           // stopped being how the daemon hears about one. Read the failures

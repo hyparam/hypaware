@@ -30,7 +30,7 @@ import {
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
-import { readLocalCaInfo } from '../tls/ca.js'
+import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -51,7 +51,8 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
@@ -498,6 +499,229 @@ export function recentEntrypointsFromSources(sources) {
   // Sorted before the cap so the entries kept are the most recently seen ones,
   // which is the same entry a "recent clients" readout would keep anyway.
   return out.slice(0, MAX_RECENT_ENTRYPOINTS)
+}
+
+/* ---------- maintenance skips (LLP 0228) ---------- */
+
+/**
+ * How many skipped partitions the standing surface names. The counts beside
+ * the list are exact, so this bounds the terminal block and the status file
+ * without hiding the size of the problem; `hyp query maintain` is where an
+ * operator enumerates every one. Eight is a screenful, and a cache with more
+ * than eight frozen partitions has a story the count already tells.
+ */
+export const MAX_SKIPPED_PARTITIONS_REPORTED = 8
+
+/** Every reason id, in the order the render lists them. */
+const MAINTENANCE_SKIP_REASONS = Object.freeze(
+  /** @type {MaintenanceSkipReason[]} */ (['compaction_ineffective', 'compaction_attempt_failed'])
+)
+
+/**
+ * The reason breakdown as one phrase, e.g. `2 compaction_ineffective, 1
+ * compaction_attempt_failed`. Reasons no partition was skipped for are left
+ * out rather than printed as zeros, and the ids are printed verbatim: they
+ * are the span attribute names, so this phrase is also the trace query
+ * (LLP 0228#reason-ids-are-span-attribute-names).
+ *
+ * Both call sites interpolate this unconditionally into a sentence that
+ * already committed to a parenthetical, so an empty phrase would render as a
+ * bare `()`. That is unreachable from a snapshot this build wrote (every
+ * skip has one of the two known reasons by construction), but not from a
+ * `status.json` a later build wrote: LLP 0228#consequences names a third
+ * reason id as exactly the kind of extension this shape absorbs, and a
+ * snapshot whose only nonzero reasons are ones this build does not
+ * recognize is precisely `skippedTotal > 0` with every known count at zero.
+ * The fallback names that case instead of leaving the parenthetical empty.
+ *
+ * @param {Record<MaintenanceSkipReason, number>} reasons
+ * @returns {string}
+ */
+export function describeMaintenanceSkipReasons(reasons) {
+  const phrase = MAINTENANCE_SKIP_REASONS
+    .filter((reason) => (reasons[reason] ?? 0) > 0)
+    .map((reason) => `${reasons[reason]} ${reason}`)
+    .join(', ')
+  return phrase === '' ? 'reasons this build does not recognize' : phrase
+}
+
+/**
+ * The partition tuple as one label: exactly the shape `hyp query maintain`
+ * prints after the dataset name, so the same partition reads identically on
+ * both surfaces.
+ *
+ * @param {Record<string, string> | undefined} partition
+ * @returns {string}
+ */
+function partitionLabel(partition) {
+  if (!isPlainObject(partition)) return 'all'
+  const parts = Object.entries(partition)
+    .filter(([, v]) => typeof v === 'string')
+    .map(([k, v]) => `${k}=${v}`)
+  return parts.length > 0 ? parts.join('/') : 'all'
+}
+
+/**
+ * Why this tick left the partition fragmented, or undefined when it did not.
+ *
+ * A partition the tick *rewrote* is not on this surface even when the rewrite
+ * achieved nothing: that is a run that did work, and the verdict it recorded
+ * puts the partition on the next tick's snapshot as a skip. What this names is
+ * the standing state, the partition the kernel has stopped rewriting.
+ *
+ * @param {MaintenancePartitionReport} p
+ * @returns {MaintenanceSkipReason | undefined}
+ * @ref LLP 0218#verdict-outranks-error [constrained-by]: maintenance already makes the two mutually exclusive, so this order only has to agree about which one a reader is owed if that ever stops holding
+ */
+function skipReasonOf(p) {
+  if (p.compacted || p.rebaselined) return undefined
+  if (p.compactionIneffective) return 'compaction_ineffective'
+  if (p.compactionAttemptFailed) return 'compaction_attempt_failed'
+  return undefined
+}
+
+/**
+ * Summarize a maintenance tick's report into the snapshot the daemon persists
+ * (`DaemonStatus.maintenance`). Pure, and deliberately cheap: it reads the
+ * report the walk already produced and stats nothing, because proving a
+ * skipped partition is also still fragmented is the per-tick cost the LLP 0199
+ * baseline gate exists to avoid.
+ *
+ * A tick that skipped nothing still produces a snapshot (all-zero counts, an
+ * empty list). The snapshot is the *current* answer, so a partition that
+ * thawed has to be able to leave it.
+ *
+ * @param {MaintenanceReport} report
+ * @param {{ at?: string }} [opts]
+ * @returns {MaintenanceSkipSnapshot}
+ * @ref LLP 0228#last-tick-only [implements]: one bounded snapshot per tick, named partitions capped and taken in the walk's own neediest-first order
+ */
+export function summarizeMaintenanceSkips(report, opts = {}) {
+  const visited = Array.isArray(report?.partitions) ? report.partitions : []
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  /** @type {MaintenanceSkippedPartition[]} */
+  const partitions = []
+  let skippedTotal = 0
+  for (const p of visited) {
+    const reason = skipReasonOf(p)
+    if (reason === undefined) continue
+    reasons[reason] += 1
+    skippedTotal += 1
+    // No sort: the report is already in walk order, which is descending live
+    // data-file count (LLP 0199#neediest-first), so the first entries past the
+    // cap are the most fragmented ones by construction.
+    if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) continue
+    partitions.push({
+      // Sanitized here too, not only on read: LLP 0228#last-tick-only says the
+      // cap and the sanitizing are both re-applied on read, which only holds
+      // if the write side already produced a clean label. `dataset` and
+      // `partition` are kernel-side identifiers in the ordinary case, but
+      // `partition`'s values come off a captured row's `client_name` by way
+      // of `resolveSourceSegments` -> `sanitizePathSegment`, which strips only
+      // path-hostile bytes and applies no length clamp or bidi/zero-width
+      // filtering. Unsanitized here, the daemon log line at
+      // `runtime.js`'s `worst` field (which reads `partitions[0]` straight)
+      // would be the one surface on this path with nothing downstream to
+      // clean it.
+      // @ref LLP 0228#last-tick-only [implements]: the write side sanitizes and clamps, not only the read side
+      dataset: sanitizeLabel(p.dataset) ?? 'unknown',
+      partition: sanitizeLabel(partitionLabel(p.partition)) ?? 'all',
+      reason,
+      // The count the recorded rewrite ran over, not the live one: the same
+      // distinction `hyp query maintain` draws, for the same reason.
+      ...(reason === 'compaction_ineffective' && typeof p.compactionIneffectiveFiles === 'number'
+        ? { dataFiles: p.compactionIneffectiveFiles }
+        : {}),
+      ...(reason === 'compaction_attempt_failed' && typeof p.compactionAttemptFailedAt === 'string'
+        ? { failedAt: p.compactionAttemptFailedAt }
+        : {}),
+    })
+  }
+  return {
+    tickAt: opts.at ?? new Date().toISOString(),
+    partitionsVisited: visited.length,
+    skippedTotal,
+    reasons,
+    partitions,
+  }
+}
+
+/**
+ * Lift the maintenance snapshot out of a status file, or null when no daemon
+ * has reported a tick for this state root.
+ *
+ * Validated, sanitized and re-capped on read as well as on write, for the
+ * reason `recentEntrypointsFromSources` states: `status.json` is a file, this
+ * build did not necessarily write it, and everything here is about to be
+ * printed to a terminal. Dataset and partition labels are the only free-form
+ * strings on the path and both are kernel-side identifiers, but they are
+ * cleaned anyway rather than trusted.
+ *
+ * Not liveness-gated, for LLP 0164's reason: "these partitions were frozen as
+ * of the tick at T" stays true after the daemon exits, and the rendered age
+ * carries the staleness.
+ *
+ * @param {DaemonStatus | null} status
+ * @returns {MaintenanceSkipSnapshot | null}
+ * @ref LLP 0228#status-file-is-the-surface [implements]: hyp status answers from status.json rather than running a second maintenance walk
+ */
+export function maintenanceSkipsFromStatus(status) {
+  const raw = status?.maintenance
+  if (!isPlainObject(raw)) return null
+  const tickAt = raw.tickAt
+  // No timestamp, no snapshot: every render of this block is relative to when
+  // the tick ran, and "frozen, at some unknown time" is not worth printing.
+  if (typeof tickAt !== 'string' || Number.isNaN(Date.parse(tickAt))) return null
+
+  const rawReasons = isPlainObject(raw.reasons) ? raw.reasons : {}
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  for (const reason of MAINTENANCE_SKIP_REASONS) {
+    reasons[reason] = nonNegativeInt(rawReasons[reason]) ?? 0
+  }
+
+  /** @type {MaintenanceSkippedPartition[]} */
+  const partitions = []
+  const rawPartitions = Array.isArray(raw.partitions) ? raw.partitions : []
+  for (const item of rawPartitions) {
+    if (partitions.length >= MAX_SKIPPED_PARTITIONS_REPORTED) break
+    if (!isPlainObject(item)) continue
+    const reason = item.reason
+    // An unknown reason id is dropped rather than printed: a name this build
+    // cannot explain is worse than a shorter list, and the counts above still
+    // account for it.
+    if (typeof reason !== 'string' || !MAINTENANCE_SKIP_REASONS.includes(/** @type {MaintenanceSkipReason} */ (reason))) continue
+    const dataset = sanitizeLabel(item.dataset)
+    const partition = sanitizeLabel(item.partition)
+    if (dataset === undefined || partition === undefined) continue
+    const dataFiles = nonNegativeInt(item.dataFiles)
+    const failedAt = sanitizeLabel(item.failedAt)
+    partitions.push({
+      dataset,
+      partition,
+      reason: /** @type {MaintenanceSkipReason} */ (reason),
+      ...(dataFiles !== undefined ? { dataFiles } : {}),
+      ...(failedAt !== undefined ? { failedAt } : {}),
+    })
+  }
+
+  const recordedTotal = nonNegativeInt(raw.skippedTotal)
+    ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
+  return {
+    tickAt,
+    // Floored at the skipped total (and the named list, which the total
+    // itself is already floored at below): "visited" can never be smaller
+    // than "skipped", or the render says "5 of 0 partitions" for a snapshot
+    // no tick could have produced. A file this build did not write can claim
+    // whatever it wants here, so the floor is enforced rather than trusted.
+    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, recordedTotal, partitions.length),
+    // The list is capped, so the count leads; but a count smaller than the
+    // list would render "2 partitions" above three lines of them.
+    skippedTotal: Math.max(recordedTotal, partitions.length),
+    reasons,
+    partitions,
+  }
 }
 
 /**
@@ -950,6 +1174,29 @@ export async function collectHypAwareStatus(opts = {}) {
   // self-evident.
   // @ref LLP 0164#not-liveness-gated [implements]: a last-seen timestamp survives its daemon; the rendered age carries the staleness
   const recentEntrypoints = recentEntrypointsFromSources(daemonStatusFile?.sources)
+
+  // ----- partitions maintenance left fragmented (LLP 0228) -----
+  // Same route and the same reason as the block above: the daemon runs the
+  // hourly walk, and `hyp status` reads no cache, so answering this any other
+  // way would mean firing a second maintenance walk from a status command.
+  const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
+  if (maintenance && maintenance.skippedTotal > 0) {
+    const one = maintenance.skippedTotal === 1
+    const breakdown = describeMaintenanceSkipReasons(maintenance.reasons)
+    // Warning, never an error: the daemon is running, capture works, and
+    // queries answer. A frozen partition costs disk and query time, so it is
+    // a thing to know about rather than an outage, which is why it sits with
+    // `recent_errors` outside the set that degrades `overall` below.
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'maintenance_partitions_skipped',
+      message: `cache maintenance is leaving ${maintenance.skippedTotal} partition${one ? '' : 's'} fragmented (${breakdown}), as of its tick at ${maintenance.tickAt}`,
+      repair: [
+        'hyp query maintain --dry-run',
+        'hyp query maintain --force',
+      ],
+    })
+  }
 
   // Sinks are derived from the loaded config (so the count reflects
   // "how many sinks does the user have configured?", the same number
@@ -1463,8 +1710,10 @@ export async function collectHypAwareStatus(opts = {}) {
   const proxyTrust = await collectProxyTrust({
     platform,
     stateRoot,
-    isCaTrustedFn: opts.isCaTrusted ?? probeCaTrusted,
-    isLaunchdEnvSetFn: opts.isLaunchdEnvSet ?? probeLaunchdEnvSet,
+    isCaTrustedFn: opts.isCaTrusted
+      ?? ((args) => probeCaTrusted({ ...args, timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
+    isLaunchdEnvSetFn: opts.isLaunchdEnvSet
+      ?? (() => probeLaunchdEnvSet({ timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
   })
 
   // ----- recent errors -----
@@ -1518,10 +1767,24 @@ export async function collectHypAwareStatus(opts = {}) {
     usagePolicy,
     firstSyncHoldDeadline,
     recentEntrypoints,
+    maintenance,
     captureHealth,
     proxyTrust,
   }
 }
+
+/**
+ * How long either trust probe may take before `hyp status` gives up on it.
+ *
+ * Both are table reads (`security verify-cert` against a local root with no
+ * AIA to chase, `launchctl getenv`), so the bound is not a performance
+ * budget: it is there because a locked login keychain can put `security`
+ * behind a GUI prompt, and `hyp status` is a report, not a dialog - nobody
+ * is watching it who could decide to stop waiting. Timing out reports
+ * `unknown` for that half, which is the honest answer and is exactly what
+ * the probe-failure path already renders.
+ */
+const TRUST_PROBE_TIMEOUT_MS = 5_000
 
 /**
  * Proxy mode's two invisible preconditions, read once so `hyp status` can
@@ -1539,10 +1802,26 @@ export async function collectHypAwareStatus(opts = {}) {
  * The two probes shell out, so each is caught independently: a probe that
  * could not run reports `null` (unknown), never `false`, because "the
  * dialog was cancelled" and "`security` did not run" are different answers
- * and only the first is actionable. Nothing here carries text from another
- * process onto the terminal - the fingerprint is computed locally from the
- * DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
- * not surfaced - so no LLP 0225 sanitizing applies.
+ * and only the first is actionable. The fingerprint is computed locally from
+ * the DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
+ * not surfaced, so neither needs bounding.
+ *
+ * The permitted host set travels with the fingerprint because the grant is
+ * wider than any one install uses: the CA is constrained to the whole static
+ * provider set, so a user who trusts it while capturing only Claude still
+ * carries a grant covering `api.openai.com` and `chatgpt.com`. The attach
+ * dialog names them; so must this, or the standing grant is only ever stated
+ * once, at the moment it is asked for. The strings come from the DER's own
+ * permitted subtrees, so they are the grant itself rather than a
+ * config-derived guess that could drift from it.
+ *
+ * That last property is also why the hosts are the one field here that does
+ * need sanitizing (LLP 0225): they are bytes off disk rather than strings we
+ * wrote, so a foreign or damaged certificate at the CA path can carry an
+ * `ESC` run, a newline, or ten thousand subtrees into a line `hyp status`
+ * prints. `displayableCaHosts` is that policy, shared with the attach dialog
+ * that names the same grant, and applied here at collection like every other
+ * label in this file so `--json` carries exactly what was printed.
  *
  * @param {object} args
  * @param {NodeJS.Platform} args.platform
@@ -1551,6 +1830,7 @@ export async function collectHypAwareStatus(opts = {}) {
  * @param {() => Promise<boolean>} args.isLaunchdEnvSetFn
  * @returns {Promise<ProxyTrustReport | null>}
  * @ref LLP 0237#consequences [implements]: hyp status reports the trust state alongside the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+ * @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so a grant wider than the configured providers stays informed
  * @ref LLP 0239#terminals-predating-attach [implements]: hyp status reports whether the variable is present in the launchd environment
  */
 async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchdEnvSetFn }) {
@@ -1580,7 +1860,7 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
     launchdEnvSet = null
   }
 
-  return { caFingerprint: ca.fingerprint, trusted, launchdEnvSet }
+  return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
 }
 
 /**
