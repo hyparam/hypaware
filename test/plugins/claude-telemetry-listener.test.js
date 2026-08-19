@@ -197,6 +197,61 @@ test('one turn projects to a user row and an assistant row with native uuids', (
   assert.equal(assistant.model, 'claude-haiku-4-5-20251001')
 })
 
+/**
+ * Claude Code 2.1.235 stopped sending `app.version` on the events and
+ * reports its version once per export, on the OTLP resource, as
+ * `service.version`. The column has to survive that drift.
+ *
+ * @ref LLP 0262#field-parity-r1 [tests]: `client_version` stays populated on
+ *   the OTEL path across the upstream shape change
+ */
+test('client_version falls back to the resource service.version when no event carries app.version', () => {
+  const records = turnRecords().map((entry) => ({
+    ...entry,
+    attributes: entry.attributes.filter((attr) => attr.key !== 'app.version'),
+  }))
+  const events = flattenClaudeTelemetryEvents(envelope(records, {
+    'service.name': 'claude-code',
+    'service.version': '2.1.235',
+  }))
+  assert.equal(events.every((event) => event.attributes['app.version'] === undefined), true)
+  const [projection] = projectClaudeTelemetryEvents(events, {
+    clientName: 'claude',
+    usageByRequestId: new Map(),
+  })
+  assert.equal(projection.client_version, '2.1.235')
+  for (const row of aiGatewayRowsFromProjectedExchange(projection)) {
+    assert.equal(row.client_version, '2.1.235')
+  }
+})
+
+test('an event-level app.version still outranks the resource service.version', () => {
+  const events = flattenClaudeTelemetryEvents(envelope(turnRecords(), {
+    'service.name': 'claude-code',
+    'service.version': '2.1.235',
+  }))
+  const [projection] = projectClaudeTelemetryEvents(events, {
+    clientName: 'claude',
+    usageByRequestId: new Map(),
+  })
+  assert.equal(projection.client_version, '2.1.233')
+  for (const row of aiGatewayRowsFromProjectedExchange(projection)) {
+    assert.equal(row.client_version, '2.1.233')
+  }
+})
+
+test('a resource with no service.version leaves client_version unset rather than empty', () => {
+  const records = turnRecords().map((entry) => ({
+    ...entry,
+    attributes: entry.attributes.filter((attr) => attr.key !== 'app.version'),
+  }))
+  const [projection] = projectClaudeTelemetryEvents(
+    flattenClaudeTelemetryEvents(envelope(records)),
+    { clientName: 'claude', usageByRequestId: new Map() },
+  )
+  assert.equal(projection.client_version, undefined)
+})
+
 test('api_request usage lands on the assistant message it names', () => {
   const [projection] = projectAll(turnRecords())
   const assistant = projection.messages[1]

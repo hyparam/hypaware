@@ -28,6 +28,14 @@ export interface ClaudeTelemetryEvent {
   sequence?: number
   /** Every attribute on the record, unwrapped. */
   attributes: Record<string, unknown>
+  /**
+   * The OTLP resource attributes of the export this event arrived in,
+   * unwrapped. Present only when the resource carried any. Kept separate from
+   * `attributes` because it describes the exporting process, not the event:
+   * `claude_telemetry_events` rows stay per-event, and the projector reads it
+   * only for facts Claude Code reports once per export (`service.version`).
+   */
+  resource?: Record<string, unknown>
 }
 
 /**

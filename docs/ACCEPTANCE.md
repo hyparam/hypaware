@@ -704,7 +704,12 @@ two-layer drift detection this discharges),
    `with_tools` above zero (that is the body join, step 4's fields arriving in
    columns); `with_cwd` and `with_branch` above zero (that is the SessionStart
    hook, which is where cwd and git identity come from on this path, not the
-   events); `with_version` above zero (`app.version` off the events).
+   events); `with_version` above zero (`app.version` off the events on
+   2.1.233, or `service.version` off the export's OTLP resource from 2.1.235,
+   where the event attribute is gone: the projector reads both, so a null
+   here across a whole session means the version reached neither place: a
+   third upstream shape or a broken fallback, filed as new drift the way
+   #854 was, not #854 itself).
    `with_cwd = 0` with everything else healthy means the hook is not installed
    and the usage policy is running blind, which is a release blocker on its own.
 
@@ -756,9 +761,15 @@ two-layer drift detection this discharges),
    `model`, `input_tokens`, `output_tokens`, and the cache-token pair; the
    `permission_mode_changed` row's `attributes` carry `from_mode` and
    `to_mode`. Every row's `attributes` should carry the identity block
-   (`app.version`, `app.entrypoint`, `user.account_uuid`, `organization.id`,
-   `terminal.type`). Pass `--max-bytes 0` or the display truncates the JSON and
-   you will read a short value as a missing one.
+   (`user.account_uuid`, `organization.id`, `terminal.type`, plus
+   `app.version` and `app.entrypoint` on clients that still send them: 2.1.235
+   moved the version to the OTLP resource, so its absence here is upstream
+   shape, not a capture fault. That same capture carries no `app.entrypoint`
+   on the events either and the resource offers no replacement for it, so
+   `ai_gateway_messages.entrypoint` is null on that client: a separate gap
+   from #854, and not something this step passes or fails on). Pass
+   `--max-bytes 0` or the display truncates the JSON and you will read a short
+   value as a missing one.
 
 9. Confirm the capture-health line agrees, which is the production half of the
    same duty:
