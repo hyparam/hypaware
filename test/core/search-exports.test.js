@@ -30,6 +30,19 @@ test('package.json publishes ./core/search the way it publishes ./core/query', (
   assert.ok(fs.existsSync(path.join(repoRoot, 'src/core/search/types.d.ts')))
 })
 
+test('the hit shapes are reachable through their own types-only entry', () => {
+  // LLP 0264 #shared hoists the GrepSearchHit / GrepSearchResult shapes for
+  // the server too, and an exports map blocks every subpath it does not
+  // name: without this entry the server can import the matcher but has to
+  // redeclare the shapes it is supposed to be sharing. The target is the
+  // hand-written declaration in src/, not a build output, because tsc does
+  // not copy a .d.ts input into the generated types/ tree.
+  assert.deepEqual(pkg.exports['./core/search/types.js'], {
+    types: './src/core/search/types.d.ts',
+  })
+  assert.ok(fs.existsSync(path.join(repoRoot, pkg.exports['./core/search/types.js'].types)))
+})
+
 test('src/ and types/ are both in the published file set', () => {
   assert.ok(pkg.files.includes('src/'))
   assert.ok(pkg.files.includes('types/'))
@@ -44,6 +57,7 @@ test('the entry point resolves and carries the shared surface', async () => {
     'SEARCHABLE_COLUMNS',
     'SNIPPET_AFTER',
     'SNIPPET_BEFORE',
+    'cellText',
     'compileMatcher',
     'makeSnippet',
   ])

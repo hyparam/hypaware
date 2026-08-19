@@ -13,6 +13,11 @@
  * Insertion order is meaningful: matched columns are reported in this
  * order, so the content column leads a hit's snippets.
  *
+ * All but one of these hold STRING. `tool_args` is a JSON column, so it
+ * reads back from parquet as an object rather than text; the matcher's
+ * `cellText` renders it before testing, because a column in this set that
+ * cannot produce a hit is worse than one that is absent from it.
+ *
  * The set is a constant, not configuration. Sharing it is what makes
  * "zero hits" mean the same thing locally and remotely, and a per-install
  * knob would reintroduce exactly the drift the sharing removes.

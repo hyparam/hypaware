@@ -15,6 +15,7 @@ import {
   MAX_QUERY_LENGTH,
   SNIPPET_AFTER,
   SNIPPET_BEFORE,
+  cellText,
   compileMatcher,
   makeSnippet,
 } from '../../src/core/search/matcher.js'
@@ -103,4 +104,64 @@ test('the reported-column cap is a positive shared constant', () => {
   assert.equal(MAX_MATCH_COLUMNS, 3)
   assert.equal(SNIPPET_BEFORE, 80)
   assert.equal(SNIPPET_AFTER, 160)
+})
+
+test('a malformed regex is refused the same way an empty query is', () => {
+  // The serving surface has to be able to tell a bad request from an
+  // internal fault; a raw SyntaxError escaping the compile makes
+  // `grep --regex '('` a 500 instead of a 400.
+  assert.throws(() => compileMatcher('(', true), /not a valid regular expression/)
+  assert.throws(() => compileMatcher('a{2,1}', true), /not a valid regular expression/)
+  assert.doesNotThrow(() => compileMatcher('(', false))
+  assert.equal(compileMatcher('(', false).test('a ( here'), true)
+})
+
+test('a literal query is matched without regex metacharacters', () => {
+  const matcher = compileMatcher('a.c', false)
+  assert.equal(matcher.test('a.c'), true)
+  assert.equal(matcher.test('abc'), false)
+})
+
+test('literal offsets index the original value, not a lowercased copy', () => {
+  // U+0130 lowercases to two code units, so an offset taken from
+  // value.toLowerCase() drifts past every later character and the snippet
+  // window opens mid-word.
+  const value = 'İİİ needle'
+  assert.deepEqual(compileMatcher('needle', false).locate(value), { index: 4, length: 6 })
+  assert.equal(makeSnippet(value, compileMatcher('needle', false)), value)
+})
+
+test('a JSON cell is searchable, not silently skipped', () => {
+  // tool_args is a JSON column (iceberg variant), so it reads back from
+  // parquet as an object. It is in the allowlist, so it has to be able to
+  // produce a hit; a typeof-string gate would make it dead weight that is
+  // still decoded on every brute scan.
+  const matcher = compileMatcher('src/core/search', false)
+  assert.equal(matcher.rowTest({ tool_args: { file_path: 'src/core/search/matcher.js' } }), true)
+  assert.equal(matcher.rowTest({ tool_args: '{"file_path":"src/core/search/matcher.js"}' }), true)
+  assert.equal(matcher.rowTest({ tool_args: { file_path: 'elsewhere.js' } }), false)
+  // An excluded column stays excluded whatever shape it holds.
+  assert.equal(matcher.rowTest({ attributes: { path: 'src/core/search/matcher.js' } }), false)
+})
+
+test('cellText renders only the shapes a searchable cell can hold', () => {
+  assert.equal(cellText('plain'), 'plain')
+  assert.equal(cellText({ a: 1 }), '{"a":1}')
+  assert.equal(cellText([1, 'two']), '[1,"two"]')
+  assert.equal(cellText(null), '')
+  assert.equal(cellText(undefined), '')
+  assert.equal(cellText(42), '')
+  const cyclic = /** @type {Record<string, unknown>} */ ({})
+  cyclic.self = cyclic
+  assert.equal(cellText(cyclic), '')
+})
+
+test('a snippet edge never cuts a surrogate pair in half', () => {
+  const pad = '\u{1F600}'.repeat(200)
+  const value = pad + 'needle' + pad
+  const snippet = makeSnippet(value, compileMatcher('needle', false))
+  // A lone surrogate survives a JSON round trip but renders as a
+  // replacement glyph, so assert the payload is well formed instead.
+  assert.equal(snippet.isWellFormed(), true)
+  assert.equal(snippet.includes('needle'), true)
 })

@@ -23,6 +23,40 @@ export const MAX_MATCH_COLUMNS = 3
 export const MAX_QUERY_LENGTH = 1024
 
 /**
+ * Escape a literal query so it can be compiled as a case-insensitive
+ * regex. Literal mode runs through a regex rather than
+ * `value.toLowerCase().includes(...)` for two reasons: the match offset
+ * has to index the original value (a character whose lowercase form is
+ * longer, `İ` for one, shifts every later offset and makes `makeSnippet`
+ * cut mid-word), and lowercasing every cell copies the whole buffer on a
+ * walk whose cells run to megabytes.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function escapeLiteral(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Compile a caller-supplied regex, refusing a malformed pattern with the
+ * same shape as the other validation failures. Without this the raw
+ * `SyntaxError` reaches the serving surface, which then cannot tell a bad
+ * request from an internal fault and answers 500 to `grep --regex '('`.
+ *
+ * @param {string} query
+ * @returns {RegExp}
+ */
+function compileRegex(query) {
+  try {
+    return new RegExp(query, 'i')
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(`query is not a valid regular expression: ${detail}`)
+  }
+}
+
+/**
  * The compiled query: `hypQuery` feeds hypgrep's index pruning, `test`
  * is the per-cell predicate, `locate` finds the first match for the
  * snippet, `rowTest` the whole-row predicate the scan paths share.
@@ -50,27 +84,45 @@ export function compileMatcher(query, regex) {
   if (query.length > MAX_QUERY_LENGTH) {
     throw new Error(`query must be at most ${MAX_QUERY_LENGTH} characters`)
   }
-  if (regex) {
-    const re = new RegExp(query, 'i')
-    return {
-      hypQuery: re,
-      test: (value) => re.test(value),
-      locate: (value) => {
-        const m = re.exec(value)
-        return m ? { index: m.index, length: Math.max(m[0].length, 1) } : { index: 0, length: 1 }
-      },
-      rowTest: (row) => anySearchableCell(row, (value) => re.test(value)),
-    }
-  }
-  const lowered = query.toLowerCase()
+  const re = regex ? compileRegex(query) : new RegExp(escapeLiteral(query), 'i')
+  // A cell the row predicate accepted through another column still has to
+  // produce an offset, so a miss degrades to the head of the value. A
+  // literal keeps its own length there; a regex has no fixed width.
+  const missLength = regex ? 1 : query.length
   return {
-    hypQuery: query,
-    test: (value) => value.toLowerCase().includes(lowered),
+    hypQuery: regex ? re : query,
+    test: (value) => re.test(value),
     locate: (value) => {
-      const index = value.toLowerCase().indexOf(lowered)
-      return { index: Math.max(index, 0), length: Math.max(lowered.length, 1) }
+      const m = re.exec(value)
+      return m ? { index: m.index, length: Math.max(m[0].length, 1) } : { index: 0, length: missLength }
     },
-    rowTest: (row) => anySearchableCell(row, (value) => value.toLowerCase().includes(lowered)),
+    rowTest: (row) => anySearchableCell(row, (value) => re.test(value)),
+  }
+}
+
+/**
+ * The searchable text of one cell. Most searchable columns hold STRING,
+ * but `tool_args` is a JSON column (iceberg `variant`), so it reads back
+ * from parquet as an object and arrives as a JSON string on the paths
+ * that carry it verbatim, exactly as `parseMaybeJson` handles it
+ * elsewhere in the contract. Without this coercion a column named in the
+ * allowlist could never produce a hit: a `typeof value === 'string'` gate
+ * drops the object form, so searching for a file path or a shell command
+ * inside a tool call answers zero while the indexed tier, which reads the
+ * column's own text, answers otherwise. That split is precisely the drift
+ * the shared module exists to prevent.
+ *
+ * @ref LLP 0264#shared [implements]: every allowlisted column is really searchable on every tier, including the JSON one
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function cellText(value) {
+  if (typeof value === 'string') return value
+  if (value === null || typeof value !== 'object') return ''
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return ''
   }
 }
 
@@ -80,17 +132,31 @@ export function compileMatcher(query, regex) {
  * shared constants above, so the two repositories render the same hit
  * the same way rather than each choosing its own excerpt.
  *
+ * The window edges are nudged off a surrogate pair, because a hit is
+ * serialized to JSON and rendered in a terminal: cutting an emoji in half
+ * would show the reader a replacement glyph at the snippet's edge.
+ *
  * @param {string} value
  * @param {GrepSearchMatcher} matcher
  * @returns {string}
  */
 export function makeSnippet(value, matcher) {
   const found = matcher.locate(value)
-  const start = Math.max(0, found.index - SNIPPET_BEFORE)
-  const end = Math.min(value.length, found.index + found.length + SNIPPET_AFTER)
+  let start = Math.max(0, found.index - SNIPPET_BEFORE)
+  let end = Math.min(value.length, found.index + found.length + SNIPPET_AFTER)
+  if (start > 0 && isLowSurrogate(value.charCodeAt(start))) start += 1
+  if (end < value.length && isLowSurrogate(value.charCodeAt(end))) end -= 1
   const prefix = start > 0 ? '...' : ''
   const suffix = end < value.length ? '...' : ''
   return prefix + value.slice(start, end) + suffix
+}
+
+/**
+ * @param {number} code
+ * @returns {boolean}
+ */
+function isLowSurrogate(code) {
+  return code >= 0xdc00 && code <= 0xdfff
 }
 
 /**
@@ -107,8 +173,8 @@ export function makeSnippet(value, matcher) {
  */
 function anySearchableCell(row, test) {
   for (const column of SEARCHABLE_COLUMNS) {
-    const value = row[column]
-    if (typeof value === 'string' && value !== '' && test(value)) return true
+    const value = cellText(row[column])
+    if (value !== '' && test(value)) return true
   }
   return false
 }
