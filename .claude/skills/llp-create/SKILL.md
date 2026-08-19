@@ -27,7 +27,7 @@ Run `node scripts/llp-numbers.js next` and use what it prints.
 
 `scripts/llp-numbers.js` is that rule:
 
-- `next` prints the next free number across every ref that could still merge, zero-padded.
+- `next` prints the next free number across every ref that could still merge and the working tree, zero-padded. A document you created a minute ago and have not committed claims its number too, so two calls in one session do not collide.
 - `check` exits nonzero when a number this branch mints is already claimed elsewhere. It runs in CI (`.github/workflows/llp-check.yml`) and in `npm test`.
 - `survey` lists every collision across every ref, including the settled ones stale branches still carry.
 

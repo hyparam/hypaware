@@ -20,16 +20,18 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  addedDocs,
   claimsByNumber,
   collisions,
+  formatCollisions,
   llpNumberOf,
   mergeableRefs,
+  mintedAgainst,
   mintedNumbers,
   nextFreeNumber,
   NOT_A_CHECKOUT,
   partialScan,
   refFilesFromGit,
+  scanRefFiles,
   run,
 } from '../../scripts/llp-numbers.js'
 
@@ -134,10 +136,18 @@ test('a document that only moved between directories is one claimant', () => {
   assert.deepEqual(collisions(refFiles), [])
 })
 
-test('renaming a document already on the base is not a fresh mint', () => {
-  assert.deepEqual(addedDocs(['llp/0100-a.spec.md'], ['llp/tombstones/0100-a.spec.md']), [])
-  assert.deepEqual(addedDocs(['llp/0100-a.spec.md'], ['llp/0100-a.spec.md', 'llp/0101-b.spec.md']), ['0101-b.spec.md'])
-  assert.deepEqual(addedDocs([], ['llp/README.md']), [])
+// A branch mints a number when it puts a document at one that had fewer, which
+// is not the same as adding a filename. Slugs get rewritten during review all the
+// time, and a slug rewrite claims nothing the branch did not already own.
+test('a branch mints a number only when it adds a document at it', () => {
+  assert.deepEqual([...mintedAgainst(['llp/0100-a.spec.md'], ['llp/tombstones/0100-a.spec.md'])], [])
+  assert.deepEqual([...mintedAgainst(['llp/0100-a.spec.md'], ['llp/0100-a-renamed.spec.md'])], [])
+  assert.deepEqual([...mintedAgainst(['llp/0100-a.spec.md'], ['llp/0100-a.spec.md', 'llp/0101-b.spec.md'])], [101])
+  // A second document at a number the base already carries is a mint of it.
+  assert.deepEqual([...mintedAgainst(['llp/0100-a.spec.md'], ['llp/0100-a.spec.md', 'llp/0100-b.spec.md'])], [100])
+  // The LLP 0156 repair mints the number it moves to, and is checked there.
+  assert.deepEqual([...mintedAgainst(['llp/0100-a.spec.md'], ['llp/0281-a.spec.md'])], [281])
+  assert.deepEqual([...mintedAgainst([], ['llp/README.md'])], [])
 })
 
 // The reproduction. Reading one branch at a time is exactly what each of the
@@ -230,6 +240,82 @@ test('an unknown mode is a usage error, not a silent pass', t => {
   assert.equal(run(['fix'], repo, () => {}, () => {}), 2)
 })
 
+// A document exists before it is committed, and two `/llp-create` calls in one
+// session are the ordinary case. Reading committed trees only would hand the
+// second one the number the first already took, which is issue #907 again with
+// both claimants on the same machine.
+test('a document written but not committed already claims its number', t => {
+  const repo = collidedRepo(t)
+  assert.equal(run(['next'], repo, () => {}, () => {}), 0)
+
+  writeDoc(repo, 'llp/0300-still-a-draft.decision.md')
+  /** @type {string[]} */
+  const out = []
+  assert.equal(run(['next'], repo, text => out.push(text), () => {}), 0)
+  assert.equal(out.join(''), '0301\n')
+
+  // And the gate sees it: an uncommitted doc at a taken number fails the check.
+  writeDoc(repo, 'llp/0266-also-a-draft.decision.md')
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 1)
+  assert.match(err.join(''), /LLP 0266/)
+})
+
+// Slugs get rewritten during review. A rewrite claims nothing the branch did not
+// already own, so blaming it for a collision the corpus already had (and telling
+// it to renumber) is a false positive with the wrong remedy attached.
+test('changing a slug without changing the number is not a mint', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0100-a.spec.md')
+  commit(repo, 'the document that reached master first')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '-b', 'stale', 'master'])
+  writeDoc(repo, 'llp/0100-b.spec.md')
+  commit(repo, 'a settled collision at 0100 that a stale branch still carries')
+
+  git(repo, ['checkout', '-q', '-b', 'topic', 'master'])
+  git(repo, ['mv', 'llp/0100-a.spec.md', 'llp/0100-a-clearer-slug.spec.md'])
+  commit(repo, 'reword the slug, keep the number')
+
+  assert.deepEqual([...mintedNumbers(repo).numbers], [])
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 0, err.join(''))
+})
+
+// A truncated clone resolves the base ref but not a merge base. Reading that as
+// an empty base counts the whole corpus as newly minted and blames the branch for
+// every collision already settled in it.
+test('a merge base that cannot be found is unknown, not an empty base', t => {
+  const repo = emptyRepo(t)
+  writeDoc(repo, 'llp/0100-a.spec.md')
+  writeDoc(repo, 'llp/tombstones/0100-a-twin.spec.md')
+  commit(repo, 'a corpus that already carries a settled collision')
+  git(repo, ['update-ref', 'refs/remotes/origin/master', 'master'])
+  git(repo, ['checkout', '-q', '--orphan', 'unrelated'])
+  commit(repo, 'a history with no common ancestor')
+
+  const minted = mintedNumbers(repo)
+  assert.equal(minted.base, 'refs/remotes/origin/master')
+  assert.equal(minted.mergeBase, null)
+  assert.deepEqual([...minted.numbers], [])
+  /** @type {string[]} */
+  const err = []
+  assert.equal(run(['check'], repo, () => {}, text => err.push(text)), 0)
+  assert.match(err.join(''), /no common ancestor/)
+})
+
+// One document is carried by every branch cut since it landed, which on this
+// repository is over a hundred refs. Printing them all buries the report.
+test('a claimant line names enough refs to locate it and counts the rest', () => {
+  const refs = Array.from({ length: 30 }, (_, i) => `refs/heads/branch-${i}`)
+  const report = formatCollisions([{ number: 100, claimants: [{ file: '0100-a.spec.md', refs }] }], 281)
+  assert.match(report, /refs\/heads\/branch-0/)
+  assert.match(report, /and 24 more/)
+  assert.ok(!report.includes('refs/heads/branch-29'), report)
+})
+
 // A checkout that carries one branch and no default branch answers every mode
 // from a corpus of one, which is the defect of issue #907 rather than a pass.
 // `actions/checkout` hands exactly that to any job that does not ask for more,
@@ -261,7 +347,7 @@ test('this branch mints no number another ref already claims', t => {
     t.skip(`this is ${partial}: fetch every branch to run this check`)
     return
   }
-  const refFiles = refFilesFromGit(REPO_ROOT, mergeableRefs(REPO_ROOT))
+  const refFiles = scanRefFiles(REPO_ROOT)
   assert.ok(refFiles.size > 0, 'expected at least one readable ref')
   const found = collisions(refFiles, mintedNumbers(REPO_ROOT).numbers)
   assert.deepEqual(found.map(c => `LLP ${c.number}: ${c.claimants.map(x => x.file).join(', ')}`), [])

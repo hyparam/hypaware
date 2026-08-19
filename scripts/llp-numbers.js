@@ -2,8 +2,9 @@
 // @ts-check
 
 // The minting rule of LLP 0156, made executable. A number is free only when no
-// document claims it on *any* ref that could still merge, so the tree you happen
-// to have checked out is the wrong denominator: three branches cut from the same
+// document claims it on *any* ref that could still merge, nor in the working tree
+// alongside them, so the tree you happen to have checked out is the wrong
+// denominator: three branches cut from the same
 // master each read `max(llp/) + 1`, each got the same answer, and git reported no
 // conflict because their slugs differed (issue #907).
 //
@@ -30,6 +31,12 @@ const EXCLUDED_DIRS = new Set(['reviews'])
 
 /** `NNNN-slug.type.md`, the filename convention of LLP 0000. */
 const DOC_PATTERN = /^(\d{4})-.*\.md$/
+
+/** How many refs a claimant line names before it summarises the rest. */
+const MAX_REFS_SHOWN = 6
+
+/** The label the working tree carries when it claims a number alongside the refs. */
+export const WORKTREE = "the working tree"
 
 /** What `partialScan` answers when the path is not a git checkout at all. */
 export const NOT_A_CHECKOUT = 'not a git checkout, so there is no corpus to scan'
@@ -120,19 +127,47 @@ export function collisions(refFiles, only = null) {
 }
 
 /**
- * The documents a branch adds: present at the tip, absent at the point it left
- * the default branch. Basenames, so that a document the branch only moved between
- * directories (into `llp/tombstones/`, say) is not read as a fresh mint. A
- * renumber, the repair LLP 0156 prescribes, does change the basename and so does
- * read as a mint, which is the point: the number it moves to has to be free too.
+ * Distinct documents per number in one tree, by basename so that a document the
+ * branch only moved between directories (into `llp/tombstones/`, say) stays one
+ * document.
+ *
+ * @param {string[]} files
+ * @returns {Map<number, Set<string>>}
+ */
+function docsByNumber(files) {
+  /** @type {Map<number, Set<string>>} */
+  const byNumber = new Map()
+  for (const file of files) {
+    const number = llpNumberOf(file)
+    if (number === null) continue
+    const names = byNumber.get(number) ?? new Set()
+    names.add(basename(file))
+    byNumber.set(number, names)
+  }
+  return byNumber
+}
+
+/**
+ * The numbers a branch is answerable for: those that more documents claim at its
+ * tip than at the point it left the default branch. Counted rather than matched
+ * by name, because changing a document's slug leaves its number exactly as
+ * claimed as it already was (0265-a to 0265-b mints nothing), while adding a
+ * second document at a number the base already carries does mint it. A renumber,
+ * the repair LLP 0156 prescribes, mints the number it moves to and is checked
+ * there, which is the point: the number it moves to has to be free too.
  *
  * @param {string[]} baseFiles paths at the merge base
  * @param {string[]} headFiles paths at the tip
- * @returns {string[]}
+ * @returns {Set<number>}
  */
-export function addedDocs(baseFiles, headFiles) {
-  const before = new Set(baseFiles.filter(f => llpNumberOf(f) !== null).map(basename))
-  return headFiles.filter(f => llpNumberOf(f) !== null).map(basename).filter(name => !before.has(name))
+export function mintedAgainst(baseFiles, headFiles) {
+  const before = docsByNumber(baseFiles)
+  /** @type {Set<number>} */
+  const minted = new Set()
+  for (const [number, names] of docsByNumber(headFiles)) {
+    if (names.size > (before.get(number)?.size ?? 0)) minted.add(number)
+  }
+  return minted
 }
 
 /**
@@ -173,27 +208,63 @@ export function refFilesFromGit(repoRoot, refs) {
 }
 
 /**
+ * The LLP documents on disk, tracked and untracked alike. A document written but
+ * not yet committed claims its number: two `/llp-create` calls in one session
+ * are the ordinary case, and a scan of committed trees only would hand both the
+ * same number, which is the defect this script exists to prevent.
+ *
+ * @param {string} repoRoot
+ * @returns {string[]}
+ */
+export function worktreeFiles(repoRoot) {
+  const listed = tryGit(repoRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '--', LLP_DIR])
+  return listed === null ? [] : [...new Set(listed.split('\n').filter(line => line !== ''))]
+}
+
+/**
+ * What this branch would merge: the working tree where there is one, the HEAD
+ * tree otherwise (a bare checkout, or a repo with no `llp/` on disk).
+ *
+ * @param {string} repoRoot
+ * @returns {string[]}
+ */
+export function tipFiles(repoRoot) {
+  const worktree = worktreeFiles(repoRoot)
+  return worktree.length > 0 ? worktree : refFilesFromGit(repoRoot, ['HEAD']).get('HEAD') ?? []
+}
+
+/**
+ * The claim index every mode reads: every mergeable ref plus the working tree.
+ *
+ * @param {string} repoRoot
+ * @returns {Map<string, string[]>}
+ */
+export function scanRefFiles(repoRoot) {
+  const refFiles = refFilesFromGit(repoRoot, mergeableRefs(repoRoot))
+  const worktree = worktreeFiles(repoRoot)
+  if (worktree.length > 0) refFiles.set(WORKTREE, worktree)
+  return refFiles
+}
+
+/**
  * The numbers the working ref mints against the default branch. Empty on the
  * default branch itself, which is what keeps the gate quiet on merges.
  *
+ * A merge base that cannot be found (a truncated clone, an unrelated history)
+ * means the answer is unknown, reported as a null `mergeBase`. Treating it as an
+ * empty base instead would count the whole corpus at HEAD as newly minted and
+ * blame this branch for every collision already settled in it.
+ *
  * @param {string} repoRoot
- * @returns {{ base: string | null, numbers: Set<number>, files: string[] }}
+ * @returns {{ base: string | null, mergeBase: string | null, numbers: Set<number> }}
  */
 export function mintedNumbers(repoRoot) {
   const base = BASE_CANDIDATES.find(ref => tryGit(repoRoot, ['rev-parse', '--verify', '--quiet', ref]) !== null) ?? null
-  if (base === null) return { base: null, numbers: new Set(), files: [] }
+  if (base === null) return { base: null, mergeBase: null, numbers: new Set() }
   const mergeBase = tryGit(repoRoot, ['merge-base', 'HEAD', base])
-  const files = addedDocs(
-    mergeBase === null ? [] : refFilesFromGit(repoRoot, [mergeBase]).get(mergeBase) ?? [],
-    refFilesFromGit(repoRoot, ['HEAD']).get('HEAD') ?? [],
-  )
-  /** @type {Set<number>} */
-  const numbers = new Set()
-  for (const file of files) {
-    const number = llpNumberOf(`${LLP_DIR}/${file}`)
-    if (number !== null) numbers.add(number)
-  }
-  return { base, numbers, files }
+  if (mergeBase === null) return { base, mergeBase: null, numbers: new Set() }
+  const numbers = mintedAgainst(refFilesFromGit(repoRoot, [mergeBase]).get(mergeBase) ?? [], tipFiles(repoRoot))
+  return { base, mergeBase, numbers }
 }
 
 /**
@@ -248,6 +319,19 @@ export function padNumber(number) {
 }
 
 /**
+ * A claimant is carried by every branch cut since it landed, which on this repo
+ * is over a hundred refs for one document. Naming them all buries the report the
+ * reader has to act on, so the line names enough to locate it and counts the rest.
+ *
+ * @param {string[]} refs
+ * @returns {string}
+ */
+function describeRefs(refs) {
+  if (refs.length <= MAX_REFS_SHOWN) return refs.join(', ')
+  return `${refs.slice(0, MAX_REFS_SHOWN).join(', ')} and ${refs.length - MAX_REFS_SHOWN} more`
+}
+
+/**
  * @param {{ number: number, claimants: { file: string, refs: string[] }[] }[]} found
  * @param {number} next the number a repair should move to
  * @returns {string}
@@ -256,7 +340,7 @@ export function formatCollisions(found, next) {
   const lines = [`${found.length} LLP number${found.length === 1 ? '' : 's'} claimed by more than one document:`]
   for (const { number, claimants } of found) {
     lines.push(`  LLP ${padNumber(number)}`)
-    for (const claimant of claimants) lines.push(`    ${claimant.file}  on ${claimant.refs.join(', ')}`)
+    for (const claimant of claimants) lines.push(`    ${claimant.file}  on ${describeRefs(claimant.refs)}`)
   }
   lines.push('')
   lines.push(`Renumber the later claimant to ${padNumber(next)} or above (LLP 0156), and sweep`)
@@ -285,7 +369,7 @@ export function run(argv, repoRoot, write, writeError) {
   if (partial !== null) {
     writeError(`warning: this is ${partial}. Run \`git fetch --prune --unshallow\` and fetch every branch, or this answer is a guess.\n`)
   }
-  const refFiles = refFilesFromGit(repoRoot, mergeableRefs(repoRoot))
+  const refFiles = scanRefFiles(repoRoot)
   const next = nextFreeNumber(refFiles)
   if (mode === 'next') {
     write(`${padNumber(next)}\n`)
@@ -301,9 +385,13 @@ export function run(argv, repoRoot, write, writeError) {
     writeError('no default branch to compare against, so nothing is minted here\n')
     return 0
   }
+  if (minted.mergeBase === null) {
+    writeError(`no common ancestor with ${minted.base}, so what this branch mints cannot be told from what it inherited\n`)
+    return 0
+  }
   const found = collisions(refFiles, minted.numbers)
   if (found.length === 0) {
-    write(`${minted.files.length} LLP document${minted.files.length === 1 ? '' : 's'} minted against ${minted.base}, no collision\n`)
+    write(`${minted.numbers.size} LLP number${minted.numbers.size === 1 ? '' : 's'} minted against ${minted.base}, no collision\n`)
     return 0
   }
   writeError(`${formatCollisions(found, next)}\n`)
