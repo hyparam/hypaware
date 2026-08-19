@@ -142,9 +142,13 @@ export function projectClaudeTelemetryEvents(events, opts) {
     }
     // A `user_prompt` event carries no `query_source` of its own, so its row
     // borrows the session's main-loop value rather than reading null. A
-    // message that DID carry one keeps it.
+    // message that DID carry one keeps it, and a message a subagent produced
+    // is skipped outright: the default is the main loop's by construction, so
+    // lending it to a sidechain row would put the parent's attribution back on
+    // a row this same pass has just labeled the subagent's.
     if (entry.facts.querySource) {
       for (const message of entry.messages) {
+        if (message.is_sidechain || message.agent_id) continue
         if (querySourceOf(message) === undefined) stampQuerySource(message, entry.facts.querySource)
       }
     }

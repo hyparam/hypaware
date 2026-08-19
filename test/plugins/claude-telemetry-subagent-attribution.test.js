@@ -178,3 +178,26 @@ test('query_source follows the event that carries it, whatever the batch order',
     assert.equal(query(rowFor(rows, USER_UUID)), 'user')
   }
 })
+
+test('the session query_source default is never lent to a subagent row', () => {
+  // Not every subagent event carries a `query_source` of its own. The
+  // default exists for main-loop events that carry none (`user_prompt`),
+  // and it is the main loop's value by construction, so a row already
+  // identified as the subagent's must read null rather than inherit it.
+  const quietSubagent = evt('assistant_response', {
+    response: 'Subagent finished.',
+    request_id: SUB_REQUEST_ID,
+    'message.uuid': SUBAGENT_UUID,
+    'agent.name': 'general-purpose',
+  }, '2026-08-19T10:00:02.500Z')
+
+  const { rows } = rowsFor([...mainLoopEvents(), quietSubagent])
+  const query = (/** @type {Record<string, unknown>} */ row) =>
+    /** @type {any} */ (row.attributes)?.claude?.query_source
+
+  const subagent = rowFor(rows, SUBAGENT_UUID)
+  assert.equal(subagent.is_sidechain, true)
+  assert.equal(query(subagent), undefined)
+  // The main loop's own borrow still happens.
+  assert.equal(query(rowFor(rows, USER_UUID)), 'user')
+})
