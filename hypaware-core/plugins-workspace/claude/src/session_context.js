@@ -29,6 +29,16 @@ export const SESSION_CONTEXT_MAX_RECORDS = 4096
  * never interrupt Claude Code). Past that the tail read stays as the backstop
  * against a file that stopped being bounded at all.
  *
+ * This moves the cliff to the writer's own bound; it does not remove it.
+ * Compaction still drops by position (`records.slice(-maxRecords)`, then
+ * shift from the front), so once the file actually reaches
+ * `SESSION_CONTEXT_MAX_BYTES` a quiet session's only record leaves the file
+ * and no read window can recover it. At the size the hook writes that cap is
+ * roughly 1,300 hook events, so a long-lived install sits pinned there.
+ * Closing that one means making compaction retain the newest record per
+ * `session_id`, which changes what the writer is specified to keep, so it
+ * wants its own LLP rather than a wider window here.
+ *
  * @ref LLP 0254#policy-inline [constrained-by]: the hook's cwd is what the
  *   ingest verdict is resolved from, so the reader may not lose a record the
  *   writer is still holding

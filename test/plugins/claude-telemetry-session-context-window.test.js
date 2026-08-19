@@ -15,6 +15,12 @@
  * So a quiet session (no hook-firing tool calls) whose neighbour is noisy
  * loses its content outright, without ever having been opted out.
  *
+ * Scope: these tests pin the regime below the writer's cap, where the record
+ * is on disk and only the reader's window decided whether it was seen. Above
+ * the cap compaction deletes the record itself, by position, and the same
+ * session is still suppressed; that is a writer-side design change (see
+ * `SESSION_CONTEXT_READ_TAIL_BYTES`) and is deliberately not pinned here.
+ *
  * @ref LLP 0254#policy-inline [tests]: the hook's record is load-bearing for
  *   this path's privacy verdict, so a reader that cannot see a record the
  *   writer kept turns a recorded session into a suppressed one
