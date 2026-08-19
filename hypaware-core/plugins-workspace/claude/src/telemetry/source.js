@@ -577,8 +577,9 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           // And so does the folder policy: a cost counter names its session
           // and its model, which is attribution for a directory the user asked
           // us to leave alone.
+          const metricRecords = await readSessionContext()
           const metricEvents = await applyUsagePolicy(metricSplit.kept, {
-            records: await readSessionContext(),
+            records: metricRecords,
             tally,
           })
           recordSuppression(span, tally)
@@ -586,7 +587,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
             span.setAttribute('telemetry_row_count', 0)
             return
           }
-          const written = await recordTelemetryEvents(metricEvents, { ctx, state, span })
+          const written = await recordTelemetryEvents(metricEvents, { ctx, state, span, records: metricRecords })
           span.setAttribute('telemetry_row_count', written)
           ctx.log.info('claude.telemetry.batch', {
             [Attr.PLUGIN]: PLUGIN_NAME,
@@ -728,7 +729,7 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
         // rows on every message-write retry.
         // @ref LLP 0255#own-dataset [implements]: behavioral events land in
         //   `claude_telemetry_events`, next to (not inside) the message rows
-        const telemetryRowsWritten = await recordTelemetryEvents(events, { ctx, state, span })
+        const telemetryRowsWritten = await recordTelemetryEvents(events, { ctx, state, span, records })
         span.setAttribute('telemetry_row_count', telemetryRowsWritten)
 
         // Projected, then deleted: the writes above succeeded, so nothing
@@ -853,18 +854,41 @@ export function partitionIgnoredSessionEvents(events, ignoredSessions) {
  * counted on the state, marked on the span, logged, and re-thrown so
  * the transport answers with an error the exporter retries.
  *
+ * `records` are the same SessionStart hook records the policy gate resolved
+ * its verdict from, so a row's `cwd` is the cwd it was judged by. Without
+ * that stamp the rows would forward under this dataset's source signal with
+ * nothing for the export seam to withhold on: `local-only` is kept at ingest
+ * precisely because it is enforced downstream, and downstream needs the cwd.
+ *
  * @ref LLP 0257#outputs [implements]: one row per event, hot fields typed,
  *   the remainder in the attributes JSON column
+ * @ref LLP 0070#derive [implements]: the withholding verdict is derived from
+ *   the row's own `cwd` at export time, so capture's job is to persist the
+ *   cwd, never a class marker that would go stale when the list changes
  * @param {ClaudeTelemetryEvent[]} events
  * @param {{
  *   ctx: PluginActivationContext,
  *   state: ClaudeTelemetryListenerState,
  *   span: { setAttribute(key: string, value: unknown): unknown },
+ *   records: SessionContextRecord[],
  * }} args
  * @returns {Promise<number>} rows written
  */
-async function recordTelemetryEvents(events, { ctx, state, span }) {
-  const rows = claudeTelemetryEventRows(events)
+async function recordTelemetryEvents(events, { ctx, state, span, records }) {
+  // One record lookup per session per batch, for the same reason
+  // `partitionByUsagePolicy` caches its verdicts: the lookup is a scan of the
+  // session-context tail and a batch routinely carries a dozen events for one
+  // session.
+  /** @type {Map<string, string | undefined>} */
+  const cwdBySession = new Map()
+  const rows = claudeTelemetryEventRows(events, {
+    cwdFor: (sessionId) => {
+      if (!cwdBySession.has(sessionId)) {
+        cwdBySession.set(sessionId, pickLatestMatching(records, { sessionId })?.cwd)
+      }
+      return cwdBySession.get(sessionId)
+    },
+  })
   if (rows.length === 0) return 0
   try {
     await ctx.storage.appendRows(

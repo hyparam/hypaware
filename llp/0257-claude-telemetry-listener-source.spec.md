@@ -75,6 +75,10 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
 - **S14** `claude_telemetry_events` rows are one per event, hot fields typed,
   the remainder in an `attributes` JSON column, with the source signal set for
   central forwarding (LLP 0255 #row-shape).
+  **Extended-by [LLP 0278](./0278-behavioral-rows-carry-cwd.decision.md):**
+  each row also carries the `cwd` of the session it names, taken from the same
+  hook record the ingest verdict was resolved from, so the export and query
+  seams can withhold a `local-only` directory's rows.
 - **S15** `parent_uuid`, `logical_parent_uuid`, `user_type`, and
   `permission_mode` read null on this path by design.
 
