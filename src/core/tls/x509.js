@@ -256,6 +256,10 @@ function keyIdentifier(spkiDer) {
  * Whether a host string is an IP literal rather than a DNS name, with an
  * IPv6 URL host's brackets tolerated because `URL.hostname` keeps them.
  *
+ * Deliberately `net.isIP`, which is the same normalised judgement `URL` already
+ * made: `URL` canonicalises every legacy IPv4 spelling (`0x7f.1`, decimal
+ * integers) to dotted quad before this ever sees it.
+ *
  * Exported because the gateway has to make the same judgement one step earlier,
  * on the upstreams it is about to ask for a CA: skipping one IP-literal
  * upstream is right, letting it fail the whole mint is not.
@@ -281,11 +285,19 @@ export function isIpLiteralHost(host) {
  * hostnames from config.
  *
  * An IP literal is printable ASCII, so it used to pass, and every host here is
- * encoded as a `dNSName`. No TLS client matches a dNSName against a connection
- * made to an IP address, and the CA excludes the whole IP space anyway
- * (LLP 0235#ca-name-constraints), so the mint succeeded and produced a
- * certificate nothing would ever accept. Same rule as the non-ASCII case: a
- * certificate that cannot work is refused, not quietly issued.
+ * encoded as a `dNSName`. A client that connected to an IP address checks the
+ * certificate's `iPAddress` SANs and only those (RFC 6125; Node's
+ * `checkServerIdentity` does exactly this), so a `dNSName` entry is never even
+ * looked at: the mint succeeded and produced a certificate nothing would ever
+ * accept. Same rule as the non-ASCII case: a certificate that cannot work is
+ * refused, not quietly issued.
+ *
+ * Not the CA's IP `excludedSubtrees`, which is a different thing: RFC 5280
+ * 4.2.1.10 applies a name-constraint subtree only to its own name form, so an
+ * excluded IP range says nothing about a `dNSName` SAN. What the exclusion does
+ * settle is that emitting an `iPAddress` SAN instead would not help either,
+ * which is why supporting IP literals is a design change rather than a wider
+ * guard here (LLP 0275#ip-literals-are-refused).
  *
  * @ref LLP 0275#ip-literals-are-refused [implements]
  * @param {string} host
@@ -304,8 +316,8 @@ function assertAsciiHost(host) {
   if (isIpLiteralHost(host)) {
     throw new Error(
       `certificate host must be a DNS name, got the IP literal ${JSON.stringify(host)}; ` +
-      'this CA constrains dNSName and excludes all IP space, so an IP-literal ' +
-      'certificate could never be accepted'
+      'this minter emits dNSName entries only, and a client connected to an IP ' +
+      'matches iPAddress SANs alone, so such a certificate could never be accepted'
     )
   }
 }

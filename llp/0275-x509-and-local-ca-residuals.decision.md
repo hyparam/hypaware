@@ -65,18 +65,35 @@ signature algorithm, one extension set) is untouched.
 
 **A certificate host must be a DNS name.** The ASCII guard in `x509.js`
 rejected anything unencodable as an IA5String but accepted `10.0.0.5`, and
-every host it accepts is encoded as a `dNSName`. No TLS client matches a
-dNSName against a connection made to an IP address, and LLP 0235's
-IP-exclusion puts the whole IPv4 and IPv6 space in `excludedSubtrees`, so such
-a certificate could not chain even if a client did look. An operator
-configuring `base_url = "https://10.0.0.5/v1"` therefore got a CA that minted
-cleanly, an `aigw.interception_ready` log line, and handshake failures with no
-stated cause.
+every host it accepts is encoded as a `dNSName`. A client that connected to an
+IP address checks the certificate's `iPAddress` SANs and only those (RFC 6125,
+and Node's `checkServerIdentity` implements exactly that), so the `dNSName`
+entry is never even looked at. An operator configuring
+`base_url = "https://10.0.0.5/v1"` therefore got a CA that minted cleanly, an
+`aigw.interception_ready` log line, and handshake failures with no stated cause.
+
+The CA's IP `excludedSubtrees` is *not* what makes that certificate
+unacceptable, and the comments this document replaced said otherwise: RFC 5280
+4.2.1.10 applies a name-constraint subtree only to its own name form, so an
+excluded IP range constrains `iPAddress` names and says nothing about a
+`dNSName` SAN. The client-side identity check is the whole reason, and it is
+sufficient on its own.
 
 Supporting IP literals is **not** what this decides. It would mean an
-`iPAddress` SAN and a hole in the IP exclusion LLP 0235 put there deliberately,
-which is a design change and needs its own document. What is decided is that
-the impossible case is named instead of minted.
+`iPAddress` SAN, and *that* is what LLP 0235's IP exclusion bars: a hole would
+have to be cut in a constraint put there deliberately, which is a design change
+and needs its own document. What is decided is that the impossible case is named
+instead of minted.
+
+The gateway also has to make that judgement one more time, at the point of
+interception rather than of minting: the compiled routing table still holds an
+IP-literal upstream (it is a real upstream in reverse-proxy mode), so
+`interceptsHost` refuses an IP-literal authority outright. Otherwise the
+`200 Connection Established` goes out before the leaf mint refuses the host, and
+the client loses that upstream's egress rather than only its capture. Skipping
+the host at CA-request time must also never cost the machine its CA: an install
+whose upstreams are *all* IP literals still mints against the static provider
+list, because that file is what a proxy-mode attach preflights on.
 
 Because a refusal at mint time would take the whole install's interception down
 over one bad upstream, the gateway makes the same judgement one step earlier:
@@ -125,8 +142,14 @@ product never touched.
 
 The gate becomes the condition the branch's own comment already describes: a
 damaged **current**-shape marker, detected exactly as the rest of that branch
-detects one. The case the reversal exists for is unaffected, and LLP
-0232#detach-restores-any-managed-key still holds for it.
+detects one, and not one whose surviving `mode` positively names a base-URL or
+otel attach (neither writes those keys, so the same false claim would otherwise
+return one case over). A marker damaged badly enough to lose `mode` as well
+still gets the reversal: it can be a proxy marker holding `prev_env`, every
+mutation is separately gated on the value still being ours, and with no `mode`
+at all "the undo record is unreadable" is exactly true. The case the reversal
+exists for is unaffected, and LLP 0232#detach-restores-any-managed-key still
+holds for it.
 
 ## Consequences
 

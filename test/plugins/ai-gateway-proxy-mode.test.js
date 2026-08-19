@@ -759,3 +759,47 @@ test('interceptsHost refuses an IP-literal authority so its tunnel stays blind',
   ])
   assert.equal(interceptsHost(nip, '10.0.0.5.nip.io', 443), true)
 })
+
+// Review round on #898. The IP-literal skip empties `hostList`, so an install
+// whose upstreams are *all* IP literals fell through to the "nothing to
+// terminate" idle path and minted no CA at all. The CA file is what a
+// proxy-mode attach preflights on (LLP 0232#proxy-attach-preflight), so that
+// turned "this one upstream is not captured" into `hyp attach claude` failing
+// with `no local CA at ...; start the daemon with proxy mode enabled` while
+// proxy mode was enabled. The static provider list is minted regardless of the
+// configured subset (LLP 0238), so there was never a reason to skip it here.
+// @ref LLP 0275#ip-literals-are-refused [tests]
+test('an IP-only upstream set still mints the static-provider CA', async (t) => {
+  const rig = await bootSource({
+    listen: '127.0.0.1:0',
+    proxy_mode: true,
+    upstreams: [{
+      name: 'local-llm',
+      base_url: 'https://10.0.0.5/v1',
+      path_prefix: '/v1/chat/completions',
+      provider: 'openai',
+    }],
+  })
+  t.after(() => rig.cleanup())
+
+  assert.ok(rig.source.status, 'the source exposes status()')
+  const details = /** @type {any} */ ((await rig.source.status()).details)
+
+  // Proxy mode is live and the machine has a CA an attach can point at.
+  assert.equal(details.proxy_mode, true)
+  assert.equal(details.proxy_mode_error, undefined)
+  assert.deepEqual(details.ca_permitted_hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+  // Nothing configured is decrypted, which is the honest answer and not an error.
+  assert.deepEqual(details.intercept_hosts, [])
+
+  const info = await readLocalCaInfo({ stateRoot: rig.stateRoot })
+  assert.ok(info, 'the CA file exists for the attach preflight to find')
+  assert.deepEqual(info.hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+
+  // The operator is still told which upstream lost its capture, and the idle
+  // path (which would have said no upstream names a host) is not taken.
+  const warned = rig.logged.find((entry) => entry.event === 'aigw.interception_host_unsupported')
+  assert.ok(warned, 'the skipped IP upstream is reported')
+  assert.deepEqual(warned.attrs.hosts, ['10.0.0.5'])
+  assert.equal(rig.logged.some((entry) => entry.event === 'aigw.interception_idle'), false)
+})

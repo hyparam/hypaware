@@ -499,10 +499,11 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
     const host = hostOfBaseUrl(u.base_url)
     if (!host) continue
     // An IP-literal `base_url` names a host this CA can never vouch for: every
-    // permitted name it carries is a `dNSName`, which no TLS client matches
-    // against a connection made to an IP, and the whole IP space is in
-    // `excludedSubtrees` by design (LLP 0235#ca-name-constraints). Skipping it
-    // here rather than letting the mint refuse it keeps one such upstream from
+    // name it can mint is a `dNSName`, and a client that connected to an IP
+    // matches `iPAddress` SANs alone (RFC 6125), so it would never look. Nor
+    // could the leaf simply carry an `iPAddress` instead: LLP 0235's name
+    // constraints exclude the whole IP space on purpose. Skipping it here
+    // rather than letting the mint refuse it keeps one such upstream from
     // taking the install's other interception down with it.
     // @ref LLP 0275#ip-literals-are-refused [implements]
     if (isIpLiteralHost(host)) {
@@ -516,12 +517,23 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
       [Attr.PLUGIN]: PLUGIN_NAME,
       hosts: [...new Set(ipLiteralHosts)],
       reason: 'an IP-literal upstream base_url cannot be intercepted: the local CA ' +
-        'constrains dNSName and excludes all IP space, so its traffic is tunnelled ' +
-        'blind and unrecorded; give the upstream a DNS name to capture it',
+        'mints dNSName certificates, which a client connected to an IP never matches, ' +
+        'so its traffic is tunnelled blind and unrecorded; give the upstream a DNS ' +
+        'name to capture it',
     })
   }
   const hosts = [...new Set(hostList)]
-  if (hosts.length === 0) {
+  // `ipLiteralHosts.length === 0` too, or the skip above turns "one upstream we
+  // cannot decrypt" into "no CA on this machine at all". The CA is minted
+  // against the static provider list rather than the configured subset
+  // (LLP 0238#full-provider-constraints), and its file is what a proxy-mode
+  // attach preflights on: with an IP-only upstream set, taking the idle path
+  // here leaves `hyp attach claude` failing `no local CA at ...; start the
+  // daemon with proxy mode enabled before attaching` while proxy mode is
+  // enabled, which is a dead end. An install that names *nothing* is genuinely
+  // idle and still returns here.
+  // @ref LLP 0275#ip-literals-are-refused [constrained-by]: an unusable upstream loses its own capture, never the machine's CA
+  if (hosts.length === 0 && ipLiteralHosts.length === 0) {
     liveState.interceptionError = 'no upstream host to intercept'
     ctx.log.warn('aigw.interception_idle', {
       [Attr.PLUGIN]: PLUGIN_NAME,

@@ -664,15 +664,23 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     // the user's own - and the reversal reported it as HypAware residue of
     // unknown provenance (#886 finding 2).
     //
-    // `mode === 'proxy'` on top of it, because `mode` is one of the fields that
-    // routes a marker here as damaged in the first place: it survives, and only
-    // a proxy attach ever writes these two keys. Without it the same false
-    // provenance claim comes back one case over, for a damaged base-URL or otel
-    // marker beside the user's own corporate bundle. It is the gate
-    // `releaseProxyModeLaunchdEnv` already uses three statements below.
+    // And never when `mode` positively names a non-proxy attach. `mode` is one
+    // of the fields that routes a marker here as damaged in the first place, so
+    // it usually survives, and only a proxy attach ever writes these two keys;
+    // without this the same false provenance claim comes back one case over,
+    // for a damaged base-URL or otel marker beside the user's own corporate
+    // bundle. Absent `mode` is *not* that evidence, though, so it still runs:
+    // a marker damaged badly enough to lose `mode` as well can still be a proxy
+    // one holding `prev_env`, and skipping it there would leave `HTTPS_PROXY`
+    // pointing at a gateway that no longer exists. That is safe because every
+    // mutation below is separately gated on the value being ours (`HTTPS_PROXY`
+    // must still equal our gateway URL) or on a recorded prior; only the
+    // warnings claim provenance, and with no `mode` at all "the undo record is
+    // unreadable" is exactly true.
     // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
     // @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
-    if (recordDamaged && marker.mode === 'proxy' && markerPort !== undefined) {
+    const modeSaysNotProxy = marker.mode === 'base_url' || marker.mode === 'otel'
+    if (recordDamaged && !modeSaysNotProxy && markerPort !== undefined) {
       reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
     }
 

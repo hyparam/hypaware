@@ -169,9 +169,9 @@ export function interceptsHost(upstreams, host, port = 443) {
   // `baseUrl.hostname` is already normalised.
   const wanted = host.toLowerCase()
   // An IP-literal authority is never intercepted, however the routing table
-  // reads. The local CA carries `dNSName` entries only and excludes the whole
-  // IP space (LLP 0235#ca-name-constraints), so terminating such a tunnel ends
-  // in a leaf mint that refuses the host - after the `200 Connection
+  // reads. The local CA can only mint `dNSName` leaves, which a client that
+  // connected to an IP does not match against, so terminating such a tunnel
+  // ends in a leaf mint that refuses the host - after the `200 Connection
   // Established` has already gone out, which kills the client's egress rather
   // than only its capture. `prepareInterception` drops an IP-literal upstream
   // from the CA host list, but the compiled routing table still carries it (it
@@ -206,8 +206,8 @@ function upstreamPortOf(upstream) {
  * both more accurate and the only way to forward a request whose path no
  * preset claims.
  *
- * Host AND port, matching {@link interceptsHost} exactly. The two have to agree
- * or the port check there is defeated: `interceptsHost` decides *whether* to
+ * Host AND port, on the same key {@link interceptsHost} uses. The two have to
+ * agree on the key or the port check there is defeated: `interceptsHost` decides *whether* to
  * decrypt on the full authority, and this decides *where the decrypted request
  * then goes*. With two upstreams naming the same host on different ports (an
  * ordinary `upstreams` config, even though no shipping preset does it), a
@@ -218,6 +218,13 @@ function upstreamPortOf(upstream) {
  * `interceptsHost` already matched, so an exact host+port entry exists. The
  * absolute-form caller has no such guarantee: there a miss is expected, and it
  * means the named host is refused (LLP 0247 #refuse-hosts-nobody-registered).
+ *
+ * `interceptsHost` is strictly the narrower predicate, not the identical one:
+ * it additionally refuses an IP-literal authority, which cannot be terminated
+ * (LLP 0275#ip-literals-are-refused). That direction is the one the argument
+ * above needs, and the difference must not be copied here - an IP-literal
+ * upstream is still routable and still recorded on the absolute-form door,
+ * where no certificate is involved.
  *
  * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
  * @param {CompiledUpstream[]} upstreams

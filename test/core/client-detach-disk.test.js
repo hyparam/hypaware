@@ -1224,3 +1224,44 @@ test('#886: a DAMAGED base-URL marker leaves the user own proxy env alone and un
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// Review round on #898. Narrowing the gate to `mode === 'proxy'` also removed
+// the one *mutation* the branch exists for. A marker damaged badly enough to
+// lose `mode` along with `managed` can still be a proxy one - it still holds
+// `prev_env` - and skipping it leaves `HTTPS_PROXY` pointing at a gateway that
+// no longer exists, which breaks every HTTPS request the client makes rather
+// than merely its capture. The mutation is safe there because it only fires on
+// a value that is still ours.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#898: a DAMAGED proxy marker that lost its mode still has HTTPS_PROXY reversed', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        HTTPS_PROXY: 'http://127.0.0.1:4123',
+      },
+      // Neither `managed` nor `mode` survived; `prev_env` did, which is what
+      // still routes this to the legacy branch as damaged.
+      _hypaware: {
+        version: '0.2.0',
+        port: 4123,
+        prev_env: { HTTPS_PROXY: 'http://proxy.corp.example:3128' },
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: CLAUDE_DESCRIPTOR,
+      homeDir: home,
+      platform: 'linux',
+    })
+    assert.equal(result.changed, true)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    // The recorded prior goes back rather than the dead gateway URL surviving.
+    assert.equal(parsed.env.HTTPS_PROXY, 'http://proxy.corp.example:3128')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
