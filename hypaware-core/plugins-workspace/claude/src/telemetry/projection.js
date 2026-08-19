@@ -111,7 +111,15 @@ export function projectClaudeTelemetryEvents(events, opts) {
       const spooled = ref ? opts.spooledBodies?.get(ref) : undefined
       if (!spooled) continue
       const entry = sessionEntry(sessionId, event)
-      mergeBodyFacts(entry.facts, spooled, sessionId, opts.sessionBodyFacts)
+      // A subagent's request body is its own: a different system prompt and a
+      // narrowed tool list. `system_text` and `tools` are exchange-level, so
+      // folding a subagent's body in would stamp the main loop's rows with the
+      // sidechain's prompt, and the `sessionBodyFacts` carry-over would keep
+      // doing it to every later batch of this session. Its gap messages are
+      // still projected, attributed to it.
+      if (!stringAttr(event, 'agent.name')) {
+        mergeBodyFacts(entry.facts, spooled, sessionId, opts.sessionBodyFacts)
+      }
       for (const gap of spooledBodyGapMessages(spooled, {
         event,
         usageByRequestId: opts.usageByRequestId,
@@ -141,7 +149,10 @@ export function projectClaudeTelemetryEvents(events, opts) {
       entry.facts.tools ??= remembered.tools
     }
     // A `user_prompt` event carries no `query_source` of its own, so its row
-    // borrows the session's main-loop value rather than reading null. A
+    // borrows the main loop's value rather than reading null. The borrow only
+    // reaches the events this batch holds (`bySession` is rebuilt per POST,
+    // and unlike `systemText` / `tools` there is no carry-over map), so a turn
+    // the exporter split across flushes can still leave a prompt row null. A
     // message that DID carry one keeps it, and a message a subagent produced
     // is skipped outright: the default is the main loop's by construction, so
     // lending it to a sidechain row would put the parent's attribution back on
@@ -464,15 +475,18 @@ function mergeSessionFacts(facts, event) {
   facts.userId ??= stringAttr(event, 'user.account_uuid')
   facts.organizationId ??= stringAttr(event, 'organization.id')
   facts.terminalType ??= stringAttr(event, 'terminal.type')
-  // @ref LLP 0262#field-parity-r1 [constrained-by]: `agent.name` and
-  // `query_source` are per-EVENT attribution, and a Task subagent runs under
-  // its parent's `session.id`, so neither can become a session fact: hoisted,
-  // one subagent event in a flush stamps the whole batch. `agent.name` is not
-  // hoisted at all; `query_source` is kept only as the default for events that
-  // carry none, and only from events a subagent did not emit, so the borrowed
-  // value is always the main loop's.
-  if (!stringAttr(event, 'agent.name')) facts.querySource ??= stringAttr(event, 'query_source')
-  facts.model ??= stringAttr(event, 'model')
+  // @ref LLP 0262#field-parity-r1 [constrained-by]: `agent.name`,
+  // `query_source` and `model` are per-EVENT, and a Task subagent runs under
+  // its parent's `session.id`, so none of them can become a session fact:
+  // hoisted, one subagent event in a flush stamps the whole batch.
+  // `agent.name` is not hoisted at all. `query_source` and `model` are read
+  // only off events a subagent did not emit, so what a row carrying neither
+  // borrows is always the main loop's. An assistant row carries its own
+  // `model` regardless; the borrow is for the rows that have none.
+  if (!stringAttr(event, 'agent.name')) {
+    facts.querySource ??= stringAttr(event, 'query_source')
+    facts.model ??= stringAttr(event, 'model')
+  }
   if (event.timestamp && (facts.startedAt === undefined || event.timestamp < facts.startedAt)) {
     facts.startedAt = event.timestamp
   }

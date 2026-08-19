@@ -42,12 +42,19 @@ export interface ClaudeTelemetrySessionFacts {
   organizationId?: string
   terminalType?: string
   /**
-   * The main loop's `query_source`, kept only as the default for events that
-   * carry none of their own. Per-request attribution (`query_source`,
-   * `agent.name`) belongs on the message: a Task subagent shares its parent's
-   * session id, so a session-level value would stamp its whole batch.
+   * The main loop's `query_source`, kept only as the default for messages in
+   * the same batch that carry none of their own. Per-request attribution
+   * (`query_source`, `agent.name`) belongs on the message: a Task subagent
+   * shares its parent's session id, so a session-level value would stamp its
+   * whole batch. Read only off events a subagent did not emit; these facts
+   * live for one POST and are not carried between batches.
    */
   querySource?: string
+  /**
+   * The main loop's model, on the same terms as `querySource`: an assistant
+   * message carries its own, so this is the exchange-level fallback for the
+   * rows that do not.
+   */
   model?: string
   startedAt?: string
   /**

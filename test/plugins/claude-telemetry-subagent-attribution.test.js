@@ -201,3 +201,88 @@ test('the session query_source default is never lent to a subagent row', () => {
   // The main loop's own borrow still happens.
   assert.equal(query(rowFor(rows, USER_UUID)), 'user')
 })
+
+test('a subagent event does not become the exchange\'s model', () => {
+  // `model` rides the event too. An assistant row carries its own, but a
+  // prompt row and a body-derived gap block have none and read the
+  // exchange's, so a subagent that happened to answer first in the flush
+  // would otherwise label the main loop's rows with the sidechain's model.
+  const subagentModel = 'claude-haiku-4-5-20251001'
+  const mainModel = 'claude-opus-4-6-20260101'
+  const main = [
+    evt('user_prompt', { prompt: 'Review the projection.', 'message.uuid': USER_UUID }, '2026-08-19T10:00:00.000Z'),
+    evt('assistant_response', {
+      response: 'Reviewed.',
+      'message.uuid': ASSISTANT_UUID,
+      model: mainModel,
+      query_source: 'user',
+    }, '2026-08-19T10:00:03.000Z'),
+  ]
+  const subagent = evt('assistant_response', {
+    response: 'Subagent finished.',
+    'message.uuid': SUBAGENT_UUID,
+    'agent.name': 'general-purpose',
+    model: subagentModel,
+  }, '2026-08-19T10:00:00.500Z')
+
+  const [projection] = projectClaudeTelemetryEvents([subagent, ...main], {
+    clientName: 'claude',
+    usageByRequestId: new Map(),
+  })
+  assert.equal(projection.model, mainModel)
+
+  const rows = aiGatewayRowsFromProjectedExchange(projection)
+  assert.equal(rowFor(rows, USER_UUID).model, mainModel)
+  assert.equal(rowFor(rows, ASSISTANT_UUID).model, mainModel)
+  assert.equal(rowFor(rows, SUBAGENT_UUID).model, subagentModel)
+})
+
+test('a subagent request body does not become the exchange\'s system prompt or tools', () => {
+  // `system_text` and `tools` are exchange-level, and a subagent's body
+  // carries a different system prompt and a narrowed tool list. Worse than
+  // the other hoists: `sessionBodyFacts` remembers them, so one subagent
+  // body would keep restating itself on every later batch of this session.
+  const SUB_BODY_REF = '/spool/subagent.request.json'
+  const bodies = spooledBodies()
+  bodies.set(SUB_BODY_REF, /** @type {any} */ ({
+    kind: 'request',
+    file: SUB_BODY_REF,
+    body: {
+      model: 'claude-haiku-4-5-20251001',
+      system: [{ type: 'text', text: 'You are a general-purpose subagent.' }],
+      messages: [],
+      tools: [{ name: 'Read' }],
+    },
+  }))
+  const sessionBodyFacts = new Map()
+  const project = (/** @type {Array<ReturnType<typeof evt>>} */ events) =>
+    projectClaudeTelemetryEvents(events, {
+      clientName: 'claude',
+      usageByRequestId: new Map(),
+      spooledBodies: bodies,
+      sessionBodyFacts,
+    })[0]
+
+  const subagentBody = evt('api_request_body', {
+    body_ref: SUB_BODY_REF,
+    request_id: SUB_REQUEST_ID,
+    'agent.name': 'general-purpose',
+  }, '2026-08-19T10:00:00.500Z')
+
+  const projection = project([subagentBody, ...mainLoopEvents()])
+  assert.equal(projection.system_text, 'You are a coding agent.')
+  assert.equal(projection.model, 'claude-haiku-4-5-20251001')
+  assert.deepEqual(projection.tools, undefined)
+
+  // And the carry-over map holds the main loop's body, so the next batch of
+  // this session (which has no body event at all) still reads it.
+  assert.equal(sessionBodyFacts.get(SESSION)?.systemText, 'You are a coding agent.')
+  const later = project([
+    evt('assistant_response', {
+      response: 'Still the main loop.',
+      'message.uuid': 'u-main-response-2',
+      query_source: 'user',
+    }, '2026-08-19T10:01:00.000Z'),
+  ])
+  assert.equal(later.system_text, 'You are a coding agent.')
+})
