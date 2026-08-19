@@ -65,6 +65,16 @@ offending token named on stderr and nothing on stdout. Not exit 0 with a
 different output mode, not exit 1 through a downstream lookup that happened to
 fail on a flag-shaped name.
 
+A single-dash token counts as a flag for this purpose. The codec reads only
+`--` tokens as flags, so an unaliased `-f` would otherwise bind as a positional
+value: `hyp query refresh -f` looking up a dataset named `-f` (exit 1), and
+`hyp report get weekly 2026-W01 abc -o out.html` fetching the artifact
+`out.html` to stdout instead of writing the file the caller asked for. That is
+the same silent misreading under a different spelling, so an unaliased
+single-dash token refuses too. The verb family keeps the lenient reading, where
+a greedy positional legitimately carries tokens like `-1`; the core set opts in
+(`strictShortFlags`).
+
 The mechanism is `parseCommandArgv()`, wrapped by `parseCoreCommandArgv()` in
 `src/core/cli/command_args.js` so the refusal itself is written in one place
 rather than reworded per command. This is reuse of the codec, not the verb
@@ -140,7 +150,14 @@ by the parameterized test, not by the table.
    "every visible core command has a declared surface" checkable statically
    rather than behaviourally, at the cost of moving schemas away from the code
    that reads their params. Worth revisiting if a usage line drifts anyway.
-2. **Does the plugin surface want the same guarantee?** The parameterized test
+2. **Do the already-strict commands want the short-flag rule too?** D1's
+   short-flag refusal rides on `parseCoreCommandArgv()`, so it covers the table.
+   A command that calls `parseCommandArgv()` directly and binds a positional
+   still reads `-Z` as that positional (`hyp policy show -Z`, `hyp backfill -Z`),
+   which is where they were before this decision. Widening it means passing the
+   option at each call site, and each one wants a look at whether a value there
+   can start with a dash.
+3. **Does the plugin surface want the same guarantee?** The parameterized test
    is scoped to core commands. Holding plugin commands to it would mean either a
    registration-level schema (a plugin-facing contract change) or a smoke that
    dispatches every registered command, and neither is obviously worth it yet.

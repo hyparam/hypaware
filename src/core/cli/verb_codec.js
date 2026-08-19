@@ -136,9 +136,12 @@ export function parseControlFlags(argv) {
  *
  * @param {VerbInputSchema} inputSchema
  * @param {string[]} argv
+ * @param {{ strictShortFlags?: boolean }} [opts] when `strictShortFlags`, a
+ *   single-dash token no alias expanded is an unknown flag rather than a
+ *   positional value
  * @returns {{ ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
-export function argvToParams(inputSchema, argv) {
+export function argvToParams(inputSchema, argv, opts = {}) {
   const props = inputSchema.properties ?? {}
   /** @type {Record<string, unknown>} */
   const params = {}
@@ -148,6 +151,14 @@ export function argvToParams(inputSchema, argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token.startsWith('--')) {
+      // Only `--` tokens read as flags here, so a misspelled short flag
+      // otherwise binds as a positional value: `hyp query refresh -f` means
+      // the dataset named '-f'. Verbs keep the lenient reading (a greedy SQL
+      // string carries '-1' and friends); the core command set opts in.
+      // @ref LLP 0266#one-contract [implements]: an unknown short flag refuses like an unknown long one instead of becoming a value
+      if (opts.strictShortFlags && token.length > 1 && token.startsWith('-')) {
+        return { ok: false, error: `unknown flag ${token}` }
+      }
       positionals.push(token)
       continue
     }
@@ -213,14 +224,16 @@ export function argvToParams(inputSchema, argv) {
  *
  * @param {string[]} argv
  * @param {VerbInputSchema} inputSchema
- * @param {{ aliases?: Record<string, string> }} [opts] argv token aliases, e.g. `{ '-y': '--yes' }`
+ * @param {{ aliases?: Record<string, string>, strictShortFlags?: boolean }} [opts] argv token
+ *   aliases, e.g. `{ '-y': '--yes' }`, and whether an unaliased single-dash token
+ *   refuses instead of binding as a positional value
  * @returns {{ help: true } | { ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
   const expanded = argv.map((token) => aliases[token] ?? token)
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
-  return argvToParams(inputSchema, expanded)
+  return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
 
 /**

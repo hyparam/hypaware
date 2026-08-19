@@ -249,9 +249,9 @@ export function coreUsage(name) {
 
 /**
  * Parse a core command's argv against its declared spec, reporting the
- * refusal itself: an unknown flag, an unexpected positional, or a missing
- * required one is a usage error (exit 2) on stderr, never a quiet
- * fall-through. A non-leading `--help` prints usage on stdout and exits 0
+ * refusal itself: an unknown flag (long or short), an unexpected positional,
+ * or a missing required one is a usage error (exit 2) on stderr, never a
+ * quiet fall-through. A non-leading `--help` prints usage on stdout and exits 0
  * (a leading one never reaches the command; dispatch renders registry
  * help for it).
  *
@@ -264,7 +264,13 @@ export function coreUsage(name) {
 export function parseCoreCommandArgv(name, argv, ctx) {
   const spec = CORE_COMMAND_ARGS[name]
   if (!spec) throw new Error(`no argument spec for core command '${name}'`)
-  const parsed = parseCommandArgv(argv, spec.schema, spec.aliases ? { aliases: spec.aliases } : {})
+  const parsed = parseCommandArgv(argv, spec.schema, {
+    ...(spec.aliases ? { aliases: spec.aliases } : {}),
+    // A short flag no alias claims is a typo, not a value: without this
+    // `hyp query refresh -f` reads '-f' as the dataset name and exits 1, and
+    // `hyp report get k p id -o out.html` fetches the artifact 'out.html'.
+    strictShortFlags: true,
+  })
   if ('help' in parsed) {
     ctx.stdout.write(`usage: ${spec.usage}\n`)
     return { ok: false, code: 0 }

@@ -264,7 +264,9 @@ export async function runReportList(argv, ctx) {
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
-  if (argv.includes('--json')) {
+  // Read the mode the gate parsed, not argv: the codec also accepts
+  // `--json=true`, and a token it blessed must not be dropped downstream.
+  if (gate.params.json === true) {
     ctx.stdout.write(JSON.stringify(reports, null, 2) + '\n')
     return 0
   }
@@ -365,7 +367,9 @@ export async function runReportDelete(argv, ctx) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
-  if (!argv.includes('--yes')) {
+  // As in `report list`: the gate accepts `--yes=true`, so reading argv
+  // directly would refuse a confirmation the validator just accepted.
+  if (gate.params.yes !== true) {
     const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
     if (!stdin || !stdin.isTTY) {
       ctx.stderr.write('error: refusing to delete without confirmation - pass --yes to delete non-interactively\n')
