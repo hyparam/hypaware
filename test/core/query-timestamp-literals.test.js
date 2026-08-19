@@ -600,3 +600,56 @@ test('an unqualified correlated reference is rejected by the engine, typed or ba
     )
   }
 })
+
+// A relation can expose one name twice: `select *` over a join expands both
+// sides, and `ai_gateway_messages` and `node` disagree about
+// `message_created_at`. Reading the first occurrence (or the union of the
+// TIMESTAMP ones, which is what a qualified reference used to be answered
+// from) types the bound against a column the engine does not hand it, and the
+// bound goes silently empty on matching data - #860 again, one join in. A name
+// whose occurrences disagree is therefore not a TIMESTAMP.
+// @ref LLP 0280#complete [tests]: a name a relation exposes twice with two types is not typed
+test('a name an inner select exposes twice with two types keeps its string comparison', async () => {
+  const registry = registryForBoth()
+  const joined = 'ai_gateway_messages m JOIN node n ON m.id = n.id'
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // the join exposes `message_created_at` as TIMESTAMP (m) and STRING (n);
+    // the engine hands the outer select n's, whose values are 'n3' and 'n4'
+    [`WITH c AS (SELECT * FROM ${joined}) SELECT c.id FROM c WHERE c.message_created_at >= '2026-08-18' ORDER BY c.id`, [3, 4]],
+    [`WITH c AS (SELECT * FROM ${joined}) SELECT id FROM c WHERE message_created_at >= '2026-08-18' ORDER BY id`, [3, 4]],
+    // and one hop further, where the ambiguous name is read by an inner
+    // select's own expression rather than by the outer scope
+    [
+      `WITH c AS (SELECT * FROM ${joined}), d AS (SELECT id, message_created_at AS ts FROM c) ` +
+      "SELECT id FROM d WHERE ts >= '2026-08-18' ORDER BY id",
+      [3, 4],
+    ],
+  ]
+  /** @type {string[]} */
+  const wrong = []
+  for (const [query, expected] of cases) {
+    const out = await executeQuerySql({ query, registry, storage })
+    const got = out.rows.map((row) => Number(row.id))
+    if (got.join(',') !== expected.join(',')) {
+      wrong.push(`${query} -> got [${got.join(',')}], SQL says [${expected.join(',')}]`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+})
+
+// The same shape, said loudly: a string bound the coercion cannot read is an
+// error rather than an empty result (LLP 0272 #refuse-uncoercible). Typing an
+// ambiguous name therefore does not just lose rows, it refuses a comparison
+// that is a perfectly ordinary string one.
+// @ref LLP 0280#complete [tests]: an ambiguous name does not turn a string bound into a refusal
+test('an ambiguous name does not refuse a string bound that is not a timestamp', async () => {
+  const registry = registryForBoth()
+  const joined = 'ai_gateway_messages m JOIN node n ON m.id = n.id'
+  const out = await executeQuerySql({
+    query: `WITH c AS (SELECT * FROM ${joined}) SELECT c.id FROM c WHERE c.message_created_at >= 'n4' ORDER BY c.id`,
+    registry,
+    storage,
+  })
+  assert.deepEqual(out.rows.map((row) => Number(row.id)), [4])
+})
