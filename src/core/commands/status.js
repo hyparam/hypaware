@@ -1,7 +1,7 @@
 // @ts-check
 
 import { Attr, withSpan } from '../observability/index.js'
-import { collectHypAwareStatus } from '../daemon/status.js'
+import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
@@ -218,6 +218,24 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       last_seen: e.lastSeen,
       rows: e.rows,
     })),
+    // What the daemon's last maintenance tick deliberately left fragmented
+    // (LLP 0228). Null until a daemon has reported a tick: absent is "no tick
+    // has said", which is not "nothing is frozen".
+    maintenance: report.maintenance
+      ? {
+        tick_at: report.maintenance.tickAt,
+        partitions_visited: report.maintenance.partitionsVisited,
+        skipped_total: report.maintenance.skippedTotal,
+        reasons: report.maintenance.reasons,
+        skipped: report.maintenance.partitions.map((p) => ({
+          dataset: p.dataset,
+          partition: p.partition,
+          reason: p.reason,
+          ...(p.dataFiles !== undefined ? { data_files: p.dataFiles } : {}),
+          ...(p.failedAt ? { failed_at: p.failedAt } : {}),
+        })),
+      }
+      : null,
     // Capture health per otel-attached client (LLP 0257 S17). Always an
     // array so a consumer can pin the key; empty means no configured client
     // is otel-attached, which keeps the pre-otel payload shape unchanged.
@@ -316,9 +334,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // `ca_trusted` / `launchd_env_set` are tri-state: `null` means the probe
     // could not run, which a consumer must not read as "not trusted".
     // @ref LLP 0237#consequences [implements]: --json carries the trust state next to the CA fingerprint
+    // @ref LLP 0238#consequences [implements]: and the full permitted host set the grant covers
     proxy_trust: report.proxyTrust
       ? {
         ca_fingerprint: report.proxyTrust.caFingerprint,
+        permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
       }
@@ -542,11 +562,18 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // dialog was cancelled last month" and "the CA was re-minted and the
   // keychain still trusts the old one", neither of which any other line here
   // can be read for.
+  //
+  // The permitted hosts are named here and not only in the attach dialog: the
+  // grant covers every provider host the product can intercept, so on an
+  // install that captures Claude alone it is wider than anything the config
+  // shows, and after attach this is the only place it can be re-read.
   // @ref LLP 0237#consequences [implements]: the trust state is reported next to the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+  // @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so the standing grant stays informed and not just the moment it was asked for
   // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
   if (report.proxyTrust) {
     stdout.write('  proxy trust:\n')
     stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
+    stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
   }
@@ -590,6 +617,36 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
+  }
+
+  // Partitions the daemon's last maintenance tick deliberately left
+  // fragmented (LLP 0228). Rendered only when there are some, like every
+  // other conditional block here, so an ordinary install's text surface is
+  // unchanged. `formatEntrypointAge` is the file's coarse-age formatter (it
+  // is named for its first caller): the question is "is this tick's answer
+  // hours or weeks old?", not the exact instant.
+  // @ref LLP 0228#status-file-is-the-surface [implements]: hyp status is where an operator who never runs `hyp query maintain` finds a frozen partition
+  if (report.maintenance && report.maintenance.skippedTotal > 0) {
+    const m = report.maintenance
+    const breakdown = describeMaintenanceSkipReasons(m.reasons)
+    stdout.write('  maintenance:\n')
+    stdout.write(
+      `    ${m.skippedTotal} of ${m.partitionsVisited} partitions left fragmented, as of the tick ${formatEntrypointAge(m.tickAt)} (${breakdown})\n`
+    )
+    for (const p of m.partitions) {
+      // The count is the one the recorded rewrite ran over, not the live one:
+      // the sentence is about that rewrite, and `hyp query maintain` draws the
+      // same distinction.
+      const detail =
+        p.reason === 'compaction_attempt_failed'
+          ? (p.failedAt ? `  the retry failed at ${p.failedAt}` : '')
+          : (p.dataFiles !== undefined ? `  the last rewrite of ${p.dataFiles} files reduced nothing` : '')
+      stdout.write(`    - ${p.dataset}/${p.partition}  [${p.reason}]${detail}\n`)
+    }
+    const unnamed = m.skippedTotal - m.partitions.length
+    if (unnamed > 0) {
+      stdout.write(`    ... and ${unnamed} more (hyp query maintain --dry-run lists them all)\n`)
+    }
   }
 
   // Local entries the central layer overrides (LLP 0031): dropped at
@@ -692,6 +749,27 @@ function describeCaTrust(trusted) {
     return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
   }
   return 'unknown - the keychain probe could not run'
+}
+
+/**
+ * The host set the trust grant covers. Printed as the certificate's own
+ * permitted subtrees, in the order the DER carries them, so the line is the
+ * grant rather than a restatement of the configured providers.
+ *
+ * An empty set is not "no hosts": a CA carrying no `dNSName` constraint at
+ * all can vouch for anything, which is the one reading the user most needs,
+ * so it is named rather than rendered as a blank line. HypAware's own mint
+ * never produces one (LLP 0238#full-provider-constraints), so this arm only
+ * fires for a foreign or damaged certificate at the CA path. That same
+ * certificate is why `collectProxyTrust` sanitizes the entries before they
+ * reach here: they are bytes off disk, not strings we wrote.
+ *
+ * @param {string[]} hosts
+ * @returns {string}
+ */
+function describePermittedHosts(hosts) {
+  if (hosts.length === 0) return 'no dNSName constraints found - this CA is not host-limited'
+  return hosts.join(', ')
 }
 
 /**

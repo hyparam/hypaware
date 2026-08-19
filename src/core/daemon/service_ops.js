@@ -47,6 +47,24 @@ export class ServiceManagerSandboxError extends ServiceOpError {
 }
 
 /**
+ * Error raised when a service-manager command outlived the timeout its
+ * caller set. A rejection rather than a non-zero result on purpose: a
+ * command that was killed never answered, and a probe that maps exit codes
+ * to a boolean would otherwise read "killed" as "no" - a false negative
+ * dressed as a measurement. Callers that already treat "the probe could not
+ * run" as unknown get that answer for free.
+ */
+export class ServiceCommandTimeoutError extends ServiceOpError {
+  /**
+   * @param {string} message
+   */
+  constructor(message) {
+    super(message)
+    this.name = 'ServiceCommandTimeoutError'
+  }
+}
+
+/**
  * Env var that opts a test back into driving the host's own service
  * manager. Deliberately awkward to type: there is no legitimate use for
  * it in the traditional suite.
@@ -115,24 +133,58 @@ function serviceManagerSpawnRefusal(bin, args) {
  * {@link ensureOk}). Rejects without spawning under the test runner (see
  * {@link serviceManagerSpawnRefusal}).
  *
+ * `timeoutMs` bounds how long the child may take. Opt-in, because the
+ * commands that reach here are not alike: a mutation the user is answering
+ * a password dialog for may legitimately take minutes, while a read-only
+ * probe run from `hyp status` that has not answered in seconds is not going
+ * to. Whoever knows which one it is sets the bound. On expiry the child is
+ * killed and the promise rejects with {@link ServiceCommandTimeoutError};
+ * `SIGKILL` rather than `SIGTERM` because the case worth bounding is a
+ * process blocked on a GUI keychain prompt, which is exactly the state that
+ * ignores a polite signal.
+ *
  * @param {string} bin
  * @param {string[]} args
+ * @param {{ timeoutMs?: number }} [opts]
  * @returns {Promise<ServiceCommandResult>}
  */
-export function runServiceCommand(bin, args) {
+export function runServiceCommand(bin, args, opts = {}) {
   const refusal = serviceManagerSpawnRefusal(bin, args)
   // Reject rather than throw: callers such as `installLaunchAgent`'s
   // best-effort bootout attach a `.catch()` to the returned promise, which a
   // synchronous throw would sail straight past.
   if (refusal) return Promise.reject(refusal)
+  const { timeoutMs } = opts
   return new Promise(function(resolve, reject) {
     const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
+    let timedOut = false
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(function() {
+        timedOut = true
+        proc.kill('SIGKILL')
+        reject(new ServiceCommandTimeoutError(
+          `'${[bin, ...args].join(' ')}' did not finish within ${timeoutMs}ms and was killed`
+        ))
+      }, timeoutMs)
+      // Nothing should be kept alive waiting for this: the timer exists to
+      // end a wait, never to extend the process past one.
+      timer.unref()
+    }
     proc.stdout.on('data', function(chunk) { stdout += chunk.toString('utf8') })
     proc.stderr.on('data', function(chunk) { stderr += chunk.toString('utf8') })
-    proc.on('error', reject)
+    proc.on('error', function(err) {
+      if (timer) clearTimeout(timer)
+      reject(err)
+    })
     proc.on('close', function(code) {
+      if (timer) clearTimeout(timer)
+      // The close that follows our own SIGKILL is not an answer, and the
+      // promise has already rejected with the one that is.
+      if (timedOut) return
       resolve({ exitCode: code === null ? -1 : code, stdout, stderr })
     })
   })

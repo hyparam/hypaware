@@ -1616,7 +1616,16 @@ async function purgeProxyTrustResidue({ ctx }) {
     try {
       const trust = await removeCaTrust({ homeDir })
       if (trust.removed) lines.push('removed the HypAware Local CA keychain trust')
-      else if (trust.detail) lines.push(`! keychain trust could not be removed (${trust.detail})`)
+      // Removal deletes duplicate roots one pass at a time, so "some went" and
+      // "something is left" are not exclusive: a detail alongside a removal
+      // has to be its own line or the residue it names goes unreported.
+      if (trust.detail) {
+        lines.push(
+          trust.removed
+            ? `! keychain trust may not be fully removed (${trust.detail})`
+            : `! keychain trust could not be removed (${trust.detail})`
+        )
+      }
     } catch (err) {
       lines.push(
         `! keychain trust could not be removed (${err instanceof Error ? err.message : String(err)})`
