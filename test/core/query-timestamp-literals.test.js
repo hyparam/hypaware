@@ -476,3 +476,127 @@ test('a derived table in FROM does not see the enclosing select scope', () => {
   )
   assert.equal(rewritten.joins[0].subquery.query.where.right.type, 'literal')
 })
+
+// --- relations the registry cannot name: CTEs and derived tables -------------
+
+/**
+ * A dataset that shares only `id` with the messages dataset, so an unqualified
+ * name inside a subquery over it can only have come from the enclosing select.
+ *
+ * @type {ColumnSpec[]}
+ */
+const EDGE_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'weight', type: 'DOUBLE', nullable: false },
+]
+
+const EDGE_ROWS = [
+  { id: 1, weight: 1 },
+  { id: 2, weight: 2 },
+  { id: 3, weight: 3 },
+  { id: 4, weight: 4 },
+]
+
+function registryForEdges() {
+  return registryForDatasets([
+    { name: 'ai_gateway_messages', columns: COLUMNS, rows: ROWS },
+    { name: 'edge', columns: EDGE_COLUMNS, rows: EDGE_ROWS },
+  ])
+}
+
+// LLP 0272 typed a bound only from a dataset schema, so a select whose FROM was
+// a CTE or a derived table got no coercion and returned zero rows on matching
+// data - issue #860's own failure, one relation further in. The columns are
+// carried out of the inner select instead, so the bound lands the same way.
+// @ref LLP 0280#carry [tests]: a bound on a CTE or derived table selects the same rows the base table's does
+test('a string bound on a CTE or derived table column selects the rows it names', async () => {
+  /** @type {[string, number[]][]} */
+  const cases = [
+    // rows: 2026-08-17T09:00:00Z, 08-18T20:59:59Z, 08-18T21:00:00Z, 08-18T22:01:39Z
+    ["WITH c AS (SELECT * FROM ai_gateway_messages) SELECT id FROM c WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    ["WITH c AS (SELECT id, message_created_at FROM ai_gateway_messages) SELECT id FROM c WHERE message_created_at < '2026-08-18T21:00:00Z' ORDER BY id", [1, 2]],
+    // an alias renames the column, and the type follows the rename
+    ["WITH c AS (SELECT id, message_created_at AS ts FROM ai_gateway_messages) SELECT id FROM c WHERE ts >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    // the derived-table spelling of the same thing, unqualified and qualified
+    ["SELECT id FROM (SELECT * FROM ai_gateway_messages) t WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    ["SELECT t.id FROM (SELECT * FROM ai_gateway_messages) t WHERE t.message_created_at >= '2026-08-18T21:00:00Z' ORDER BY t.id", [3, 4]],
+    // a CTE over a CTE: the carry has to survive more than one hop
+    ["WITH c AS (SELECT * FROM ai_gateway_messages), d AS (SELECT * FROM c) SELECT id FROM d WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    // a set operation carries a column's type only when both sides agree on it
+    ["SELECT id FROM (SELECT * FROM ai_gateway_messages UNION ALL SELECT * FROM ai_gateway_messages) t WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 3, 4, 4]],
+    // every clause and shape the base-table case already covers
+    ["WITH c AS (SELECT * FROM ai_gateway_messages) SELECT id FROM c GROUP BY id HAVING max(message_created_at) >= '2026-08-18T21:00:00Z' ORDER BY id", [3, 4]],
+    ["WITH c AS (SELECT * FROM ai_gateway_messages) SELECT id FROM c WHERE message_created_at IN ('2026-08-18T21:00:00Z') ORDER BY id", [3]],
+    ["WITH c AS (SELECT * FROM ai_gateway_messages) SELECT id FROM c WHERE message_created_at BETWEEN '2026-08-18T21:00:00Z' AND '2026-08-18T23:00:00Z' ORDER BY id", [3, 4]],
+  ]
+  /** @type {string[]} */
+  const wrong = []
+  for (const [query, expected] of cases) {
+    const got = await ids(query)
+    if (got.join(',') !== expected.join(',')) {
+      wrong.push(`${query} -> got [${got.join(',')}], SQL says [${expected.join(',')}]`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+})
+
+// The other direction, which is the reason LLP 0272 declined to guess: an inner
+// select can hand a dataset column's name to a value of another type, and
+// typing that from the dataset would compare a string cell to a Date - zero
+// rows again, pointed the other way.
+// @ref LLP 0280#carry [tests]: the carried type is the inner expression's, never the dataset's
+test('a CTE that renames another type onto a TIMESTAMP column name keeps its string comparison', async () => {
+  assert.deepEqual(
+    await ids(
+      'WITH c AS (SELECT id, date AS message_created_at FROM ai_gateway_messages) ' +
+      "SELECT id FROM c WHERE message_created_at >= '2026-08-18' ORDER BY id"
+    ),
+    [2, 3, 4]
+  )
+})
+
+// An inner select the walk cannot read end to end supplies nothing at all,
+// rather than a partial column list a later name could be mis-typed against.
+// @ref LLP 0280#complete [tests]: a partially-readable inner select contributes no types
+test('an inner select that cannot be read completely types nothing', () => {
+  const registry = registryForMessages()
+  /** @type {string[]} */
+  const cases = [
+    // `other` is not a registered dataset, so the CTE's own columns are unknown
+    "WITH c AS (SELECT * FROM other) SELECT id FROM c WHERE message_created_at >= '2026-08-18T21:00:00Z'",
+    // an output column with neither an alias nor a bare name cannot be placed
+    // in the list, so the list is not a list
+    'SELECT id FROM (SELECT id, message_created_at, upper(date) FROM ai_gateway_messages) t ' +
+    "WHERE message_created_at >= '2026-08-18T21:00:00Z'",
+    // a table function names columns this walk cannot enumerate
+    'WITH c AS (SELECT * FROM unnest([1, 2])) SELECT id FROM c ' + "WHERE message_created_at >= '2026-08-18T21:00:00Z'",
+  ]
+  for (const sql of cases) {
+    const rewritten = whereOfRewritten(sql, registry)
+    const where = rewritten.type === 'with' ? rewritten.query.where : rewritten.where
+    assert.equal(where.right.type, 'literal', sql)
+  }
+})
+
+// LLP 0272 also named the unqualified correlated reference as a residual. It is
+// not the same defect: the engine does not resolve an unqualified name into an
+// enclosing select at all, so the query raises rather than returning zero rows,
+// and it raises identically whether the literal is typed or bare. Typing it
+// could not change the answer, which is why the rewrite leaves it alone.
+// @ref LLP 0280#unqualified-correlated [tests]: the engine rejects the shape either way, so there is no silent answer to fix
+test('an unqualified correlated reference is rejected by the engine, typed or bare', async () => {
+  const registry = registryForEdges()
+  for (const literal of ["TIMESTAMP '2026-08-18T21:00:00Z'", "'2026-08-18T21:00:00Z'"]) {
+    await assert.rejects(
+      executeQuerySql({
+        query:
+          'SELECT m.id FROM ai_gateway_messages m WHERE EXISTS (' +
+          `SELECT 1 FROM edge e WHERE e.id = m.id AND message_created_at >= ${literal})`,
+        registry,
+        storage,
+      }),
+      /Column "message_created_at" not found/,
+      literal
+    )
+  }
+})

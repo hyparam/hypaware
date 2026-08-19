@@ -3,7 +3,7 @@
 /**
  * @import { ExprNode, SelectStatement, Statement } from 'squirreling/src/ast.js'
  * @import { QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
- * @import { TimestampScope } from '../../../src/core/query/types.js'
+ * @import { InferredColumn, RelationRef, TimestampScope } from '../../../src/core/query/types.js'
  */
 
 /** Comparison operators that take an implicit literal coercion in SQL. */
@@ -98,17 +98,17 @@ export class TimestampLiteralError extends Error {
  * @ref LLP 0272 [implements]: string literals are typed by the column they are compared against, before the pushdown sees them
  */
 export function coerceTimestampLiterals(statement, registry) {
-  rewriteStatement(statement, registry, new Set(), undefined)
+  rewriteStatement(statement, registry, new Map(), undefined)
   return statement
 }
 
 /**
  * @param {Statement} statement
  * @param {QueryRegistry} registry
- * @param {Set<string>} shadowed table names bound to a CTE rather than a dataset
+ * @param {Map<string, InferredColumn[] | undefined>} ctes table names bound to a CTE rather than a dataset, each mapped to the columns its body was proved to expose (absent value: not provable)
  * @param {TimestampScope | undefined} outer enclosing scope, for a correlated reference
  */
-function rewriteStatement(statement, registry, shadowed, outer) {
+function rewriteStatement(statement, registry, ctes, outer) {
   if (statement.type === 'with') {
     // A CTE is visible to its siblings that follow it and to the outer query,
     // and it shadows any dataset of the same name. Held lower-cased because
@@ -116,42 +116,42 @@ function rewriteStatement(statement, registry, shadowed, outer) {
     // plans by `name.toLowerCase()`): a case-sensitive shadow set would let
     // `WITH Msgs ... FROM msgs` borrow a dataset's schema for columns the CTE
     // actually supplies.
-    const inner = new Set(shadowed)
+    const inner = new Map(ctes)
     for (const cte of statement.ctes) {
       // A CTE body cannot reference the query it is attached to, so it never
       // inherits the correlated scope the attached query may have.
       rewriteStatement(cte.query, registry, inner, undefined)
-      inner.add(cte.name.toLowerCase())
+      inner.set(cte.name.toLowerCase(), inferColumns(cte.query, registry, inner))
     }
     rewriteStatement(statement.query, registry, inner, outer)
     return
   }
   if (statement.type === 'compound') {
-    rewriteStatement(statement.left, registry, shadowed, outer)
-    rewriteStatement(statement.right, registry, shadowed, outer)
+    rewriteStatement(statement.left, registry, ctes, outer)
+    rewriteStatement(statement.right, registry, ctes, outer)
     return
   }
-  rewriteSelect(statement, registry, shadowed, outer)
+  rewriteSelect(statement, registry, ctes, outer)
 }
 
 /**
  * @param {SelectStatement} select
  * @param {QueryRegistry} registry
- * @param {Set<string>} shadowed
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
  * @param {TimestampScope | undefined} outer
  */
-function rewriteSelect(select, registry, shadowed, outer) {
-  const scope = timestampScope(select, registry, shadowed, outer)
+function rewriteSelect(select, registry, ctes, outer) {
+  const scope = timestampScope(select, registry, ctes, outer)
 
   // Nested scopes first. A relation in FROM or JOIN resolves entirely against
   // its own tables and cannot see this select's, so it gets no outer scope; a
   // subquery in expression position can be correlated, so it gets this one.
-  if (select.from?.type === 'subquery') rewriteStatement(select.from.query, registry, shadowed, undefined)
+  if (select.from?.type === 'subquery') rewriteStatement(select.from.query, registry, ctes, undefined)
   for (const join of select.joins) {
-    if (join.subquery) rewriteStatement(join.subquery.query, registry, shadowed, undefined)
+    if (join.subquery) rewriteStatement(join.subquery.query, registry, ctes, undefined)
   }
   const exprs = selectExprs(select)
-  for (const expr of exprs) rewriteExprStatements(expr, registry, shadowed, scope)
+  for (const expr of exprs) rewriteExprStatements(expr, registry, ctes, scope)
 
   // Every clause this select holds, not just WHERE: the same
   // Date-against-string comparison is false for every row wherever it sits,
@@ -191,83 +191,180 @@ function selectExprs(select) {
 }
 
 /**
- * The TIMESTAMP columns this select's base tables declare, two ways: the
- * names every base table in scope agrees are TIMESTAMP (for an unqualified
- * reference), and the names each base table declares under its own name and
- * alias (for a qualified one). A name two tables type differently is dropped
- * rather than guessed at, and a relation the registry cannot name at all (a
- * derived table, a CTE, a table function) contributes nothing, so `s.ts`
- * against such a relation is never typed from an unrelated dataset that
- * happens to share the column name: a wrong coercion returns wrong rows,
- * which is the failure this exists to end.
- *
- * Every relation is still recorded in `bound`, schema or not, so a qualifier
- * this select binds stops the correlated walk into `outer` instead of
- * borrowing an enclosing relation that happens to share the alias.
+ * Every relation this select binds, in FROM-then-JOIN order, which is the
+ * order a `SELECT *` expands them in. A relation is one of three things: a
+ * name (a dataset or a CTE), an inner select (a derived table), or neither (a
+ * table function, whose columns nothing here can enumerate).
  *
  * @param {SelectStatement} select
- * @param {QueryRegistry} registry
- * @param {Set<string>} shadowed
- * @param {TimestampScope | undefined} outer
- * @returns {TimestampScope}
+ * @returns {RelationRef[]}
  */
-function timestampScope(select, registry, shadowed, outer) {
-  /** @type {{ table: string, alias?: string }[]} */
-  const tables = []
-  /** @type {Set<string>} */
-  const bound = new Set()
-  /** @param {string | undefined} name */
-  const bind = (name) => {
-    if (name) bound.add(name.toLowerCase())
-  }
-  if (select.from?.type === 'table') {
-    tables.push({ table: select.from.table, alias: select.from.alias })
-  } else if (select.from) {
-    bind(select.from.alias)
-  }
+function selectRelations(select) {
+  /** @type {RelationRef[]} */
+  const relations = []
+  const from = select.from
+  if (from?.type === 'table') relations.push({ table: from.table, alias: from.alias })
+  else if (from?.type === 'subquery') relations.push({ query: from.query, alias: from.alias })
+  else if (from) relations.push({ alias: from.alias })
   for (const join of select.joins) {
-    if (join.table && !join.subquery && !join.fromFunction) {
-      tables.push({ table: join.table, alias: join.alias })
-    } else {
-      bind(join.alias)
-      bind(join.subquery?.alias)
-      bind(join.fromFunction?.alias)
-    }
+    if (join.subquery) relations.push({ query: join.subquery.query, alias: join.subquery.alias ?? join.alias })
+    else if (join.fromFunction) relations.push({ alias: join.fromFunction.alias ?? join.alias })
+    else if (join.table) relations.push({ table: join.table, alias: join.alias })
+    else relations.push({ alias: join.alias })
   }
-  for (const { table, alias } of tables) {
-    bind(table)
-    bind(alias)
-  }
+  return relations
+}
 
-  /** @type {Map<string, boolean>} */
-  const seenTypes = new Map()
-  /** @type {Map<string, Set<string>>} */
-  const byRelation = new Map()
-  for (const { table, alias } of tables) {
-    if (shadowed.has(table.toLowerCase())) continue
-    // `?.columns` rather than a bare deref: a registration that hands the
-    // kernel a malformed schema must not turn every query touching it into a
-    // TypeError, the same way `hyp backfill` reads it.
-    const columns = registry.getDataset(table)?.schema?.columns
-    if (!columns) continue
-    /** @type {Set<string>} */
-    const declared = new Set()
-    for (const column of columns) {
-      const isTimestamp = column.type === 'TIMESTAMP'
-      if (isTimestamp) declared.add(column.name)
-      const seen = seenTypes.get(column.name)
-      seenTypes.set(column.name, seen === undefined ? isTimestamp : seen && isTimestamp)
-    }
-    byRelation.set(table.toLowerCase(), declared)
-    if (alias) byRelation.set(alias.toLowerCase(), declared)
-  }
+/**
+ * The names a reference can qualify this relation by, lower-cased.
+ *
+ * @param {RelationRef} relation
+ * @returns {string[]}
+ */
+function relationKeys(relation) {
+  /** @type {string[]} */
+  const keys = []
+  if (relation.table) keys.push(relation.table.toLowerCase())
+  if (relation.alias) keys.push(relation.alias.toLowerCase())
+  return keys
+}
 
-  /** @type {Set<string>} */
-  const agreed = new Set()
-  for (const [name, isTimestamp] of seenTypes) {
-    if (isTimestamp) agreed.add(name)
+/**
+ * The columns a relation exposes, or undefined when they cannot all be read.
+ * A dataset answers from its declared schema; a CTE answers from what its body
+ * was proved to expose; a derived table is walked here and now.
+ *
+ * @param {RelationRef} relation
+ * @param {QueryRegistry} registry
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
+ * @returns {InferredColumn[] | undefined}
+ * @ref LLP 0280#carry [implements]: a relation the registry cannot name still supplies its columns when the inner select can be read
+ */
+function relationColumns(relation, registry, ctes) {
+  if (relation.query) return inferColumns(relation.query, registry, ctes)
+  if (relation.table === undefined) return undefined
+  const key = relation.table.toLowerCase()
+  if (ctes.has(key)) return ctes.get(key)
+  // `?.columns` rather than a bare deref: a registration that hands the kernel
+  // a malformed schema must not turn every query touching it into a TypeError,
+  // the same way `hyp backfill` reads it.
+  const columns = registry.getDataset(relation.table)?.schema?.columns
+  if (!columns) return undefined
+  return columns.map((column) => ({ name: column.name, isTimestamp: column.type === 'TIMESTAMP' }))
+}
+
+/**
+ * The columns an inner select exposes, or undefined when any one of them
+ * cannot be read. All or nothing on purpose: a partial list would let a name
+ * the list happens to omit be typed from an unrelated relation that declares
+ * it, which is the wrong-rows failure LLP 0272 exists to prevent, so a
+ * relation that cannot be read end to end supplies nothing at all.
+ *
+ * @param {Statement} statement
+ * @param {QueryRegistry} registry
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
+ * @returns {InferredColumn[] | undefined}
+ * @ref LLP 0280#complete [implements]: an inner select supplies its whole column list or none of it
+ */
+function inferColumns(statement, registry, ctes) {
+  if (statement.type === 'with') {
+    const inner = new Map(ctes)
+    for (const cte of statement.ctes) {
+      inner.set(cte.name.toLowerCase(), inferColumns(cte.query, registry, inner))
+    }
+    return inferColumns(statement.query, registry, inner)
   }
-  return { agreed, byRelation, bound, outer }
+  if (statement.type === 'compound') {
+    // A set operation pairs its sides by position, and the pair carries a type
+    // only when both sides have it: `union`ing a TIMESTAMP with a STRING gives
+    // a column this walk must not call a TIMESTAMP.
+    const left = inferColumns(statement.left, registry, ctes)
+    const right = inferColumns(statement.right, registry, ctes)
+    if (!left || !right || left.length !== right.length) return undefined
+    return left.map((column, index) => ({
+      name: column.name,
+      isTimestamp: column.isTimestamp && right[index].isTimestamp,
+    }))
+  }
+  /** @type {{ keys: string[], columns: InferredColumn[] }[]} */
+  const relations = []
+  for (const relation of selectRelations(statement)) {
+    const columns = relationColumns(relation, registry, ctes)
+    if (!columns) return undefined
+    relations.push({ keys: relationKeys(relation), columns })
+  }
+  /** @type {InferredColumn[]} */
+  const exposed = []
+  for (const column of statement.columns) {
+    if (column.type === 'star') {
+      if (column.table === undefined) {
+        for (const relation of relations) exposed.push(...relation.columns)
+        continue
+      }
+      const qualifier = column.table.toLowerCase()
+      const named = relations.find((relation) => relation.keys.includes(qualifier))
+      if (!named) return undefined
+      exposed.push(...named.columns)
+      continue
+    }
+    const name = column.alias ?? (column.expr.type === 'identifier' ? column.expr.name : undefined)
+    if (name === undefined) return undefined
+    exposed.push({ name, isTimestamp: exprIsTimestamp(column.expr, relations) })
+  }
+  return exposed
+}
+
+/**
+ * Whether an inner select's output column is a TIMESTAMP, resolved against
+ * that select's own relations. Only the shapes that provably carry the type
+ * answer true: a column reference, a `CAST(... AS TIMESTAMP)`, and a call
+ * whose result takes its arguments' type. Everything else answers false,
+ * which costs the coercion and never mis-types it.
+ *
+ * @param {ExprNode} node
+ * @param {{ keys: string[], columns: InferredColumn[] }[]} relations
+ * @returns {boolean}
+ */
+function exprIsTimestamp(node, relations) {
+  if (node.type === 'identifier') {
+    if (node.prefix !== undefined) {
+      const qualifier = node.prefix.toLowerCase()
+      const named = relations.find((relation) => relation.keys.includes(qualifier))
+      return named ? declaresTimestamp(named.columns, node.name) === true : false
+    }
+    // Unqualified: every relation that declares the name has to call it a
+    // TIMESTAMP, and at least one has to declare it. A name no relation
+    // declares is a correlated reference out of this select, whose type this
+    // walk has no view of.
+    let declared = false
+    for (const relation of relations) {
+      const isTimestamp = declaresTimestamp(relation.columns, node.name)
+      if (isTimestamp === undefined) continue
+      if (!isTimestamp) return false
+      declared = true
+    }
+    return declared
+  }
+  if (node.type === 'cast') return node.toType === 'TIMESTAMP'
+  if (node.type === 'function' || node.type === 'window') {
+    const args = typeCarryingArgs(node.funcName, node.args)
+    if (args.length === 0) return false
+    return args.every((arg) => exprIsTimestamp(arg, relations))
+  }
+  return false
+}
+
+/**
+ * Whether a column list declares this name a TIMESTAMP, or undefined when it
+ * does not declare the name at all.
+ *
+ * @param {InferredColumn[]} columns
+ * @param {string} name
+ * @returns {boolean | undefined}
+ */
+function declaresTimestamp(columns, name) {
+  const found = columns.find((column) => column.name === name)
+  return found === undefined ? undefined : found.isTimestamp
 }
 
 /**
@@ -276,20 +373,71 @@ function timestampScope(select, registry, shadowed, outer) {
  *
  * @param {ExprNode} node
  * @param {QueryRegistry} registry
- * @param {Set<string>} shadowed
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
  * @param {TimestampScope} scope the enclosing select's scope
  */
-function rewriteExprStatements(node, registry, shadowed, scope) {
+function rewriteExprStatements(node, registry, ctes, scope) {
   if (node.type === 'in') {
-    rewriteExprStatements(node.expr, registry, shadowed, scope)
-    rewriteStatement(node.subquery, registry, shadowed, scope)
+    rewriteExprStatements(node.expr, registry, ctes, scope)
+    rewriteStatement(node.subquery, registry, ctes, scope)
     return
   }
   if (node.type === 'subquery' || node.type === 'exists' || node.type === 'not exists') {
-    rewriteStatement(node.subquery, registry, shadowed, scope)
+    rewriteStatement(node.subquery, registry, ctes, scope)
     return
   }
-  for (const child of childExprs(node)) rewriteExprStatements(child, registry, shadowed, scope)
+  for (const child of childExprs(node)) rewriteExprStatements(child, registry, ctes, scope)
+}
+
+/**
+ * The TIMESTAMP columns this select's relations expose, two ways: the names
+ * every relation in scope agrees are TIMESTAMP (for an unqualified
+ * reference), and the names each relation exposes under its own name and
+ * alias (for a qualified one). A name two relations type differently is
+ * dropped rather than guessed at, and a relation whose columns cannot be read
+ * (a table function, a CTE over an unregistered table) contributes nothing,
+ * so `s.ts` against such a relation is never typed from an unrelated dataset
+ * that happens to share the column name: a wrong coercion returns wrong rows,
+ * which is the failure this exists to end.
+ *
+ * Every relation is still recorded in `bound`, columns or not, so a qualifier
+ * this select binds stops the correlated walk into `outer` instead of
+ * borrowing an enclosing relation that happens to share the alias.
+ *
+ * @param {SelectStatement} select
+ * @param {QueryRegistry} registry
+ * @param {Map<string, InferredColumn[] | undefined>} ctes
+ * @param {TimestampScope | undefined} outer
+ * @returns {TimestampScope}
+ */
+function timestampScope(select, registry, ctes, outer) {
+  /** @type {Set<string>} */
+  const bound = new Set()
+  /** @type {Map<string, Set<string>>} */
+  const byRelation = new Map()
+  /** @type {Map<string, boolean>} */
+  const seenTypes = new Map()
+  for (const relation of selectRelations(select)) {
+    const keys = relationKeys(relation)
+    for (const key of keys) bound.add(key)
+    const columns = relationColumns(relation, registry, ctes)
+    if (!columns) continue
+    /** @type {Set<string>} */
+    const declared = new Set()
+    for (const column of columns) {
+      if (column.isTimestamp) declared.add(column.name)
+      const seen = seenTypes.get(column.name)
+      seenTypes.set(column.name, seen === undefined ? column.isTimestamp : seen && column.isTimestamp)
+    }
+    for (const key of keys) byRelation.set(key, declared)
+  }
+
+  /** @type {Set<string>} */
+  const agreed = new Set()
+  for (const [name, isTimestamp] of seenTypes) {
+    if (isTimestamp) agreed.add(name)
+  }
+  return { agreed, byRelation, bound, outer }
 }
 
 /**
@@ -344,11 +492,11 @@ function childExprs(node) {
 /**
  * The column name if this operand carries the type of a TIMESTAMP column in
  * scope, otherwise undefined. A qualified reference is resolved through its
- * qualifier, so `s.message_created_at` against a joined derived table stays a
- * string comparison even when a base table in the same scope declares that
- * name TIMESTAMP; an unqualified one falls back to the names every base table
- * agrees on. A type-preserving call is looked through to the argument that
- * carries its type, so `max(ts)` types like `ts` does.
+ * qualifier, so `s.message_created_at` against a joined relation whose columns
+ * cannot be read stays a string comparison even when a base table in the same
+ * scope declares that name TIMESTAMP; an unqualified one falls back to the
+ * names every relation agrees on. A type-preserving call is looked through to
+ * the argument that carries its type, so `max(ts)` types like `ts` does.
  *
  * @param {ExprNode} node
  * @param {TimestampScope} scope
@@ -389,8 +537,8 @@ function typeCarryingArgs(funcName, args) {
  * the scope chain: this select's relations first, then the enclosing ones,
  * which is how SQL resolves a correlated reference from inside an `EXISTS`
  * or `IN` subquery. A qualifier this select binds ends the walk even when its
- * schema is unknown (a CTE, a derived table), so an inner alias never borrows
- * an enclosing relation that happens to share its name.
+ * columns are unknown (a table function), so an inner alias never borrows an
+ * enclosing relation that happens to share its name.
  *
  * @param {string} prefix lower-cased qualifier
  * @param {string} name
