@@ -55,6 +55,14 @@ const GAP_BLOCK_TYPES = new Set([
  * @ref LLP 0252#project-then-delete [implements]: an unprojectable body is
  *   deleted and counted, not retried forever
  *
+ * `unparseableBytes` is what that immediate deletion took off the disk, and it
+ * is reported separately from `consumedBytes` because the caller subtracts the
+ * two at different moments: the consumed files are deleted only after the
+ * batch's writes land, while an unparseable one is already gone by the time
+ * this returns. Without it the published `spool_bytes` kept counting bytes
+ * that no longer existed until the next sweep restated the gauge a minute
+ * later.
+ *
  * @param {ClaudeTelemetryEvent[]} events
  * @param {{ spoolDir: string }} opts
  * @returns {Promise<{
@@ -63,6 +71,7 @@ const GAP_BLOCK_TYPES = new Set([
  *   consumedBytes: number,
  *   missing: number,
  *   unparseable: number,
+ *   unparseableBytes: number,
  *   refused: string[],
  * }>}
  */
@@ -74,6 +83,7 @@ export async function loadSpooledBodies(events, opts) {
   let consumedBytes = 0
   let missing = 0
   let unparseable = 0
+  let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
 
@@ -102,7 +112,11 @@ export async function loadSpooledBodies(events, opts) {
     const body = parseMaybeJson(raw.toString('utf8'))
     if (!isPlainObject(body)) {
       unparseable += 1
-      await fs.rm(file, { force: true }).catch(() => {})
+      // Only bytes that actually left the disk. An unlink that failed (a
+      // read-only spool, EPERM) leaves the file occupying the cap, and
+      // subtracting it here would under-report `spool_bytes` instead.
+      const removed = await fs.rm(file, { force: true }).then(() => true).catch(() => false)
+      if (removed) unparseableBytes += raw.length
       continue
     }
     bodies.set(ref, {
@@ -114,7 +128,7 @@ export async function loadSpooledBodies(events, opts) {
     consumedBytes += raw.length
   }
 
-  return { bodies, consumedFiles, consumedBytes, missing, unparseable, refused }
+  return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }
 }
 
 /**
