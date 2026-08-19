@@ -13,6 +13,7 @@ import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   buildWalkthroughClientDescriptorMap,
   composePickerConfig,
+  configRecordsPickAnswer,
   configuredExportChoice,
   configuredPickerSources,
   defaultConfirmSelectPromptFactory,
@@ -116,7 +117,16 @@ export async function resolvePickSeeding(opts) {
   // (`--yes`, presets, `--from-file`) state every input on the command line,
   // so they keep composing from scratch and their output stays byte-identical.
   const existing = interactive ? await readLocalConfig(configPath) : undefined
-  const configured = existing ? configuredPickerSources(existing, descriptors) : undefined
+  // A config on disk only makes this run a reconfigure when it records a
+  // pick answer. `hyp remote add` before the first `hyp init` creates a
+  // config that holds only `query.remotes`; reading a seed off that file
+  // yielded an *empty* set, which beat detection in the `??` below and
+  // opened onboarding with every detected row unchecked. An answer-less
+  // config still reaches the composition fold (its keys carry forward);
+  // it just does not stand in for an answer nobody gave.
+  // @ref LLP 0267#answer-less [implements]: a config that records no pick answer seeds like no config at all
+  const recordsAnswer = existing !== undefined && configRecordsPickAnswer(existing)
+  const configured = existing && recordsAnswer ? configuredPickerSources(existing, descriptors) : undefined
 
   // Interactive only: detection seeds the pre-checked boxes on a **first
   // run**. Best-effort - a detector failure leaves the set empty rather than
@@ -317,7 +327,10 @@ export async function runWizardPick(opts) {
       sources_locked: lockedSources.length,
       managed: opts.managed === true,
       sources_configured: configured?.size ?? 0,
-      reconfigure: existing !== undefined,
+      // Keyed to the recorded answer, not to bare file existence: a run
+      // seeding from detection must not report itself as a reconfigure.
+      // @ref LLP 0267#answer-less [implements]: the reconfigure attribute follows the answer-keyed classification
+      reconfigure: configured !== undefined,
       status: 'ok',
     },
     async () => {},
@@ -356,7 +369,14 @@ export async function runWizardPick(opts) {
     // box. Other destinations remain available via `hyp init --export`.
     // A reconfigure reads the answer back off disk instead: a question
     // that is never asked cannot be re-answered by defaulting it again.
-    exportChoice = existing ? configuredExportChoice(existing) : /** @type {PickerExport} */ ('local-parquet')
+    // Only a config that records a pick answer is read back: an
+    // answer-less file (`hyp remote add` before the first init) never
+    // answered the export question either, and reading it re-answered
+    // "keep-local" on the user's behalf.
+    // @ref LLP 0267#answer-less [implements]: an answer-less config does not stand in for the export answer
+    exportChoice = configured !== undefined && existing
+      ? configuredExportChoice(existing)
+      : /** @type {PickerExport} */ ('local-parquet')
     // Retention is not asked either: the orchestrator supplies the
     // pathway default (90-day team / 120-day local), overridable only
     // via `hyp init --retention-days` on the non-interactive path. On a
