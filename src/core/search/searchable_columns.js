@@ -39,6 +39,15 @@ export const SEARCHABLE_COLUMNS = constantSet([
 ])
 
 /**
+ * The one dataset grep search covers, on both repositories: the client
+ * greps its own `ai_gateway_messages` cache, the server the same dataset's
+ * cache and archive. Named here beside the columns it scopes so the search
+ * service and the sidecar-build pass cannot disagree about which tables
+ * carry indexes.
+ */
+export const GREP_DATASET = 'ai_gateway_messages'
+
+/**
  * A Set that cannot be added to, deleted from, or cleared. `SCAN_COLUMNS`
  * below is a load-time snapshot of the allowlist, so a caller mutating the
  * exported Set would make a column searchable process-wide while the brute

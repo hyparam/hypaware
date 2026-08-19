@@ -18,6 +18,8 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
+import { buildSidecarsForTable } from '../search/sidecar_build.js'
+import { GREP_DATASET } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
@@ -244,6 +246,45 @@ export async function maintainCache(opts) {
       report.errorKind = errorKindOf(err)
       report.errorMessage = err instanceof Error ? err.message : String(err)
       totalFailed++
+    }
+    // The grep sidecar build, on the files the rewrite just finalized:
+    // compaction is the moment a file stops changing, so this is the one
+    // point in a file's life where an index can be built once and stay
+    // valid (LLP 0264 #lifecycle). Only the grep dataset carries indexes,
+    // and only a rewrite that committed has new files to index. Isolated
+    // from the partition's own verdict: an index that cannot be built
+    // costs speed, never the tick, and never correctness (the scan tier
+    // serves whatever has no sidecar).
+    // @ref LLP 0264#lifecycle [implements]: sidecars are built at maintenance right after compaction finalizes the generation's files
+    if (!opts.dryRun && report.compacted && !report.failed && part.dataset === GREP_DATASET) {
+      try {
+        const cursorAfter = readCursorSync(part.path)
+        const liveDir = path.join(part.path, generationLayout(cursorAfter).liveDir)
+        await withSpan(
+          'maintenance.grep_index',
+          {
+            [Attr.COMPONENT]: 'cache',
+            [Attr.OPERATION]: 'maintenance.grep_index',
+            [Attr.DATASET]: part.dataset,
+            status: 'ok',
+          },
+          async (span) => {
+            const built = await buildSidecarsForTable({ tableDir: liveDir })
+            report.sidecarsBuilt = built.built
+            report.sidecarsFailed = built.failed + built.quarantined
+            span.setAttribute('sidecars_built', built.built)
+            span.setAttribute('sidecars_present', built.present)
+            span.setAttribute('sidecars_failed', built.failed)
+            span.setAttribute('sidecars_quarantined', built.quarantined)
+          },
+          { component: 'cache' }
+        )
+      } catch (err) {
+        // Index absence is served by the scan tier, so a build-pass throw
+        // is a warning on the report, never a failed partition.
+        report.sidecarsFailed = (report.sidecarsFailed ?? 0) + 1
+        report.sidecarError = err instanceof Error ? err.message : String(err)
+      }
     }
     reports.push(report)
     if (!report.failed) maintained++
@@ -1468,8 +1509,13 @@ function liveDataFileCount(partitionDir) {
 function countDataFiles(tableDir) {
   const dataDir = path.join(tableDir, 'data')
   try {
+    // Grep sidecars live beside their data files as `<file>.index.parquet`
+    // and MUST stay out of this count: it feeds the compaction heuristics
+    // and the LLP 0199 baseline gate, so counting sidecars would read a
+    // just-compacted-and-indexed partition as "grew since compaction" and
+    // rewrite it every tick forever.
     return fs.readdirSync(dataDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith('.parquet'))
+      .filter((e) => e.isFile() && e.name.endsWith('.parquet') && !e.name.endsWith('.index.parquet'))
       .length
   } catch {
     return 0
@@ -1516,22 +1562,28 @@ function measureMetadataDir(tableDir) {
 }
 
 /**
+ * Data bytes only: grep sidecars are excluded for the same reason
+ * `countDataFiles` excludes them; the avg-file-size heuristic divides
+ * these bytes by that count, so the two must see the same file set.
+ *
  * @param {string} tableDir
  * @returns {number}
  */
 function measureDataDir(tableDir) {
-  return measureDir(path.join(tableDir, 'data'))
+  return measureDir(path.join(tableDir, 'data'), (name) => !name.endsWith('.index.parquet'))
 }
 
 /**
  * @param {string} dir
+ * @param {(name: string) => boolean} [include]
  * @returns {number}
  */
-function measureDir(dir) {
+function measureDir(dir, include) {
   let total = 0
   try {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isFile()) continue
+      if (include && !include(entry.name)) continue
       try {
         total += fs.statSync(path.join(dir, entry.name)).size
       } catch { /* skip */ }

@@ -19,7 +19,7 @@ import {
   resolveCallerClass,
 } from '../query/visibility.js'
 import { cellText, compileMatcher, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
-import { SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
+import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
 
 /**
  * The local grep-search service: the client half of LLP 0264, mirroring the
@@ -58,7 +58,7 @@ import { SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
-const DATASET = 'ai_gateway_messages'
+const DATASET = GREP_DATASET
 
 /**
  * Rows between abort checks inside one brute-scanned file. The deadline has
@@ -221,29 +221,48 @@ export async function executeGrepSearch(args) {
           }
         }
         if (indexFile) {
-          indexedFiles += 1
-          // No `limit` is passed down: a purged or withheld row is filtered
-          // AFTER parquetFind accepts it, so a passed-down limit would count
-          // rows this walk then discards and under-return. The generator is
-          // simply not pulled past the budget instead.
-          const rows = parquetFind({
-            query: matcher.hypQuery,
-            url: file.filePath,
-            indexFile,
-            asyncBufferFactory: async ({ url }) => await io.reader(url),
-            rowFilter: accept,
-            signal,
-          })
-          for await (const row of rows) {
-            if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
-            if (withheld?.(row)) {
-              localOnly.withheldRows += 1
-              continue
+          // The attempt runs into local buffers and commits only when the
+          // index tier finished (or the budget stopped it): a sidecar that
+          // turns out to be unreadable mid-read (torn by an external
+          // writer; the build's own publish is atomic) must degrade this
+          // one file to the scan tier below without double-counting the
+          // rows the broken attempt already saw.
+          /** @type {GrepSearchHit[]} */
+          const found = []
+          let withheldHere = 0
+          try {
+            // No `limit` is passed down: a purged or withheld row is
+            // filtered AFTER parquetFind accepts it, so a passed-down limit
+            // would count rows this walk then discards and under-return.
+            // The generator is simply not pulled past the budget instead.
+            const rows = parquetFind({
+              query: matcher.hypQuery,
+              url: file.filePath,
+              indexFile,
+              asyncBufferFactory: async ({ url }) => await io.reader(url),
+              rowFilter: accept,
+              signal,
+            })
+            for await (const row of rows) {
+              if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
+              if (withheld?.(row)) {
+                withheldHere += 1
+                continue
+              }
+              found.push(toHit(row, matcher))
+              if (hits.length + found.length >= budget) break
             }
-            hits.push(toHit(row, matcher))
-            if (hits.length >= budget) return
+            indexedFiles += 1
+            localOnly.withheldRows += withheldHere
+            hits.push(...found)
+            return
+          } catch (err) {
+            if (isAbort(err)) throw err
+            getLogger('query').warn('grep_search.sidecar_unreadable', {
+              [Attr.COMPONENT]: 'query',
+              error_message: err instanceof Error ? err.message : String(err),
+            })
           }
-          return
         }
         scannedFiles += 1
         const sourceFile = await io.reader(file.filePath)
