@@ -73,7 +73,7 @@ function writeGatewayConfig(home, opts) {
  * enable prompt never fires and the migration offer is the only question in
  * play. `answer` (when stdin is a TTY) is pre-buffered for it.
  *
- * @param {{ home: string, answer?: string, tty?: boolean, json?: boolean }} opts
+ * @param {{ home: string, answer?: string, tty?: boolean }} opts
  */
 function makeCtx({ home, answer, tty = true }) {
   const registered = ['claude', 'codex']
@@ -86,12 +86,24 @@ function makeCtx({ home, answer, tty = true }) {
       if (!registered.includes(name)) return undefined
       return {
         name,
-        /** @param {{ endpoint: string, dryRun?: boolean }} args */
+        /** @param {{ endpoint: string, dryRun?: boolean, json?: boolean, stdout: { write(chunk: unknown): boolean } }} args */
         async attach(args) {
           writeFileSync(
             path.join(home, `${name}-attached.json`),
             JSON.stringify({ endpoint: args.endpoint, dryRun: args.dryRun === true })
           )
+          // Mirror a real adapter's --json contract: under json, stdout carries
+          // exactly the one-line machine payload and nothing else, so the
+          // --json pins below can assert it stays clean of any migration note.
+          // The flag is read off `args`, the way a real adapter reads it, so
+          // the pins also fail if the command stops propagating `--json` into
+          // `client.attach()` and every adapter starts printing prose into a
+          // machine-readable run.
+          if (args.json === true) {
+            args.stdout.write(
+              JSON.stringify({ status: 'ok', action: 'attach', client: name, dry_run: args.dryRun === true }) + '\n'
+            )
+          }
         },
       }
     },
@@ -226,6 +238,68 @@ test('non-TTY: no question, one pointer note, attach unchanged', async () => {
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
     assert.match(stderr.text(), /run 'hyp attach claude' in an interactive terminal/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+  })
+})
+
+// @ref LLP 0244#non-interactive [tests]: --json never prompts even on a TTY and emits exactly the pointer
+test('--json on a TTY: no prompt, exactly one pointer note, no write, stdout stays the attach JSON payload', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    // A `y` is queued even though nothing may consume it: were the askYesNo
+    // seam ever reached, an unanswerable prompt would park on an empty stdin
+    // and the run would never settle, cancelling the rest of this file
+    // instead of naming the regression. With the answer buffered, a reached
+    // seam instead accepts the migration and trips the question, stderr, and
+    // config-unchanged assertions below, loudly and in place.
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: true, answer: 'y' })
+    const code = await runAttach(['--client', 'claude', '--json'], ctx)
+    assert.equal(code, 0, stderr.text())
+    // The askYesNo seam is never reached: its question never reaches stderr.
+    assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
+    // Exactly the one pointer line, nothing else on stderr.
+    assert.equal(
+      stderr.text(),
+      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
+      'interactive terminal to switch it to proxy mode\n'
+    )
+    // No config write: proxy_mode stays absent from the file on disk.
+    const after = readFileSync(localConfigPath(home), 'utf8')
+    assert.equal(after, before)
+    assert.doesNotMatch(after, /proxy_mode/)
+    // stdout stays the attach's valid JSON payload, nothing interleaved.
+    const stdoutText = stdout.text()
+    assert.equal(stdoutText.split('\n').filter((line) => line.length > 0).length, 1)
+    const payload = JSON.parse(stdoutText)
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.client, 'claude')
+  })
+})
+
+// @ref LLP 0244#non-interactive [tests]: --json never prompts even on a TTY and emits exactly the pointer
+test('--json combined with non-TTY still emits the pointer exactly once, not twice', async () => {
+  await withTempHome(async (home) => {
+    writeGatewayConfig(home)
+    const before = readFileSync(localConfigPath(home), 'utf8')
+    const { ctx, stdout, stderr } = makeCtx({ home, tty: false, answer: 'y' })
+    const code = await runAttach(['--client', 'claude', '--json'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
+    // Both conditions (json and non-TTY) independently qualify for the
+    // pointer; it must still land exactly once, never doubled.
+    assert.equal(
+      stderr.text(),
+      "note: this install attaches claude by base URL; run 'hyp attach claude' in an " +
+      'interactive terminal to switch it to proxy mode\n'
+    )
+    const after = readFileSync(localConfigPath(home), 'utf8')
+    assert.equal(after, before)
+    assert.doesNotMatch(after, /proxy_mode/)
+    const stdoutText = stdout.text()
+    assert.equal(stdoutText.split('\n').filter((line) => line.length > 0).length, 1)
+    const payload = JSON.parse(stdoutText)
+    assert.equal(payload.status, 'ok')
+    assert.equal(payload.client, 'claude')
   })
 })
 
