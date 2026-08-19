@@ -290,15 +290,16 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 
    ```sh
    SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   SINCE_SQL=${SINCE%Z}
    hyp query sql "
      select count(*) from ai_gateway_messages
      where conversation_source = 'openclaw'"
    ```
 
-   `$SINCE` is the ISO instant `hyp client history import --since` takes; `$SINCE_SQL`
-   is the same instant without the zone suffix, which is what compares
-   cleanly against the `message_created_at` TIMESTAMP column.
+   `$SINCE` is the ISO instant `hyp client history import --since` takes, and the same
+   text goes straight into SQL against the `message_created_at` TIMESTAMP
+   column. Keep the trailing `Z`: the query layer types the string literal
+   against the column ([LLP 0272](../llp/0272-string-literals-typed-by-the-column.decision.md)),
+   and a zone-less instant would be read as local time.
 
 3. Hold a short conversation in OpenClaw, one turn on each API shape (use
    `openclaw agents list` if you do not know your agent id):
@@ -323,7 +324,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
      select provider, client_name, count(*) n, max(message_created_at) last_seen
      from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE_SQL'
+       and message_created_at >= '$SINCE'
      group by 1, 2
      order by last_seen desc"
    ```
@@ -356,12 +357,12 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    hyp query sql "
      select count(*) from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE_SQL'"
+       and message_created_at >= '$SINCE'"
    hyp query sql "
      select part_id, count(*) n
      from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE_SQL'
+       and message_created_at >= '$SINCE'
      group by part_id
      having count(*) > 1"
    ```
@@ -382,13 +383,12 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
    hyp client detach openclaw
    openclaw gateway restart
    SINCE2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   SINCE2_SQL=${SINCE2%Z}
    openclaw agent --agent <agent-id> --model anthropic/<a-claude-model> \
      --message "In one sentence, what is a hash collision?"
    hyp query sql "
      select count(*) from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE2_SQL'"
+       and message_created_at >= '$SINCE2'"
    ```
 
    Pass condition immediately after the turn: `0`. Detach means the turn
@@ -418,7 +418,7 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
      select count(*), max(message_created_at)
      from ai_gateway_messages
      where conversation_source = 'openclaw'
-       and message_created_at >= '$SINCE2_SQL'"
+       and message_created_at >= '$SINCE2'"
    ```
 
    Pass condition: `1`. The scheduled sweep picked the turn up once its
@@ -591,15 +591,17 @@ two-layer drift detection this discharges),
 
    ```sh
    SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   SINCE_SQL=${SINCE%Z}
    SPOOL="${HYP_HOME:-$HOME/.hyp}/spool/claude-bodies"
    ls -ld "$SPOOL"
    ```
 
    Pass condition: the spool directory exists and reads `drwx------`
    ([LLP 0253#spool-location](../llp/0253-body-spool-is-capped-and-swept.decision.md#spool-location)).
-   `$SINCE` is the ISO instant; `$SINCE_SQL` is the same instant without the
-   zone suffix, which is what compares cleanly against a TIMESTAMP column.
+   `$SINCE` is the ISO instant, and the same text goes straight into SQL
+   against a TIMESTAMP column. Keep the trailing `Z`: the query layer types
+   the string literal against the column
+   ([LLP 0272](../llp/0272-string-literals-typed-by-the-column.decision.md)),
+   and a zone-less instant would be read as local time.
 
 3. Take a raw body sample with the daemon **stopped**. Stopping it is what
    makes this step deterministic: nothing consumes the spool, so the files sit
@@ -695,7 +697,7 @@ two-layer drift detection this discharges),
             sum(case when client_version is not null then 1 else 0 end) with_version
      from ai_gateway_messages
      where conversation_source = 'claude_code'
-       and message_created_at >= '$SINCE_SQL'
+       and message_created_at >= '$SINCE'
      group by 1
      order by 1"
    ```
@@ -722,7 +724,7 @@ two-layer drift detection this discharges),
    hyp query sql "
      select event_name, count(*) n, max(event_timestamp) last_seen
      from claude_telemetry_events
-     where event_timestamp >= '$SINCE_SQL'
+     where event_timestamp >= '$SINCE'
      group by 1
      order by 1"
    ```
@@ -749,7 +751,7 @@ two-layer drift detection this discharges),
    hyp query sql --max-bytes 0 "
      select event_name, tool_name, decision, source, cost_usd, attributes
      from claude_telemetry_events
-     where event_timestamp >= '$SINCE_SQL'
+     where event_timestamp >= '$SINCE'
        and event_name in ('tool_decision', 'api_request', 'permission_mode_changed')
      order by event_timestamp
      limit 12"
