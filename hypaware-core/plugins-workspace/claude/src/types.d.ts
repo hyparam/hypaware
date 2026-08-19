@@ -218,11 +218,15 @@ export interface ClaudeAttachOptions {
    * host). `base_url` is the original mechanism, repointing
    * `ANTHROPIC_BASE_URL` at the local gateway. Defaults to `base_url` so a
    * caller that has not been taught about proxy mode cannot acquire it by
-   * accident. See LLP 0231.
+   * accident.
    *
    * `otel` writes neither routing key: it turns on Claude Code's own telemetry
    * export, so the client talks to Anthropic directly and reports to the local
    * listener. See LLP 0258.
+   *
+   * @ref LLP 0231#decision [implements]: `proxy` is the RFC's accepted
+   * narrowed-aperture transport, and the RFC is where "why a second transport
+   * at all, and what it costs" lives rather than in any one spawned decision
    */
   mode?: 'proxy' | 'base_url' | 'otel'
   /**
