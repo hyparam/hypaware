@@ -138,6 +138,37 @@ function preparedSource(fields, rows, seen) {
   }
 }
 
+/**
+ * A prepared source with a working row scan and configurable negotiation.
+ * Its native batches throw so a successful query proves the union selected
+ * the row fallback.
+ *
+ * @param {Field[]} fields
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {{ appliesFilter?: boolean, mismatchesEmptySchema?: boolean }} [options]
+ * @returns {ScannableDataSource}
+ */
+function fallbackPreparedSource(fields, rows, options = {}) {
+  const source = fakeSource(rows, [])
+  source.schema = { fields }
+  source.prepareScan = (request) => {
+    const requestedFields = request.columns.map((demand) => {
+      const field = fields.find((candidate) => candidate.id === demand.field)
+      if (!field) throw new Error(`unknown test field ${demand.field}`)
+      return field
+    })
+    return {
+      schema: { fields: options.mismatchesEmptySchema && request.columns.length === 0 ? fields : requestedFields },
+      residual: { filter: options.appliesFilter ? undefined : request.filter },
+      properties: {},
+      async *batches() {
+        throw new Error('native batches should not run after incompatible negotiation')
+      },
+    }
+  }
+  return source
+}
+
 // @ref LLP 0266#partition-union [tests]: field ids are local to each table, filters may prune each child, and ranges belong to the concatenated stream
 test('unionSources concatenates prepared batches, remaps field ids, and keeps range hints global', async () => {
   /** @type {ScanRequest[]} */
@@ -187,6 +218,55 @@ test('unionSources declines prepared batches when partition schemas drift', () =
   const union = unionSources([older, newer])
   assert.equal(union.schema, undefined)
   assert.equal(union.prepareScan, undefined, 'row padding remains authoritative for drifted schemas')
+})
+
+test('unionSources falls back to rows when prepared children report different filter residuals', async () => {
+  /** @type {Field[]} */
+  const fields = [
+    { id: 1, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 2, name: 'v', dataType: { type: 'number' }, nullable: false },
+  ]
+  const union = unionSources([
+    fallbackPreparedSource(fields, [{ k: 'x', v: 1 }, { k: 'y', v: 2 }]),
+    fallbackPreparedSource(fields, [{ k: 'x', v: 3 }], { appliesFilter: true }),
+  ])
+  const rows = await collect(executeSql({
+    tables: { t: union },
+    query: "SELECT v FROM t WHERE k = 'x'",
+  }))
+  assert.deepEqual(rows, [{ v: 1 }, { v: 3 }])
+})
+
+test('unionSources row fallback preserves counts with an empty prepared projection', async () => {
+  /** @type {Field[]} */
+  const fields = [{ id: 1, name: 'v', dataType: { type: 'number' }, nullable: false }]
+  const first = fallbackPreparedSource(fields, [{ v: 1 }, { v: 2 }])
+  const second = fallbackPreparedSource(fields, [{ v: 3 }], { mismatchesEmptySchema: true })
+  first.numRows = undefined
+  const rows = await collect(executeSql({ tables: { t: unionSources([first, second]) }, query: 'SELECT COUNT(*) AS n FROM t' }))
+  assert.deepEqual(rows, [{ n: 3 }])
+})
+
+test('unionSources treats equivalent data types as compatible regardless of object key order', () => {
+  /** @type {Field[]} */
+  const fieldsA = [{
+    id: 1,
+    name: 'values',
+    dataType: { type: 'array', items: { type: 'string' } },
+    nullable: false,
+  }]
+  /** @type {Field[]} */
+  const fieldsB = [{
+    id: 2,
+    name: 'values',
+    dataType: { items: { type: 'string' }, type: 'array' },
+    nullable: false,
+  }]
+  const union = unionSources([
+    preparedSource(fieldsA, [{ values: ['a'] }], []),
+    preparedSource(fieldsB, [{ values: ['b'] }], []),
+  ])
+  assert.equal(typeof union.prepareScan, 'function')
 })
 
 /**

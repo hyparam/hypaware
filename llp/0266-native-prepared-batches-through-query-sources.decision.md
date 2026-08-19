@@ -40,9 +40,9 @@ Storage forwards `schema` and `prepareScan()` after removing internal fields
 from the advertised schema. Squirreling derives field demands from that public
 schema, so an internal field cannot enter a prepared request.
 
-The heap-budget wrapper forwards prepared metadata and re-yields native
-batches with one inline budget check per batch. It also accepts a
-prepared-only third-party source, matching Squirreling's widened
+The heap-budget wrapper forwards prepared metadata and samples after native
+batch production and after each deferred column materializes. It also accepts
+a prepared-only third-party source, matching Squirreling's widened
 `AsyncDataSource` contract. Hypaware names the stronger shape used by its own
 storage and parquet layers `ScannableDataSource`: those sources always retain
 `columns` and `scan()` for wrappers whose semantics require rows.
@@ -85,12 +85,19 @@ prepared scan only when the physical schema already contains every column the
 wrapper advertises. If an old partition lacks a declared field, the existing
 row and `scanColumn` paths retain control.
 
+Icebird 0.8.23 has a pre-existing row-scan defect when a pushed filter and
+position deletes coexist: filtering loses physical row ordinals before delete
+application, so a live matching row can be dropped. This is tracked in
+[icebird#41](https://github.com/hyparam/icebird/issues/41). The prepared path
+avoids the defect by withholding the filter when deletes exist, but visibility
+and schema-drift fallbacks remain exposed until Icebird fixes its row path.
+
 ## Consequences
 
 - Current, schema-aligned Iceberg partitions reach native batch execution end
   to end through storage, union, ai-gateway, and heap-budget wrappers.
-- Additive schema drift remains correct and queryable, but stays on the older
-  paths until all participating physical schemas align.
+- Additive schema drift retains the established absent-column semantics and
+  stays on the older paths until all participating physical schemas align.
 - LIMIT/OFFSET and residual filters remain globally correct over
   multi-partition datasets.
 - Internal cache fields remain absent from planning and query results.

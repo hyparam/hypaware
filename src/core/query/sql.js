@@ -20,7 +20,7 @@ import {
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncDataSource, PrepareScan } from 'squirreling'
+ * @import { AsyncBatch, AsyncDataSource, PrepareScan } from 'squirreling'
  */
 
 /**
@@ -153,12 +153,15 @@ function withHeapBudget(source, guard) {
   if (!source.scan) {
     const schema = /** @type {NonNullable<AsyncDataSource['schema']>} */ (source.schema)
     const prepareScan = /** @type {NonNullable<AsyncDataSource['prepareScan']>} */ (source.prepareScan)
-    return {
+    /** @type {AsyncDataSource} */
+    const bounded = {
       numRows: source.numRows,
       columns: source.columns,
       schema,
       prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
     }
+    forwardBudgetedScanColumn(bounded, source, guard)
+    return bounded
   }
   const scan = source.scan
   /** @type {AsyncDataSource} */
@@ -188,29 +191,42 @@ function withHeapBudget(source, guard) {
     bounded.schema = source.schema
     bounded.prepareScan = budgetedPrepareScan((request) => prepareScan.call(source, request), guard)
   }
-  if (typeof source.scanColumn === 'function') {
-    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-    // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
-    bounded.scanColumn = (options) => {
-      const inner = normalizeScanColumn(scanColumn(options), options)
-      return {
-        appliedWhere: inner.appliedWhere,
-        appliedLimitOffset: inner.appliedLimitOffset,
-        async *chunks() {
-          for await (const chunk of inner.chunks()) {
-            guard.check('column_chunk')
-            yield chunk
-          }
-        },
-      }
-    }
-  }
+  forwardBudgetedScanColumn(bounded, source, guard)
   return bounded
 }
 
 /**
- * Preserve a prepared source through the heap-budget decoration and sample
- * retained growth at every native batch boundary.
+ * Forward a column stream with its negotiation flags intact and sample each
+ * materialized chunk.
+ *
+ * @param {AsyncDataSource} bounded
+ * @param {AsyncDataSource} source
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {void}
+ */
+function forwardBudgetedScanColumn(bounded, source, guard) {
+  if (typeof source.scanColumn !== 'function') return
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+  // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
+  bounded.scanColumn = (options) => {
+    const inner = normalizeScanColumn(scanColumn.call(source, options), options)
+    return {
+      appliedWhere: inner.appliedWhere,
+      appliedLimitOffset: inner.appliedLimitOffset,
+      async *chunks() {
+        for await (const chunk of inner.chunks()) {
+          guard.check('column_chunk')
+          yield chunk
+        }
+      },
+    }
+  }
+}
+
+/**
+ * Preserve a prepared source through the heap-budget decoration. Direct
+ * vectors are sampled after batch production; deferred vectors are sampled
+ * immediately after their lazy read resolves.
  *
  * @param {PrepareScan} prepareScan
  * @param {{ check: (site: string) => void }} guard
@@ -226,10 +242,33 @@ function budgetedPrepareScan(prepareScan, guard) {
       async *batches(options = {}) {
         for await (const batch of inner.batches(options)) {
           guard.check('native_batch')
-          yield batch
+          yield budgetedBatch(batch, guard)
         }
       },
     }
+  }
+}
+
+/**
+ * @param {AsyncBatch} batch
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {AsyncBatch}
+ */
+function budgetedBatch(batch, guard) {
+  return {
+    selection: batch.selection,
+    columns: batch.columns.map((column) => {
+      if (!('read' in column)) return column
+      const read = column.read
+      return {
+        ...column,
+        async read(request) {
+          const vector = await read.call(column, request)
+          guard.check('native_batch')
+          return vector
+        },
+      }
+    }),
   }
 }
 
@@ -368,7 +407,7 @@ export async function executeQuerySql(args) {
               localOnly.callerClass = vis.callerClass
               if (!callerSeesEverything(vis.callerRank)) {
                 if (!source.scan || !source.columns) {
-                  throw new Error(`Dataset "${name}" must provide scan() to enforce local-only visibility`)
+                  throw new Error(`Dataset "${name}" must provide columns and scan() to enforce local-only visibility`)
                 }
                 localOnly.filtered = true
                 table = withLocalOnlyVisibility(/** @type {ScannableDataSource} */ (source), {
