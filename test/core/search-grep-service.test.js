@@ -171,6 +171,47 @@ test('scan tier: the limit truncates to the newest matches', async () => {
   assert.equal(res.exhausted, false)
 })
 
+test('the limit keeps the newest matches inside one file, not the first ones walked', async () => {
+  // One append, so all ten rows share a data file and the newest-day file
+  // walk cannot order them: only sort-order truncation can. Rows land in
+  // insertion order, which is oldest first, so a walk-order cut would answer
+  // m1..m3.
+  const batch = []
+  for (let i = 0; i < 10; i++) batch.push(mkRow({ date: '2026-08-14', content_text: `needle body ${i}` }))
+  const { storage } = await makeCache([batch])
+  const all = await grep(storage, { limit: 100 })
+  assert.equal(all.hits.length, 10)
+  const newest = all.hits.slice(0, 3).map((h) => h.messageId)
+  const capped = await grep(storage, { limit: 3 })
+  assert.deepEqual(capped.hits.map((h) => h.messageId), newest, 'the newest three survive the limit')
+  assert.equal(capped.truncated, true)
+  assert.equal(capped.exhausted, false)
+})
+
+test('a chain id alone scopes the walk, with no session id beside it', async () => {
+  const { storage } = await makeCache([[OLD], [NEW]])
+  const byChain = await grep(storage, { chainId: 'a2' })
+  assert.deepEqual(byChain.hits.map((h) => h.sessionId), ['s2'])
+  const byConversation = await grep(storage, { chainId: 'c2' })
+  assert.deepEqual(byConversation.hits.map((h) => h.sessionId), ['s2'])
+  const unknownChain = await grep(storage, { chainId: 'zz' })
+  assert.equal(unknownChain.hits.length, 0, 'an unmatched chain id filters, it does not fall open')
+})
+
+test('a deadline signal returns the partial answer rather than throwing', async () => {
+  const { storage } = await makeCache([[OLD], [NEW]])
+  // AbortSignal.timeout's reason is a DOMException named TimeoutError, not
+  // AbortError: the deadline shape the service is built for.
+  const deadline = AbortSignal.timeout(1)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const res = await grep(storage, { signal: deadline })
+  assert.equal(res.exhausted, false, 'an aborted walk is not exhausted')
+  const controller = new AbortController()
+  controller.abort()
+  const plain = await grep(storage, { signal: controller.signal })
+  assert.equal(plain.exhausted, false)
+})
+
 test('scan tier: from/to narrow by day at the file walk', async () => {
   const { storage } = await makeCache([[OLD], [NEW]])
   const fromOnly = await grep(storage, { from: '2026-08-11' })
@@ -320,4 +361,22 @@ test('an empty or oversized query refuses up front', async () => {
   await assert.rejects(() => grep(storage, { query: '' }), /non-empty/)
   await assert.rejects(() => grep(storage, { query: 'x'.repeat(2000) }), /at most/)
   await assert.rejects(() => grep(storage, { query: '(', regex: true }), /not a valid regular expression/)
+})
+
+test('a missing or non-positive limit refuses up front', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-grep-limit-'))
+  const storage = createQueryStorageService({ cacheRoot })
+  await assert.rejects(() => grep(storage, { limit: undefined }), /positive integer/)
+  await assert.rejects(() => grep(storage, { limit: 0 }), /positive integer/)
+  await assert.rejects(() => grep(storage, { limit: -1 }), /positive integer/)
+  await assert.rejects(() => grep(storage, { limit: 2.5 }), /positive integer/)
+})
+
+test('unreadable table metadata fails the search rather than answering zero', async () => {
+  const { storage, cacheRoot } = await makeCache([[OLD], [NEW]])
+  const metadataDir = path.join(resolveIcebergDir(path.join(cacheRoot, 'datasets', DATASET, 'source=test')), 'metadata')
+  for (const name of await fs.readdir(metadataDir)) {
+    if (name.endsWith('.metadata.json')) await fs.writeFile(path.join(metadataDir, name), '{ truncated')
+  }
+  await assert.rejects(() => grep(storage), 'a corrupt table raises, matching the SQL read path')
 })

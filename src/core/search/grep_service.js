@@ -104,7 +104,16 @@ const UNKNOWN_DAY_SORT_KEY = '￿'
 export async function executeGrepSearch(args) {
   const { storage, signal } = args
   const limit = args.limit
-  // Collect one past the limit: the overflow row is the proof that
+  // `limit` is validated here for the same reason the query is: this is the
+  // wire shape a serving surface hands straight through, so an unchecked
+  // value fails late and wrong instead of up front. An absent limit makes
+  // the budget NaN, so the walk never stops and collects every match in the
+  // cache; a negative one reaches the result trim and throws a bare
+  // `RangeError: Invalid array length` from deep inside the service.
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error('limit must be a positive integer')
+  }
+  // Collect one past the limit: the overflow hit is the proof that
   // `truncated` is true, and is never returned.
   const budget = limit + 1
   const matcher = compileMatcher(args.query, args.regex === true)
@@ -204,6 +213,27 @@ export async function executeGrepSearch(args) {
       let indexedFiles = 0
       let scannedFiles = 0
 
+      /**
+       * Keep the newest `budget` hits and drop the rest. Truncation has to
+       * happen in SORT order, never in walk order: rows inside one data file
+       * are in write order (LLP 0022 clusters a file by session, so a
+       * session's rows run oldest to newest), and one message-day is many
+       * files, so cutting the tail of the walk keeps the OLDEST matches of
+       * whichever file first filled the budget, the exact opposite of what
+       * the limit promises. Trimming is amortized (it runs once the buffer
+       * has doubled), so the walk still costs a bounded number of hits
+       * rather than one per match in the cache.
+       */
+      const trimHits = () => {
+        sortHits(hits)
+        if (hits.length > budget) hits.length = budget
+      }
+      /** @param {Record<string, unknown>} row */
+      const collect = (row) => {
+        hits.push(toHit(row, matcher))
+        if (hits.length >= budget * 2) trimHits()
+      }
+
       /** @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file */
       const searchFile = async (file) => {
         // Sidecar existence IS the index marker, no ledger (LLP 0264
@@ -240,8 +270,7 @@ export async function executeGrepSearch(args) {
               localOnly.withheldRows += 1
               continue
             }
-            hits.push(toHit(row, matcher))
-            if (hits.length >= budget) return
+            collect(row)
           }
           return
         }
@@ -250,7 +279,6 @@ export async function executeGrepSearch(args) {
         const rows = await parquetReadObjects({ file: sourceFile, columns: SCAN_COLUMNS })
         for (let i = 0; i < rows.length; i++) {
           if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
-          if (hits.length >= budget) return
           if (file.deletedPositions?.has(BigInt(i))) continue
           const row = rows[i]
           if (!accept(row)) continue
@@ -258,7 +286,7 @@ export async function executeGrepSearch(args) {
             localOnly.withheldRows += 1
             continue
           }
-          hits.push(toHit(row, matcher))
+          collect(row)
         }
       }
 
@@ -266,8 +294,17 @@ export async function executeGrepSearch(args) {
         for (const file of files) {
           signal?.throwIfAborted()
           if (hits.length >= budget) {
-            exhausted = false
-            break
+            trimHits()
+            // Files are walked day-descending, so every file still ahead
+            // holds rows no newer than this one's day. Once the budget is
+            // full of hits strictly newer than that day, nothing left in the
+            // walk can displace one and the walk stops. A same-day file (or
+            // one whose day would not decode) is still read, because its
+            // rows can outrank a kept hit.
+            if (file.day !== null && file.day < hits[hits.length - 1].date) {
+              exhausted = false
+              break
+            }
           }
           if (file.day !== null
             && ((rowFrom !== undefined && file.day < rowFrom) || (rowTo !== undefined && file.day > rowTo))) {
@@ -278,13 +315,13 @@ export async function executeGrepSearch(args) {
       } catch (err) {
         // The caller aborting mid-walk keeps what was found: a partial
         // answer marked not exhausted, never an error.
-        if (!isAbort(err)) throw err
+        if (!isAbort(err, signal)) throw err
         exhausted = false
       }
 
+      trimHits()
       const truncated = hits.length > limit
       if (truncated) hits.length = limit
-      sortHits(hits)
 
       span.setAttribute('file_count', files.length)
       span.setAttribute('indexed_file_count', indexedFiles)
@@ -331,7 +368,13 @@ function sortHits(hits) {
     const at = a.messageCreatedAt ?? ''
     const bt = b.messageCreatedAt ?? ''
     if (at !== bt) return at < bt ? 1 : -1
-    return (a.partId ?? '') < (b.partId ?? '') ? 1 : -1
+    const ap = a.partId ?? ''
+    const bp = b.partId ?? ''
+    // Equal keys compare equal: the walk trims in sort order and so sorts
+    // the buffer repeatedly, and a comparator that never returns 0 would
+    // reshuffle indistinguishable hits on every pass.
+    if (ap === bp) return 0
+    return ap < bp ? 1 : -1
   })
 }
 
@@ -374,9 +417,9 @@ function toHit(row, matcher) {
  */
 function compileChainPredicate(params) {
   const { sessionId, chainId } = params
-  if (sessionId === undefined) return () => true
+  if (sessionId === undefined && chainId === undefined) return () => true
   return (row) => {
-    if (row.session_id !== sessionId) return false
+    if (sessionId !== undefined && row.session_id !== sessionId) return false
     if (chainId === undefined) return true
     // A chain id names either side of the pair, the same matching rule the
     // server applies (its LLP 0117 locator query).
@@ -399,7 +442,22 @@ function toDayString(value) {
   return null
 }
 
-/** @param {unknown} err */
-function isAbort(err) {
+/**
+ * Did this error come from the caller's deadline rather than from the walk?
+ * `throwIfAborted` rethrows `signal.reason` verbatim, and the natural
+ * deadline (`AbortSignal.timeout`) makes that reason a `DOMException` named
+ * `TimeoutError`, not `AbortError`, so a name check alone turns the
+ * documented "partial answer, marked not exhausted" into a thrown error for
+ * the one abort shape the service exists to serve. Identity against the
+ * signal's own reason accepts every abort shape, a caller's custom
+ * `abort(reason)` included, without swallowing an unrelated failure that
+ * happens to race the deadline.
+ *
+ * @param {unknown} err
+ * @param {AbortSignal | undefined} signal
+ * @returns {boolean}
+ */
+function isAbort(err, signal) {
+  if (signal?.aborted === true && err === signal.reason) return true
   return err instanceof Error && err.name === 'AbortError'
 }
