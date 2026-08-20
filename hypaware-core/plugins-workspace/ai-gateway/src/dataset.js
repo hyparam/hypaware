@@ -163,12 +163,15 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * (e.g. `git_remote`/`head_sha`/`repo_root` in v7, LLP 0032). Squirreling's
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
- * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
- * itself is unchanged: a column an old partition physically lacks stays
- * addressable, and the exact value a read of it yields depends on the read path
- * (LLP 0015#multi-partition-union).
+ * column would throw `ColumnNotFoundError` over any pre-bump partition. Over
+ * the icebird-backed cache the value such a read yields is `null` on the
+ * single-column `scanColumn` path and `undefined` on the row path, never a
+ * throw; LLP 0240 records the measured contract and the tests that pin it.
+ * LLP 0015#multi-partition-union states the parquet-backed contract, which is
+ * a different one (undefined-or-throws) and does not govern this dataset.
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
+ * @ref LLP 0240#contract [implements]: the wrapper is what makes an absent column addressable; its read values are pinned at the SQL surface
  * @param {AsyncDataSource} source
  * @returns {AsyncDataSource}
  */
@@ -178,6 +181,16 @@ function withSchemaColumns(source) {
   const wrapped = {
     columns,
     numRows: source.numRows,
+    // The row path owes the same predicate gate as `scanColumn` below. A
+    // `where` naming a declared-but-physically-absent column must not reach
+    // the source: an icebird partition builds a hyparquet filter on a column
+    // its schema never had, matches nothing away, and still reports
+    // `appliedWhere: true`, so the engine trusts the unfiltered stream and
+    // `WHERE git_remote = 'x'` returns every row. Forwarding it verbatim was
+    // wrong in exactly the shape LLP 0098 already forbids; the union hides it
+    // (its own gate fires first) so only a single-partition cache was hit.
+    // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped on the row path too, not only on scanColumn
+    // @ref LLP 0240#where-gate [implements]: an ungated row-path where made a single icebird partition answer predicates on an absent column wrongly
     scan(options) {
       // The engine names this scan's output columns from the list advertised
       // here, but fills them from each row's own `columns`. A partition that
@@ -185,14 +198,25 @@ function withSchemaColumns(source) {
       // output name past the gap onto its neighbour's value: over a drifted
       // union `SELECT *, git_remote` answered with git_remote's value under
       // the name of the column that happened to follow the star's short
-      // width. Pad each row back out to the advertised list.
+      // width. Pad each row back out to the advertised list. Stripping the
+      // predicate below does not narrow it: the gate only drops `where`.
       // @ref LLP 0241#alignment [implements]: a declared-but-absent column becomes a padded cell, not a missing slot the star can slide through
       const scanColumns = options?.columns ?? columns
-      const result = source.scan(options)
+      const pushable = !options?.where || canPushWhere(source, whereColumns(options.where))
+      // Stripping the predicate also strips limit/offset: they are only
+      // meaningful after the filter, and a source that ignored the predicate
+      // but honored a slice would silently drop matching rows.
+      const inner = pushable
+        ? source.scan(options)
+        : source.scan({ ...options, where: undefined, limit: undefined, offset: undefined })
       return {
-        appliedWhere: result.appliedWhere,
-        appliedLimitOffset: result.appliedLimitOffset,
-        rows: () => alignRows(result.rows(), scanColumns),
+        appliedWhere: pushable && inner.appliedWhere,
+        appliedLimitOffset: pushable && inner.appliedLimitOffset,
+        // The two duties compose in one direction: the gate hands an
+        // unfiltered stream back to the engine, and the padding is what lets
+        // the engine's own re-filter read the absent column as `undefined`
+        // instead of missing it on a short row (LLP 0241#alignment).
+        rows: () => alignRows(inner.rows(), scanColumns),
       }
     },
   }
