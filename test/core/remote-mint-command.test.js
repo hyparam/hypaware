@@ -99,14 +99,18 @@ test('mint forwards --label and --expires-days', async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), { expires_days: 30, label: 'repo-ci' })
 })
 
-test('mint rejects a non-integer --expires-days', async () => {
-  const hypHome = await tmpHome()
-  const { ctx, err } = await makeCtx({ hypHome })
-  const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
-  const code = await runRemoteMint(['prod', '--expires-days', 'soon'], ctx, { fetchImpl: impl })
-  assert.equal(code, 2)
-  assert.equal(calls.length, 0)
-  assert.match(err.join(''), /--expires-days expects a positive integer/)
+test('mint rejects an --expires-days the schema bound refuses', async () => {
+  for (const bad of ['soon', '0', '-5', '1.5']) {
+    const hypHome = await tmpHome()
+    const { ctx, err } = await makeCtx({ hypHome })
+    const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
+    const code = await runRemoteMint(['prod', '--expires-days', bad], ctx, { fetchImpl: impl })
+    assert.equal(code, 2, bad)
+    assert.equal(calls.length, 0, bad)
+    // The gate owns the bound, so the refusal also prints the usage line.
+    assert.match(err.join(''), /--expires-days expects a positive integer/)
+    assert.match(err.join(''), /usage: hyp remote mint/)
+  }
 })
 
 test('mint refuses an unknown target with remote add guidance', async () => {

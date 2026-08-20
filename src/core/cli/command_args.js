@@ -177,7 +177,11 @@ export const CORE_COMMAND_ARGS = {
       properties: {
         name: { type: 'string' },
         label: { type: 'string' },
-        'expires-days': { type: 'string' },
+        // The expiry bound and its 365-day default are declared here, not
+        // re-checked in the runner: the schema is the whole surface of the
+        // command, so a bad value fails at the gate with the usage line like
+        // every other argument error.
+        'expires-days': { type: 'integer', minimum: 1, default: 365 },
       },
       positional: ['name'],
     },

@@ -1000,12 +1000,8 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // @ref LLP 0062#bare-remote [implements]: bare `remote mint` resolves the default target
   const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
   const label = /** @type {string | undefined} */ (gate.params.label)
-  const daysRaw = /** @type {string | undefined} */ (gate.params['expires-days'])
-  const expiresDays = daysRaw === undefined ? 365 : Number(daysRaw)
-  if (!Number.isInteger(expiresDays) || expiresDays <= 0) {
-    ctx.stderr.write(`hyp remote mint: --expires-days expects a positive integer (got ${daysRaw})\n`)
-    return 2
-  }
+  // Bounded and defaulted by the schema (LLP 0293), so no second check here.
+  const expiresDays = /** @type {number} */ (gate.params['expires-days'])
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {

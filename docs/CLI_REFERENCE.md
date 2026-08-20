@@ -1223,6 +1223,34 @@ install the daemon. `--no-daemon` provisions without installing the service.
 hyp remote login team --no-forward
 ```
 
+### `hyp remote mint`
+
+```text
+hyp remote mint [name] [--label <label>] [--expires-days <n>]
+```
+
+Mints a long-lived CI enrollment token from your logged-in session and prints
+it once, for pasting into CI secrets. It requires a session stored by
+`hyp remote login`. Omit `name` to mint against the default target.
+`--label` names the gateway the token is bound to, and `--expires-days`
+overrides the 365-day default. Every CI run that joins with the token shares
+that one gateway, and the token itself never rotates.
+
+```sh
+hyp remote mint team --label repo-ci --expires-days 90
+```
+
+Use the printed token as the CI recipe's bootstrap credential:
+
+```sh
+# setup
+hyp join https://hyp.example.com "$HYP_CI_TOKEN" --no-daemon
+hyp daemon run --foreground &
+# ... the job's steps ...
+# teardown: flush what the schedule has not exported yet
+hyp sync --yes
+```
+
 ### `hyp remote list`
 
 ```text
