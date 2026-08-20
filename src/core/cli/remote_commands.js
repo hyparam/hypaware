@@ -11,13 +11,18 @@ import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
 import {
+  attachWithRefresh,
   deriveIdentityBase,
+  describeAuthRejection,
+  isRefreshable,
   readCredentials,
   remoteTokenEnvVar,
   removeToken,
+  resolveAccessJwt,
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
+import { NO_FETCH_MESSAGE, describeRefreshError, expiryTimestamp } from '../remote/identity_client.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
@@ -968,6 +973,206 @@ function explainLoginError(callbackError, err) {
       return LOGIN_ORG_NOT_PERMITTED_MESSAGE
     default:
       return err instanceof Error ? err.message : String(err)
+  }
+}
+
+/**
+ * `hyp remote mint [name] [--label <label>] [--expires-days <n>]`: mint a
+ * long-lived CI enrollment token against the target server and print it once.
+ *
+ * The token is the CI counterpart of an operator-distributed bootstrap token
+ * (LLP 0063 D6): the server binds it to one gateway row created at mint time,
+ * and every CI run that `hyp join`s with it exchanges it for its own
+ * short-lived gateway JWT against that same shared gateway, so the secret in
+ * CI never rotates. The caller authenticates with their logged-in OIDC
+ * session; the request rides the shared one-shot refresh + retry policy
+ * (LLP 0058 D5).
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{ fetchImpl?: typeof fetch }} [deps] test seam for the mint request
+ * @returns {Promise<number>}
+ * @ref LLP 0298#mint [implements]: user-minted CI token from the logged-in session; printed once, 365-day default expiry
+ */
+export async function runRemoteMint(argv, ctx, deps = {}) {
+  const gate = parseCoreCommandArgv('remote mint', argv, ctx)
+  if (!gate.ok) return gate.code
+  // Bare `hyp remote mint` targets the default remote, like bare `remote login`.
+  // @ref LLP 0062#bare-remote [implements]: bare `remote mint` resolves the default target
+  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const label = /** @type {string | undefined} */ (gate.params.label)
+  // Bounded and defaulted by the schema (LLP 0293), so no second check here.
+  const expiresDays = /** @type {number} */ (gate.params['expires-days'])
+  const remotes = await readConfiguredRemotes(ctx)
+  const entry = remotes[name]
+  if (!entry) {
+    ctx.stderr.write(`hyp remote mint: unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'\n`)
+    return 2
+  }
+  const identityBase = deriveIdentityBase(entry.url)
+  if (!identityBase) {
+    ctx.stderr.write(`hyp remote mint: cannot derive the identity endpoint from '${entry.url}'\n`)
+    return 2
+  }
+  // The recipe must name the server BASE, not the registered target URL. A
+  // target may legitimately be registered as `<base>/v1/mcp` (LLP 0084 D2, and
+  // the shape docs/CLI_REFERENCE.md shows for `hyp remote add`), and `hyp join`
+  // stores its url argument verbatim as the central sink url, which central's
+  // IdentityClient then resolves `/v1/identity/bootstrap` against. Pasting the
+  // registered URL through would 404 every CI run while minting here still
+  // worked, since deriveIdentityBase already reduces to the origin.
+  const joinTarget = new URL(entry.url).origin
+  const doFetch = deps.fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
+  if (typeof doFetch !== 'function') {
+    ctx.stderr.write(`hyp remote mint: ${NO_FETCH_MESSAGE}\n`)
+    return 1
+  }
+
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
+  let resolved
+  try {
+    resolved = await resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
+  } catch (err) {
+    const { sessionExpired, message } = describeRefreshError(err, name)
+    ctx.stderr.write(`hyp remote mint: ${message}\n`)
+    return sessionExpired ? 2 : 1
+  }
+  if (!resolved.ok) {
+    ctx.stderr.write(`hyp remote mint: ${resolved.error}\n`)
+    return 2
+  }
+
+  /** @param {string} token @returns {Promise<{ authFailed: boolean, value: { ok: true, response: Response } | { ok: false, error: string } }>} */
+  const op = async (token) => {
+    /** @type {Response} */
+    let response
+    try {
+      response = await doFetch(`${identityBase}/mint`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ expires_days: expiresDays, ...(label !== undefined ? { label } : {}) }),
+      })
+    } catch (err) {
+      return { authFailed: false, value: { ok: false, error: err instanceof Error ? err.message : String(err) } }
+    }
+    return { authFailed: response.status === 401, value: { ok: true, response } }
+  }
+
+  /** @type {{ ok: true, value: { ok: true, response: Response } | { ok: false, error: string }, authFailed: boolean } | { ok: false, error: string }} */
+  let out
+  try {
+    out = await attachWithRefresh({
+      resolved,
+      refresh: () => resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
+      op,
+    })
+  } catch (refreshErr) {
+    const { sessionExpired, message } = describeRefreshError(refreshErr, name)
+    ctx.stderr.write(`hyp remote mint: ${message}\n`)
+    return sessionExpired ? 2 : 1
+  }
+  if (!out.ok) {
+    ctx.stderr.write(`hyp remote mint: ${out.error}\n`)
+    return 2
+  }
+  if (out.authFailed) {
+    // A 401 that survives the retry is ambiguous here for the same reason it is
+    // on the reports plane (LLP 0155 #write-401): this server answers 401, not
+    // 403, to a live session that lacks a scope, so the 403 branch below never
+    // fires for that case. Naming only expiry would send a user who cannot mint
+    // round the re-login loop forever, so say both causes.
+    if (isRefreshable(resolved)) {
+      ctx.stderr.write(
+        `hyp remote mint: '${name}' refused the credential (HTTP 401) - your session may have expired ` +
+          `(re-run 'hyp remote login ${name}'), or your account may not be permitted to mint CI tokens; ` +
+          `ask a server admin\n`,
+      )
+      return 1
+    }
+    const { message, exitCode } = describeAuthRejection({ target: name, status: 401, resolved })
+    ctx.stderr.write(`hyp remote mint: ${message}\n`)
+    return exitCode
+  }
+  if (!out.value.ok) {
+    ctx.stderr.write(`hyp remote mint: ${out.value.error}\n`)
+    return 1
+  }
+
+  const response = out.value.response
+  if (response.status === 404) {
+    ctx.stderr.write(`hyp remote mint: '${name}' does not support minting CI tokens (HTTP 404) - the server may predate this feature\n`)
+    return 1
+  }
+  if (response.status === 403) {
+    ctx.stderr.write(`hyp remote mint: '${name}' refused to mint (HTTP 403) - your account may not be permitted to mint CI tokens; ask a server admin\n`)
+    return 1
+  }
+  /** @type {string} */
+  let text = ''
+  try {
+    text = await response.text()
+  } catch {
+    // fall through to the shape checks below with an empty body
+  }
+  if (!response.ok) {
+    ctx.stderr.write(`hyp remote mint: mint failed (HTTP ${response.status})${text ? ` - ${text.slice(0, 200)}` : ''}\n`)
+    return 1
+  }
+  /** @type {any} */
+  let json
+  try {
+    json = JSON.parse(text)
+  } catch {
+    json = undefined
+  }
+  const token = isPlainObject(json) && typeof json.token === 'string' && json.token.length > 0 ? json.token : undefined
+  if (!token) {
+    ctx.stderr.write(`hyp remote mint: the server's mint response carried no token\n`)
+    return 1
+  }
+  const gatewayId = isPlainObject(json) && typeof json.gateway_id === 'string' ? json.gateway_id : undefined
+  // The identity plane sends `expires_at` as a Unix epoch-second, not an ISO
+  // string, and `/mint` is a sibling of `/token` (LLP 0298 D3), so reuse the
+  // one normalization instead of pattern-matching a string here. Display only:
+  // the token is shown once, so an unreadable expiry is dropped rather than
+  // allowed to fail the print that carries the secret.
+  const expiresAt = isPlainObject(json) ? readExpiry(json.expires_at) : undefined
+
+  // The token goes to stdout alone; every advisory line goes to stderr, as the
+  // first-sync consent block above already does. `hyp remote mint > ci.token`
+  // and `TOKEN=$(hyp remote mint)` are the natural ways to move a printed
+  // secret, and a banner captured into the secret store is not recoverable:
+  // the token is never shown again, and re-minting creates a second gateway
+  // row (LLP 0298 D2).
+  const detail = [gatewayId ? `gateway ${gatewayId}` : '', expiresAt ? `expires ${expiresAt}` : ''].filter(Boolean).join(', ')
+  ctx.stderr.write(`minted CI token for '${name}'${detail ? ` (${detail})` : ''}\n`)
+  ctx.stdout.write(`${token}\n`)
+  ctx.stderr.write('store it in your CI secrets now - it is not shown again\n')
+  ctx.stderr.write('CI recipe:\n')
+  // The token reaches `hyp join` on stdin, never as an argv positional: it is a
+  // long-lived shared secret, and `hyp join`'s own help and CLI reference both
+  // say a positional token lands in shell history and process listings - which
+  // on a CI runner means `ps` and any `set -x` trace.
+  ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
+  ctx.stderr.write('            hyp daemon run --foreground &\n')
+  ctx.stderr.write('  teardown: hyp sync --yes\n')
+  return 0
+}
+
+/**
+ * Render an identity `expires_at` for display, or `undefined` when the server
+ * omitted it or sent something unreadable.
+ *
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function readExpiry(value) {
+  if (value === undefined || value === null) return undefined
+  try {
+    return expiryTimestamp(value, 'expires_at')
+  } catch {
+    return undefined
   }
 }
 

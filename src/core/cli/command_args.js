@@ -168,6 +168,24 @@ export const CORE_COMMAND_ARGS = {
       positional: ['name'],
     },
   },
+  'remote mint': {
+    // Bare `hyp remote mint` mints against the default target, the same
+    // resolution as bare `remote login` (LLP 0062 #bare-remote).
+    usage: 'hyp remote mint [name] [--label <label>] [--expires-days <n>]',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        label: { type: 'string' },
+        // The expiry bound and its 365-day default are declared here, not
+        // re-checked in the runner: the schema is the whole surface of the
+        // command, so a bad value fails at the gate with the usage line like
+        // every other argument error.
+        'expires-days': { type: 'integer', minimum: 1, default: 365 },
+      },
+      positional: ['name'],
+    },
+  },
   'report render': {
     usage: 'hyp report render [<dir>] [--no-refresh-assets]',
     schema: {
