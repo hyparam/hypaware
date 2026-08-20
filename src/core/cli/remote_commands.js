@@ -22,7 +22,7 @@ import {
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
-import { NO_FETCH_MESSAGE, describeRefreshError } from '../remote/identity_client.js'
+import { NO_FETCH_MESSAGE, describeRefreshError, expiryTimestamp } from '../remote/identity_client.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
@@ -1132,17 +1132,48 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
     return 1
   }
   const gatewayId = isPlainObject(json) && typeof json.gateway_id === 'string' ? json.gateway_id : undefined
-  const expiresAt = isPlainObject(json) && typeof json.expires_at === 'string' ? json.expires_at : undefined
+  // The identity plane sends `expires_at` as a Unix epoch-second, not an ISO
+  // string, and `/mint` is a sibling of `/token` (LLP 0298 D3), so reuse the
+  // one normalization instead of pattern-matching a string here. Display only:
+  // the token is shown once, so an unreadable expiry is dropped rather than
+  // allowed to fail the print that carries the secret.
+  const expiresAt = isPlainObject(json) ? readExpiry(json.expires_at) : undefined
 
+  // The token goes to stdout alone; every advisory line goes to stderr, as the
+  // first-sync consent block above already does. `hyp remote mint > ci.token`
+  // and `TOKEN=$(hyp remote mint)` are the natural ways to move a printed
+  // secret, and a banner captured into the secret store is not recoverable:
+  // the token is never shown again, and re-minting creates a second gateway
+  // row (LLP 0298 D2).
   const detail = [gatewayId ? `gateway ${gatewayId}` : '', expiresAt ? `expires ${expiresAt}` : ''].filter(Boolean).join(', ')
-  ctx.stdout.write(`minted CI token for '${name}'${detail ? ` (${detail})` : ''}\n`)
+  ctx.stderr.write(`minted CI token for '${name}'${detail ? ` (${detail})` : ''}\n`)
   ctx.stdout.write(`${token}\n`)
-  ctx.stdout.write('store it in your CI secrets now - it is not shown again\n')
-  ctx.stdout.write('CI recipe:\n')
-  ctx.stdout.write(`  setup:    hyp join ${joinTarget} "$HYP_CI_TOKEN" --no-daemon\n`)
-  ctx.stdout.write('            hyp daemon run --foreground &\n')
-  ctx.stdout.write('  teardown: hyp sync --yes\n')
+  ctx.stderr.write('store it in your CI secrets now - it is not shown again\n')
+  ctx.stderr.write('CI recipe:\n')
+  // The token reaches `hyp join` on stdin, never as an argv positional: it is a
+  // long-lived shared secret, and `hyp join`'s own help and CLI reference both
+  // say a positional token lands in shell history and process listings - which
+  // on a CI runner means `ps` and any `set -x` trace.
+  ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
+  ctx.stderr.write('            hyp daemon run --foreground &\n')
+  ctx.stderr.write('  teardown: hyp sync --yes\n')
   return 0
+}
+
+/**
+ * Render an identity `expires_at` for display, or `undefined` when the server
+ * omitted it or sent something unreadable.
+ *
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function readExpiry(value) {
+  if (value === undefined || value === null) return undefined
+  try {
+    return expiryTimestamp(value, 'expires_at')
+  } catch {
+    return undefined
+  }
 }
 
 /**

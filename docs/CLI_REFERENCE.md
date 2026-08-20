@@ -1240,13 +1240,19 @@ that one gateway, and the token itself never rotates.
 hyp remote mint team --label repo-ci --expires-days 90
 ```
 
+The token is written to standard output on its own; the summary line, the
+warning, and the recipe go to standard error, so `hyp remote mint > ci.token`
+stores exactly the secret.
+
 Use the printed token as the CI recipe's bootstrap credential. The recipe names
 the server base, which is what `hyp join` expects, even when the target was
-registered with a `/v1/mcp` suffix:
+registered with a `/v1/mcp` suffix, and feeds the token on standard input
+rather than as a positional argument, which would expose a long-lived shared
+secret to `ps` and to `set -x` traces on the runner:
 
 ```sh
 # setup
-hyp join https://hyp.example.com "$HYP_CI_TOKEN" --no-daemon
+printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com --no-daemon
 hyp daemon run --foreground &
 # ... the job's steps ...
 # teardown: flush what the schedule has not exported yet

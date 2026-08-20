@@ -69,7 +69,7 @@ function fetchStub(script) {
 
 test('mint posts to the identity mint endpoint and prints the token once', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({ hypHome })
+  const { ctx, out, err } = await makeCtx({ hypHome })
   await seedSession(hypHome)
   const { impl, calls } = fetchStub([
     { status: 200, body: { token: 'ci-tok-1', gateway_id: 'gw-ci', expires_at: '2027-08-20T00:00:00Z' } },
@@ -81,12 +81,51 @@ test('mint posts to the identity mint endpoint and prints the token once', async
   assert.equal(calls[0].init.method, 'POST')
   assert.equal(calls[0].init.headers.authorization, 'Bearer jwt-1')
   assert.deepEqual(JSON.parse(calls[0].init.body), { expires_days: 365 })
-  const text = out.join('')
-  assert.match(text, /minted CI token for 'prod' \(gateway gw-ci, expires 2027-08-20T00:00:00Z\)/)
-  assert.match(text, /^ci-tok-1$/m)
-  assert.match(text, /not shown again/)
-  assert.match(text, /hyp join https:\/\/hyp\.internal "\$HYP_CI_TOKEN" --no-daemon/)
-  assert.match(text, /hyp sync --yes/)
+  // stdout carries the secret and nothing else, so `hyp remote mint > ci.token`
+  // stores a usable token rather than a banner wrapped around one.
+  assert.equal(out.join(''), 'ci-tok-1\n')
+  const advice = err.join('')
+  assert.match(advice, /minted CI token for 'prod' \(gateway gw-ci, expires 2027-08-20T00:00:00Z\)/)
+  assert.match(advice, /not shown again/)
+  assert.match(advice, /hyp join https:\/\/hyp\.internal --no-daemon/)
+  assert.match(advice, /hyp sync --yes/)
+})
+
+test('the recipe pipes the token to hyp join instead of passing it as argv', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const { impl } = fetchStub([{ status: 200, body: { token: 'ci-tok-1' } }])
+  assert.equal(await runRemoteMint(['prod'], ctx, { fetchImpl: impl }), 0)
+  const advice = err.join('')
+  // A positional token lands in shell history and in `ps` on a shared runner,
+  // which is why `hyp join`'s own help steers scripts to stdin or --token-file.
+  assert.match(advice, /printf '%s' "\$HYP_CI_TOKEN" \| hyp join https:\/\/hyp\.internal --no-daemon/)
+  assert.doesNotMatch(advice, /hyp join \S+ "\$HYP_CI_TOKEN"/)
+})
+
+test('an epoch-second expires_at is rendered, not silently dropped', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  // The identity plane's wire shape for `expires_at` is a Unix epoch-second,
+  // the same as /token's; reading only strings would drop the one line that
+  // tells the user when their never-re-shown CI credential dies.
+  const { impl } = fetchStub([{ status: 200, body: { token: 't', gateway_id: 'gw', expires_at: 1789000000 } }])
+  assert.equal(await runRemoteMint(['prod'], ctx, { fetchImpl: impl }), 0)
+  assert.equal(out.join(''), 't\n')
+  assert.match(err.join(''), /expires 2026-09-10T00:26:40\.000Z/)
+})
+
+test('an unreadable expires_at drops the detail but still prints the token', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const { impl } = fetchStub([{ status: 200, body: { token: 't', gateway_id: 'gw', expires_at: 'whenever' } }])
+  assert.equal(await runRemoteMint(['prod'], ctx, { fetchImpl: impl }), 0)
+  assert.equal(out.join(''), 't\n')
+  assert.match(err.join(''), /\(gateway gw\)/)
+  assert.doesNotMatch(err.join(''), /expires/)
 })
 
 test('mint forwards --label and --expires-days', async () => {
@@ -147,14 +186,14 @@ test('the printed recipe joins the server base, not a /v1/mcp target URL', async
   // A target registered as `<base>/v1/mcp` is a supported shape (LLP 0084 D2).
   // `hyp join` stores its url argument verbatim, so pasting the registered URL
   // into the recipe would 404 every CI run on /v1/identity/bootstrap.
-  const { ctx, out } = await makeCtx({ hypHome, remotes: { prod: { url: 'https://hyp.internal/v1/mcp' } } })
+  const { ctx, err } = await makeCtx({ hypHome, remotes: { prod: { url: 'https://hyp.internal/v1/mcp' } } })
   await seedSession(hypHome)
   const { impl, calls } = fetchStub([{ status: 200, body: { token: 'ci-tok-1' } }])
   const code = await runRemoteMint(['prod'], ctx, { fetchImpl: impl })
   assert.equal(code, 0)
   assert.equal(calls[0].url, 'https://hyp.internal/v1/identity/mint')
-  const text = out.join('')
-  assert.match(text, /hyp join https:\/\/hyp\.internal "\$HYP_CI_TOKEN" --no-daemon/)
+  const text = err.join('')
+  assert.match(text, /hyp join https:\/\/hyp\.internal --no-daemon/)
   assert.doesNotMatch(text, /hyp join \S*\/v1\/mcp/)
 })
 
