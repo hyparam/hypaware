@@ -2,7 +2,6 @@
 
 import { buildQuerySqlOutput } from '../query/format.js'
 import { renderLocalOnlyNotice } from '../query/verb.js'
-import { executeGrepSearch } from './grep_service.js'
 import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
 
 /**
@@ -94,7 +93,14 @@ export const queryGrepVerb = {
       typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1
         ? Math.min(rawLimit, MAX_LIMIT)
         : DEFAULT_LIMIT
-    return executeGrepSearch({
+    // Loaded on demand, not at module scope: `registerCoreCommands`
+    // projects every `CORE_VERBS` entry pre-boot so `hyp --help` can
+    // render, so a top-level import would pull hypgrep, hyparquet and the
+    // Iceberg store into the front door of every `hyp` invocation (measured
+    // at ~16ms on `hyp --help`, ~10%) for the one command that needs them.
+    // The remote stack in `verb_command.js` is deferred for the same reason.
+    const { executeGrepSearch } = await import('./grep_service.js')
+    const result = await executeGrepSearch({
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       query: String(params.query ?? ''),
       regex: params.regex === true,
@@ -108,9 +114,16 @@ export const queryGrepVerb = {
       callerCwd: ctx.callerCwd,
       includeLocalOnly: params['include-local-only'] === true,
     })
+    // The clamp's own promise, carried through to the render: at the
+    // ceiling there is no larger `--limit` left to ask for, so the
+    // truncation notice must not send the caller back to a flag that
+    // cannot move. Local-only, like the freshness and visibility fields; a
+    // server result carries none of them and falls back to the general
+    // wording.
+    return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
   },
   render(result, controls) {
-    const r = /** @type {Partial<GrepSearchResult> & { localOnly?: LocalOnlyVisibilityReport, freshnessMessages?: string[] }} */ (result)
+    const r = /** @type {Partial<GrepSearchResult> & { localOnly?: LocalOnlyVisibilityReport, freshnessMessages?: string[], limitCeilingReached?: boolean, indexedFiles?: number, scannedFiles?: number }} */ (result)
     const hits = Array.isArray(r.hits) ? r.hits : []
     // One row per matched column, rg-style: the locator columns lead, the
     // snippet trails. Delegating to the query formatter gives grep the same
@@ -132,9 +145,21 @@ export const queryGrepVerb = {
     // render: the limit cut the answer (narrow or raise --limit), or the
     // walk stopped early (an abort or server deadline mid-search).
     if (r.truncated === true) {
-      stderr += 'grep: more matches exist beyond the limit - narrow with --from/--to or --session-id, or raise --limit\n'
+      stderr += r.limitCeilingReached === true
+        ? `grep: more matches exist beyond the ${MAX_LIMIT}-hit ceiling - narrow with --from/--to or --session-id\n`
+        : 'grep: more matches exist beyond the limit - narrow with --from/--to or --session-id, or raise --limit\n'
     } else if (r.exhausted === false) {
       stderr += 'grep: the search stopped before covering every file; results may be incomplete\n'
+    }
+    // Zero hits over zero files is not the answer the summary's coverage
+    // clause promises to make honest: "searched everything, found nothing"
+    // and "searched nothing" render identically otherwise, and on the MCP
+    // surface an agent sees only the rows. The file counts are the local
+    // service's own; a server result carries none, so this stays quiet on
+    // `--remote`.
+    if (hits.length === 0 && r.indexedFiles === 0 && r.scannedFiles === 0) {
+      stderr += 'grep: no ai_gateway_messages data files were searched - nothing is recorded on this machine yet, ' +
+        'or --from/--to excluded every file\n'
     }
     return {
       stdout: out.stdout,

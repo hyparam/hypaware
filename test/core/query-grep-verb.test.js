@@ -186,6 +186,37 @@ test('an unusable limit falls back to the default instead of failing', async () 
   assert.match(out.join(''), /needle a/)
 })
 
+test('at the ceiling the truncation notice stops advising a flag that cannot move', () => {
+  // The clamp exists so a caller is never told to raise a limit it already
+  // pinned; the notice has to keep that promise or the clamp only moves the
+  // unfollowable advice one flag along.
+  const atCeiling = queryGrepVerb.render(
+    { hits: [], truncated: true, exhausted: true, limitCeilingReached: true },
+    /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(atCeiling.stderr ?? '', /beyond the 1000-hit ceiling/)
+  assert.doesNotMatch(atCeiling.stderr ?? '', /raise --limit/)
+  const belowCeiling = queryGrepVerb.render(
+    { hits: [], truncated: true, exhausted: true, limitCeilingReached: false },
+    /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(belowCeiling.stderr ?? '', /raise --limit/)
+})
+
+test('zero hits over zero searched files says so instead of passing for a full search', async () => {
+  const { ctx, err } = await makeCtx([])
+  const code = await cmd.run(['needle'], ctx)
+  assert.equal(code, 0)
+  assert.match(err.join(''), /no ai_gateway_messages data files were searched/)
+})
+
+test('zero hits over a searched cache stays quiet', async () => {
+  const { ctx, err } = await makeCtx([[mkRow({ content_text: 'nothing to see' })]])
+  const code = await cmd.run(['needle'], ctx)
+  assert.equal(code, 0)
+  assert.equal(err.join(''), '', 'files were searched, so the empty answer is the honest one')
+})
+
 test('a malformed --from is refused rather than answering zero hits', async () => {
   const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
   // The window is compared lexicographically, so `2026-8-1` would prune
