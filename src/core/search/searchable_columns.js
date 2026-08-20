@@ -13,10 +13,18 @@
  * Insertion order is meaningful: matched columns are reported in this
  * order, so the content column leads a hit's snippets.
  *
- * All but one of these hold STRING. `tool_args` is a JSON column, so it
- * reads back from parquet as an object rather than text; the matcher's
- * `cellText` renders it before testing, because a column in this set that
- * cannot produce a hit is worse than one that is absent from it.
+ * Every column here holds STRING. `tool_args` is deliberately absent, and
+ * its absence is a gap recorded rather than left to be rediscovered (the
+ * discipline of server LLP 0157 #identifier-columns). It is the dataset's
+ * one VARIANT column (iceberg `variant`, a JSON cell), and no tier in
+ * either repository can produce a hit from it: both index workers filter
+ * VARIANT out before building, and the server's shared row predicate gates
+ * on `typeof value === 'string' && value !== ''`, which an object-valued
+ * cell fails. A column in this set that cannot produce a hit is worse than
+ * one absent from it, because it is decoded on every brute scan for the
+ * cost and named in the tool description for the promise while answering
+ * zero. hyparam/hypaware#977 restores the coverage on every tier at once,
+ * once hypgrep can index VARIANT.
  *
  * The set is a constant, not configuration. Sharing it is what makes
  * "zero hits" mean the same thing locally and remotely, and a per-install
@@ -28,7 +36,6 @@
 export const SEARCHABLE_COLUMNS = constantSet([
   'content_text',
   'tool_name',
-  'tool_args',
   'session_id',
   'conversation_id',
   'agent_id',

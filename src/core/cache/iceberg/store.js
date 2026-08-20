@@ -459,8 +459,13 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * and would otherwise resurrect purged rows (LLP 0104).
  *
  * Files whose manifest entry is deleted (status 2) or not parquet are
- * excluded. An unreadable or snapshot-less table returns `[]`, matching the
- * "empty table" degradation of `dataSourceForTable`.
+ * excluded. A missing or snapshot-less table returns `[]`, matching the
+ * "empty table" degradation of `dataSourceForTable`. A metadata load that
+ * FAILS propagates, for the same reason: unreadable table metadata means an
+ * unknown row set, and a reader that swallows it reports "no matches" over a
+ * partition it never read. `dataSourceForTable` lets that error out, so
+ * `hyp query sql` fails loudly; grep search must not answer zero where SQL
+ * raises.
  *
  * @param {string} tablePath
  * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, recordCount: number, deletedPositions: Set<bigint> | undefined }[]>}
@@ -469,13 +474,7 @@ export async function listLiveDataFiles(tablePath) {
   if (!tableExists(tablePath)) return []
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
-  /** @type {TableMetadata} */
-  let metadata
-  try {
-    ({ metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister }))
-  } catch {
-    return []
-  }
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
   const dataFileMap = await findDataFileEntries(metadata, resolver)
   if (dataFileMap.size === 0) return []

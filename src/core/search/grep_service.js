@@ -104,7 +104,16 @@ const UNKNOWN_DAY_SORT_KEY = '￿'
 export async function executeGrepSearch(args) {
   const { storage, signal } = args
   const limit = args.limit
-  // Collect one past the limit: the overflow row is the proof that
+  // `limit` is validated here for the same reason the query is: this is the
+  // wire shape a serving surface hands straight through, so an unchecked
+  // value fails late and wrong instead of up front. An absent limit makes
+  // the budget NaN, so the walk never stops and collects every match in the
+  // cache; a negative one reaches the result trim and throws a bare
+  // `RangeError: Invalid array length` from deep inside the service.
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error('limit must be a positive integer')
+  }
+  // Collect one past the limit: the overflow hit is the proof that
   // `truncated` is true, and is never returned.
   const budget = limit + 1
   const matcher = compileMatcher(args.query, args.regex === true)
@@ -195,7 +204,17 @@ export async function executeGrepSearch(args) {
       // Newest message-day first, across every source partition at once, so
       // a truncated answer keeps the newest matches whichever client wrote
       // them (the server's walk order, applied to the client's layout).
-      files.sort((a, b) => ((a.day ?? UNKNOWN_DAY_SORT_KEY) < (b.day ?? UNKNOWN_DAY_SORT_KEY) ? 1 : -1))
+      // Equal days compare equal, like `sortHits` below: one day is many
+      // files, and the early break below reads the walk as strictly
+      // day-descending, so a comparator that answered -1 both ways for two
+      // same-day files would leave that order to whatever the engine's sort
+      // happens to do rather than to the comparator.
+      files.sort((a, b) => {
+        const ad = a.day ?? UNKNOWN_DAY_SORT_KEY
+        const bd = b.day ?? UNKNOWN_DAY_SORT_KEY
+        if (ad === bd) return 0
+        return ad < bd ? 1 : -1
+      })
 
       const { resolver: io } = await createLocalIcebergIO()
       /** @type {GrepSearchHit[]} */
@@ -203,6 +222,112 @@ export async function executeGrepSearch(args) {
       let exhausted = true
       let indexedFiles = 0
       let scannedFiles = 0
+
+      /**
+       * Keep the newest `budget` hits and drop the rest. Truncation has to
+       * happen in SORT order, never in walk order: rows inside one data file
+       * are in write order (LLP 0022 clusters a file by session, so a
+       * session's rows run oldest to newest), and one message-day is many
+       * files, so cutting the tail of the walk keeps the OLDEST matches of
+       * whichever file first filled the budget, the exact opposite of what
+       * the limit promises. Trimming is amortized (it runs once the buffer
+       * has doubled), so the walk still costs a bounded number of hits
+       * rather than one per match in the cache.
+       *
+       * The same trim runs over the indexed tier's per-file buffer below,
+       * for the same reason: a buffer that grew with the file rather than
+       * with the budget would give up the memory bound this walk promises,
+       * and cutting it in walk order would reintroduce the bug.
+       *
+       * @param {GrepSearchHit[]} list
+       */
+      const trimBuffer = (list) => {
+        sortHits(list)
+        if (list.length > budget) list.length = budget
+      }
+      const trimHits = () => trimBuffer(hits)
+      /** @param {Record<string, unknown>} row */
+      const collect = (row) => {
+        hits.push(toHit(row, matcher))
+        if (hits.length >= budget * 2) trimHits()
+      }
+
+      /**
+       * Search one file through its sidecar. Returns false when the index
+       * proved unusable, which hands that one file to the scan tier below.
+       *
+       * The existence probe only rules out a missing sidecar. A sidecar
+       * that exists but cannot be read (a half-written index from a killed
+       * build, a truncation from a full disk, a format the installed
+       * hypgrep refuses) throws from inside `parquetFind`, where the footer
+       * is parsed and the version checked. Left uncaught, one poisoned
+       * sidecar fails every grep over the whole cache, including the
+       * partitions the walk never reached, which would make index state a
+       * correctness input; LLP 0264 #lifecycle says it never is, so a
+       * poisoned file is brute-scanned exactly like an unindexed one.
+       *
+       * The attempt therefore runs into a local buffer and commits only
+       * once the index tier finished. A sidecar can tear mid-read (an
+       * external writer; the build's own publish is atomic), and rows
+       * already pushed to the shared buffer could not be taken back, so
+       * committing as it went would leave the choice between double-counting
+       * them on the rescan and failing the whole query. Buffering makes
+       * degrading the file a decision this function can still take at any
+       * point in the read.
+       *
+       * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
+       * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
+       * @param {string} sidecarUrl
+       * @returns {Promise<boolean>}
+       */
+      const searchIndexed = async (file, indexFile, sidecarUrl) => {
+        /** @type {GrepSearchHit[]} */
+        const found = []
+        let withheldHere = 0
+        try {
+          // No `limit` is passed down: a purged or withheld row is filtered
+          // AFTER parquetFind accepts it, so a passed-down limit would count
+          // rows this walk then discards and under-return. The generator is
+          // simply not pulled past the budget instead.
+          const rows = parquetFind({
+            query: matcher.hypQuery,
+            url: file.filePath,
+            indexFile,
+            asyncBufferFactory: async ({ url }) => await io.reader(url),
+            rowFilter: accept,
+            signal,
+          })
+          for await (const row of rows) {
+            if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
+            if (withheld?.(row)) {
+              withheldHere += 1
+              continue
+            }
+            found.push(toHit(row, matcher))
+            if (found.length >= budget * 2) trimBuffer(found)
+          }
+        } catch (err) {
+          if (isAbort(err, signal)) throw err
+          getLogger('query').warn('grep_search.sidecar_unreadable', {
+            [Attr.COMPONENT]: 'query',
+            [Attr.OPERATION]: 'query.grep_search',
+            // Named, because this warning is the only notice that a sidecar
+            // needs deleting: nothing rebuilds one in place, so the file it
+            // points at is the actionable part of the line.
+            sidecar_file: urlToPath(sidecarUrl),
+            error_message: err instanceof Error ? err.message : String(err),
+          })
+          return false
+        }
+        indexedFiles += 1
+        localOnly.withheldRows += withheldHere
+        // Appended, not spread: `limit` reaches this service unvalidated and
+        // one file may fill the whole buffer, and a spread of that many
+        // arguments is an argument-count overflow, not a push.
+        for (const hit of found) hits.push(hit)
+        if (hits.length >= budget * 2) trimHits()
+        return true
+      }
 
       /** @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file */
       const searchFile = async (file) => {
@@ -217,67 +342,19 @@ export async function executeGrepSearch(args) {
           try {
             indexFile = await io.reader(sidecarUrl)
           } catch (err) {
-            if (/** @type {Error & { code?: string }} */ (err)?.code !== 'ENOENT') throw err
+            // Every reader failure degrades, not only the delete race: an
+            // unreadable sidecar is an unindexed file, and an unindexed
+            // file is the scan tier's, never the caller's error.
+            if (isAbort(err, signal)) throw err
+            indexFile = null
           }
         }
-        if (indexFile) {
-          // The attempt runs into local buffers and commits only when the
-          // index tier finished (or the budget stopped it): a sidecar that
-          // turns out to be unreadable mid-read (torn by an external
-          // writer; the build's own publish is atomic) must degrade this
-          // one file to the scan tier below without double-counting the
-          // rows the broken attempt already saw.
-          /** @type {GrepSearchHit[]} */
-          const found = []
-          let withheldHere = 0
-          try {
-            // No `limit` is passed down: a purged or withheld row is
-            // filtered AFTER parquetFind accepts it, so a passed-down limit
-            // would count rows this walk then discards and under-return.
-            // The generator is simply not pulled past the budget instead.
-            const rows = parquetFind({
-              query: matcher.hypQuery,
-              url: file.filePath,
-              indexFile,
-              asyncBufferFactory: async ({ url }) => await io.reader(url),
-              rowFilter: accept,
-              signal,
-            })
-            for await (const row of rows) {
-              if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
-              if (withheld?.(row)) {
-                withheldHere += 1
-                continue
-              }
-              found.push(toHit(row, matcher))
-              if (hits.length + found.length >= budget) break
-            }
-            indexedFiles += 1
-            localOnly.withheldRows += withheldHere
-            // Appended, not spread: `limit` reaches this service unvalidated
-            // and one file may fill the whole budget, and a spread of that
-            // many arguments is an argument-count overflow, not a push.
-            for (const hit of found) hits.push(hit)
-            return
-          } catch (err) {
-            if (isAbort(err)) throw err
-            getLogger('query').warn('grep_search.sidecar_unreadable', {
-              [Attr.COMPONENT]: 'query',
-              [Attr.OPERATION]: 'query.grep_search',
-              // Named, because this warning is the only notice that a
-              // sidecar needs deleting: nothing rebuilds one in place, so
-              // the file it points at is the actionable part of the line.
-              sidecar_file: urlToPath(sidecarUrl),
-              error_message: err instanceof Error ? err.message : String(err),
-            })
-          }
-        }
+        if (indexFile && await searchIndexed(file, indexFile, sidecarUrl)) return
         scannedFiles += 1
         const sourceFile = await io.reader(file.filePath)
         const rows = await parquetReadObjects({ file: sourceFile, columns: SCAN_COLUMNS })
         for (let i = 0; i < rows.length; i++) {
           if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
-          if (hits.length >= budget) return
           if (file.deletedPositions?.has(BigInt(i))) continue
           const row = rows[i]
           if (!accept(row)) continue
@@ -285,7 +362,7 @@ export async function executeGrepSearch(args) {
             localOnly.withheldRows += 1
             continue
           }
-          hits.push(toHit(row, matcher))
+          collect(row)
         }
       }
 
@@ -293,8 +370,17 @@ export async function executeGrepSearch(args) {
         for (const file of files) {
           signal?.throwIfAborted()
           if (hits.length >= budget) {
-            exhausted = false
-            break
+            trimHits()
+            // Files are walked day-descending, so every file still ahead
+            // holds rows no newer than this one's day. Once the budget is
+            // full of hits strictly newer than that day, nothing left in the
+            // walk can displace one and the walk stops. A same-day file (or
+            // one whose day would not decode) is still read, because its
+            // rows can outrank a kept hit.
+            if (file.day !== null && file.day < hits[hits.length - 1].date) {
+              exhausted = false
+              break
+            }
           }
           if (file.day !== null
             && ((rowFrom !== undefined && file.day < rowFrom) || (rowTo !== undefined && file.day > rowTo))) {
@@ -305,13 +391,13 @@ export async function executeGrepSearch(args) {
       } catch (err) {
         // The caller aborting mid-walk keeps what was found: a partial
         // answer marked not exhausted, never an error.
-        if (!isAbort(err)) throw err
+        if (!isAbort(err, signal)) throw err
         exhausted = false
       }
 
+      trimHits()
       const truncated = hits.length > limit
       if (truncated) hits.length = limit
-      sortHits(hits)
 
       span.setAttribute('file_count', files.length)
       span.setAttribute('indexed_file_count', indexedFiles)
@@ -358,7 +444,13 @@ function sortHits(hits) {
     const at = a.messageCreatedAt ?? ''
     const bt = b.messageCreatedAt ?? ''
     if (at !== bt) return at < bt ? 1 : -1
-    return (a.partId ?? '') < (b.partId ?? '') ? 1 : -1
+    const ap = a.partId ?? ''
+    const bp = b.partId ?? ''
+    // Equal keys compare equal: the walk trims in sort order and so sorts
+    // the buffer repeatedly, and a comparator that never returns 0 would
+    // reshuffle indistinguishable hits on every pass.
+    if (ap === bp) return 0
+    return ap < bp ? 1 : -1
   })
 }
 
@@ -366,9 +458,9 @@ function sortHits(hits) {
  * Project a matched row to the shared hit shape. Matched columns come from
  * the same allowlist the row predicate tested, in the set's order, so the
  * content column leads and a column the predicate could not have matched is
- * never reported. Cells render through `cellText` first, so the JSON column
- * (`tool_args`) that produced a `rowTest` match also produces the matched
- * column and its snippet here rather than being skipped as a non-string.
+ * never reported. Cells render through `cellText` first, the same coercion
+ * the row predicate applied, so a row that matched always names at least one
+ * matched column here rather than reporting a hit with none.
  *
  * @param {Record<string, unknown>} row
  * @param {GrepSearchMatcher} matcher
@@ -401,9 +493,9 @@ function toHit(row, matcher) {
  */
 function compileChainPredicate(params) {
   const { sessionId, chainId } = params
-  if (sessionId === undefined) return () => true
+  if (sessionId === undefined && chainId === undefined) return () => true
   return (row) => {
-    if (row.session_id !== sessionId) return false
+    if (sessionId !== undefined && row.session_id !== sessionId) return false
     if (chainId === undefined) return true
     // A chain id names either side of the pair, the same matching rule the
     // server applies (its LLP 0117 locator query).
@@ -426,7 +518,22 @@ function toDayString(value) {
   return null
 }
 
-/** @param {unknown} err */
-function isAbort(err) {
+/**
+ * Did this error come from the caller's deadline rather than from the walk?
+ * `throwIfAborted` rethrows `signal.reason` verbatim, and the natural
+ * deadline (`AbortSignal.timeout`) makes that reason a `DOMException` named
+ * `TimeoutError`, not `AbortError`, so a name check alone turns the
+ * documented "partial answer, marked not exhausted" into a thrown error for
+ * the one abort shape the service exists to serve. Identity against the
+ * signal's own reason accepts every abort shape, a caller's custom
+ * `abort(reason)` included, without swallowing an unrelated failure that
+ * happens to race the deadline.
+ *
+ * @param {unknown} err
+ * @param {AbortSignal | undefined} signal
+ * @returns {boolean}
+ */
+function isAbort(err, signal) {
+  if (signal?.aborted === true && err === signal.reason) return true
   return err instanceof Error && err.name === 'AbortError'
 }

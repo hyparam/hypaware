@@ -47,9 +47,9 @@ export interface GrepSearchResult {
  * A compiled grep query: `hypQuery` feeds hypgrep's index pruning,
  * `test`/`locate` run per cell (locate finds the snippet window),
  * `rowTest` is the whole-row predicate the scan paths share. The cell
- * entry points take `unknown` because a searchable cell is not always
- * text: `tool_args` decodes to an object, and every one of them renders
- * it the same way, so a cell `rowTest` accepted cannot then miss here.
+ * entry points take `unknown` because a row cell is not always text, and
+ * every one of them renders it the same way, so a cell `rowTest` accepted
+ * cannot then miss here.
  */
 export interface GrepSearchMatcher {
   hypQuery: string | RegExp
