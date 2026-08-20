@@ -204,7 +204,17 @@ export async function executeGrepSearch(args) {
       // Newest message-day first, across every source partition at once, so
       // a truncated answer keeps the newest matches whichever client wrote
       // them (the server's walk order, applied to the client's layout).
-      files.sort((a, b) => ((a.day ?? UNKNOWN_DAY_SORT_KEY) < (b.day ?? UNKNOWN_DAY_SORT_KEY) ? 1 : -1))
+      // Equal days compare equal, like `sortHits` below: one day is many
+      // files, and the early break below reads the walk as strictly
+      // day-descending, so a comparator that answered -1 both ways for two
+      // same-day files would leave that order to whatever the engine's sort
+      // happens to do rather than to the comparator.
+      files.sort((a, b) => {
+        const ad = a.day ?? UNKNOWN_DAY_SORT_KEY
+        const bd = b.day ?? UNKNOWN_DAY_SORT_KEY
+        if (ad === bd) return 0
+        return ad < bd ? 1 : -1
+      })
 
       const { resolver: io } = await createLocalIcebergIO()
       /** @type {GrepSearchHit[]} */
@@ -234,6 +244,59 @@ export async function executeGrepSearch(args) {
         if (hits.length >= budget * 2) trimHits()
       }
 
+      /**
+       * Search one file through its sidecar. Returns false when the index
+       * proved unusable BEFORE it produced a row, which hands the file to
+       * the scan tier instead; a failure after the first row cannot be
+       * retried that way (the hits already collected would be counted a
+       * second time), so it propagates.
+       *
+       * The existence probe only rules out a missing sidecar. A sidecar
+       * that exists but cannot be read (a half-written index from a killed
+       * build, a truncation from a full disk, a format the installed
+       * hypgrep refuses) throws from inside `parquetFind`, where the footer
+       * is parsed and the version checked. Left uncaught, one poisoned
+       * sidecar fails every grep over the whole cache, including the
+       * partitions the walk never reached, which would make index state a
+       * correctness input; LLP 0264 #lifecycle says it never is, so a
+       * poisoned file is brute-scanned exactly like an unindexed one.
+       *
+       * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
+       * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
+       * @returns {Promise<boolean>}
+       */
+      const searchIndexed = async (file, indexFile) => {
+        // No `limit` is passed down: a purged or withheld row is filtered
+        // AFTER parquetFind accepts it, so a passed-down limit would count
+        // rows this walk then discards and under-return. The generator is
+        // simply not pulled past the budget instead.
+        const rows = parquetFind({
+          query: matcher.hypQuery,
+          url: file.filePath,
+          indexFile,
+          asyncBufferFactory: async ({ url }) => await io.reader(url),
+          rowFilter: accept,
+          signal,
+        })
+        let produced = false
+        try {
+          for await (const row of rows) {
+            produced = true
+            if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
+            if (withheld?.(row)) {
+              localOnly.withheldRows += 1
+              continue
+            }
+            collect(row)
+          }
+        } catch (err) {
+          if (produced || isAbort(err, signal)) throw err
+          return false
+        }
+        indexedFiles += 1
+        return true
+      }
+
       /** @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file */
       const searchFile = async (file) => {
         // Sidecar existence IS the index marker, no ledger (LLP 0264
@@ -247,33 +310,14 @@ export async function executeGrepSearch(args) {
           try {
             indexFile = await io.reader(sidecarUrl)
           } catch (err) {
-            if (/** @type {Error & { code?: string }} */ (err)?.code !== 'ENOENT') throw err
+            // Every reader failure degrades, not only the delete race: an
+            // unreadable sidecar is an unindexed file, and an unindexed
+            // file is the scan tier's, never the caller's error.
+            if (isAbort(err, signal)) throw err
+            indexFile = null
           }
         }
-        if (indexFile) {
-          indexedFiles += 1
-          // No `limit` is passed down: a purged or withheld row is filtered
-          // AFTER parquetFind accepts it, so a passed-down limit would count
-          // rows this walk then discards and under-return. The generator is
-          // simply not pulled past the budget instead.
-          const rows = parquetFind({
-            query: matcher.hypQuery,
-            url: file.filePath,
-            indexFile,
-            asyncBufferFactory: async ({ url }) => await io.reader(url),
-            rowFilter: accept,
-            signal,
-          })
-          for await (const row of rows) {
-            if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
-            if (withheld?.(row)) {
-              localOnly.withheldRows += 1
-              continue
-            }
-            collect(row)
-          }
-          return
-        }
+        if (indexFile && await searchIndexed(file, indexFile)) return
         scannedFiles += 1
         const sourceFile = await io.reader(file.filePath)
         const rows = await parquetReadObjects({ file: sourceFile, columns: SCAN_COLUMNS })

@@ -334,6 +334,39 @@ test('indexed tier: a stale sidecar cannot resurrect a purged row', async () => 
   assert.deepEqual(res.hits.map((h) => h.sessionId), ['s1'], 'the purged row is filtered by position')
 })
 
+test('indexed tier: a poisoned sidecar degrades that file, it does not fail the search', async () => {
+  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
+  const before = await grep(storage)
+  await buildSidecars(tableDir())
+  // A half-written index: the file exists, so the existence probe accepts
+  // it, and the footer parse inside parquetFind is what fails. LLP 0264
+  // #lifecycle makes index state a performance property only, so this one
+  // file falls back to the scan tier and the answer is unchanged.
+  const files = await listLiveDataFiles(tableDir())
+  const poisoned = urlToPath(files[0].filePath).replace(/\.parquet$/, '.index.parquet')
+  await fs.writeFile(poisoned, 'PAR1 not really an index')
+  const res = await grep(storage)
+  assert.deepEqual(res.hits, before.hits, 'the poisoned file still answers, through the scan tier')
+  assert.equal(res.scannedFiles, 1, 'exactly the poisoned file degraded')
+  assert.equal(res.indexedFiles, files.length - 1)
+})
+
+test('indexed tier: an unreadable sidecar degrades that file rather than throwing', async () => {
+  const { storage, tableDir } = await makeCache([[NEW]])
+  const before = await grep(storage)
+  await buildSidecars(tableDir())
+  const files = await listLiveDataFiles(tableDir())
+  const sidecar = urlToPath(files[0].filePath).replace(/\.parquet$/, '.index.parquet')
+  // A directory where the sidecar should be: the probe sees it, the read
+  // fails with EISDIR rather than the ENOENT the delete race produces.
+  await fs.rm(sidecar)
+  await fs.mkdir(sidecar)
+  const res = await grep(storage)
+  assert.deepEqual(res.hits, before.hits)
+  assert.equal(res.indexedFiles, 0)
+  assert.equal(res.scannedFiles, files.length)
+})
+
 test('rows captured into the spool are found after the freshness flush', async () => {
   const { storage } = await makeCache([[OLD]])
   const spooled = mkRow({ date: '2026-08-13', session_id: 'spooled', content_text: 'fresh needle from the spool' })
