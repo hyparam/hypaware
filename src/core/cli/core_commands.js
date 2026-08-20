@@ -1,7 +1,7 @@
 // @ts-check
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
-import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
+import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
 import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
@@ -693,6 +693,17 @@ function buildCoreCommands(registry) {
         '--no-daemon to provision the sink without installing the service.',
       ].join('\n'),
       run: runRemoteLogin,
+    },
+    {
+      name: 'remote mint',
+      summary: 'Mint a CI enrollment token for one shared gateway (printed once)',
+      usage: coreUsage('remote mint'),
+      help: [
+        'Requires a logged-in session (hyp remote login). The token enrolls CI',
+        'runs under one shared gateway via `hyp join`; default expiry 365 days',
+        '(--expires-days <n>), --label names the gateway.',
+      ].join('\n'),
+      run: runRemoteMint,
     },
     {
       name: 'remote list',

@@ -168,6 +168,20 @@ export const CORE_COMMAND_ARGS = {
       positional: ['name'],
     },
   },
+  'remote mint': {
+    // Bare `hyp remote mint` mints against the default target, the same
+    // resolution as bare `remote login` (LLP 0062 #bare-remote).
+    usage: 'hyp remote mint [name] [--label <label>] [--expires-days <n>]',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        label: { type: 'string' },
+        'expires-days': { type: 'string' },
+      },
+      positional: ['name'],
+    },
+  },
   'report render': {
     usage: 'hyp report render [<dir>] [--no-refresh-assets]',
     schema: {

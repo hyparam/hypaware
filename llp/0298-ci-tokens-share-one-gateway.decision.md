@@ -57,7 +57,10 @@ client and the ingest validator on the server).
 their OIDC credential (LLP 0058) to call the server's mint endpoint, and
 prints the token **once** for pasting into CI secrets. Tokens expire; the
 default is **365 days**, overridable by flag. The verb lives in the
-`hyp remote` family because that is the per-target credential surface.
+`hyp remote` family because that is the per-target credential surface. On the
+wire it is `POST <identity-base>/mint` (the sibling of `/token` and
+`/refresh`), bearer = the session's access JWT, response
+`{ token, gateway_id, expires_at }`.
 
 ### D4: The CI recipe is explicit setup and teardown steps {#recipe}
 
