@@ -14,6 +14,7 @@ import {
   attachWithRefresh,
   deriveIdentityBase,
   describeAuthRejection,
+  isRefreshable,
   readCredentials,
   remoteTokenEnvVar,
   removeToken,
@@ -1013,6 +1014,14 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
     ctx.stderr.write(`hyp remote mint: cannot derive the identity endpoint from '${entry.url}'\n`)
     return 2
   }
+  // The recipe must name the server BASE, not the registered target URL. A
+  // target may legitimately be registered as `<base>/v1/mcp` (LLP 0084 D2, and
+  // the shape docs/CLI_REFERENCE.md shows for `hyp remote add`), and `hyp join`
+  // stores its url argument verbatim as the central sink url, which central's
+  // IdentityClient then resolves `/v1/identity/bootstrap` against. Pasting the
+  // registered URL through would 404 every CI run while minting here still
+  // worked, since deriveIdentityBase already reduces to the origin.
+  const joinTarget = new URL(entry.url).origin
   const doFetch = deps.fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   if (typeof doFetch !== 'function') {
     ctx.stderr.write(`hyp remote mint: ${NO_FETCH_MESSAGE}\n`)
@@ -1068,6 +1077,19 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
     return 2
   }
   if (out.authFailed) {
+    // A 401 that survives the retry is ambiguous here for the same reason it is
+    // on the reports plane (LLP 0155 #write-401): this server answers 401, not
+    // 403, to a live session that lacks a scope, so the 403 branch below never
+    // fires for that case. Naming only expiry would send a user who cannot mint
+    // round the re-login loop forever, so say both causes.
+    if (isRefreshable(resolved)) {
+      ctx.stderr.write(
+        `hyp remote mint: '${name}' refused the credential (HTTP 401) - your session may have expired ` +
+          `(re-run 'hyp remote login ${name}'), or your account may not be permitted to mint CI tokens; ` +
+          `ask a server admin\n`,
+      )
+      return 1
+    }
     const { message, exitCode } = describeAuthRejection({ target: name, status: 401, resolved })
     ctx.stderr.write(`hyp remote mint: ${message}\n`)
     return exitCode
@@ -1117,7 +1139,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   ctx.stdout.write(`${token}\n`)
   ctx.stdout.write('store it in your CI secrets now - it is not shown again\n')
   ctx.stdout.write('CI recipe:\n')
-  ctx.stdout.write(`  setup:    hyp join ${entry.url} "$HYP_CI_TOKEN" --no-daemon\n`)
+  ctx.stdout.write(`  setup:    hyp join ${joinTarget} "$HYP_CI_TOKEN" --no-daemon\n`)
   ctx.stdout.write('            hyp daemon run --foreground &\n')
   ctx.stdout.write('  teardown: hyp sync --yes\n')
   return 0

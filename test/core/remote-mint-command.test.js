@@ -142,6 +142,50 @@ test('a 401 on a static token maps to re-login guidance without a retry', async 
   assert.match(err.join(''), /re-run 'hyp remote login prod'/)
 })
 
+test('the printed recipe joins the server base, not a /v1/mcp target URL', async () => {
+  const hypHome = await tmpHome()
+  // A target registered as `<base>/v1/mcp` is a supported shape (LLP 0084 D2).
+  // `hyp join` stores its url argument verbatim, so pasting the registered URL
+  // into the recipe would 404 every CI run on /v1/identity/bootstrap.
+  const { ctx, out } = await makeCtx({ hypHome, remotes: { prod: { url: 'https://hyp.internal/v1/mcp' } } })
+  await seedSession(hypHome)
+  const { impl, calls } = fetchStub([{ status: 200, body: { token: 'ci-tok-1' } }])
+  const code = await runRemoteMint(['prod'], ctx, { fetchImpl: impl })
+  assert.equal(code, 0)
+  assert.equal(calls[0].url, 'https://hyp.internal/v1/identity/mint')
+  const text = out.join('')
+  assert.match(text, /hyp join https:\/\/hyp\.internal "\$HYP_CI_TOKEN" --no-daemon/)
+  assert.doesNotMatch(text, /hyp join \S*\/v1\/mcp/)
+})
+
+test('a 401 that survives the refresh names both expiry and missing permission', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  // This server answers 401, not 403, to a live session lacking a scope
+  // (LLP 0155 #write-401), so the expiry-only wording would loop the user
+  // through re-login forever. The refresh succeeds, so the second 401 is the
+  // one that survives the one-shot retry.
+  /** @type {string[]} */ const seen = []
+  const impl = /** @type {typeof fetch} */ (/** @type {unknown} */ (async (/** @type {any} */ url, /** @type {any} */ init) => {
+    seen.push(String(url))
+    if (String(url).endsWith('/token')) {
+      const body = { refresh_token: 'rt-2', access_jwt: 'jwt-2', expires_at: 32503680000, org: 'acme' }
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) }
+    }
+    return { ok: false, status: 401, text: async () => '' }
+  }))
+  const code = await runRemoteMint(['prod'], ctx, { fetchImpl: impl })
+  assert.deepEqual(seen, [
+    'https://hyp.internal/v1/identity/mint',
+    'https://hyp.internal/v1/identity/token',
+    'https://hyp.internal/v1/identity/mint',
+  ])
+  assert.equal(code, 1)
+  const text = err.join('')
+  assert.match(text, /session may have expired/)
+  assert.match(text, /not be permitted to mint CI tokens/)
+})
 test('a 403 names the missing mint permission', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })

@@ -1240,7 +1240,9 @@ that one gateway, and the token itself never rotates.
 hyp remote mint team --label repo-ci --expires-days 90
 ```
 
-Use the printed token as the CI recipe's bootstrap credential:
+Use the printed token as the CI recipe's bootstrap credential. The recipe names
+the server base, which is what `hyp join` expects, even when the target was
+registered with a `/v1/mcp` suffix:
 
 ```sh
 # setup
