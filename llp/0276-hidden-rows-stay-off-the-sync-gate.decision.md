@@ -86,6 +86,11 @@ filter ("hiding is a display filter, never a catalog deletion").
 
 ## The empty no-question line {#no-candidates}
 
+> **Extended-by: [LLP 0281 §visible-org-row](./0281-deferred-874-residuals.decision.md#visible-org-row).**
+> The split below covers the branches where `candidates` is empty *and* the
+> locked list is. A fifth case - a visible org row standing beside a hidden
+> pick - narrows the fleet sentence to the rows the fleet owns.
+>
 > **Extended-by: [LLP 0289 §ask-the-store](./0289-sync-lane-asks-the-store-about-hidden-picks.decision.md#ask-the-store).**
 > The hidden *picks* cross as ids rather than a count, so the third
 > sentence below can be checked against the client-sync store the export

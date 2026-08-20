@@ -1,4 +1,4 @@
-# LLP 0198: Setup ends by handing the user a question, and can start it for them
+# LLP 0198: Setup ends with questions, and `hyp ask` can start one explicitly
 
 **Type:** Decision
 **Status:** Draft
@@ -10,9 +10,9 @@
 
 > Extends the closing sequence of [LLP 0135](./0135-install-experience-overhaul.design.md).
 > What setup writes, attaches, and narrates is untouched. What changes is
-> the last screen: setup now offers a short list of questions worth
-> asking of the data it just captured, and can start the user's client on
-> the chosen one rather than printing a command to copy.
+> the last screen: setup prints a short list of questions worth asking of
+> the data it just captured. Starting a client is reserved for the explicit
+> `hyp ask` command.
 
 ## Context {#context}
 
@@ -30,40 +30,51 @@ which names a file operation, not a capability. The product's whole
 proposition - ask your own AI client about your own AI history - is
 reachable only by a user who already knows to try it.
 
-The gap is not information. It is activation. Printing example
-prompts would leave the user to open a second terminal, start a client,
-and retype one; the drop-off across those three steps is the entire
-distance between "installed" and "used".
+The list is useful activation on its own, but setup is not a safe place to
+start an AI client. `hyp init` may have been invoked by an installer or from
+the user's home directory, a temporary directory, or an unrelated repository.
+Starting Claude Code or Codex there silently makes that directory the new
+session's working context. The user may also have installed a client without
+wanting a new session at the end of setup.
 
 Both first-party CLI clients accept the opening prompt as argv and start
 interactively on it (`claude [options] [prompt]`, `codex [OPTIONS]
-[PROMPT]`), so the distance is closable: setup can *be* the launcher.
+[PROMPT]`), so `hyp ask` can still close the distance when the user invokes
+it explicitly from the directory they chose.
 
 ## Decision {#decision}
 
-<a id="first-ask"></a>**Setup closes on a question list, and the list is
-live.** After the first look and the privacy narration, an attended run
-renders a select of the suggested questions plus "Not now". Choosing one
-starts the user's own client on that question. This step is named the
+<a id="onboarding-list"></a>**Setup closes on a printed question list.**
+After the first look and the privacy narration, an attended run prints the
+suggested questions. It never renders a selection menu and never starts a
+client. The list is independent of client detection: when neither Claude Code
+nor Codex is detected, setup still prints it and starts nothing.
+
+The footer points to `hyp ask` for later use and says to run it from the
+directory where the user wants the client to start. The working directory is
+therefore chosen at the explicit launch boundary instead of inherited from
+wherever onboarding happened.
+
+<a id="first-ask"></a>**The live question list belongs to `hyp ask`.** The
+explicit command renders a select of the suggested questions plus "Not now".
+Choosing one starts the user's own client on that question. This is the
 **first ask**, paired with the first look: the look proves there are rows,
 the ask spends them.
 
-Ordering is deliberate and the privacy narration keeps its position
-([LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy):
-it "stays the last thing on screen"). The first ask is not a sixth
-paragraph of output competing with it; it is the exit door. The narration
-remains the last thing HypAware *says*, and the ask is what the user does
-next. An enrolled run therefore reads: rows, then what leaves this machine
-and when, then a question.
+Onboarding ordering is deliberate, and it narrows a rule rather than
+extending one.
+[LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy)
+settled that the narration prints as the wizard's closing words; a printed
+list now follows it, so the narration is the last thing HypAware says *about
+privacy* rather than the last thing on screen. The narrowing is deliberate:
+an enrolled run should read rows, then what leaves this machine and when,
+then what to ask later, because a question list printed ahead of the
+deadline would make the deadline the afterthought.
 
-<a id="frame"></a>**The ask is drawn as its own screen.** The prompt is
-framed in a border (`box`, `cli/tui/types.d.ts`), which no other wizard
-prompt is. The step's position is what makes it necessary: every other
-prompt arrives on a screen of its own with nothing above it, while this one
-lands at the bottom of a long scroll, under the first look's tables, rules
-and dim footers. An unframed list of plain sentences there reads as more
-output to skim past rather than as the one thing still waiting for a
-keypress, and the step's whole purpose is that the user presses a key.
+<a id="frame"></a>**The `hyp ask` menu is drawn as its own screen.** The
+prompt is framed in a border (`box`, `cli/tui/types.d.ts`). The frame
+distinguishes the explicit command's interactive menu from its plain `--list`
+output. Onboarding itself prints no framed or interactive menu.
 
 The border is dim and the content inside keeps the emphasis it already had:
 the frame's job is separation, not competition with the bold title or the
@@ -76,7 +87,7 @@ lives in `cli/style.js` beside the palette, on the same one-place grounds
 ([LLP 0189 #palette](./0189-cli-severity-colour.decision.md#palette)), so a
 second framed block cannot invent a second frame.
 
-<a id="real-launch"></a>**The launch is a real launch, not a hint.** The
+<a id="real-launch"></a>**An explicit `hyp ask` launch is real, not a hint.** The
 chosen client is spawned with the prompt as argv and `stdio: 'inherit'`,
 so it takes the terminal and draws its own UI. Copy-paste is the failure
 mode being removed; a "here is a command you could run" screen would be
@@ -91,19 +102,12 @@ load-bearing:
   only after `select()` has resolved, never from inside a reducer, so the
   child inherits a terminal in its original mode. A child that inherits
   raw mode renders as a client that "opens broken".
-- **The wizard keeps its own exit code.** `hyp init` exits on whether
-  *setup* succeeded. The child's exit code is not propagated: a user who
-  quits the client with ctrl+c has not failed an install, and reporting
-  that as a non-zero `hyp init` would be a false claim about durable
-  state that was written minutes earlier.
-- **The step can never fail a finished install.** Same rule as the first
-  look, for the same reason: every durable action already succeeded. A
-  missing binary, a spawn error, a cancelled prompt, an unforeseen throw -
-  each degrades to the printed list, never to a stack trace over a
-  successful setup. The step is attended-only on the same terms as the
-  first look, so a `--yes` or `--dry-run` install prints nothing new; the
-  non-TTY path exists for `hyp ask` (#re-runnable), where a piped run
-  prints the list rather than prompting.
+- **The command owns its exit code.** A failed explicit invocation can report
+  failure without making any claim about the already-finished install.
+- **Onboarding never reaches this launch path.** A `--yes` or `--dry-run`
+  install prints nothing new; an attended install prints only the list. The
+  non-TTY path exists for `hyp ask` (#re-runnable), where a piped run prints
+  the list rather than prompting.
 
 <a id="path-probe"></a>**Launchability is a PATH probe, and it is a
 different question from detection.** `detectPickerSources`
@@ -114,11 +118,11 @@ file at `~/.claude/settings.json` does not imply a `claude` on `$PATH`,
 and Claude Desktop is detectable, pickable, attachable, and cannot be
 started on a question at all - it is a GUI app with no prompt argument.
 
-The first ask therefore probes `$PATH` directly for the launch binary of
-each *picked* client, and offers only what both was picked and resolves.
-The two conditions are both required: an unpicked client is one HypAware
+The explicit `hyp ask` command therefore probes `$PATH` directly for the launch binary of
+each *attached* client, and offers only what both is attached and resolves.
+The two conditions are both required: an unattached client is one HypAware
 is not recording, so opening it would produce a session the user did not
-consent to capture, and a picked client with no binary cannot be started.
+consent to capture, and an attached client with no binary cannot be started.
 
 <a id="split"></a>**Core owns the questions; the manifest owns the
 launch.** The prompts are questions about HypAware's own datasets -
@@ -147,7 +151,7 @@ needs trimming" - and reverses its judgment that showing all four was
 right. Both halves of the cost turned out to be real on a working cache:
 
 - **Space.** Four sections run ~60 lines. The block is now followed by
-  the privacy narration *and* the first ask, so setup's tail is a wall to
+  the privacy narration and the question list, so setup's tail is a wall to
   scroll past at exactly the moment the user is finally being handed
   something to do. 0135 argued the narration survives because it comes
   after; that was right about the narration and wrong about the reader.
@@ -190,10 +194,10 @@ not the mechanism, and the planner's `SECTION_COST_VS_PROBE` is still
 calibrated against an older, narrower measurement - a separate defect
 this decision does not fix, only stops routinely tripping over.
 
-<a id="empty-cache"></a>**An empty cache suppresses the launch, and says
-why.** Every suggested question is about recorded history. On a fresh
+<a id="empty-cache"></a>**An empty cache changes the framing, and `hyp ask`
+suppresses its launch.** Every suggested question is about recorded history. On a fresh
 install with nothing to backfill - the ordinary case for someone new to
-Claude or Codex - launching one spends the user's single first impression
+Claude or Codex - launching one through `hyp ask` spends the user's single first impression
 on an empty answer, and teaches them the tool does not work at the exact
 moment they were about to find out that it does. So a cache with no rows
 gets the list as text, prefaced by the fact that makes the emptiness
@@ -228,12 +232,16 @@ The client will ask its own permission the first time the skill runs
 A tool whose pitch is "see what your AI clients are doing" must not open
 its first session by quietly widening what one of them may do.
 
-<a id="re-runnable"></a>**The list is re-runnable as `hyp ask`.** Every
-other closing surface names a durable entry point - the first look prints
-"See this again anytime: hyp query overview" - and a menu reachable only
-by re-running `hyp init` would be the exception. `hyp ask` renders the
-same list against the same probe, and `hyp ask "<question>"` skips the
-menu and launches directly.
+<a id="re-runnable"></a>**`hyp ask` is where the questions become
+runnable.** Setup only names them, so without a verb they would be four
+sentences a user has to retype into a session they open themselves - the
+copy-paste failure this decision exists to remove, merely deferred by one
+screen. `hyp ask` renders the same list against the same probe and starts
+the chosen client, and `hyp ask "<question>"` skips the menu entirely,
+which is the shape a user reaches for once they know what they want.
+Every other closing surface already names a durable entry point (the
+first look prints "See this again anytime: hyp query overview"); this is
+the one for the questions.
 
 ## Consequences {#consequences}
 
@@ -245,11 +253,17 @@ phrased as a user would phrase them, not as skill invocations
 ([LLP 0011 #no-architectural-names](./0011-setup-and-onboarding.decision.md#no-architectural-names)) -
 the skills' own descriptions do the routing.
 
-A launched session is itself recorded through the gateway the finale just
-restarted, so the user's first question becomes their second data point.
+A session launched later by `hyp ask` is itself recorded through the gateway,
+so the user's first question becomes their next data point.
 This is a pleasant accident rather than a design goal, and it is not
-narrated: setup claiming credit for capturing the session it just started
-would read as a boast at the moment the user is finally doing something.
+narrated.
+
+The cost of that ordering is that on an enrolled install the "nothing has
+been uploaded yet" block and its deadline are no longer the last thing on
+screen, and can scroll out of view on a short terminal. The sync offer
+([LLP 0203 #offer](./0203-setup-offers-the-first-sync.decision.md#offer))
+is what keeps the deadline actionable despite that: it restates it as a
+prompt the user must answer, between the narration and the list.
 
 `hyp ask` is a new top-level verb in an already-broad surface. It earns
 the slot by being the only one that is about *starting* rather than
@@ -258,12 +272,31 @@ HypAware installed and have forgotten what to do with it.
 
 ## Telemetry
 
-`wizard.first_ask` span: `launcher_count`, `client`, `prompt_id`,
-`launched`, and `status` (`ok` / `skipped` / `error`) with `skip_reason`
-distinguishing `no-rows`, `no-launcher`, `not-interactive`, and
-`declined`. `no-rows` is the one worth watching on its own: a high rate
-says installs are finishing with nothing captured, which is a backfill
-problem wearing a first-ask costume. The
-distribution across those reasons is the measurement that says whether
-the step is reaching anyone; `prompt_id` says which question people
-actually pick, which is what would justify changing the set.
+The two halves are measured separately, because moving the launch out of
+setup broke the join between them.
+
+**Setup** emits nothing about the launch, because it does not launch.
+`wizard.finish` carries `first_ask`, which says only which framing
+printed: `listed`, `listed-empty`, or `skipped`. `skipped` is derivable
+from `pathway` and `cancelled` on the same line and is kept only so the
+field is total; the bit worth having is `listed-empty`, whose rate across
+installs is how many machines finish setup with nothing in the cache. That
+is the backfill-health signal, read at the one moment every install passes
+through.
+
+**`hyp ask`** emits the `wizard.first_ask` span: `launcher_count`,
+`client`, `prompt_id`, `launched`, and `status` (`ok` / `skipped` /
+`error`) with `skip_reason` distinguishing `no-rows`, `no-launcher`,
+`not-interactive`, and `declined`. The distribution across those reasons
+says whether the command works for the people who reach it, and
+`prompt_id` says which question they pick, which is what would justify
+changing the set.
+
+What neither measures is whether the printed list sends anyone to the
+command. Setup and a later `hyp ask` are separate runs with nothing
+joining them, so the conversion this decision turns on is not attributable
+and must not be inferred from the two rates side by side. Buying it would
+mean stamping an install id into the span, which is a bigger commitment
+than the question warrants; until then, `no-rows` on the span is the
+closest proxy - it counts people who reached the command with nothing to
+ask about, which is where a list shown too eagerly would send them.

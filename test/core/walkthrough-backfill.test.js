@@ -258,7 +258,7 @@ test('interactive onboarding maps cancelled backfill consent to the cancel exit 
   assert.equal(result.finale?.cancelled, true)
   assert.deepEqual(result.finale?.backfill, [])
   assert.deepEqual(result.finale?.daemonRestart, { skipped: false, dryRun: true, ok: true })
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
   assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
   assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
 })

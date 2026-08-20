@@ -52,7 +52,7 @@ test('a client attached with no plugin enabling it is a warning naming the detac
   assert.ok(found, JSON.stringify(report.diagnostics, null, 2))
   assert.equal(found.severity, 'warning')
   assert.match(found.message, /codex/)
-  assert.deepEqual(found.repair, ['hyp detach --client codex'])
+  assert.deepEqual(found.repair, ['hyp client detach codex'])
 })
 
 test('a configured attached client draws no stranded diagnostic', async () => {
@@ -120,5 +120,5 @@ test('a missing config still names the client its marker strands', async () => {
   assert.equal(report.diagnostics.some((d) => d.kind === 'config_missing'), true)
   const found = report.diagnostics.find((d) => d.kind === 'client_attached_not_configured')
   assert.ok(found, JSON.stringify(report.diagnostics, null, 2))
-  assert.deepEqual(found.repair, ['hyp detach --client codex'])
+  assert.deepEqual(found.repair, ['hyp client detach codex'])
 })

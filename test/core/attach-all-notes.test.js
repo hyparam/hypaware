@@ -82,7 +82,7 @@ async function withTempHome(fn) {
   }
 }
 
-test('hyp attach all: a catalog-known client missing from the live registry gets a note, the live ones attach', async () => {
+test('hyp client attach all: a catalog-known client missing from the live registry gets a note, the live ones attach', async () => {
   await withTempHome(async (home) => {
     const { ctx, stdout, stderr } = makeCtx({
       home,
@@ -90,22 +90,18 @@ test('hyp attach all: a catalog-known client missing from the live registry gets
     })
     const code = await runAttach(['all'], ctx)
     assert.equal(code, 0, stderr.text())
-    // The only stderr is the LLP 0244 #non-interactive migration pointer:
-    // this base-URL config has a proxy-capable claude row, and `attach all`
-    // never prompts but still owes the one-line pointer.
-    assert.equal(
-      stderr.text(),
-      "note: this install attaches claude by base URL; run 'hyp attach claude' in an interactive terminal to switch it to proxy mode\n"
-    )
+    // Nothing on stderr: no bundled client row declares proxy attach since
+    // LLP 0262, so `attach all` owes no migration pointer either.
+    assert.equal(stderr.text(), '')
 
     const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:'))
     assert.deepEqual(lines, [
-      "note: openclaw is a known client but its adapter is not enabled; run 'hyp attach openclaw' to enable it",
+      "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
     ])
   })
 })
 
-test('hyp attach all: the note does not change the exit code, only real attach failures among the live set do', async () => {
+test('hyp client attach all: the note does not change the exit code, only real attach failures among the live set do', async () => {
   await withTempHome(async (home) => {
     // Only claude and claude-desktop are live; codex and openclaw are both
     // known-but-not-enabled. Two notes, zero live-attach failures, exit code
@@ -113,16 +109,13 @@ test('hyp attach all: the note does not change the exit code, only real attach f
     const { ctx, stdout, stderr } = makeCtx({ home, registered: ['claude', 'claude-desktop'] })
     const code = await runAttach(['all'], ctx)
     assert.equal(code, 0, stderr.text())
-    // Stderr carries only the LLP 0244 migration pointer (see above).
-    assert.equal(
-      stderr.text(),
-      "note: this install attaches claude by base URL; run 'hyp attach claude' in an interactive terminal to switch it to proxy mode\n"
-    )
+    // No migration pointer on stderr (see above).
+    assert.equal(stderr.text(), '')
 
     const notes = stdout.text().split('\n').filter((l) => l.startsWith('note:')).sort()
     assert.deepEqual(notes, [
-      "note: codex is a known client but its adapter is not enabled; run 'hyp attach codex' to enable it",
-      "note: openclaw is a known client but its adapter is not enabled; run 'hyp attach openclaw' to enable it",
+      "note: codex is a known client but its adapter is not enabled; run 'hyp client attach codex' to enable it",
+      "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
     ])
   })
 })

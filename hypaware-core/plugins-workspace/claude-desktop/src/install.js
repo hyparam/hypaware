@@ -179,7 +179,7 @@ export async function runInstall(argv, cmdCtx, opts) {
       // rules the sign-in out outright, and that is knowable from config.
       const mayNeedSignIn = opts.credential.mode !== 'org_key'
       if (!(await confirmProceed(cmdCtx, { mayNeedSignIn }))) {
-        cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp claude-desktop install' when you want to.\n")
+        cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp client claude-desktop install' when you want to.\n")
         return 1
       }
     }
@@ -203,11 +203,11 @@ export async function runInstall(argv, cmdCtx, opts) {
   if (failed.length > 0) {
     cmdCtx.stdout.write(
       `claude-desktop install: incomplete (${failed.map((s) => s.step).join(', ')}); `
-      + "re-run 'hyp claude-desktop install' to finish, or use --print-commands\n",
+      + "re-run 'hyp client claude-desktop install' to finish, or use --print-commands\n",
     )
     return 1
   }
-  cmdCtx.stdout.write("claude-desktop install: done. Run 'hyp claude-desktop verify' after Desktop restarts.\n")
+  cmdCtx.stdout.write("claude-desktop install: done. Run 'hyp client claude-desktop verify' after Desktop restarts.\n")
   return 0
 }
 
@@ -233,13 +233,13 @@ export async function runInstall(argv, cmdCtx, opts) {
 async function ensureCredentialLogin(cmdCtx, credential, printCommands) {
   const step = 'credential login'
   if (printCommands && credential.mode !== 'org_key') {
-    cmdCtx.stdout.write('hyp claude-account login\n')
+    cmdCtx.stdout.write('hyp client claude-account login\n')
     return { step, status: 'skipped', detail: 'printed only (--print-commands); sign in yourself if not already' }
   }
   if (credential.mode === 'org_key') {
     return { step, status: 'skipped', detail: 'org_key mode: fleet-provided key, no sign-in needed' }
   }
-  const statusCode = await cmdCtx.commands.run('claude-account status', [])
+  const statusCode = await cmdCtx.commands.run('client claude-account status', [])
   if (statusCode === 0) {
     return { step, status: 'skipped', detail: 'already signed in' }
   }
@@ -247,12 +247,12 @@ async function ensureCredentialLogin(cmdCtx, credential, printCommands) {
     return {
       step,
       status: 'failed',
-      detail: "needs an interactive terminal; run 'hyp claude-account login' yourself, then re-run",
+      detail: "needs an interactive terminal; run 'hyp client claude-account login' yourself, then re-run",
     }
   }
-  const loginCode = await cmdCtx.commands.run('claude-account login', [])
+  const loginCode = await cmdCtx.commands.run('client claude-account login', [])
   if (loginCode !== 0) {
-    return { step, status: 'failed', detail: "sign-in did not complete; re-run 'hyp claude-desktop install' to retry" }
+    return { step, status: 'failed', detail: "sign-in did not complete; re-run 'hyp client claude-desktop install' to retry" }
   }
   return { step, status: 'done' }
 }
@@ -271,10 +271,10 @@ async function ensureCredentialLogin(cmdCtx, credential, printCommands) {
 async function ensureHelperWritten(cmdCtx, inputs, printCommands) {
   const step = 'credential helper'
   if (printCommands) {
-    cmdCtx.stdout.write('hyp claude-desktop install-helper\n')
+    cmdCtx.stdout.write('hyp client claude-desktop install-helper\n')
     return { step, status: 'skipped', detail: `printed only (--print-commands); would write ${inputs.helperPath}` }
   }
-  const code = await cmdCtx.commands.run('claude-desktop install-helper', [])
+  const code = await cmdCtx.commands.run('client claude-desktop install-helper', [])
   if (code !== 0) {
     return { step, status: 'failed', detail: 'failed to write the credential helper wrapper' }
   }
@@ -349,7 +349,7 @@ function ensurePlistWritten(cmdCtx, inputs, opts) {
       return {
         step,
         status: 'failed',
-        detail: `'${formatCommand(command)}' did not succeed; re-run 'hyp claude-desktop install' to retry, or use --print-commands`,
+        detail: `'${formatCommand(command)}' did not succeed; re-run 'hyp client claude-desktop install' to retry, or use --print-commands`,
       }
     }
   }

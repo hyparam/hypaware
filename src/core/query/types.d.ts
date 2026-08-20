@@ -1,3 +1,5 @@
+import type { Statement } from 'squirreling/src/ast.js'
+
 import type {
   HypAwareV2Config,
   PluginLogger,
@@ -174,4 +176,47 @@ export interface OverviewRows {
 export interface OverviewNotice {
   kind: 'local-only' | 'freshness'
   line: string
+}
+
+/**
+ * One column a relation exposes, as the LLP 0272 literal rewrite needs to see
+ * it: the name a reference can use, and whether that name is a TIMESTAMP. A
+ * dataset answers from its declared schema; a CTE or derived table answers
+ * from the inner select LLP 0280 walks to build the same list.
+ */
+export interface InferredColumn {
+  name: string
+  isTimestamp: boolean
+}
+
+/**
+ * One relation a select binds, reduced to what the LLP 0272 rewrite asks of
+ * it. Exactly one of `table` (a dataset or a CTE) and `query` (a derived
+ * table) is set; neither is set for a relation whose columns nothing here can
+ * enumerate, such as a table function.
+ */
+export interface RelationRef {
+  table?: string
+  query?: Statement
+  alias?: string
+}
+
+/**
+ * How a select resolves a column reference to a declared TIMESTAMP, for the
+ * LLP 0272 literal rewrite. `agreed` answers an unqualified reference (the
+ * names every relation in scope types the same way); `byRelation`
+ * answers a qualified one, keyed by the lower-cased name a qualifier can
+ * actually reach the relation by (its alias when it has one, otherwise its
+ * table name).
+ * `bound` holds every relation this select binds including the ones whose
+ * columns cannot be read (a table function, a CTE over an unregistered
+ * table), so a qualifier resolved through `outer` can be stopped here
+ * rather than borrowing an enclosing relation's types.
+ */
+export interface TimestampScope {
+  agreed: Set<string>
+  byRelation: Map<string, Set<string>>
+  bound: Set<string>
+  /** The enclosing select's scope, for a correlated reference; absent at the top level. */
+  outer?: TimestampScope
 }

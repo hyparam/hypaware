@@ -115,7 +115,7 @@ test('the gate stops at attach state: client_attach_missing still fires for a pr
   // with the two state surfaces above.
   const desktop = missing.find((d) => d.message.includes('claude-desktop'))
   assert.ok(desktop, `expected client_attach_missing for claude-desktop, got: ${missing.map((d) => d.message).join(' | ')}`)
-  assert.deepEqual(desktop.repair, ['hyp claude-desktop install'])
+  assert.deepEqual(desktop.repair, ['hyp client claude-desktop install'])
   // The probed clients are unaffected in the other direction.
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/claude'")))
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/openclaw'")))

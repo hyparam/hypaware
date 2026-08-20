@@ -8,6 +8,8 @@
 **Related:** LLP 0012, LLP 0015, LLP 0016, LLP 0021, LLP 0030, LLP 0032,
 LLP 0049, LLP 0066, LLP 0103, LLP 0262 (the RFC this spec realizes, accepted 2026-08-17), LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256, LLP 0258
 **Tracker:** hyparam/hypaware#798
+**Extended-by:** LLP 0271 (#status-and-health gains a third leg: a per-signal
+OTLP variable in the user's environment is named as a diagnostic of its own)
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json
 > listener plus a body-file reader, registered by `@hypaware/claude`, producing
@@ -75,6 +77,10 @@ inputs (an HTTP endpoint and a directory) and two outputs (two datasets).
 - **S14** `claude_telemetry_events` rows are one per event, hot fields typed,
   the remainder in an `attributes` JSON column, with the source signal set for
   central forwarding (LLP 0255 #row-shape).
+  **Extended-by [LLP 0278](./0278-behavioral-rows-carry-cwd.decision.md):**
+  each row also carries the `cwd` of the session it names, taken from the same
+  hook record the ingest verdict was resolved from, so the export and query
+  seams can withhold a `local-only` directory's rows.
 - **S15** `parent_uuid`, `logical_parent_uuid`, `user_type`, and
   `permission_mode` read null on this path by design.
 

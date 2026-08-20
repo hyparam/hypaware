@@ -511,6 +511,9 @@ export function backfillConsentTitle(providers, retentionDays) {
  * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
  * array and their descriptors in the catalog - see
  * {@link visiblePickerDescriptors} for what still depends on them.
+ * `claude-desktop` is hidden too (LLP 0297) and, like every id absent from
+ * this array, sorts after the known ones; nothing needs to change here if
+ * it is ever unhidden.
  *
  * @type {string[]}
  */
@@ -710,7 +713,7 @@ export async function runPickerWalkthrough(opts) {
     ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
   })
   if (!guard.proceed) {
-    opts.stderr.write(`hyp init: ${guard.message}\n`)
+    opts.stderr.write(`hyp setup: ${guard.message}\n`)
     return overwriteAbortedResult({ opts, configPath, config, picks })
   }
   if (guard.backupPath) {
@@ -1044,6 +1047,33 @@ function contributedPlugins(compose) {
 }
 
 /**
+ * Does {@link configuredPickerSources} read this row back off plugins the
+ * row itself contributes, rather than off state some other row also
+ * composes?
+ *
+ * This is the derivative-read-back test LLP 0202 #carry-through argued
+ * from and LLP 0297 #own-plugins names. A row whose whole `compose`
+ * contribution is an upstream (`raw-anthropic`, `raw-openai`) reads as
+ * configured whenever *any* row supplying that upstream is picked, so its
+ * seeded state is evidence about the config, not about the user. A row
+ * that contributes plugins of its own (`claude-desktop`) is in the config
+ * only because something put it there deliberately, so its seeded state
+ * is a recorded answer and a hidden row may be carried on it.
+ *
+ * `requires_gateway` alone does not count: every gateway-backed row asks
+ * for `@hypaware/ai-gateway`, so its presence separates nothing.
+ *
+ * @param {PickerDescriptor} descriptor
+ * @returns {boolean}
+ * @ref LLP 0297#own-plugins [implements]: the read-back is non-derivative exactly when the row contributes plugins of its own
+ */
+export function readsBackFromOwnPlugins(descriptor) {
+  const compose = descriptor.compose
+  if (!compose) return false
+  return contributedPlugins(compose).length > 0
+}
+
+/**
  * Riders to add to an already-composed plugin list: every plugin whose
  * `compose_with` names are all present. Run to a fixpoint, so a rider that
  * waits on another rider still lands and the manifests need no ordering
@@ -1331,26 +1361,6 @@ function mergeSink(composed, prior) {
 }
 
 /**
- * Whether a local config on disk records a pick answer at all, as opposed
- * to having been created by a config writer that never asked one. The
- * discriminator is the `plugins` key: {@link composePickerConfig} always
- * writes a `plugins` array (a record-nothing pick still composes the
- * export pair), while the side-channel writers (`hyp remote add` /
- * `remove`) create-or-augment the file without ever touching `plugins`.
- *
- * `plugins: []` counts as an answer: it cannot be told apart from a
- * deliberately emptied install, and re-seeding that from detection would
- * re-consent to capture on the user's behalf.
- *
- * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
- * @param {HypAwareV2Config} config
- * @returns {boolean}
- */
-export function configRecordsPickAnswer(config) {
-  return Array.isArray(config.plugins)
-}
-
-/**
  * The picker rows an existing local config already collects: the inverse
  * of {@link composePickerConfig}'s per-descriptor fold. A row counts as
  * configured when everything its `compose` contribution asks for is
@@ -1520,7 +1530,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
   if (!caWait.ready) {
     stderr.write(
       'warning: the daemon did not mint the proxy CA in time; clients may attach by ' +
-      "base URL. Re-run 'hyp attach <client>' once the daemon is up to switch them.\n"
+      "base URL. Re-run 'hyp client attach <client>' once the daemon is up to switch them.\n"
     )
   }
   return { waited: true, ready: caWait.ready }
@@ -1943,7 +1953,7 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
   stdout.write('These tools still send their requests through the HypAware gateway,\n')
   stdout.write('but this setup no longer collects them, so their requests can start\n')
   stdout.write('failing. Point each one back at its provider with:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -1975,7 +1985,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
   stdout.write('\n')
   stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
   stdout.write('Their requests can start failing until you run:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -2231,7 +2241,9 @@ export function ridersInDefaultSet(composeWith) {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`,
+ * widened by `@ref LLP 0297#claude-desktop` to a row that is hidden because
+ * its setup does not belong in a checkbox).
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:
@@ -2495,7 +2507,7 @@ async function cancelledResult(opts) {
  */
 function writeCancelledNotice(stderr) {
   try {
-    stderr.write('hyp init: cancelled\n')
+    stderr.write('hyp setup: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

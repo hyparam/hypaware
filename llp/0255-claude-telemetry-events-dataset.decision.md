@@ -5,6 +5,7 @@
 **Systems:** Plugins, Query, Sources
 **Author:** Phil / Claude
 **Date:** 2026-08-17
+**Extended-by:** LLP 0278 (the row shape gains a `cwd` column, so the export and query seams can withhold `local-only` rows)
 **Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0262 (the
 RFC this decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257
 
@@ -41,6 +42,11 @@ cost); everything else rides in an `attributes` JSON column. The split is a
 query-ergonomics judgment, not a completeness one: no attribute is dropped, and
 a field that turns out to be hot can be promoted to a column later without
 re-deriving the data.
+
+> **Extended-by [LLP 0278](./0278-behavioral-rows-carry-cwd.decision.md):**
+> `cwd` joins the typed columns. Not as a hot field: the export seam derives
+> its `local-only` verdict from that column, so a dataset that forwards under
+> a source signal and carries no `cwd` cannot be withheld at all.
 
 ### Owned by `@hypaware/claude` {#owned-by-claude}
 

@@ -158,7 +158,7 @@ export function createOpenclawAttach(opts) {
               `models.providers.${existing.join(' and models.providers.')} already ` +
               `exists in ${settingsPath} and was not written by HypAware; attach ` +
               `refuses to merge (LLP 0167#attach-detach). ` +
-              `Remove it by hand or run 'hyp detach --client ${CLIENT_NAME}' first.`
+              `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
             return refuse(span, attachCtx, logger, settingsPath, reason)
           }
 

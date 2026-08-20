@@ -588,7 +588,7 @@ test('proxy mode turned off with a CA still installed serves blind tunnels', asy
   // as it was, every time, until the CA is gone.
   // @ref LLP 0262#migration [tests]: the stale-CA remedy cannot be a plain re-attach
   const reason = String(staleWarn.attrs.reason ?? '')
-  assert.match(reason, /hyp detach claude --purge/)
+  assert.match(reason, /hyp client detach claude --purge/)
   assert.doesNotMatch(reason, /run `hyp attach claude` to move it back/)
 
   // The tunnel is still served, so an already-attached client keeps its egress
@@ -681,4 +681,125 @@ test('an empty routing table with no CA still idles', async (t) => {
   const status = await rig.source.status()
   assert.equal(/** @type {any} */ (status.details).listening, false)
   assert.match(String(status.message), /^idle: /)
+})
+
+// #886 finding 3. An IP-literal `base_url` produced `hostOfBaseUrl` -> an IP,
+// which passed the certificate host guard and went into the CA's permitted
+// dNSName set. The CA minted, `aigw.interception_ready` logged, and every
+// handshake to that upstream failed because a dNSName is not what a client
+// matches an IP connection against - and the CA excludes all IP space anyway
+// (LLP 0235#ca-name-constraints). An IP upstream must not be able to take the
+// rest of the install's interception down with it either.
+// @ref LLP 0275#ip-literals-are-refused [tests]
+test('an IP-literal upstream is skipped, loudly, without breaking the rest', async (t) => {
+  const rig = await bootSource({
+    listen: '127.0.0.1:0',
+    proxy_mode: true,
+    upstreams: [
+      {
+        name: 'anthropic',
+        base_url: 'https://api.anthropic.com',
+        path_prefix: '/v1/messages',
+        provider: 'anthropic',
+      },
+      {
+        name: 'local-llm',
+        base_url: 'https://10.0.0.5/v1',
+        path_prefix: '/v1/chat/completions',
+        provider: 'openai',
+      },
+    ],
+  })
+  t.after(() => rig.cleanup())
+
+  assert.ok(rig.source.status, 'the source exposes status()')
+  const status = await rig.source.status()
+  const details = /** @type {any} */ (status.details)
+
+  // The CA is still minted, still for the static provider set, and the IP is
+  // nowhere in it.
+  assert.deepEqual(details.ca_permitted_hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+  assert.deepEqual(details.intercept_hosts, ['api.anthropic.com'])
+
+  const info = await readLocalCaInfo({ stateRoot: rig.stateRoot })
+  assert.ok(info)
+  assert.deepEqual(info.hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+
+  // And the operator is told, by name, why that upstream is not decrypted.
+  const warned = rig.logged.find((entry) => entry.event === 'aigw.interception_host_unsupported')
+  assert.ok(warned, 'the skipped IP upstream is reported')
+  assert.equal(warned.level, 'warn')
+  assert.deepEqual(warned.attrs.hosts, ['10.0.0.5'])
+})
+
+// The skip in `prepareInterception` only shapes the CA host list. The compiled
+// routing table still holds the IP-literal upstream (it is a real upstream in
+// reverse-proxy mode), so without a matching refusal here a `CONNECT 10.0.0.5:443`
+// was still terminated: the 200 went out, `secureContextFor` threw from the leaf
+// mint, and the socket died. That is the client's egress, not just its capture,
+// and it is the opposite of the "tunnelled blind and unrecorded" the warning and
+// LLP 0275 both promise.
+// @ref LLP 0275#ip-literals-are-refused [tests]
+test('interceptsHost refuses an IP-literal authority so its tunnel stays blind', () => {
+  const upstreams = compileUpstreams([
+    { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages' },
+    { name: 'local-llm', base_url: 'https://10.0.0.5/v1', path_prefix: '/v1/chat/completions' },
+    { name: 'local-v6', base_url: 'https://[fd00::1]/v1', path_prefix: '/v1/embeddings' },
+  ])
+  // The DNS-named upstream is unaffected.
+  assert.equal(interceptsHost(upstreams, 'api.anthropic.com', 443), true)
+  // The IP-literal ones are tunnelled, however the routing table reads.
+  assert.equal(interceptsHost(upstreams, '10.0.0.5', 443), false)
+  assert.equal(interceptsHost(upstreams, 'fd00::1', 443), false)
+  assert.equal(interceptsHost(upstreams, '[fd00::1]', 443), false)
+  // A host that merely looks numeric is still a DNS name and still intercepted
+  // when an upstream names it.
+  const nip = compileUpstreams([
+    { name: 'nip', base_url: 'https://10.0.0.5.nip.io/v1', path_prefix: '/v1' },
+  ])
+  assert.equal(interceptsHost(nip, '10.0.0.5.nip.io', 443), true)
+})
+
+// Review round on #898. The IP-literal skip empties `hostList`, so an install
+// whose upstreams are *all* IP literals fell through to the "nothing to
+// terminate" idle path and minted no CA at all. The CA file is what a
+// proxy-mode attach preflights on (LLP 0232#proxy-attach-preflight), so that
+// turned "this one upstream is not captured" into `hyp client attach claude` failing
+// with `no local CA at ...; start the daemon with proxy mode enabled` while
+// proxy mode was enabled. The static provider list is minted regardless of the
+// configured subset (LLP 0238), so there was never a reason to skip it here.
+// @ref LLP 0275#ip-literals-are-refused [tests]
+test('an IP-only upstream set still mints the static-provider CA', async (t) => {
+  const rig = await bootSource({
+    listen: '127.0.0.1:0',
+    proxy_mode: true,
+    upstreams: [{
+      name: 'local-llm',
+      base_url: 'https://10.0.0.5/v1',
+      path_prefix: '/v1/chat/completions',
+      provider: 'openai',
+    }],
+  })
+  t.after(() => rig.cleanup())
+
+  assert.ok(rig.source.status, 'the source exposes status()')
+  const details = /** @type {any} */ ((await rig.source.status()).details)
+
+  // Proxy mode is live and the machine has a CA an attach can point at.
+  assert.equal(details.proxy_mode, true)
+  assert.equal(details.proxy_mode_error, undefined)
+  assert.deepEqual(details.ca_permitted_hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+  // Nothing configured is decrypted, which is the honest answer and not an error.
+  assert.deepEqual(details.intercept_hosts, [])
+
+  const info = await readLocalCaInfo({ stateRoot: rig.stateRoot })
+  assert.ok(info, 'the CA file exists for the attach preflight to find')
+  assert.deepEqual(info.hosts, ['api.anthropic.com', 'api.openai.com', 'chatgpt.com'])
+
+  // The operator is still told which upstream lost its capture, and the idle
+  // path (which would have said no upstream names a host) is not taken.
+  const warned = rig.logged.find((entry) => entry.event === 'aigw.interception_host_unsupported')
+  assert.ok(warned, 'the skipped IP upstream is reported')
+  assert.deepEqual(warned.attrs.hosts, ['10.0.0.5'])
+  assert.equal(rig.logged.some((entry) => entry.event === 'aigw.interception_idle'), false)
 })

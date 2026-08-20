@@ -224,15 +224,24 @@ test('diagnoseV1Config falls back to first-party client descriptors', () => {
   })
   assert.deepEqual(withoutGateway.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
 
-  const missingUpstream = diagnoseV1Config({
+  const claudeNeedsNoProxyUpstream = diagnoseV1Config({
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/claude' },
     ],
   })
-  assert.deepEqual(missingUpstream.map((diagnostic) => diagnostic.kind), [
-    'gateway_missing_anthropic_upstream',
+  assert.deepEqual(claudeNeedsNoProxyUpstream.map((diagnostic) => diagnostic.kind), [])
+
+  const codexStillNeedsAnUpstream = diagnoseV1Config({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/codex' },
+    ],
+  })
+  assert.deepEqual(codexStillNeedsAnUpstream.map((diagnostic) => diagnostic.kind), [
+    'gateway_missing_openai_upstream',
   ])
 })
 
@@ -294,7 +303,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.equal(claude?.agentDir, '.claude/agents')
   assert.equal(claude?.attachProbe?.format, 'json')
   assert.equal(claude?.attachProbe?.marker_key, '_hypaware')
-  assert.deepEqual(claude?.requiredUpstreams, ['anthropic'])
+  assert.equal(claude?.requiredUpstreams, undefined)
 
   assert.ok(catalog.clientDescriptors.has('codex'))
   const codex = catalog.clientDescriptors.get('codex')
@@ -351,7 +360,7 @@ test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed 
               summary: 'The Claude Mac app',
               detect: { app_bundle: '/Applications/Claude.app' },
               needs_setup: true,
-              configure_command: 'claude-desktop install',
+              configure_command: 'client claude-desktop install',
             },
           ],
         },
@@ -378,7 +387,7 @@ test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed 
   assert.equal(claudeDesktop?.summary, 'The Claude Mac app')
   assert.deepEqual(claudeDesktop?.detect, { app_bundle: '/Applications/Claude.app' })
   assert.equal(claudeDesktop?.needsSetup, true)
-  assert.equal(claudeDesktop?.configureCommand, 'claude-desktop install')
+  assert.equal(claudeDesktop?.configureCommand, 'client claude-desktop install')
 })
 
 test('buildPluginCatalog picker descriptors are first-manifest-wins on a name collision', () => {

@@ -202,7 +202,7 @@ test('unchecking a source writes its opt-out and names the follow-up command', a
     { source: 'openclaw', class: 'local-only' },
   ])
   assert.match(stdout.text(), /Keeping local-only: openclaw/)
-  assert.match(stdout.text(), /hyp policy client/)
+  assert.match(stdout.text(), /hyp privacy client/)
 })
 
 test('a re-entry states the split on the gate and accepting keeps it', async () => {
@@ -510,6 +510,90 @@ test('a stale opt-out for a hidden locked row does not soften the fleet sentence
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.match(stdout.text(), /capture your fleet manages directly still syncs to your server/)
+})
+
+// The fifth no-question fact, and the residual LLP 0276 left open: a visible
+// org row and a hidden carried pick standing at the same time. The fleet row
+// is real, so the screen still names it - but the carried row composes into
+// the *local* layer, so "everything you picked is managed by your fleet"
+// would hand the fleet an owner's claim over capture it does not own.
+// @ref LLP 0281#visible-org-row [tests]:
+test('zero visible candidates with an org row and a hidden picked row: the fleet sentence covers only its own rows', async () => {
+  const { env, stateDir } = await makeHome()
+  const stdout = makeBuf()
+  let prompted = false
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    locked: [descriptor('claude')],
+    lockedHidden: 0,
+    candidatesHiddenIds: ['raw-anthropic'],
+    progress: 'Step 3 of 4 · Choose what syncs',
+    prompt: async () => { prompted = true; return [] },
+    confirm: async () => { prompted = true; return 'accept' },
+  }))
+
+  assert.deepEqual(result, { noQuestion: true, optedOut: [] })
+  assert.equal(prompted, false)
+  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
+  // The org row is still named, under a sentence scoped to it alone.
+  assert.match(stdout.text(), /Your fleet manages these and they always sync:/)
+  assert.match(stdout.text(), /capture claude/)
+  // The claim that broke: the hidden pick is not the fleet's, so nothing may
+  // say the fleet manages everything picked.
+  assert.doesNotMatch(stdout.text(), /Everything you picked is managed by your fleet/)
+  // And the hidden pick is disclosed as a fact without being named.
+  assert.match(stdout.text(), /Capture already set up on this machine also syncs to your server\./)
+  assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
+  assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
+})
+
+// The unchanged case, pinned beside it: with no hidden pick standing the
+// exhaustive sentence is true and stays.
+// @ref LLP 0281#visible-org-row [tests]:
+test('zero visible candidates with an org row and no hidden pick: keeps the exhaustive fleet sentence', async () => {
+  const { env } = await makeHome()
+  const stdout = makeBuf()
+
+  await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    locked: [descriptor('claude')],
+    lockedHidden: 0,
+    candidatesHiddenIds: [],
+    prompt: async () => [],
+    confirm: async () => 'accept',
+  }))
+
+  assert.match(stdout.text(), /Everything you picked is managed by your fleet and always syncs\./)
+  assert.doesNotMatch(stdout.text(), /also syncs to your server/)
+})
+
+// The org-row branch asks the store the same question its no-locked sibling
+// does (LLP 0289 #not-done): a hidden pick the store already withholds is
+// not standing, so nothing but the fleet's own rows leaves the machine and
+// the exhaustive sentence is true again. The two branches turn on one fact.
+// @ref LLP 0289#ask-the-store [tests]:
+test('zero visible candidates with an org row and a hidden pick already opted out: keeps the exhaustive fleet sentence', async () => {
+  const { env, stateDir } = await makeHome()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
+  const stdout = makeBuf()
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    locked: [descriptor('claude')],
+    lockedHidden: 0,
+    candidatesHiddenIds: ['raw-anthropic'],
+    prompt: async () => [],
+    confirm: async () => 'accept',
+  }))
+
+  assert.deepEqual(result, { noQuestion: true, optedOut: [] })
+  assert.match(stdout.text(), /Everything you picked is managed by your fleet and always syncs\./)
+  assert.doesNotMatch(stdout.text(), /also syncs to your server/)
+  assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })
 
 test('a cancelled gate returns cancelled and writes nothing', async () => {

@@ -139,11 +139,31 @@ function recordFrom(value) {
  * projector also tail-reads, so a missed compaction does not put
  * projection back on an unbounded path.
  *
+ * Two rules decide what survives.
+ *
+ * The cap is the module's, not the caller's: `opts.maxBytes` is clamped to the
+ * SMALLER of `SESSION_CONTEXT_MAX_BYTES` and `SESSION_CONTEXT_READ_TAIL_BYTES`.
+ * Every reader calls `readSessionContext` with no opts
+ * (`createSessionContextReader`, settlement, backfill), so the tail constant is
+ * the real limit on what any reader can see; retaining past it keeps records on
+ * disk that no reader will ever read, which is the silent eviction this file
+ * exists to avoid, reached through the other door. Widening the retained window
+ * means widening the read window first.
+ *
+ * Eviction gives up a session's history before its presence; `compactBody` has
+ * the two tiers and the order within each.
+ *
+ * @ref LLP 0286#writer-cap-is-clamped [implements]: the retained window may not
+ *   exceed the window readers are able to read
  * @param {string} filePath
  * @param {{ maxBytes?: number, maxRecords?: number }} opts
  */
 async function compactSessionContextIfNeeded(filePath, opts) {
-  const maxBytes = positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES
+  const maxBytes = Math.min(
+    positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES,
+    SESSION_CONTEXT_MAX_BYTES,
+    SESSION_CONTEXT_READ_TAIL_BYTES
+  )
   const maxRecords = positiveInt(opts.maxRecords) ?? SESSION_CONTEXT_MAX_RECORDS
   let stat
   try {
@@ -156,16 +176,86 @@ async function compactSessionContextIfNeeded(filePath, opts) {
   const records = await readSessionContext(filePath, {
     maxBytes: Math.max(maxBytes * 2, SESSION_CONTEXT_READ_TAIL_BYTES),
   })
-  const keep = records.slice(-maxRecords)
-  let body = keep.map((record) => JSON.stringify(record)).join('\n')
-  if (body.length > 0) body += '\n'
-  while (Buffer.byteLength(body, 'utf8') > maxBytes && keep.length > 1) {
-    keep.shift()
-    body = keep.map((record) => JSON.stringify(record)).join('\n')
-    if (body.length > 0) body += '\n'
+  await atomicWriteFile(filePath, compactBody(records, { maxBytes, maxRecords }))
+}
+
+/**
+ * Render the retained records, evicting until the body fits both bounds.
+ *
+ * Eviction runs in two tiers. Tier one is a session's INTERIOR records (the
+ * ones with both an older and a newer record of their own session), oldest
+ * record first across all sessions. Tier two is its ENDPOINTS (its earliest and
+ * its newest record, which are the same record for a single-record session). So
+ * a session gives up its middle before either endpoint, and gives up an endpoint
+ * only once every session's middle is already gone.
+ *
+ * Tier two is ordered by how stale the SESSION is (the position of its newest
+ * record), not by where the endpoint itself sits. Ordering endpoints by their
+ * own position reads the front of the file as "oldest", but the front of the
+ * file is exactly where a long-running session's session-start record lives: the
+ * first endpoint evicted would be the session-start record of the session that
+ * has been alive longest, while every record of a session that ended hours ago
+ * survived. That is the eviction this rule exists to prevent, so a whole stale
+ * session goes before a live one gives up either end.
+ *
+ * Why both ends: ingest asks only for a session's latest record
+ * (`pickLatestMatching`), so the newest is what presence costs; settlement
+ * resolves an OPENING row against the record live at that row's own time
+ * (LLP 0085), which for an opening row is the session-start record, so the
+ * earliest is what a correct drop costs. The alternative is an `undetermined`
+ * session whose spooled bodies are deleted unread, or an opening row in an
+ * ignored dir resolved against a later clean cwd and retained: a leak, which is
+ * the direction that cannot be taken back.
+ *
+ * The final record standing is never evicted, matching the byte loop this
+ * replaces: the file's last record is always its own session's newest, and that
+ * session is by construction the freshest, so it sorts last in tier two.
+ *
+ * Earliest is by append order rather than by `ts`, because append order is the
+ * order the hook observed and a record's `ts` is optional.
+ *
+ * @ref LLP 0286#endpoints-evicted-last [implements]: a session's session-start and
+ *   latest records are the last things compaction gives up, and the session that
+ *   went quiet longest ago gives them up first
+ * @param {SessionContextRecord[]} records append-ordered, any session
+ * @param {{ maxBytes: number, maxRecords: number }} bounds
+ * @returns {string}
+ */
+function compactBody(records, { maxBytes, maxRecords }) {
+  const lines = records.map((record) => JSON.stringify(record))
+  const sizes = lines.map((line) => Buffer.byteLength(line, 'utf8') + 1)
+  /** @type {Map<string, number>} */
+  const newestBySession = new Map()
+  /** @type {Map<string, number>} */
+  const earliestBySession = new Map()
+  records.forEach((record, index) => {
+    newestBySession.set(record.session_id, index)
+    if (!earliestBySession.has(record.session_id)) earliestBySession.set(record.session_id, index)
+  })
+  const endpoints = new Set([...newestBySession.values(), ...earliestBySession.values()])
+
+  const dropped = new Array(records.length).fill(false)
+  let kept = records.length
+  let bytes = sizes.reduce((sum, size) => sum + size, 0)
+  const indexes = records.map((_, index) => index)
+  /** @param {number} index */
+  const lastSeen = (index) => newestBySession.get(records[index].session_id) ?? index
+  const order = [
+    ...indexes.filter((index) => !endpoints.has(index)),
+    ...indexes
+      .filter((index) => endpoints.has(index))
+      .sort((a, b) => lastSeen(a) - lastSeen(b) || a - b),
+  ]
+  for (const index of order) {
+    if (kept <= maxRecords && bytes <= maxBytes) break
+    if (kept <= 1) break
+    dropped[index] = true
+    kept -= 1
+    bytes -= sizes[index]
   }
 
-  await atomicWriteFile(filePath, body)
+  const body = lines.filter((_, index) => !dropped[index]).join('\n')
+  return body.length > 0 ? body + '\n' : body
 }
 
 /**

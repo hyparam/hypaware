@@ -5,7 +5,6 @@
  * @import { FinaleSummary, PickerSource } from '../../../../src/core/cli/types.js'
  * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import {
- *   FirstAskResult,
  *   FirstLookOutcome,
  *   FirstLookResult,
  *   InitWizardResult,
@@ -26,7 +25,6 @@ import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
-  buildWalkthroughClientDescriptorMap,
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
   runPickerFinale,
@@ -37,7 +35,7 @@ import {
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { runWizardFirstAsk } from './first_ask.js'
+import { writeSuggestedPrompts } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, defaultRowLabels, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -291,14 +289,14 @@ export async function runInitWizard(opts) {
               // #consequences: a cancelled run still exits 130).
               // @ref LLP 0191#esc-back [implements]: ctrl+c cancels the run at the disconnect question rather than acting as a back-step
               if (joined) await narrateEnrolledAbort(opts)
-              opts.stderr.write('hyp init: cancelled\n')
+              opts.stderr.write('hyp setup: cancelled\n')
               return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {
-                opts.stderr.write('hyp init: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
+                opts.stderr.write('hyp setup: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
                 continue
               }
               // Disconnected: the org's rows are no longer locked and the
@@ -406,7 +404,7 @@ export async function runInitWizard(opts) {
           if (choice === 'back') continue atFork
           if (choice === 'cancelled') {
             if (joined) await narrateEnrolledAbort(opts)
-            opts.stderr.write('hyp init: cancelled\n')
+            opts.stderr.write('hyp setup: cancelled\n')
             return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
           expressShown = true
@@ -619,7 +617,7 @@ export async function runInitWizard(opts) {
 
   // Loop invariant, restated for the type system: the only way out of the
   // lanes above, other than returning, assigns `picked` first.
-  if (!picked) throw new Error('hyp init: internal error: the pick lane did not run')
+  if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
   const finaleProgress = express ? undefined : wizardStepProgress(pathway, 'finale', { managed: enrolled() })
 
@@ -673,7 +671,7 @@ export async function runInitWizard(opts) {
   const cancelled = finaleSummary?.cancelled === true
   if (cancelled) {
     try {
-      opts.stderr.write('hyp init: cancelled\n')
+      opts.stderr.write('hyp setup: cancelled\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -755,8 +753,8 @@ export async function runInitWizard(opts) {
   const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
 
   // ...and then the offer to end the wait. It sits between the narration
-  // and the first ask because it is an action on what the narration just
-  // said, and because the first ask may take the terminal for good.
+  // and the question list because it is an action on what the narration just
+  // said.
   // @ref LLP 0203#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
@@ -772,29 +770,21 @@ export async function runInitWizard(opts) {
     })
   }
 
-  // The exit door. Placed after the privacy narration on purpose: the
-  // narration stays the wizard's last *words* (LLP 0135 #privacy), and
-  // this is what the user does next rather than one more thing to read.
-  // Attended, non-dry-run, non-cancelled, same as the first look - and it
-  // may take the terminal for good, so nothing may follow it but the
-  // return.
-  // @ref LLP 0198#first-ask [implements]: the closing question list, after the narration, last of all
-  /** @type {FirstAskResult | undefined} */
-  let firstAsk
+  // The closing question list comes after the privacy narration, but it is
+  // output only: onboarding never starts Claude Code or Codex. `hyp init`
+  // may have been run from any directory, and that directory must not become
+  // an agent session without an explicit launch command from the user.
+  // @ref LLP 0198#onboarding-list [implements]: the wizard prints questions and never launches a client from its caller's cwd
+  /** @type {'listed' | 'listed-empty' | 'skipped'} */
+  let firstAskListed = 'skipped'
   if (interactive && !cancelled && opts.finale?.dryRun !== true) {
-    firstAsk = await runWizardFirstAsk({
-      clients: picked.clientsPicked,
-      descriptors: opts.catalog
-        ? opts.catalog.clientDescriptors
-        : await buildWalkthroughClientDescriptorMap(),
+    const hasRows = firstLookHadRows(firstLookResult)
+    writeSuggestedPrompts({
       stdout: opts.stdout,
-      stderr: opts.stderr,
-      env: opts.env,
-      interactive: true,
-      hasRows: firstLookHadRows(firstLookResult),
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
-      ...(opts.firstAsk ?? {}),
+      footer: 'onboarding',
+      hasRows,
     })
+    firstAskListed = hasRows === false ? 'listed-empty' : 'listed'
   }
 
   log.info('wizard.finish', {
@@ -806,7 +796,13 @@ export async function runInitWizard(opts) {
     folder_ask: folderAsk ?? 'not-asked',
     express,
     cancelled,
-    first_ask: firstAsk ? (firstAsk.launched ? `launched:${firstAsk.client}` : firstAsk.reason) : 'skipped',
+    // Which framing printed, not whether the step ran: `skipped` restates
+    // `pathway` and `cancelled` above it, while `listed-empty` is the one
+    // value nothing else on this line carries - the rate of installs
+    // finishing with an empty cache, which is backfill health read at the
+    // moment every install passes through.
+    // @ref LLP 0198#empty-cache [implements]: the empty-cache framing is the measurement setup contributes
+    first_ask: firstAskListed,
     // How often an enrolled install chooses not to wait is the measurement
     // that says whether the window is sized for the people in it.
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
@@ -879,7 +875,7 @@ function printJoinFailure(opts, join) {
     return
   }
   if (join.reason === 'org_selection_required') {
-    opts.stderr.write('Joining failed: this account belongs to more than one org. Run `hyp remote login --org <name>` first, then re-run `hyp init`.\n')
+    opts.stderr.write('Joining failed: this account belongs to more than one org. Run `hyp remote login --org <name>` first, then re-run `hyp setup`.\n')
     return
   }
   opts.stderr.write('Joining failed: an admin needs to grant this account access before this machine can enroll.\n')
@@ -1019,7 +1015,7 @@ async function narrateEnrolledAbort(opts) {
     opts.stdout.write(
       '\n' +
       'This machine is enrolled: its configured sources sync to your server by default.\n' +
-      "Keep any local-only with 'hyp policy client <name> local-only'.\n"
+      "Keep any local-only with 'hyp privacy client <name> local-only'.\n"
     )
     await narratePrivacyIfTeamPath(opts)
   } catch {

@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 
 /**
  * The exemplar here is `@hypaware/gascity`, and it should stay a plugin that
@@ -212,7 +213,7 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   )
   assert.match(
     stderr.text(),
-    /^ {2}repair: @hypaware\/gascity is disabled by the fleet \(central\) config and cannot be enabled locally; ask your fleet admin to enable it$/m
+    /^ {2}repair: @hypaware\/gascity is disabled by the organization \(central\) config and cannot be enabled locally; ask your administrator to enable it$/m
   )
   // Neither the add-entry nor the local-enable advice should appear.
   assert.equal(stderr.text().includes('add {"name"'), false)
@@ -260,4 +261,126 @@ test('a command whose plugin IS active is unaffected (renders group help, no ava
   assert.match(stdout.text(), /usage: hyp gascity <subcommand>/)
   assert.match(stdout.text(), /attach\s+Attach the gascity subscriber/)
   assert.equal(stdout.text().includes('not in the active config'), false)
+})
+
+// `session` is core-registered as a task group (LLP 0248) but every one of its
+// subcommands is contributed by @hypaware/ai-gateway. When that plugin is
+// inactive the group shell still matches, so the miss path is never reached
+// and the user got an empty subcommand table (exit 0) or an `expected one of:`
+// with nothing after it (exit 2) instead of the plugin name and the repair.
+// @ref LLP 0153#unavailable-not-unknown [tests]: a core group emptied by an inactive plugin reports unavailable by every spelling
+test('a core group whose subcommands all come from an inactive plugin reports unavailable, not an empty table', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-empty-group-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/ai-gateway',
+    commands: [
+      { name: 'session ignore', summary: 'Stop recording this session' },
+      { name: 'session status', summary: 'Report this session opt-out state' },
+    ],
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+
+  for (const argv of [['session'], ['session', 'ignore'], ['session', 'zzz-not-a-subcommand'], ['session', '--help']]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(argv, {
+      stdout,
+      stderr,
+      workspaceDir,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    })
+
+    assert.equal(code, 2, `hyp ${argv.join(' ')} exited ${code}`)
+    assert.equal(stdout.text(), '', `hyp ${argv.join(' ')} wrote to stdout`)
+    assert.match(
+      stderr.text(),
+      /^hyp: 'session' is provided by @hypaware\/ai-gateway, which is not in the active config$/m
+    )
+    assert.ok(
+      stderr.text().includes(`  repair: add {"name": "@hypaware/ai-gateway"} to plugins[] in ${configPath}`),
+      `hyp ${argv.join(' ')} omits the repair line`
+    )
+    assert.equal(stderr.text().includes('expected one of: \n'), false)
+  }
+})
+
+test('dispatch miss on a selected plugin whose activate() threw reports unavailable, not unknown', async () => {
+  // The config already names the plugin, so LLP 0153's "add it to plugins[]"
+  // repair is wrong and LLP 0154's "flip enabled" repair is wrong too. Before
+  // this case existed the command fell all the way through to "unknown
+  // command", telling the user a feature they configured does not exist.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-activate-threw-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
+    activateBody: `  throw new Error('activation is broken on purpose')`,
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] }))
+
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['gascity'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 2)
+  assert.match(
+    stderr.text(),
+    /^hyp: 'gascity' is provided by @hypaware\/gascity, which your config selects but this run could not activate$/m
+  )
+  const repairLine = stderr
+    .text()
+    .split('\n')
+    .find((line) => line.startsWith('  repair:'))
+  assert.equal(
+    repairLine,
+    `  repair: the plugin is configured but unavailable this run; run 'hyp status' for why, then re-run this command`
+  )
+  assert.equal(stderr.text().includes('unknown command'), false)
+  // Neither config repair applies: the entry is already there and enabled.
+  assert.equal(stderr.text().includes('add {"name"'), false)
+  assert.equal(stderr.text().includes('"enabled": true'), false)
+})
+
+test('an injected kernel is not read as a failed activation', async () => {
+  // The integration API (`src/core/cli/integration.js`) forwards a caller's
+  // own kernel and registry, and dispatch then never boots. There is no
+  // activation record to compare against, so a config-selected plugin whose
+  // command is not in the caller's registry must NOT be reported as one this
+  // run "could not activate": nothing tried.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-injected-kernel-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/gascity',
+    commands: [{ name: 'gascity attach', summary: 'Attach the gascity subscriber' }],
+  })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] }))
+
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['gascity'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    registry: createCommandRegistry(),
+    kernel: /** @type {any} */ ({}),
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 2)
+  assert.equal(stderr.text().includes('could not activate'), false)
+  assert.match(stderr.text(), /unknown command 'gascity'/)
 })

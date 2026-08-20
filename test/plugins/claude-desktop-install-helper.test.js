@@ -60,7 +60,7 @@ test('install-helper writes an executable no-arg wrapper under the state dir', a
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'subscription' })
   await activate(ctx)
 
-  const install = commands.get('claude-desktop install-helper')
+  const install = commands.get('client claude-desktop install-helper')
   const { code, out } = await invoke(install.run, [])
   assert.equal(code, 0)
 
@@ -90,7 +90,7 @@ test('the generated wrapper runs its target with no arguments', async () => {
   const helperPath = path.join(stateDir, HELPER_BASENAME)
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'subscription' })
   await activate(ctx)
-  const install = commands.get('claude-desktop install-helper')
+  const install = commands.get('client claude-desktop install-helper')
   // install-helper embeds resolveHypBin()/process.execPath, so hand-write
   // an equivalent wrapper against the fake to exercise no-arg exec. The
   // fake already includes its own `#!/bin/sh`, so exec it directly.
@@ -106,14 +106,14 @@ test('status reports the helper as not installed until install-helper runs', asy
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'org_key' })
   await activate(ctx)
-  const status = commands.get('claude-desktop status')
+  const status = commands.get('client claude-desktop status')
 
   const before = await invoke(status.run, [])
   assert.equal(before.code, 1)
   assert.ok(/NOT installed/.test(before.out))
   assert.ok(/scheme x-api-key/.test(before.out))
 
-  await invoke(commands.get('claude-desktop install-helper').run, [])
+  await invoke(commands.get('client claude-desktop install-helper').run, [])
   const after = await invoke(status.run, [])
   assert.equal(after.code, 0)
   assert.ok(/installed/.test(after.out))

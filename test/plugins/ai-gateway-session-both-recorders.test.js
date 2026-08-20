@@ -12,6 +12,7 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
 import {
   runSessionIgnore,
+  runSessionStatus,
   runSessionUnignore,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
 
@@ -104,6 +105,83 @@ test('unignore removes the id from both recorders', async () => {
       assert.equal(out.status, 'ok')
       assert.equal(out.recorders.length, 2)
       assert.ok(out.recorders.every((/** @type {any} */ r) => r.status === 'ok' && r.ignored === false))
+    })
+  })
+})
+
+test('status confirms protection only after every advertised recorder reports ignored', async () => {
+  const gatewaySet = new Set([SESSION])
+  const listenerSet = new Set([SESSION])
+  await withControlServer(gatewaySet, async (gatewayBase) => {
+    await withControlServer(listenerSet, async (listenerBase) => {
+      const home = daemonHome({ gatewayBase, listenerBase })
+      const env = { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION }
+      const json = fakeCtx({ env })
+      assert.equal(await runSessionStatus(['--json'], json.ctx), 0)
+      const out = JSON.parse(json.stdout())
+      assert.equal(out.status, 'ignored')
+      assert.equal(out.ignored, true)
+      assert.equal(out.recorders.length, 2)
+      assert.deepEqual(out.recorders.map((/** @type {any} */ r) => [r.recorder, r.status]), [
+        ['gateway', 'ignored'],
+        ['claude-telemetry', 'ignored'],
+      ])
+
+      const human = fakeCtx({ env })
+      assert.equal(await runSessionStatus([], human.ctx), 0)
+      assert.match(human.stdout(), /recorder claude-telemetry at .*: ignored/)
+      assert.equal((human.stdout().match(/nothing proves the responder/g) ?? []).length, 2)
+    })
+  })
+})
+
+test('status reports recorded when any advertised recorder does not hold the id', async () => {
+  const gatewaySet = new Set([SESSION])
+  const listenerSet = /** @type {Set<string>} */ (new Set())
+  await withControlServer(gatewaySet, async (gatewayBase) => {
+    await withControlServer(listenerSet, async (listenerBase) => {
+      const home = daemonHome({ gatewayBase, listenerBase })
+      const ctx = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
+      assert.equal(await runSessionStatus(['--json'], ctx.ctx), 1)
+      const out = JSON.parse(ctx.stdout())
+      assert.equal(out.status, 'not_ignored')
+      assert.equal(out.ignored, false)
+      assert.equal(out.recorders[0].status, 'ignored')
+      assert.equal(out.recorders[1].status, 'not_ignored')
+
+      // The headline speaks for the recorder that is still recording, which
+      // here is NOT the first entry of the inventory. Every other recorder
+      // gets its own line, so the gateway's `ignored` - the fact a user
+      // reading "this session IS being recorded" most needs beside it - is
+      // printed, and the recorder the headline already covered is not
+      // repeated. A blind `slice(1)` did the exact opposite of both.
+      const human = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
+      assert.equal(await runSessionStatus([], human.ctx), 1)
+      const text = human.stdout()
+      assert.match(text, /recorder gateway at .*: ignored \(1 ignored\)/)
+      assert.equal((text.match(/^recorder /gm) ?? []).length, 1, 'only the non-headline recorder gets a line')
+      assert.doesNotMatch(text, /recorder claude-telemetry at/)
+      // Both endpoints still carry the per-responder trust disclosure.
+      assert.equal((text.match(/nothing proves the responder/g) ?? []).length, 2)
+      assert.ok(text.includes(listenerBase), 'the headline recorder endpoint is named')
+      assert.ok(text.includes(gatewayBase), 'the other recorder endpoint is named')
+    })
+  })
+})
+
+test('status stays unknown when an advertised recorder refuses the read', async () => {
+  const gatewaySet = new Set([SESSION])
+  await withControlServer(gatewaySet, async (gatewayBase) => {
+    await withRefusingServer(async (listenerBase) => {
+      const home = daemonHome({ gatewayBase, listenerBase })
+      const ctx = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
+      assert.equal(await runSessionStatus(['--json'], ctx.ctx), 3)
+      const out = JSON.parse(ctx.stdout())
+      assert.equal(out.status, 'unknown')
+      assert.equal(out.ignored, null)
+      assert.equal(out.recorders[0].status, 'ignored')
+      assert.equal(out.recorders[1].status, 'unknown')
+      assert.match(out.reason, /claude-telemetry at .*HTTP 500/)
     })
   })
 })

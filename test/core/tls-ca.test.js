@@ -294,3 +294,67 @@ test('a CA carrying more subtrees than the bound reports them bounded', async (t
   assert.equal(shown.length, 25)
   assert.equal(shown[24], '(+6 more dNSName constraints)')
 })
+
+// #886 finding 1, end to end. A ten-year CA minted on a machine whose clock
+// reads past 2039 has a `notAfter` beyond 2049, and the two-digit UTCTime year
+// wrapped it into the 19xx window: the CA was born expired, `loadLocalCa` saw
+// it inside the renewal window and re-minted on every single boot, and every
+// intercepted handshake failed with nothing naming the cause.
+// @ref LLP 0275#generalized-time-past-2049 [tests]
+test('a CA minted on a clock past 2039 is not born expired', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  const now = new Date(Date.UTC(2041, 0, 1))
+  const ca = await ensureLocalCa({ stateRoot, hosts: [HOST], now })
+  assert.equal(ca.created, true)
+
+  // What is on disk has to agree with the lifetime the minter intended.
+  const info = await readLocalCaInfo({ stateRoot })
+  assert.ok(info)
+  assert.equal(info.notAfter.getTime(), ca.notAfter.getTime())
+  assert.ok(info.notAfter.getTime() > now.getTime(), 'the stored CA is not already expired')
+
+  // And it is reusable: the boot after this one must not re-mint.
+  const second = await ensureLocalCa({ stateRoot, hosts: [HOST], now })
+  assert.equal(second.created, false)
+  assert.equal(second.fingerprint, ca.fingerprint)
+})
+
+// #886 finding 4. The stored constraint set had to equal the requested host
+// list exactly, so *narrowing* the upstream set re-minted the CA and stranded
+// the keychain trust grant the user gave once by password dialog - the whole
+// reason the CA is long-lived (LLP 0238#ten-year-validity). Only widening needs
+// a new CA; a stored superset already vouches for everything asked for.
+// @ref LLP 0275#stored-superset-is-reusable [tests]
+test('narrowing the host set reuses the stored CA rather than stranding its trust', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  const wide = ['api.anthropic.com', 'api.openai.com', 'chatgpt.com', 'llm.corp.example']
+  const first = await ensureLocalCa({ stateRoot, hosts: wide })
+  assert.equal(first.created, true)
+
+  // The operator drops their own upstream from config; the next daemon boot
+  // asks for the static three.
+  const narrowed = await ensureLocalCa({ stateRoot, hosts: wide.slice(0, 3) })
+  assert.equal(narrowed.created, false)
+  assert.equal(narrowed.fingerprint, first.fingerprint)
+  // The CA still reports the wider set it actually permits, so status and the
+  // leaf store both stay honest about the trust grant in force.
+  assert.deepEqual([...narrowed.hosts].sort(), [...wide].sort())
+})
+
+// The invariant the exact-match rule was protecting, kept: a CA that cannot
+// vouch for a host being asked for is still regenerated.
+// @ref LLP 0275#stored-superset-is-reusable [tests]
+test('a stored CA missing a requested host is still regenerated', async (t) => {
+  const stateRoot = await tempRoot()
+  t.after(() => fsp.rm(stateRoot, { recursive: true, force: true }))
+
+  const first = await ensureLocalCa({ stateRoot, hosts: [HOST, 'api.openai.com'] })
+  const widened = await ensureLocalCa({ stateRoot, hosts: [HOST, 'llm.corp.example'] })
+
+  assert.equal(widened.created, true)
+  assert.notEqual(widened.fingerprint, first.fingerprint)
+})

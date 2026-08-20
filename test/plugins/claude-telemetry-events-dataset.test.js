@@ -53,6 +53,18 @@ function event(name, attrs = {}) {
   }
 }
 
+/**
+ * The cwd lookup is a required argument, so a caller cannot silently write
+ * rows the export seam reads as `full` (LLP 0278). These tests are about the
+ * row shape rather than the stamp, so they pass one that knows no sessions;
+ * `claude-telemetry-local-only-export.test.js` covers the stamp itself.
+ *
+ * @returns {string | undefined}
+ */
+function noCwd() {
+  return undefined
+}
+
 // ---------------------------------------------------------------------
 // claudeTelemetryEventRows: the behavioral/content split and the row shape
 // ---------------------------------------------------------------------
@@ -63,7 +75,7 @@ test('content and body-pointer events yield no behavioral rows', () => {
     event('assistant_response', { response: 'secret response', 'message.uuid': 'u-2' }),
     event('api_request_body', { body_ref: '/tmp/spool/req.json' }),
     event('api_response_body', { body_ref: '/tmp/spool/resp.json' }),
-  ])
+  ], { cwdFor: noCwd })
   assert.deepEqual(rows, [])
 })
 
@@ -75,7 +87,7 @@ test('a tool_decision event becomes one row with the hot fields typed and lifted
       source: 'user_reject',
       language: 'javascript',
     }),
-  ])
+  ], { cwdFor: noCwd })
   assert.equal(rows.length, 1)
   const row = rows[0]
   assert.equal(row.event_name, 'tool_decision')
@@ -101,7 +113,7 @@ test('a tool_decision event becomes one row with the hot fields typed and lifted
 test('cost_usd is typed from the string-typed numeric Claude Code sends', () => {
   const rows = claudeTelemetryEventRows([
     event('api_request', { cost_usd: '0.0047732', input_tokens: 73, request_id: 'req_1' }),
-  ])
+  ], { cwdFor: noCwd })
   assert.equal(rows.length, 1)
   assert.equal(rows[0].cost_usd, 0.0047732)
   const attrs = /** @type {Record<string, unknown>} */ (rows[0].attributes)
@@ -114,7 +126,7 @@ test('an unrecognized event name is recorded with its attributes, not discarded'
   // @ref LLP 0257#failure-modes [tests]: unknown names keep their attributes
   const rows = claudeTelemetryEventRows([
     event('brand_new_event', { detail: 'something upstream added' }),
-  ])
+  ], { cwdFor: noCwd })
   assert.equal(rows.length, 1)
   assert.equal(rows[0].event_name, 'brand_new_event')
   const attrs = /** @type {Record<string, unknown>} */ (rows[0].attributes)
@@ -124,7 +136,7 @@ test('an unrecognized event name is recorded with its attributes, not discarded'
 test('a hot key whose value does not fit its typed column stays in the JSON instead of vanishing', () => {
   const rows = claudeTelemetryEventRows([
     event('tool_decision', { tool_name: 'Read', decision: 42 }),
-  ])
+  ], { cwdFor: noCwd })
   assert.equal(rows[0].decision, null)
   const attrs = /** @type {Record<string, unknown>} */ (rows[0].attributes)
   assert.equal(attrs.decision, 42)
@@ -133,7 +145,7 @@ test('a hot key whose value does not fit its typed column stays in the JSON inst
 test('an event with no session id and no timestamp still lands, with nulls', () => {
   const rows = claudeTelemetryEventRows([
     { name: 'mcp_server_connection', attributes: { server_name: 'some-mcp', status: 'connected' } },
-  ])
+  ], { cwdFor: noCwd })
   assert.equal(rows.length, 1)
   assert.equal(rows[0].session_id, null)
   assert.equal(rows[0].event_timestamp, null)
@@ -269,7 +281,7 @@ test('the registration names the dataset, its owner, its signal, and its timesta
   assert.equal(registration.localOnlyContentColumns, undefined)
   assert.deepEqual(
     registration.schema.columns.map((c) => c.name),
-    ['event_name', 'event_timestamp', 'session_id', 'tool_name', 'decision', 'source', 'cost_usd', 'attributes']
+    ['event_name', 'event_timestamp', 'session_id', 'tool_name', 'decision', 'source', 'cost_usd', 'cwd', 'attributes']
   )
 })
 
@@ -280,7 +292,7 @@ test('rows written through storage flush, discover, and read back through the re
     const rows = claudeTelemetryEventRows([
       event('tool_decision', { tool_name: 'Read', decision: 'accept', source: 'config' }),
       event('permission_mode_changed', { from_mode: 'default', to_mode: 'acceptEdits' }),
-    ])
+    ], { cwdFor: noCwd })
     const tablePath = claudeTelemetryTablePath(storage)
     await storage.appendRows(tablePath, [...CLAUDE_TELEMETRY_EVENT_COLUMNS], rows)
     await storage.flushTable(tablePath, { force: true })

@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
-import { defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
+import { configRecordsPickAnswer, defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { narrateAcceptedGate } from './express.js'
 import {
@@ -13,7 +13,6 @@ import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   buildWalkthroughClientDescriptorMap,
   composePickerConfig,
-  configRecordsPickAnswer,
   configuredExportChoice,
   configuredPickerSources,
   defaultConfirmSelectPromptFactory,
@@ -23,6 +22,7 @@ import {
   derivePickedClients,
   loadPickerCatalog,
   orderPickerDescriptors,
+  readsBackFromOwnPlugins,
   resolveHypHome,
   ridersInDefaultSet,
   visiblePickerDescriptors,
@@ -51,6 +51,11 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * a reconfigure's carried row is not re-asked. Saying so on the gate is
  * what keeps "record all of these" from reading as if enter alone
  * finished the job.
+ *
+ * No BUNDLED row reaches it today: `claude-desktop` was the only one and is
+ * now hidden (LLP 0297). `needs_setup` remains a kernel contract any plugin
+ * may declare, so the suffix stays and is tested against a descriptor whose
+ * `hidden` flag is cleared.
  */
 export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
 
@@ -205,10 +210,11 @@ export async function resolvePickSeeding(opts) {
   //   - `detected` never carries. On a first run the seed is a DETECTION
   //     result, and carrying off that would compose a source the user was
   //     never shown and cannot uncheck, purely because a probe found it -
-  //     exactly what LLP 0011 #autodetect-vs-default forbids. No bundled
-  //     hidden row declares a `detect` probe today, but `hidden` is a
-  //     kernel-contract field any plugin can set beside one, so the gate is
-  //     stated rather than assumed.
+  //     exactly what LLP 0011 #autodetect-vs-default forbids. `hidden` and
+  //     `detect` do co-occur (`claude-desktop` keeps its `/Applications`
+  //     probe), and today `detectedSeed` also drops every `needs_setup` row
+  //     before the seed is built, so nothing reaches this tier twice over -
+  //     the gate is stated rather than left resting on that coincidence.
   //   - `selection` always carries, without the "nothing visible seeded"
   //     test. A re-entry's seed is the selection a previous pass already
   //     confirmed, and nothing derives a hidden id into it: read-back never
@@ -217,12 +223,29 @@ export async function resolvePickSeeding(opts) {
   //     rule against a seed that now also holds the visible rows the user
   //     just added would drop the row, so `back` then `enter` would delete
   //     the very upstream the carry exists to preserve.
+  //
+  // The "nothing visible seeded" test is the derivative-read-back rule's
+  // proxy, and it is only sound for a row whose read-back IS derivative.
+  // `claude-desktop` is hidden too (LLP 0297) and is not: it reads back off
+  // `@hypaware/claude-account` + `@hypaware/claude-desktop`, which nothing
+  // else composes, so a config naming them recorded a real decision - the
+  // sudo'd plist write `hyp client claude-desktop install` performs. Under
+  // the bare test it would be dropped by any reconfigure that also seeded a
+  // visible row (every install that captures anything else), silently
+  // un-composing a working Desktop setup and leaving no route back: the
+  // command that would repair it is contributed by the plugin the rewrite
+  // just removed from `plugins[]`. So a config-seeded hidden row also
+  // carries when it reads back off plugins of its own.
   // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
   // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
-  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id)).map((d) => d.id)
+  // @ref LLP 0297#carry-through [implements]: a hidden row with a non-derivative read-back carries off the config seed whatever else is checked
+  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id))
   const seededVisible = visibleList.some((d) => seed.has(d.id))
-  const carries = seedOrigin === 'selection' || (seedOrigin === 'config' && !seededVisible)
-  const carried = carries ? seededHidden : []
+  const carried = seedOrigin === 'selection'
+    ? seededHidden.map((d) => d.id)
+    : seedOrigin === 'config'
+      ? seededHidden.filter((d) => !seededVisible || readsBackFromOwnPlugins(d)).map((d) => d.id)
+      : []
 
   return {
     descriptors,
@@ -531,7 +554,7 @@ export async function commitWizardPickedConfig(args) {
     ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
   })
   if (!guard.proceed) {
-    args.stderr.write(`hyp init: ${guard.message}\n`)
+    args.stderr.write(`hyp setup: ${guard.message}\n`)
     await withSpan(
       'wizard.pick.write_config',
       {
@@ -660,6 +683,13 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
       screen = 'menu'
     } else {
       try {
+        const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet))
+        // Whether this menu arrives with a state worth keeping: a locked
+        // row, or one the seed already checked (the config on disk, a
+        // re-entry's selection, detection). Exactly the predicate behind
+        // `defaultRows`, read off the rows that render so the flag below
+        // can never disagree with the boxes on screen.
+        const hasChecked = options.some((o) => o.checked === true)
         const sourceRaw = await ask({
           pickType: 'sources',
           // No keys in the title: the TUI's hint line and the numbered
@@ -671,7 +701,19 @@ async function promptPickSelection({ opts, ask, confirm, visibleList, descriptor
           // fallback prints the same text as plain text.
           // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
           ...(opts.progress ? { progress: opts.progress } : {}),
-          options: visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet)),
+          options,
+          // The TUI multiselect always renders and keeps the checked state;
+          // the numbered fallback only does so for a question that asks.
+          // Without this the non-TTY menu printed bare labels and read a
+          // bare enter as "collect nothing", so a reconfigure that walked
+          // gate then menu then enter rewrote a seeded config to collect
+          // nothing - past an overwrite confirm that defaults to yes.
+          // Opted in only when a box is actually checked: with none there
+          // is no state to keep, so enter stays the historical empty
+          // selection and a dropped terminal still cancels the run rather
+          // than carrying it into the daemon install with no sources.
+          // @ref LLP 0274#pick-menu [implements]: the pick menu keeps its checked state on a bare enter, and only where it has one
+          ...(hasChecked ? { enterKeepsChecked: true } : {}),
           ...(hasGate || opts.allowBack ? { allowBack: true } : {}),
         })
         return {
@@ -793,7 +835,7 @@ async function cancelledResult(opts) {
     { component: 'wizard' }
   )
   try {
-    opts.stderr.write('hyp init: cancelled\n')
+    opts.stderr.write('hyp setup: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

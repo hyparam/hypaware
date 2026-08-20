@@ -156,7 +156,7 @@ test('a second displacement at an already-backed-up path is reported as discarde
   // nothing malformed, so it cannot see which value wins a collision. Break the
   // same block again by hand between attaches and the two rules meet: the first
   // backup is kept (it holds the pre-hypaware content) and the second value is
-  // genuinely gone. Warning it as "backed up ... hyp detach restores it" would
+  // genuinely gone. Warning it as "backed up ... hyp client detach restores it" would
   // be the silent destruction this whole change exists to end, dressed up.
   const { home, settingsPath } = await stageHome({ env: 'FIRST-ORIGINAL' })
   try {
@@ -172,8 +172,8 @@ test('a second displacement at an already-backed-up path is reported as discarde
     const warnings = second.changed ? second.warnings ?? [] : []
     assert.equal(warnings.length, 1)
     assert.match(warnings[0], /already holds an earlier backup/)
-    assert.match(warnings[0], /discarded and hyp detach will not restore it/)
-    assert.doesNotMatch(warnings[0], /hyp detach restores it/)
+    assert.match(warnings[0], /discarded and hyp client detach will not restore it/)
+    assert.doesNotMatch(warnings[0], /hyp client detach restores it/)
     // A malformed `env` is where an API key ends up; the notice names the path,
     // never the value, because it is printed and logged.
     assert.doesNotMatch(warnings[0], /SECOND-HANDEDIT/)

@@ -154,7 +154,7 @@ test('hyp session status names the folder governor rather than omitting it (R7)'
     await runSessionStatus([], ctx.ctx)
     const text = ctx.stdout()
     assert.match(text, /not ignored/)
-    assert.match(text, /hyp policy show/, 'the session verb must point at the other, independent governor')
+    assert.match(text, /hyp privacy show/, 'the session verb must point at the other, independent governor')
   })
 })
 

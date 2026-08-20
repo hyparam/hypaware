@@ -1,5 +1,6 @@
 // @ts-check
 
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -51,7 +52,10 @@ const GAP_BLOCK_TYPES = new Set([
  *
  * A file that fails to parse is deleted immediately and counted: the
  * same session is recoverable from transcript backfill, and an
- * undeleted body is a raw prompt sitting on disk.
+ * undeleted body is a raw prompt sitting on disk. Its size is reported
+ * alongside the count, because a deletion the caller cannot size leaves
+ * the published `spool_bytes` gauge high until the next sweep restates
+ * it - reporting bytes for content that is already off the disk.
  * @ref LLP 0252#project-then-delete [implements]: an unprojectable body is
  *   deleted and counted, not retried forever
  *
@@ -63,6 +67,7 @@ const GAP_BLOCK_TYPES = new Set([
  *   consumedBytes: number,
  *   missing: number,
  *   unparseable: number,
+ *   unparseableBytes: number,
  *   refused: string[],
  * }>}
  */
@@ -74,6 +79,7 @@ export async function loadSpooledBodies(events, opts) {
   let consumedBytes = 0
   let missing = 0
   let unparseable = 0
+  let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
 
@@ -102,7 +108,26 @@ export async function loadSpooledBodies(events, opts) {
     const body = parseMaybeJson(raw.toString('utf8'))
     if (!isPlainObject(body)) {
       unparseable += 1
-      await fs.rm(file, { force: true }).catch(() => {})
+      try {
+        // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
+        // for a path that is already gone, and the bytes below are only ours to
+        // report if this call is the one that took the file off the disk. Two
+        // reads of the same `body_ref` can be in flight at once (the handler is
+        // not serialized, so an exporter retry overlaps the original it is
+        // retrying), and a forced remove would let both subtract those bytes.
+        await fs.unlink(file)
+        // Sized only once the file is gone: one that is still there (EPERM, a
+        // read-only spool) is still spooled, so subtracting its bytes would
+        // publish a spool smaller than the one the next sweep finds.
+        // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
+        //   the spool's current size, so a deletion only the reader can see has
+        //   to be sized for the caller
+        unparseableBytes += raw.length
+      } catch {
+        // Already gone, or not removable at all: either way this batch has no
+        // byte movement to report, and the content is recoverable from
+        // transcript backfill.
+      }
       continue
     }
     bodies.set(ref, {
@@ -114,7 +139,7 @@ export async function loadSpooledBodies(events, opts) {
     consumedBytes += raw.length
   }
 
-  return { bodies, consumedFiles, consumedBytes, missing, unparseable, refused }
+  return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }
 }
 
 /**
@@ -125,23 +150,61 @@ export async function loadSpooledBodies(events, opts) {
  * retried batch re-reads the same files. Deletion is the normal end of
  * a body's life, which is what keeps the spool transient.
  *
+ * The size is read before the unlink, and a ref that is already gone is not
+ * counted: `fs.rm(..., { force: true })` succeeds on a missing path, so
+ * counting its return alone reported every vanished ref as one more deletion
+ * (`bodies_deleted`, and the drop path's `bodies_dropped`). The byte total
+ * is what lets a caller that never read the files - the policy-drop arm, which
+ * deletes unread - bring `spool_bytes` down by what actually left the disk
+ * instead of leaving it high until the next sweep restates it.
+ *
  * @ref LLP 0252#project-then-delete [implements]: a body file is deleted as
  *   soon as it has been projected
  * @param {string[]} files
- * @returns {Promise<number>} how many files were removed
+ * @returns {Promise<{ deleted: number, bytesRemoved: number }>}
  */
 export async function deleteSpooledBodies(files) {
   let deleted = 0
+  let bytesRemoved = 0
   for (const file of files) {
+    /** @type {number} */
+    let size
+    try {
+      size = (await fs.stat(file)).size
+    } catch {
+      // Already evicted, already swept, or never written: nothing here to
+      // remove, and nothing to subtract.
+      continue
+    }
     try {
       await fs.rm(file, { force: true })
-      deleted += 1
     } catch {
-      // A vanished or unremovable file is the sweep's problem, not a
-      // reason to fail the batch that already recorded its content.
+      // An unremovable file is the sweep's problem, not a reason to fail the
+      // batch that already recorded its content.
+      continue
     }
+    deleted += 1
+    bytesRemoved += size
   }
-  return deleted
+  return { deleted, bytesRemoved }
+}
+
+/**
+ * A short, non-reversible handle for a `body_ref` that has to be named in a
+ * log line. A refused ref is out-of-spool by definition and arrived over the
+ * wire, so logging it verbatim puts an unvalidated, possibly attacker-chosen
+ * absolute path into a line an operator's own sink may ship off the machine,
+ * while every other line on this path carries basenames and counts. The digest
+ * still correlates repeats of one ref across lines and runs, which is what the
+ * refusal signal is read for.
+ *
+ * @ref LLP 0257#observability [implements]: S23 - payload identity is carried
+ *   by a hash, not by the raw value
+ * @param {string} ref
+ * @returns {string}
+ */
+export function bodyRefDigest(ref) {
+  return crypto.createHash('sha256').update(ref).digest('hex').slice(0, 12)
 }
 
 /**
@@ -160,7 +223,7 @@ export async function deleteSpooledBodies(files) {
  *   works AND the content goes
  * @param {ClaudeTelemetryEvent[]} events
  * @param {{ spoolDir: string }} opts
- * @returns {Promise<{ deleted: number, refused: string[] }>}
+ * @returns {Promise<{ deleted: number, bytesRemoved: number, refused: string[] }>}
  */
 export async function deleteSpooledBodiesForEvents(events, opts) {
   const spoolRoot = path.resolve(opts.spoolDir)
@@ -182,8 +245,8 @@ export async function deleteSpooledBodiesForEvents(events, opts) {
     }
     files.push(file)
   }
-  const deleted = await deleteSpooledBodies(files)
-  return { deleted, refused }
+  const removed = await deleteSpooledBodies(files)
+  return { deleted: removed.deleted, bytesRemoved: removed.bytesRemoved, refused }
 }
 
 /**

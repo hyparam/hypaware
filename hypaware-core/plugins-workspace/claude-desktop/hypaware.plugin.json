@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a fleet, and contributes the hyp init wizard's Claude Desktop picker row.",
+  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a centrally managed deployment. Its picker row is hidden (LLP 0297): Claude Desktop is never offered during onboarding, and is set up only by explicitly running 'hyp client claude-desktop install'.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -26,8 +26,9 @@
         "label": "Claude Desktop",
         "summary": "Records Claude Desktop conversations and starts a local gateway listener. Needs Claude sign-in and admin approval; setup asks before changing anything.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
+        "hidden": true,
         "needs_setup": true,
-        "configure_command": "claude-desktop install",
+        "configure_command": "client claude-desktop install",
         "compose": {
           "requires_gateway": true,
           "gateway_upstream": {
@@ -44,11 +45,11 @@
       }
     ],
     "commands": [
-      { "name": "claude-desktop profile", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
-      { "name": "claude-desktop install-helper", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
-      { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" },
-      { "name": "claude-desktop install", "summary": "Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt" },
-      { "name": "claude-desktop verify", "summary": "Verify the Desktop plist install and print the in-app capture-check hint" }
+      { "name": "client claude-desktop profile", "aliases": ["claude-desktop profile"], "category": "capture-movement", "audience": "everyday", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
+      { "name": "client claude-desktop install-helper", "aliases": ["claude-desktop install-helper"], "category": "capture-movement", "audience": "everyday", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
+      { "name": "client claude-desktop status", "aliases": ["claude-desktop status"], "category": "capture-movement", "audience": "everyday", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" },
+      { "name": "client claude-desktop install", "aliases": ["claude-desktop install"], "category": "capture-movement", "audience": "everyday", "summary": "Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt" },
+      { "name": "client claude-desktop verify", "aliases": ["claude-desktop verify"], "category": "capture-movement", "audience": "everyday", "summary": "Verify the Desktop plist install and print the in-app capture-check hint" }
     ],
     "config_sections": [
       {

@@ -116,7 +116,7 @@ test('a CA timeout degrades to the base-URL warning, not a failure', async () =>
     })
     assert.deepEqual(result, { waited: true, ready: false })
     assert.match(stderr.text(), /did not mint the proxy CA in time/)
-    assert.match(stderr.text(), /hyp attach <client>/)
+    assert.match(stderr.text(), /hyp client attach <client>/)
   })
 })
 

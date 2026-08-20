@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -139,7 +140,7 @@ export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
  * *return* on timeout rather than throwing. A timeout is not an error here for
  * the same reason it is not one there: the caller has a better answer than an
  * exception (attach's own endpoint-resolution ladder, which ends in the
- * `hyp daemon install` / `hyp start` guidance the give-up message names).
+ * `hyp daemon install` / `hyp daemon start` guidance the give-up message names).
  *
  * The probed fact is `resolveLiveGatewayEndpointFromStatus`, which is already
  * liveness-gated on the daemon pid, so a stale `status.json` left by the
@@ -361,11 +362,10 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
  * @ref LLP 0033#commands [implements]: `remote add` is a local-layer writer; URL in config, token never in config
  */
 export async function runRemoteAdd(argv, ctx) {
-  const [name, url] = positionals(argv)
-  if (!name || !url) {
-    ctx.stderr.write('usage: hyp remote add <name> <url>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('remote add', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.name)
+  const url = String(parsed.params.url)
   if (!/^https?:\/\//.test(url)) {
     ctx.stderr.write(`hyp remote add: url must be an http(s) URL (got ${url})\n`)
     return 2
@@ -448,19 +448,34 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     ctx.stderr.write('hyp remote login: --host expects a host label\n')
     return { exitCode: 2, reason: 'usage' }
   }
-  // The target name is the first positional. Skip the VALUE slot of a
-  // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
-  // as the target 'acme'.
+  // The strict gate runs after the three value-flag checks above so their
+  // flag-specific wording ("--org expects an org name") survives; what it
+  // adds is the refusal for everything neither they nor the readers below
+  // name, which used to be dropped in silence.
+  const gate = parseCoreCommandArgv('remote login', argv, ctx)
+  // `code: 0` is the help path, which printed usage and signed nobody in, so
+  // it gets its own reason: 'ok' would tell a LoginOutcome reader the sign-in
+  // succeeded (LLP 0179#outcome), and the wizard branches on that.
+  if (!gate.ok) {
+    if (gate.code === 0) return { exitCode: 0, reason: 'help' }
+    return { exitCode: gate.code, reason: 'usage' }
+  }
+  // Read the target and the mode flags out of what the gate parsed, never out
+  // of argv. The codec also accepts the `--flag=true` form for a boolean, so
+  // `argv.includes('--no-forward')` was false for `--no-forward=true`: a token
+  // the gate had just blessed, dropped in silence, and the machine enrolled
+  // for fleet forwarding against an explicit opt-out. Same class the `report`
+  // group closed for `--json` and `--yes`.
   // A bare `hyp remote login` (no target) signs in to the default target: an
   // explicit query.default_remote, else the shipped built-in central server.
   // @ref LLP 0062#bare-remote [implements]: bare `remote login` resolves the default target, the companion of bare `--remote`
-  const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0] ?? effectiveDefaultRemote(ctx.config)
-  const forceBrowser = argv.includes('--browser')
-  const noBrowser = argv.includes('--no-browser')
+  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const forceBrowser = gate.params.browser === true
+  const noBrowser = gate.params['no-browser'] === true
   // Enrollment opt-outs (LLP 0063): --no-forward signs in for queries only;
   // --no-daemon provisions the sink but leaves the service install by hand.
-  const noForward = argv.includes('--no-forward')
-  const noDaemon = argv.includes('--no-daemon')
+  const noForward = gate.params['no-forward'] === true
+  const noDaemon = gate.params['no-daemon'] === true
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
@@ -857,7 +872,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     if (attached.length > 0) {
       ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
     } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
+      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -964,7 +979,9 @@ function explainLoginError(callbackError, err) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('remote list', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const remotes = await readConfiguredRemotes(ctx)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const stored = await readCredentials(stateDir)
@@ -1001,11 +1018,9 @@ export async function runRemoteList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteRemove(argv, ctx) {
-  const name = positionals(argv)[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote remove <name>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('remote remove', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const name = String(parsed.params.name)
   let removedConfig = false
   const configPath = localConfigPath(ctx)
   try {
@@ -1109,5 +1124,4 @@ async function readLocalConfigRaw(configPath) {
     throw new Error(`local config is not valid JSON: ${configPath}`)
   }
 }
-
 

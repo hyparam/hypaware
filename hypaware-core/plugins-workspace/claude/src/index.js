@@ -12,7 +12,7 @@ import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath } from './settings.js'
+import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
@@ -192,30 +192,31 @@ export async function activate(ctx) {
             config: ctx.config,
           })
           const spoolDir = claudeBodySpoolDir(obsEnv.hypHome)
-          if (attachCtx.dryRun) {
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', false)
-            writeAttachOutput(attachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: true,
-              settingsPath,
-              port: safeEndpointPort(attachCtx.endpoint),
-              changed: false,
-              prevValue: undefined,
-              mode: MODE_OTEL,
-              telemetryPort,
-              spoolDir,
-            })
-            return
-          }
-          const port = endpointPort(attachCtx.endpoint)
           try {
-            // The floor check itself lives in attach(): it refuses before any
-            // I/O, so a too-old Claude Code leaves the settings byte-identical,
-            // a proxy attach it would otherwise have migrated included.
+            // The read-only preflight runs for dry-run too, so the plan cannot
+            // promise a switch the write path refuses. It happens before any
+            // settings I/O, leaving an existing proxy attach byte-identical.
             // @ref LLP 0258#version-floor [implements]: the probed version is what attach refuses on; unknown proceeds
             const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
+            preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
+            if (attachCtx.dryRun) {
+              span.setAttribute('status', 'ok')
+              span.setAttribute('restored', false)
+              writeAttachOutput(attachCtx, {
+                status: 'ok',
+                client: CLIENT_NAME,
+                dryRun: true,
+                settingsPath,
+                port: safeEndpointPort(attachCtx.endpoint),
+                changed: false,
+                prevValue: undefined,
+                mode: MODE_OTEL,
+                telemetryPort,
+                spoolDir,
+              })
+              return
+            }
+            const port = endpointPort(attachCtx.endpoint)
 
             // The base URL is never written and no proxy keys appear, which is
             // what keeps Remote Control's first-party predicate true with no
@@ -232,6 +233,14 @@ export async function activate(ctx) {
               telemetryPort,
               spoolDir,
               claudeVersion,
+              // The half of the per-signal override check that can only be
+              // made here. A leftover OTEL_EXPORTER_OTLP_LOGS_ENDPOINT lives in
+              // the user's shell, never in the settings file attach writes, and
+              // it outranks the endpoint this attach is about to write - which
+              // is total, silent capture loss with every surface reporting
+              // healthy. Read to warn; never unset, never shadowed.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              processEnv: ctx.env,
             })
             // After the settings write, not before: a floor refusal must leave
             // nothing behind, and Claude Code only starts writing bodies once a
@@ -242,7 +251,7 @@ export async function activate(ctx) {
             // landed: an unwritable spool root would otherwise report the whole
             // attach as failed while the client is in fact attached, and would
             // swallow the migration notes below - including the line naming
-            // `hyp detach claude --purge` for the CA a migrated machine still
+            // `hyp client detach claude --purge` for the CA a migrated machine still
             // carries. A warning names the one thing that did not happen.
             // @ref LLP 0253#spool-location [implements]
             /** @type {string | undefined} */
@@ -281,7 +290,7 @@ export async function activate(ctx) {
             // settings file. The launchd environment is unwound here; the CA
             // trust is OFFERED, never taken: it carries the once-per-machine
             // password-dialog grant, other clients may still proxy through the
-            // gateway, and ending the grant is `hyp detach --purge`'s job.
+            // gateway, and ending the grant is `hyp client detach --purge`'s job.
             // @ref LLP 0262#migration [implements]: release the proxy keys, unwind the launchd env, offer detach --purge, write the OTEL block
             const migratedFrom = result.changed && result.priorMode === MODE_PROXY
               ? MODE_PROXY
@@ -312,7 +321,7 @@ export async function activate(ctx) {
                   ? 'The HypAware Local CA, and any login-keychain trust it was granted, ' +
                     'is still in place. '
                   : 'The HypAware local CA is still on disk. ') +
-                "Run 'hyp detach claude --purge' to remove it (then 'hyp attach claude' " +
+                "Run 'hyp client detach claude --purge' to remove it (then 'hyp client attach claude' " +
                 'to keep capturing); it is never removed without you asking.'
               )
               span.setAttribute('migrated_from', migratedFrom)
@@ -497,7 +506,7 @@ function firstNonEmpty(...values) {
 }
 
 /**
- * `hyp init claude-and-otel-local`
+ * `hyp setup claude-and-otel-local`
  *
  * Writes a v2 config that picks: `@hypaware/ai-gateway`,
  * `@hypaware/otel`, `@hypaware/local-fs`+`@hypaware/format-parquet`,
@@ -522,7 +531,7 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     try {
       await fs.access(configPath)
       ctx.stderr.write(
-        `hyp init: config already exists at ${configPath} (pass --force to overwrite)\n`
+        `hyp setup: config already exists at ${configPath} (pass --force to overwrite)\n`
       )
       return 1
     } catch (err) {
@@ -542,17 +551,17 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       {
         name: '@hypaware/ai-gateway',
         config: {
-          // Literal because this preset writes its config literally: the
-          // picker fold writes the same key from `gateway_proxy_mode`.
-          // @ref LLP 0243#composed-default [implements]: the preset install defaults to proxy attach too
-          proxy_mode: true,
-          upstreams: [
-            {
-              name: 'anthropic',
-              base_url: 'https://api.anthropic.com',
-              path_prefix: '/',
-            },
-          ],
+          // No `proxy_mode`: this preset writes literally what the picker fold
+          // composes, and the claude row stopped declaring
+          // `gateway_proxy_mode` when its attach became otel-only. Writing the
+          // key here would mint a CA on first boot that nothing in this
+          // install ever presents, and hand `hyp status` a proxy-trust block
+          // reporting keychain and launchd state no attach on this machine
+          // can ever change.
+          // Claude still requires the gateway capability as its normalized
+          // exchange writer, but OTEL sends no model traffic through it.
+          // @ref LLP 0262#capture [implements]: OTEL is the producer and the gateway capability remains the projection seam
+          upstreams: [],
         },
       },
       {
@@ -561,11 +570,8 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      {
-        name: '@hypaware/claude',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
-      // The graph pair rides the gateway in `hyp init`'s picker fold
+      { name: '@hypaware/claude' },
+      // The graph pair rides the gateway in `hyp setup`'s picker fold
       // (`compose_with`). This preset writes its plugin list literally, so
       // it has to name them itself: without this the preset ships a brand
       // new config with no `node` / `edge`, while `hypaware-query` tells the
@@ -595,7 +601,7 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
   await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
   ctx.stdout.write(`✓ Wrote ${configPath}\n`)
   ctx.stdout.write('  plugins: @hypaware/ai-gateway, @hypaware/otel, @hypaware/local-fs, @hypaware/format-parquet, @hypaware/claude\n')
-  ctx.stdout.write('  next: hyp attach --client claude\n')
+  ctx.stdout.write('  next: hyp client attach claude\n')
   return 0
 }
 
@@ -644,7 +650,7 @@ function safeEndpointPort(endpoint) {
 }
 
 /**
- * Unwind the launchd-environment half of a proxy attach when `hyp attach
+ * Unwind the launchd-environment half of a proxy attach when `hyp client attach
  * claude` migrates the machine to `otel` mode.
  *
  * Mirrors the detach undo's release (`releaseProxyModeLaunchdEnv` in
@@ -779,7 +785,7 @@ function writeAttachOutput(attachCtx, fields) {
   }
   // The migration story, told where the user is looking: what the switch
   // released, what was unwound, and the one residue that is theirs to end
-  // (the CA trust, offered as `hyp detach claude --purge`, never run for
+  // (the CA trust, offered as `hyp client detach claude --purge`, never run for
   // them).
   // @ref LLP 0262#migration [implements]: the offer is a printed step, not an action
   for (const note of fields.migrationNotes ?? []) {
@@ -802,4 +808,3 @@ function takenOverKey(mode) {
   if (mode === MODE_OTEL) return 'OTEL_EXPORTER_OTLP_ENDPOINT'
   return 'ANTHROPIC_BASE_URL'
 }
-

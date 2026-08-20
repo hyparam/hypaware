@@ -30,7 +30,7 @@ function env(hypHome) {
   return { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
 }
 
-test('an enabled claude-desktop with no attach marker warns, naming hyp claude-desktop install', async () => {
+test('an enabled claude-desktop with no attach marker warns, naming the canonical client setup command', async () => {
   const hypHome = await makeHome()
   // The exact converging state a declined setup leaves behind (LLP 0139
   // Consequences): the composed plugins stay in the config, with no plist
@@ -55,8 +55,8 @@ test('an enabled claude-desktop with no attach marker warns, naming hyp claude-d
   // The repair is the row's own configure_command, not `hyp attach`: the
   // plugin registers no runtime adapter, so the generic repair would answer
   // `unknown client`.
-  assert.deepEqual(found.repair, ['hyp claude-desktop install'])
-  assert.match(found.message, /run 'hyp claude-desktop install'/)
+  assert.deepEqual(found.repair, ['hyp client claude-desktop install'])
+  assert.match(found.message, /run 'hyp client claude-desktop install'/)
 })
 
 test('with claude-desktop not in the config, no such warning fires', async () => {

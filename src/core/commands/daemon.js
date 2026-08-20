@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from 'node:path'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
@@ -122,7 +123,9 @@ function entryList(value) {
  * @param {CommandRunContext} ctx
  */
 export async function runDaemonStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('daemon status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const { readStatusFile } = await import('../daemon/status.js')
   const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -191,10 +194,12 @@ export async function runDaemonStatus(argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runDaemonStop(_argv, ctx) {
+export async function runDaemonStop(argv, ctx) {
+  const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { requestDaemonStop } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const outcome = await requestDaemonStop({ stateRoot: stateDir })
@@ -218,10 +223,12 @@ export async function runDaemonStop(_argv, ctx) {
  * otherwise fall back to a stop + operator-relaunch hint for the
  * foreground path.
  *
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runDaemonRestart(_argv, ctx) {
+export async function runDaemonRestart(argv, ctx) {
+  const parsed = parseCoreCommandArgv('daemon restart', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
   const homeDir = ctx.env.HOME
   const status = await serviceDaemonStatus({ homeDir })
@@ -333,14 +340,8 @@ export async function runDaemonInstall(argv, ctx) {
  * @ref LLP 0206#d1 [implements]: uninstall reaches down to level 1 so it cannot leave clients pointed at a dead port
  */
 export async function runDaemonUninstall(argv, ctx, deps = {}) {
-  for (const token of argv) {
-    if (token === '--help' || token === '-h') {
-      ctx.stdout.write('usage: hyp daemon uninstall\n')
-      return 0
-    }
-    ctx.stderr.write(`hyp daemon uninstall: unexpected argument '${token}'\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('daemon uninstall', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
   const { detachAllClientsFromDisk } = await import('./clients.js')
   const homeDir = ctx.env.HOME
@@ -362,7 +363,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)
-    ctx.stderr.write("  the service is gone; run 'hyp detach <client>' for each attached client by hand\n")
+    ctx.stderr.write("  the service is gone; run 'hyp client detach <client>' for each attached client by hand\n")
     return 1
   }
   for (const client of sweep.detached) {
@@ -384,7 +385,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   }
   for (const failure of sweep.failed) {
     ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
-    ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
+    ctx.stderr.write(`  run 'hyp client detach ${failure.name}' to finish reversing it\n`)
   }
   if (sweep.failed.length > 0) {
     // Exit 1 here means the sweep, not the teardown: without this line a
@@ -402,14 +403,8 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
  * @param {CommandRunContext} ctx
  */
 export async function runDaemonStart(argv, ctx) {
-  for (const token of argv) {
-    if (token === '--help' || token === '-h') {
-      ctx.stdout.write('usage: hyp daemon start\n')
-      return 0
-    }
-    ctx.stderr.write(`hyp daemon start: unexpected argument '${token}'\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('daemon start', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { startServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
   const homeDir = ctx.env.HOME
   const status = await serviceDaemonStatus({ ...(homeDir !== undefined ? { homeDir } : {}) })

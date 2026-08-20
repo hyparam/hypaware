@@ -28,6 +28,14 @@ export interface ClaudeTelemetryEvent {
   sequence?: number
   /** Every attribute on the record, unwrapped. */
   attributes: Record<string, unknown>
+  /**
+   * The OTLP resource attributes of the export this event arrived in,
+   * unwrapped. Present only when the resource carried any. Kept separate from
+   * `attributes` because it describes the exporting process, not the event:
+   * `claude_telemetry_events` rows stay per-event, and the projector reads it
+   * only for facts Claude Code reports once per export (`service.version`).
+   */
+  resource?: Record<string, unknown>
 }
 
 /**
@@ -41,8 +49,20 @@ export interface ClaudeTelemetrySessionFacts {
   userId?: string
   organizationId?: string
   terminalType?: string
+  /**
+   * The main loop's `query_source`, kept only as the default for messages in
+   * the same batch that carry none of their own. Per-request attribution
+   * (`query_source`, `agent.name`) belongs on the message: a Task subagent
+   * shares its parent's session id, so a session-level value would stamp its
+   * whole batch. Read only off events a subagent did not emit; these facts
+   * live for one POST and are not carried between batches.
+   */
   querySource?: string
-  agentName?: string
+  /**
+   * The main loop's model, on the same terms as `querySource`: an assistant
+   * message carries its own, so this is the exchange-level fallback for the
+   * rows that do not.
+   */
   model?: string
   startedAt?: string
   /**
@@ -218,11 +238,15 @@ export interface ClaudeAttachOptions {
    * host). `base_url` is the original mechanism, repointing
    * `ANTHROPIC_BASE_URL` at the local gateway. Defaults to `base_url` so a
    * caller that has not been taught about proxy mode cannot acquire it by
-   * accident. See LLP 0231.
+   * accident.
    *
    * `otel` writes neither routing key: it turns on Claude Code's own telemetry
    * export, so the client talks to Anthropic directly and reports to the local
    * listener. See LLP 0258.
+   *
+   * @ref LLP 0231#decision [implements]: `proxy` is the RFC's accepted
+   * narrowed-aperture transport, and the RFC is where "why a second transport
+   * at all, and what it costs" lives rather than in any one spawned decision
    */
   mode?: 'proxy' | 'base_url' | 'otel'
   /**
@@ -251,6 +275,14 @@ export interface ClaudeAttachOptions {
    * version is not a refusal, so `undefined` proceeds.
    */
   claudeVersion?: string
+  /**
+   * The environment the attach itself is running in, injected rather than read
+   * off `process`. Inspected for per-signal OTLP keys that outrank the endpoint
+   * `otel` mode writes, which is where those keys really come from: a shell
+   * profile or a launchd variable, not this settings file. Read only, and only
+   * to warn - see LLP 0271. Omitting it silently skips that half of the check.
+   */
+  processEnv?: Record<string, unknown>
 }
 
 export interface ClaudeAttachChanged {
@@ -276,7 +308,7 @@ export interface ClaudeAttachChanged {
    * up into the marker's `prev_malformed` and keeps succeeding (LLP 0163), so
    * this is the only thing that tells the user a hand-edit was moved aside.
    *
-   * A list, not a joined string: attach's callers render it (`hyp attach`
+   * A list, not a joined string: attach's callers render it (`hyp client attach`
    * prints a line each, `--json` echoes the array) and there is no reason to
    * hand them a field they would have to split. Omitted when nothing was
    * displaced, including on a re-attach whose backup was carried over from an

@@ -112,6 +112,11 @@ same reason. When it lands it consults the same `candidatesHiddenIds`
 answer this doc mints, so the two branches keep agreeing rather than
 disagreeing about one fact. Nothing else about LLP 0281 is affected.
 
+It has since landed (PR #925, `d1f13959`), and the merge did exactly that:
+the org-row branch reads the same `hiddenCandidateSyncs` boolean, so a
+hidden pick the store withholds leaves the exhaustive fleet sentence true
+on both branches. Done, not open.
+
 The lane's question is the store's answer, not the seam's. The seam
 withholds `optedOutClientSourceIds(entries)` *minus* the central-classified
 ids (`source_withhold.js`), so a standing entry for a source the org owns

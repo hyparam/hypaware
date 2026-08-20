@@ -46,6 +46,11 @@ export const TELEMETRY_EVENTS_SOURCE_SIGNAL = 'claude_telemetry'
  * @ref LLP 0255#row-shape [implements]: hot fields typed (event name, session
  *   id, tool name, decision, decision source, cost), attributes JSON for the
  *   rest
+ * @ref LLP 0070#derive [implements]: `cwd` is not ergonomics, it is the key
+ *   the export seam derives its withholding verdict from. A dataset that
+ *   forwards under a source signal and carries no `cwd` is one the
+ *   `local-only` filter can never fire on, so the column is a privacy
+ *   requirement here, not a query convenience.
  * @type {ReadonlyArray<ColumnSpec>}
  */
 export const CLAUDE_TELEMETRY_EVENT_COLUMNS = Object.freeze([
@@ -56,6 +61,7 @@ export const CLAUDE_TELEMETRY_EVENT_COLUMNS = Object.freeze([
   { name: 'decision',        type: 'STRING',    nullable: true  },
   { name: 'source',          type: 'STRING',    nullable: true  },
   { name: 'cost_usd',        type: 'DOUBLE',    nullable: true  },
+  { name: 'cwd',             type: 'STRING',    nullable: true  },
   { name: 'attributes',      type: 'JSON',      nullable: true  },
 ])
 
@@ -81,27 +87,39 @@ export function claudeTelemetryTablePath(storage) {
  * names this listener has never seen: an upstream event we do not model
  * still lands with its attributes, rather than being discarded.
  *
+ * `cwdFor` resolves a session id to the directory the SessionStart hook
+ * recorded for it, the same lookup the ingest policy gate decided on. It is
+ * required rather than optional: a caller that omits it writes rows with a
+ * null `cwd`, which both the export and query seams read as `full`, which is
+ * precisely the leak issue #878 was. Putting it in the signature puts that
+ * mistake in front of the type checker instead of leaving it silent. It may
+ * still answer `undefined` for a session it holds no record for; those events
+ * are withheld at ingest as undetermined, so the listener never reaches here
+ * with one.
+ *
  * @ref LLP 0257#failure-modes [implements]: an unrecognized event name is
  *   recorded with its attributes, not discarded
  * @param {ClaudeTelemetryEvent[]} events
+ * @param {{ cwdFor: (sessionId: string) => string | undefined }} opts
  * @returns {Record<string, unknown>[]}
  */
-export function claudeTelemetryEventRows(events) {
+export function claudeTelemetryEventRows(events, opts) {
   /** @type {Record<string, unknown>[]} */
   const rows = []
   for (const event of events) {
     if (CONTENT_EVENT_NAMES.includes(event.name)) continue
     if (BODY_EVENT_NAMES.includes(event.name)) continue
-    rows.push(rowFromEvent(event))
+    rows.push(rowFromEvent(event, opts.cwdFor))
   }
   return rows
 }
 
 /**
  * @param {ClaudeTelemetryEvent} event
+ * @param {(sessionId: string) => string | undefined} cwdFor
  * @returns {Record<string, unknown>}
  */
-function rowFromEvent(event) {
+function rowFromEvent(event, cwdFor) {
   const sessionId = stringOf(event.attributes['session.id'])
   const toolName = stringOf(event.attributes.tool_name)
   const decision = stringOf(event.attributes.decision)
@@ -129,6 +147,15 @@ function rowFromEvent(event) {
     attributes[key] = value
   }
 
+  // The cwd of the session this event names, from the hook record the ingest
+  // verdict was resolved against. An event naming no session resolves to null:
+  // there is no cwd to look up, and the export seam reads a null cwd as `full`
+  // (the same polarity `ai_gateway_messages` has always had).
+  // @ref LLP 0070#granularity [implements]: the withholding key is per row,
+  //   keyed on the row's own cwd, so a session that moves between a synced and
+  //   a local-only tree is filtered event by event rather than wholesale
+  const cwd = sessionId !== undefined ? stringOf(cwdFor(sessionId)) : undefined
+
   return {
     event_name: event.name,
     event_timestamp: event.timestamp ?? null,
@@ -137,6 +164,7 @@ function rowFromEvent(event) {
     decision: decision ?? null,
     source: source ?? null,
     cost_usd: costUsd ?? null,
+    cwd: cwd ?? null,
     attributes,
   }
 }
@@ -167,14 +195,17 @@ export function claudeTelemetryDatasetRegistration() {
     sourceSignal: TELEMETRY_EVENTS_SOURCE_SIGNAL,
     primaryTimestampColumn: 'event_timestamp',
     // No `localOnlyContentColumns`: that declaration is for derived
-    // tables whose unprovenanced rows may AGGREGATE local-only content
-    // (the LLP 0105 wrapper would then null `attributes` for every
-    // ordinary caller, since no row here carries a `cwd` to prove
-    // itself with). This dataset's privacy seam is ingest instead: an
-    // ignored session's events are dropped before any row is written
-    // (LLP 0254 #policy-inline), so the rows that exist are recordable
-    // by construction, the same argument the message dataset's
-    // cwd-less rows rest on.
+    // tables whose unprovenanced rows may AGGREGATE local-only content.
+    // These rows are not derived and they are not unprovenanced: every
+    // row a session names carries that session's `cwd`, so both the
+    // export seam (LLP 0070) and the query seam (LLP 0105) filter it
+    // per row, exactly as they filter `ai_gateway_messages`. Ingest
+    // covers the class above `local-only`: an ignored session's events
+    // are dropped before any row is written (LLP 0254 #policy-inline).
+    // @ref LLP 0105#graph-provenance [constrained-by]: content-column
+    //   suppression is the fallback for rows that cannot prove their
+    //   provenance; these prove it with `cwd`, so per-row withholding
+    //   applies instead and ordinary callers keep their attributes
     discoverPartitions: discoverParts,
     refreshPartition: async () => /** @type {DatasetRefreshResult} */ ({ status: 'skipped', rows: 0 }),
     createDataSource,

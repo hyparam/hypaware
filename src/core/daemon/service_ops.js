@@ -141,7 +141,8 @@ function serviceManagerSpawnRefusal(bin, args) {
  * killed and the promise rejects with {@link ServiceCommandTimeoutError};
  * `SIGKILL` rather than `SIGTERM` because the case worth bounding is a
  * process blocked on a GUI keychain prompt, which is exactly the state that
- * ignores a polite signal.
+ * ignores a polite signal. Only a bounded caller is ever killed, so that
+ * signal can never interrupt a half-applied mutation.
  *
  * @param {string} bin
  * @param {string[]} args
@@ -165,7 +166,15 @@ export function runServiceCommand(bin, args, opts = {}) {
     if (timeoutMs !== undefined) {
       timer = setTimeout(function() {
         timedOut = true
+        // Settle on the deadline itself, not on the kill's own `close`. A
+        // child that leaves a grandchild holding the inherited pipe never
+        // emits one, and waiting for it would reinstate the unbounded wait
+        // this timer exists to remove. Detaching the three handles is what
+        // lets the calling process exit while such a child winds down.
         proc.kill('SIGKILL')
+        proc.stdout.destroy()
+        proc.stderr.destroy()
+        proc.unref()
         reject(new ServiceCommandTimeoutError(
           `'${[bin, ...args].join(' ')}' did not finish within ${timeoutMs}ms and was killed`
         ))

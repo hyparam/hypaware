@@ -70,17 +70,17 @@ export const CLASSIFICATION_CHOICES = [
 ]
 
 /**
- * The `hyp policy set` argv that records `targetPath` as `cls` in the
+ * The `hyp privacy set` argv that records `targetPath` as `cls` in the
  * machine-local store (LLP 0111 #teaching, LLP 0103): `full` -> `sync`,
  * `local-only` -> `local-only`, `ignore` -> `ignore`. Returned as an argv
  * array (not a shell string) so a caller can dispatch it directly against the
- * same two-word `policy set` verb the human runs, which is exactly what the
- * "answer lands via the verbs" contract pins. The `policy set` verb has been
+ * same two-word `privacy set` verb the human runs, which is exactly what the
+ * "answer lands via the verbs" contract pins. The `privacy set` verb has been
  * registered since T2, so the hook never advertises a spelling the binary
  * lacks.
  *
  * @ref LLP 0106 [implements]: map a chosen class to the marking verb the hook dispatches
- * @ref LLP 0111#teaching [implements]: emit `policy set <path> <token>`, retiring the `hyp ignore --sync` misnomer
+ * @ref LLP 0111#teaching [implements]: emit the class-neutral marking verb, retiring the `hyp ignore --sync` misnomer
  * @param {UsageClass} cls
  * @param {string} targetPath absolute path of the folder to classify
  * @returns {string[]}
@@ -88,7 +88,8 @@ export const CLASSIFICATION_CHOICES = [
 export function verbArgvForClass(cls, targetPath) {
   const choice = CLASSIFICATION_CHOICES.find((c) => c.class === cls)
   if (!choice) throw new Error(`verbArgvForClass: unknown class ${String(cls)}`)
-  return ['policy', 'set', targetPath, choice.token]
+  // @ref LLP 0248#aliases [implements]: internal callers use the privacy journey while policy remains a compatibility alias
+  return ['privacy', 'set', targetPath, choice.token]
 }
 
 /**
@@ -120,7 +121,7 @@ export function buildClassificationPrompt({ cwd }) {
   ]
   for (const choice of CLASSIFICATION_CHOICES) {
     lines.push(`  - ${choice.label}: ${choice.blurb}`)
-    lines.push(`      hyp policy set ${cwd} ${choice.token}`)
+    lines.push(`      hyp privacy set ${cwd} ${choice.token}`)
   }
   lines.push('')
   lines.push('Present these three choices as a selection menu using your environment\'s')
@@ -134,8 +135,8 @@ export function buildClassificationPrompt({ cwd }) {
   // question at all learns the standing answer here rather than having to
   // find a setting (LLP 0200 #escape-hatch).
   lines.push('If the user does not want to be asked about folders at all, run')
-  lines.push('`hyp policy folders sync` instead: new folders then sync without asking,')
-  lines.push('and `hyp policy folders ask` brings the question back.')
+  lines.push('`hyp privacy folders sync` instead: new folders then sync without asking,')
+  lines.push('and `hyp privacy folders ask` brings the question back.')
   return lines.join('\n')
 }
 

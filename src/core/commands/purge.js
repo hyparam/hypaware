@@ -5,7 +5,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { askYesNo } from '../cli/confirm.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -211,7 +211,7 @@ export async function runPurge(argv, ctx) {
       `still record and will be re-imported by the next backfill:\n`
     )
     for (const dir of resurrectable) ctx.stderr.write(`  ${dir}\n`)
-    ctx.stderr.write("tip: mark them ignored first with 'hyp policy set <path> ignore' so the purge is durable\n")
+    ctx.stderr.write("tip: mark them ignored first with 'hyp privacy set <path> ignore' so the purge is durable\n")
   }
 
   return 0
@@ -281,7 +281,7 @@ function parseArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { ...base, error: USAGE }
   }

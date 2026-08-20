@@ -38,9 +38,13 @@ doing at each one:
    manages are already selected and locked; tools detected on your
    machine are pre-selected as well. A later step chooses which of your
    own additions sync to the server and which stay on this machine.
-3. **Complete any additional setup.** Some tools require one further step
-   (Claude Desktop, for example, requests your password and an application
-   restart). You may defer any of these; the remaining setup continues.
+3. **Complete any additional setup.** A tool whose adapter needs one more
+   step asks for it here, and you may defer any of them; the remaining setup
+   continues. No tool shipped today asks for one, so on a stock install this
+   step passes silently. Claude Desktop used to appear here and no longer
+   does: its setup needs a browser sign-in and your password for a
+   system-level file, so it is opt-in only, outside the wizard, via
+   `hyp client claude-desktop install`.
 
 <img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as managed by your fleet and a detected tool pre-checked.">
 

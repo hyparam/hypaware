@@ -1,7 +1,7 @@
 // @ts-check
 
 import { requireConfirmation } from '../cli/confirm.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
@@ -56,7 +56,7 @@ export async function runSync(argv, ctx) {
       },
       positional: ['instance'],
     },
-    { aliases: { '-y': '--yes' } }
+    { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } }
   )
   if ('help' in parsed) {
     ctx.stdout.write(`${USAGE}\n`)
@@ -381,7 +381,7 @@ function renderFirstSyncWarning(deadlineMs) {
     `  Your review window runs until ${formatFirstSyncDeadline(deadlineMs)}.\n` +
     '  Syncing now ends it early and sends your backfilled history.\n' +
     '  What has been sent cannot be un-sent. To exclude a folder first:\n' +
-    '    hyp policy set <path> local-only\n'
+    '    hyp privacy set <path> local-only\n'
   )
 }
 

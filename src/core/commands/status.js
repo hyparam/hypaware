@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -31,7 +32,9 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  * @returns {Promise<number>}
  */
 export async function runStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
 
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
@@ -107,6 +110,178 @@ export async function runStatus(argv, ctx) {
     },
     { component: 'status' }
   )
+}
+
+/**
+ * Narrow client projection of the same snapshot `hyp status` uses. This is
+ * intentionally not a second attach probe or config reader: adding another
+ * client surface must not create two answers to whether a client is attached.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0248#client-status [implements]: client status projects the overall status collector
+ */
+export async function runClientStatus(argv, ctx) {
+  const parsed = parseCoreCommandArgv('client status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
+
+  const report = await collectHypAwareStatus({
+    env: ctx.env,
+    runtime: {
+      sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
+      sinks: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
+      capabilities: ctx.capabilities,
+      query: ctx.query,
+      storage: ctx.storage,
+    },
+  })
+  const requested = typeof parsed.params.client === 'string' ? parsed.params.client : undefined
+  const clients = requested
+    ? report.clients.filter((client) => client.name === requested)
+    : report.clients
+  if (requested && clients.length === 0) {
+    ctx.stderr.write(`hyp client status: unknown client '${requested}'\n`)
+    return 1
+  }
+
+  const rows = projectClientStatus(report, clients)
+
+  if (json) {
+    ctx.stdout.write(JSON.stringify({ clients: rows }, null, 2) + '\n')
+    return 0
+  }
+  if (rows.length === 0) {
+    ctx.stdout.write('No clients are configured or detected.\n')
+    return 0
+  }
+  renderClientStatusText(rows, ctx.stdout)
+  return 0
+}
+
+/**
+ * Project client-focused facts out of the same status report used by
+ * `hyp status`. The projection reads listener details already persisted in the
+ * report's source snapshot and never probes settings, transcripts, or a live
+ * endpoint itself.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {HypAwareStatusReport['clients']} clients
+ * @ref LLP 0248#client-status [implements]: one overall snapshot supplies attach, endpoint, activity, and recorder-health facts
+ */
+export function projectClientStatus(report, clients) {
+  return clients.map((client) => {
+    const health = report.captureHealth.find((entry) => entry.client === client.name)
+    const listener = listenerEndpointFromReport(report, health?.source ?? null)
+    const clientTelemetryEndpoint = client.telemetryPort !== undefined
+      ? `http://127.0.0.1:${client.telemetryPort}`
+      : null
+    const endpointDrift = client.telemetryPort !== undefined && listener.port !== null
+      ? client.telemetryPort !== listener.port
+      : null
+
+    return {
+      name: client.name,
+      configured: client.configured,
+      attachable: client.attachable !== false,
+      attached: client.attached,
+      mode: client.mode ?? null,
+      provenance: report.layered
+        ? (report.layered.centralPlugins.includes(client.plugin) ? 'central' : 'local')
+        : 'local',
+      settings_path: client.settingsPath ?? null,
+      version: client.version ?? null,
+      port: client.port ?? null,
+      telemetry_endpoint: clientTelemetryEndpoint,
+      listener_endpoint: listener.endpoint,
+      endpoint_drift: endpointDrift,
+      capture_health: health
+        ? {
+          source: health.source,
+          last_event_at: health.lastEventAt,
+          last_transcript_activity_at: health.lastTranscriptActivityAt,
+          attached_at: health.attachedAt,
+          listener_started_at: health.listenerStartedAt,
+          gap_seconds: Math.round(health.gapMs / 1000),
+          state: health.state,
+        }
+        : null,
+      error: client.error ?? null,
+      recent_entrypoints: report.recentEntrypoints
+        .filter((entry) => entry.clientName === client.name)
+        .map((entry) => ({
+          entrypoint: entry.entrypoint,
+          last_seen: entry.lastSeen,
+          rows: entry.rows,
+        })),
+    }
+  })
+}
+
+/**
+ * @param {ReturnType<typeof projectClientStatus>} rows
+ * @param {{ write(chunk: string): unknown }} stdout
+ */
+export function renderClientStatusText(rows, stdout) {
+  stdout.write('Clients:\n')
+  for (const row of rows) {
+    const attach = row.attachable
+      ? row.attached
+        ? (row.mode ? `attached (${row.mode})` : 'attached')
+        : 'not attached'
+      : 'attach n/a'
+    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    if (row.telemetry_endpoint || row.listener_endpoint) {
+      const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
+      const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
+      const drift = row.endpoint_drift === true ? ' [endpoint drift]' : ''
+      stdout.write(`    telemetry: ${clientEndpoint} -> ${listenerEndpoint}${drift}\n`)
+    }
+    if (row.capture_health) {
+      const events = row.capture_health.last_event_at ?? 'none'
+      const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
+      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
+    }
+    if (row.error) stdout.write(`    error: ${row.error}\n`)
+    for (const entry of row.recent_entrypoints) {
+      stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
+    }
+  }
+}
+
+/**
+ * Where the recorder's listener is bound, read from the report's source
+ * snapshot.
+ *
+ * Liveness-gated, exactly like the `client_telemetry_stale` diagnostic in
+ * `hyp status` (src/core/daemon/status.js): "the listener is bound to X" is
+ * not a claim a dead daemon's persisted snapshot can support, and a restart
+ * is what moves an ephemeral port back. Without the gate, `hyp client status`
+ * boots with no plugins, falls back to the last `status.json`, and reports
+ * `[endpoint drift]` for a stopped daemon while `hyp status` correctly stays
+ * silent, so the two surfaces this projection exists to reconcile disagree.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {string | null} sourceName
+ * @returns {{ endpoint: string | null, port: number | null }}
+ * @ref LLP 0248#client-status [implements]: the projection reports what the overall status collector would report, drift gate included
+ */
+function listenerEndpointFromReport(report, sourceName) {
+  if (!sourceName) return { endpoint: null, port: null }
+  if (!report.daemon?.running) return { endpoint: null, port: null }
+  const source = report.sources.find((entry) => entry.name === sourceName)
+  if (!source?.details || typeof source.details !== 'object') return { endpoint: null, port: null }
+  const details = /** @type {Record<string, unknown>} */ (source.details)
+  const host = typeof details.listen_host === 'string' ? details.listen_host : null
+  const port = typeof details.listen_port === 'number' && Number.isInteger(details.listen_port)
+    ? details.listen_port
+    : null
+  return {
+    endpoint: host !== null && port !== null ? `http://${host}:${port}` : null,
+    port,
+  }
 }
 
 /**
@@ -338,6 +513,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
+        // Whether the CA is live or residue, which neither probe above can
+        // answer and which decides whether purging it is safe. Tri-state like
+        // its siblings: `null` means the config could not be read, which a
+        // consumer must not read as "proxy_mode is off".
+        proxy_mode_configured: report.proxyTrust.proxyModeConfigured,
       }
       : null,
     diagnostics: report.diagnostics.map((d) => ({
@@ -465,7 +645,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
       // A client with no attach probe has no attach state to report: printing
-      // `not attached` for it invites a `hyp attach` that is a documented
+      // `not attached` for it invites a `hyp client attach` that is a documented
       // no-op and can never change the line (#544). Where there is an attach,
       // the marker's mode rides the attached state (`attached (otel)`), so a
       // machine that just migrated modes is visibly on the new one from the
@@ -573,6 +753,48 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
+    // Three facts with no verb is what this block used to be, and since
+    // LLP 0262 the claude attach neither installs nor reads either mechanism,
+    // so nothing else on the machine names what acts on them. What the note
+    // may say depends on whether the CA is live: `proxy_mode: true` has the
+    // gateway re-mint and present it on every start, so a purge there is not
+    // tidying up, it is deleting the key the running interception terminates
+    // TLS with. Residue gets the purge; live proxy capture gets told what
+    // still depends on the CA and nothing to run; a config we could not read
+    // gets neither, because "cannot tell" is not "safe to delete".
+    //
+    // The live branch names no client: `proxy_mode` is retained for codex,
+    // claude-desktop, openclaw, hermes, and raw SDK traffic, so the client
+    // this CA is actually serving here is not knowable from the trust state.
+    // The residue branch has to name one, because `hyp client detach` takes a
+    // client; that command detaches it as well as purging, which the note
+    // states rather than leaving the user to discover it.
+    // @ref LLP 0262#migration [implements]: the CA and any trust it was granted outlive the migration and end at `detach --purge`, never at another attach
+    if (report.proxyTrust.proxyModeConfigured === null) {
+      stdout.write(
+        '    note:           the config could not be read, so whether this CA is live or residue is unknown\n'
+      )
+      stdout.write(
+        '                    fix the config first: purging a CA a proxy_mode gateway presents breaks capture\n'
+      )
+    } else if (report.proxyTrust.proxyModeConfigured) {
+      stdout.write(
+        '    note:           proxy_mode is on, so the gateway still terminates TLS with this CA\n'
+      )
+      stdout.write(
+        '                    the clients captured through the proxy need it; turn proxy_mode off before purging\n'
+      )
+    } else {
+      stdout.write(
+        '    note:           only proxy_mode capture uses this CA, and no plugin here is configured for it\n'
+      )
+      stdout.write(
+        "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
+      )
+      stdout.write(
+        '                    it detaches claude on the way, so re-attach it afterwards to keep capturing\n'
+      )
+    }
   }
 
   stdout.write(`  cache:           ${cacheRoot}\n`)
@@ -602,8 +824,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.layered?.hasCentral && report.usagePolicy) {
     stdout.write(
       report.usagePolicy.folderAsk === 'sync'
-        ? '  new folders:     sync without asking (`hyp policy folders ask` to be asked instead)\n'
-        : '  new folders:     asked about once each (`hyp policy folders sync` to stop asking)\n'
+        ? '  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)\n'
+        : '  new folders:     asked about once each (`hyp privacy folders sync` to stop asking)\n'
     )
   }
 
@@ -711,7 +933,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
         if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp attach ${a.requestKey}' after fixing the cause`
+        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
@@ -731,20 +953,23 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 }
 
 /**
- * The keychain half of the `proxy trust` block. An untrusted CA carries the
- * repair with it because the repair is one command and the state is otherwise
- * silent: capture keeps working, so nothing else in the report will ever
- * mention it (LLP 0237#attach-anyway-on-refusal). `null` is a probe that could
- * not run, which is a different answer from "not trusted" and says so.
+ * The keychain half of the `proxy trust` block. A bare state, with no repair
+ * attached: the repair used to be `hyp client attach claude`, and since LLP 0262 that
+ * attach writes an OTEL settings block and touches neither the keychain nor
+ * the launchd environment, so naming it would point the user at a command that
+ * cannot change this line. Nor does an untrusted CA break Remote Control any
+ * more: the OTEL attach repoints no base URL, so the inbound channel the trust
+ * grant existed for never meets the proxy. What does act on the CA is named
+ * once, by the block itself. `null` is a probe that could not run, which is a
+ * different answer from "not trusted" and says so.
  *
+ * @ref LLP 0262#requirements [constrained-by]: R6 - the base URL is never repointed, so Remote Control no longer rests on this trust
  * @param {boolean | null} trusted
  * @returns {string}
  */
 function describeCaTrust(trusted) {
   if (trusted === true) return 'trusted'
-  if (trusted === false) {
-    return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
-  }
+  if (trusted === false) return 'not trusted'
   return 'unknown - the keychain probe could not run'
 }
 
@@ -770,14 +995,16 @@ function describePermittedHosts(hosts) {
 }
 
 /**
- * The launchd half of the `proxy trust` block. Same tri-state, same reason.
+ * The launchd half of the `proxy trust` block. Same tri-state, and the same
+ * reason for stating rather than prescribing: nothing sets `NODE_USE_SYSTEM_CA`
+ * on this machine any more, so an unset variable has no repair to carry.
  *
  * @param {boolean | null} set
  * @returns {string}
  */
 function describeLaunchdEnv(set) {
   if (set === true) return `${ENV_VAR_NAME}=1 set`
-  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp attach claude\` to set it`
+  if (set === false) return `${ENV_VAR_NAME} not set`
   return 'unknown - the launchctl probe could not run'
 }
 

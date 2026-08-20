@@ -588,14 +588,13 @@ export interface FirstAskLauncher {
 }
 
 /**
- * What the first ask did. Every `launched: false` value is a normal
- * outcome, never a failed install (LLP 0198#real-launch): `no-launcher`
- * when nothing picked resolves on `$PATH`, `not-interactive` on a piped
+ * What the explicit first ask did. Every `launched: false` value is a
+ * contained command outcome (LLP 0198#real-launch): `no-launcher`
+ * when no attached client resolves on `$PATH`, `not-interactive` on a piped
  * stream, `declined` on "Not now" or a cancelled prompt, `spawn-failed`
  * when the binary resolved but would not start, `no-rows` when the cache
  * has nothing for the questions to be about (LLP 0198#empty-cache),
- * `error` for anything unforeseen. All six print the question list
- * instead.
+ * `error` for anything unforeseen. All six print the question list instead.
  */
 export type FirstAskResult =
   | { launched: true; client: string; promptId: string; exitCode?: number }
@@ -639,7 +638,7 @@ export interface RunWizardSyncNowOptions {
 
 /** Options for `runWizardFirstAsk`. */
 export interface RunWizardFirstAskOptions {
-  /** Picked client names, from the pick phase (LLP 0180 derivation). */
+  /** Attached client names eligible for an explicit `hyp ask` launch. */
   clients: string[]
   descriptors: Map<string, ClientDescriptor>
   stdout: { write(chunk: string): unknown }
@@ -655,7 +654,6 @@ export interface RunWizardFirstAskOptions {
    */
   hasRows?: boolean
   /** Working directory the client is started in; defaults to the caller's. */
-  cwd?: string
   stdin?: NodeJS.ReadableStream
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
@@ -720,12 +718,6 @@ export interface RunInitWizardOptions {
    * would otherwise have to wait out the real one.
    */
   firstLookBudgetMs?: number
-  /**
-   * Overrides for the closing first ask (tests): the PATH resolver, the
-   * spawn seam, the select seam. Production callers pass none, and the
-   * step is attended-only like the first look.
-   */
-  firstAsk?: Partial<RunWizardFirstAskOptions>
   /**
    * Overrides for the closing sync offer (tests): the confirm seam, the
    * spawn seam, the hold re-read. Production callers pass none, and the

@@ -120,7 +120,7 @@ export async function run({ harness, expect }) {
       ],
     })
 
-    // The otel attach marker a real `hyp attach --client claude` writes,
+    // The otel attach marker a real `hyp client attach claude` writes,
     // stubbed the way status_diagnostics stubs the base-URL one so the
     // assertions focus on the health surface rather than adapter effects.
     const attachedAt = new Date(now - 6 * HOUR).toISOString()
@@ -220,7 +220,7 @@ export async function run({ harness, expect }) {
       'gap json: the diagnostic carries a repair hint',
       gapDiag?.repair,
       (v) => Array.isArray(v) && v.length > 0 && v.some(
-        (/** @type {any} */ r) => typeof r === 'string' && r.includes('hyp attach --client claude')
+        (/** @type {any} */ r) => typeof r === 'string' && r.includes('hyp client attach claude')
       )
     )
     expect.that(

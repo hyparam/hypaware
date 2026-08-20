@@ -190,6 +190,26 @@ export interface StartedProxy {
 export type RegisteredProjector = AiGatewayExchangeProjector & { _seq: number }
 
 /**
+ * Per-thread `previous_message_id` bookkeeping inside an ai-gateway
+ * conversation state: which message ids this thread has already chained,
+ * the current tail new messages link to, and the links owed to messages a
+ * rolled-back exchange left buried under a later one (issue #879).
+ */
+export interface ThreadChain {
+  seen: Set<string>
+  last: string | undefined
+  /**
+   * message id -> the `previous_message_id` array the message was FIRST
+   * projected with. Written only when a rollback cannot restore the tail
+   * (another exchange has chained past it), read by the re-projection that
+   * rebuilds the row the failed append never wrote. Entries are kept rather
+   * than consumed so a second failed attempt still replays the same link;
+   * they are bounded by `seen`, which is already per-message.
+   */
+  replayLinks: Map<string, string[]>
+}
+
+/**
  * Mutable state owned by the ai-gateway plugin instance. Both the
  * `AiGatewayCapability` facade (what adapter plugins see) and the running
  * source read from this object: the API mutates it via `register*` calls,
@@ -272,6 +292,23 @@ export interface SessionMutationOutcome {
 }
 
 /**
+ * One recorder's answer for `hyp session status`. Every live recorder that
+ * advertises the shared control route is queried before the command claims
+ * the session is protected. A failed read remains `unknown`; it never turns
+ * into `not_ignored`.
+ */
+export interface SessionStatusOutcome {
+  recorder: string
+  endpoint: string
+  endpoint_source: 'daemon_status' | 'config_listen'
+  endpoint_authenticated: false
+  status: 'ignored' | 'not_ignored' | 'unknown'
+  ignored: boolean | null
+  total: number | null
+  reason: string | null
+}
+
+/**
  * What `hyp session status` reports, in `--json` field order. It carries the
  * PROVENANCE of both inputs alongside the answer (`session_id_source` /
  * `session_id_evidence`, `endpoint_source`) because an `ignored: true` rests on
@@ -313,6 +350,7 @@ export interface SessionStatusReport {
   endpoint: string | null
   endpoint_source: 'daemon_status' | 'config_listen' | null
   reason: string | null
+  recorders: SessionStatusOutcome[]
 }
 
 export interface AiGatewayRuntime {

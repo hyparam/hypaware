@@ -168,6 +168,7 @@ export type StatusDiagnosticKind =
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
+  | 'client_telemetry_env_override'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
@@ -395,12 +396,34 @@ export interface ProxyTrustReport {
   trusted: boolean | null
   /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
   launchdEnvSet: boolean | null
+  /**
+   * Whether an enabled gateway entry in the effective config still carries
+   * `proxy_mode: true`, or null when the config could not be read at all.
+   * The two probes above cannot tell a CA in live use from residue an old
+   * proxy attach left behind, and the advice differs completely: a
+   * proxy-mode gateway re-mints this CA on every start and terminates TLS
+   * with it, so purging it breaks capture rather than tidying it up. Null is
+   * "cannot tell", which a consumer must not read as "proxy_mode is off".
+   */
+  proxyModeConfigured: boolean | null
 }
 
 export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether anything on this machine records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to a config existing only
+   * because a writer that never asked one created it. True when the local
+   * layer records a pick answer, or when the central layer carries capture of
+   * its own (the fleet having answered on the machine's behalf); the bare
+   * `@hypaware/central` enrollment seed is not such an answer.
+   * `hyp remote add` and the enrolling `hyp remote login` before the first
+   * `hyp init` leave `configExists` true and this false; that pair is what the
+   * returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a

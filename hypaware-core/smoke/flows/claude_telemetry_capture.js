@@ -194,7 +194,7 @@ export async function run({ harness, expect }) {
             manifest: l.manifest,
             rootDir: l.rootDir,
             // Port 0: the smoke reads the bound port back off the source
-            // status, the same way `hyp attach claude` will.
+            // status, the same way `hyp client attach claude` will.
             config: /** @type {any} */ (l.manifest.name === '@hypaware/claude'
               ? { telemetry: { listen_host: '127.0.0.1', listen_port: 0, spool_max_bytes: spoolCapBytes } }
               : {}),
@@ -507,6 +507,7 @@ export async function run({ harness, expect }) {
         decision,
         source,
         cost_usd,
+        cwd,
         event_timestamp,
         JSON_VALUE(attributes, '$.from_mode') as from_mode,
         JSON_VALUE(attributes, '$.to_mode') as to_mode,
@@ -540,6 +541,15 @@ export async function run({ harness, expect }) {
         `events: the ${row.event_name} row carries the session id and a timestamp`,
         row,
         (v) => v.session_id === sessionId && typeof v.event_timestamp === 'string' && v.event_timestamp.length > 0,
+      )
+      // Without this the export seam has no key to withhold a local-only
+      // directory's behavioral rows on, and they forward to a fleet server.
+      // @ref LLP 0070#derive [tests]: every behavioral row carries the cwd its
+      //   ingest verdict was resolved from
+      expect.that(
+        `events: the ${row.event_name} row carries the cwd the hook recorded`,
+        row.cwd,
+        (v) => v === harness.tmpDir,
       )
     }
     const toolDecision = eventRows.find((/** @type {any} */ r) => r.event_name === 'tool_decision')
@@ -770,6 +780,18 @@ export async function run({ harness, expect }) {
       'events: the lines-of-code metric data point landed with its integer value',
       locRow,
       (v) => v !== undefined && Number(v.metric_value) === 42,
+    )
+    // The metrics branch is a second, separate `recordTelemetryEvents` call
+    // site, so the cwd stamp it depends on needs its own assertion: without
+    // one, dropping `records` from that branch leaves per-session cost and
+    // activity counters unstamped, and a null cwd reads `full` at both seams
+    // - issue #878 again, for the metrics half only, with the suite green.
+    // @ref LLP 0278#decision [tests]: the listener stamps cwd on every
+    //   behavioral row, metric data points included
+    expect.that(
+      'events: the metric data points carry the hook cwd too, not just the log events',
+      [costRow, locRow],
+      (v) => v.every((/** @type {any} */ r) => r !== undefined && r.cwd === harness.tmpDir),
     )
 
     const finalStatus = await /** @type {NonNullable<typeof started.status>} */ (started.status)()

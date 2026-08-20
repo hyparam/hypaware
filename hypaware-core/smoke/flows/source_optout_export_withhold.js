@@ -34,7 +34,7 @@ const COLUMNS = [
 
 /**
  * Hermetic smoke for LLP 0188: on an enrolled machine every source syncs by
- * default, a `hyp policy client <name> local-only` opt-out withholds that
+ * default, a `hyp privacy client <name> local-only` opt-out withholds that
  * source's FUTURE rows at the export seam (drop-but-advance), and flipping
  * back to sync never retroactively ships the rows withheld in between.
  * Drives the REAL central forward sink through the REAL sink driver, with
@@ -48,7 +48,7 @@ const COLUMNS = [
  *
  * @ref LLP 0188#rule [tests]: tick 1 ships BOTH clients' rows with nothing
  *   opted out - the default-sync reversal's headline assertion.
- * @ref LLP 0188#opt-out [tests]: after `hyp policy client openclaw
+ * @ref LLP 0188#opt-out [tests]: after `hyp privacy client openclaw
  *   local-only`, tick 2 ships only the other client's new rows; the live
  *   (TTL-fresh) store read needs no resolver rebuild.
  * @ref LLP 0188#no-retroactive-ship [tests]: flipping back to sync ships
@@ -248,14 +248,14 @@ export async function run({ harness, expect }) {
     await step('opt_out_cli', async () => {
       const stdout = makeBuf()
       const stderr = makeBuf()
-      const code = await dispatch(['policy', 'client', 'openclaw', 'local-only'], {
+      const code = await dispatch(['privacy', 'client', 'openclaw', 'local-only'], {
         stdout,
         stderr,
         kernel,
         registry,
         env: process.env,
       })
-      expect.that('cli: hyp policy client openclaw local-only exited 0', code, (v) => v === 0)
+      expect.that('cli: hyp privacy client openclaw local-only exited 0', code, (v) => v === 0)
       expect.that(
         'cli: the confirmation states future rows stay local',
         stdout.text(),
@@ -263,8 +263,8 @@ export async function run({ harness, expect }) {
       )
 
       const listOut = makeBuf()
-      await dispatch(['policy', 'client'], { stdout: listOut, stderr: makeBuf(), kernel, registry, env: process.env })
-      expect.that('cli: hyp policy client lists the opt-out', listOut.text(), (v) => v.includes('clients kept local-only: openclaw'))
+      await dispatch(['privacy', 'client'], { stdout: listOut, stderr: makeBuf(), kernel, registry, env: process.env })
+      expect.that('cli: hyp privacy client lists the opt-out', listOut.text(), (v) => v.includes('clients kept local-only: openclaw'))
     })
 
     // ----- smoke_step: withhold_tick (new openclaw rows dropped, hermes ships) -----
@@ -299,14 +299,14 @@ export async function run({ harness, expect }) {
     // ----- smoke_step: flip_back_tick (sync again: future-only, no history upload) -----
     await step('flip_back_tick', async () => {
       const stdout = makeBuf()
-      const code = await dispatch(['policy', 'client', 'openclaw', 'sync'], {
+      const code = await dispatch(['privacy', 'client', 'openclaw', 'sync'], {
         stdout,
         stderr: makeBuf(),
         kernel,
         registry,
         env: process.env,
       })
-      expect.that('cli: hyp policy client openclaw sync exited 0', code, (v) => v === 0)
+      expect.that('cli: hyp privacy client openclaw sync exited 0', code, (v) => v === 0)
       expect.that(
         'cli: the flip-back names the no-retroactive-ship property',
         stdout.text(),

@@ -24,6 +24,7 @@ export type PluginDiagnosticKind =
   | 'activate_threw'
   | 'contribution_not_registered'
   | 'contribution_undeclared'
+  | 'command_help_drift'
   | 'capability_unresolved'
   | 'capability_unprovided'
 
@@ -48,12 +49,43 @@ export interface DoctorReport {
   warnCount: number
 }
 
+/**
+ * One registered command, as the help system sees it. `commands` (names only)
+ * answers "was it registered"; the help checks also need to know what it says
+ * and whether help shows it at all.
+ */
+export interface RegisteredCommand {
+  name: string
+  summary: string
+  /** True when the registration sets `hidden`, keeping it out of every help listing. */
+  hidden: boolean
+}
+
+/**
+ * The snapshot buckets that are plain name lists, and so can be diffed against a
+ * `contributes.<category>` array. Names the keys rather than deriving them from
+ * `RegisteredSnapshot`, whose other fields carry richer shapes.
+ */
+export type NameListKey =
+  | 'sources'
+  | 'sinks'
+  | 'datasets'
+  | 'commands'
+  | 'skills'
+  | 'agents'
+  | 'init_presets'
+  | 'capabilities'
+
 /** Normalized snapshot of what a dry-run `activate()` actually registered. */
 export interface RegisteredSnapshot {
   sources: string[]
   sinks: string[]
   datasets: string[]
   commands: string[]
+  /** `commands`, with the fields the manifest also carries. Same order. */
+  commandDetails: RegisteredCommand[]
+  /** Group descriptions registered with `ctx.commands.registerGroup`. */
+  commandGroups: { name: string, summary?: string }[]
   skills: string[]
   agents: string[]
   init_presets: string[]

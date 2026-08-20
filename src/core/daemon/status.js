@@ -4,12 +4,17 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import {
+  isOtlpHeadersOverride,
+  otlpOverrideSignal,
+  perSignalOtlpOverrides,
+} from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
@@ -58,6 +63,17 @@ import {
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
+
+/**
+ * The plugin the enrollment seed names. `hyp join` and the enrolling
+ * `hyp remote login` write `plugins: [{ name: '@hypaware/central' }]` plus the
+ * central sink so the machine can reach its server; it records no capture
+ * choice, so a central layer naming only it has answered nothing. Only the
+ * catalog-less fallback in `collectHypAwareStatus` reads it: with a catalog the
+ * test is the positive one (does the layer name a capture plugin?), which
+ * excludes this and every other non-capture plugin.
+ */
+const CENTRAL_ENROLLMENT_PLUGIN = '@hypaware/central'
 
 /**
  * Path to the daemon status file. Written by the daemon at each
@@ -731,7 +747,7 @@ export function maintenanceSkipsFromStatus(status) {
  * running for this state root, no status file exists, or the gateway source
  * recorded no bound port.
  *
- * This is the discovery mechanism manual `hyp attach` uses on a default
+ * This is the discovery mechanism manual `hyp client attach` uses on a default
  * install: only the running daemon knows which port it actually bound (the
  * well-known default, its ephemeral fallback when that port was taken - LLP
  * 0114 - or a pre-0114 ephemeral bind), and the daemon persists it here
@@ -773,7 +789,7 @@ export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
  *
  * The generic sibling of the gateway resolver above, for sources that publish
  * `details.listen_port` (the OTLP receiver, the Claude telemetry listener).
- * The first consumer is `hyp attach claude` in `otel` mode: only the running
+ * The first consumer is `hyp client attach claude` in `otel` mode: only the running
  * daemon knows which port the listener actually bound (its configured default,
  * or the ephemeral fallback when that port was taken), so the endpoint attach
  * writes must come from here whenever a daemon is up.
@@ -941,6 +957,46 @@ export async function collectHypAwareStatus(opts = {}) {
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
 
+  // The stronger claim behind `configExists`: does anything on this machine
+  // record an *answer* to onboarding's pick question, or does the config merely
+  // exist because a writer that never asked one created it (`hyp remote add`
+  // and the enrolling `hyp remote login` before the first `hyp init`, the
+  // documented team order)?
+  //
+  // Each layer is read on its own terms, not off the merge. The local layer
+  // answers when it records a pick answer at all, the same discriminator the
+  // pick lane reads, so the two lanes cannot classify one file two ways. The
+  // central layer answers when it carries capture of its own: a machine whose
+  // fleet configured its sources is set up, the fleet having answered on its
+  // behalf (LLP 0129 #join-before-picker).
+  //
+  // "Carries capture" is a plugin-level test against the picker catalog - does
+  // the central layer name a plugin that contributes a picker row? - which is
+  // the same test `computeCentralLockedSources` uses to decide which rows the
+  // org owns, so the locked set and this claim cannot disagree. Naming a sink
+  // or format plugin is not an answer to the pick question: it configures where
+  // rows go, not whether any are recorded. Neither is `@hypaware/central` on
+  // its own - it is the enrollment seed `hyp remote login` and `hyp join`
+  // write to reach the server at all, and it is on disk before anyone has been
+  // asked anything. Without a catalog the question cannot be asked at all, so
+  // that case falls back to the weaker plugin-name reading, which keeps a
+  // managed machine on the returning path: re-opening onboarding's consent
+  // questions is the direction that costs the user something (LLP 0183).
+  //
+  // The merged config cannot express either half: it hides the enrollment seed
+  // among the plugins, and it drops a local `plugins: []` whenever the merged
+  // list comes out empty (`mergeConfigLayers` only sets the key when it is
+  // non-empty), turning a deliberate record-nothing pick back into "no answer".
+  // @ref LLP 0281#returning-gate [implements]: the report carries the answer-keyed claim the returning gate needs, not only file existence
+  const capturePluginNames = catalog
+    ? new Set([...catalog.pickerDescriptors.values()].map((d) => d.plugin))
+    : null
+  const centralAnswersPick = [...centralPluginNames].some((name) => (
+    capturePluginNames ? capturePluginNames.has(name) : name !== CENTRAL_ENROLLMENT_PLUGIN
+  ))
+  const configRecordsAnswer =
+    (localConfig !== null && configRecordsPickAnswer(localConfig)) || centralAnswersPick
+
   // A local layer that is present but does not parse: `activePlugins` is then
   // empty (or central-only) because the file could not be read, not because
   // the operator disabled anything. Any diagnostic whose repair is "your
@@ -983,14 +1039,14 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'config_missing',
         message: `no config found - neither a central layer nor ${configPath}`,
-        repair: ['hyp init', 'hyp init --from-file <config.json>', 'hyp join <url> <token>'],
+        repair: ['hyp setup', 'hyp setup --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
       diagnostics.push({
         severity: 'error',
         kind: 'config_unreadable',
         message: localLoaded.message,
-        repair: ['hyp init --from-file <config.json>'],
+        repair: ['hyp setup --from-file <config.json>'],
       })
     }
   } else {
@@ -1001,7 +1057,7 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'config_local_unreadable',
         message: `local config layer is unreadable (${localLoaded.message}) - running on the central layer only`,
-        repair: ['hyp init --from-file <config.json> --force'],
+        repair: ['hyp setup --from-file <config.json> --force'],
       })
     }
     for (const err of validationErrors) {
@@ -1370,7 +1426,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // only alternative, which is no surface at all.
     // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
     if (configured && !probe.attached) {
-      // The repair is `hyp attach` only for a client whose plugin registers a
+      // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
       // adapter (claude-desktop: its plist is placed by an attended command
@@ -1380,7 +1436,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // plugin's picker row, which already declares it as `configure_command`.
       // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
       const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
-      const repair = configureCommand ? `hyp ${configureCommand}` : `hyp attach --client ${clientName}`
+      const repair = configureCommand ? `hyp ${configureCommand}` : `hyp client attach ${clientName}`
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
@@ -1390,6 +1446,18 @@ export async function collectHypAwareStatus(opts = {}) {
     } else if (
       configured &&
       probe.attached &&
+      // Gateway-routed modes only. An `otel` marker records the gateway port
+      // like every other marker does, but nothing that client sends goes
+      // there: it talks to Anthropic directly and exports telemetry to the
+      // listener instead. Comparing that recorded port against the live
+      // gateway made a routine rebind print "attached at port X, the gateway
+      // is now bound to Y - re-attach", a rebind that changes nothing about
+      // whether this client is captured, over a repair whose only real effect
+      // is to rewrite the telemetry env block. `client_telemetry_stale` below
+      // watches the port this mode actually depends on.
+      // @ref LLP 0257#status-and-health [constrained-by]: S17b - on the otel
+      //   path the endpoint that matters is the listener's, not the gateway's
+      probe.mode !== 'otel' &&
       liveGatewayPort !== undefined &&
       probe.port !== undefined &&
       probe.port !== liveGatewayPort
@@ -1403,8 +1471,8 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_stale',
-        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
-        repair: [`hyp attach --client ${clientName}`],
+        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp client attach ${clientName}' to re-point it`,
+        repair: [`hyp client attach ${clientName}`],
       })
     } else if (!configured && probe.attached && !hasCentral && !localConfigUnreadable) {
       // The mirror image of `client_attach_missing`: the marker is on disk but
@@ -1424,8 +1492,8 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attached_not_configured',
-        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp detach --client ${clientName}' to unhook it`,
-        repair: [`hyp detach --client ${clientName}`],
+        message: `${clientName} settings still point at the HypAware gateway but '${descriptor.plugin}' is not enabled - its requests are no longer collected and can fail; run 'hyp client detach ${clientName}' to unhook it`,
+        repair: [`hyp client detach ${clientName}`],
       })
     }
 
@@ -1487,10 +1555,99 @@ export async function collectHypAwareStatus(opts = {}) {
         diagnostics.push({
           severity: 'warning',
           kind: 'client_telemetry_stale',
-          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp attach --client ${clientName}' to re-point it`,
+          message: `${clientName} exports its telemetry to port ${probe.telemetryPort} but the listener is bound to port ${boundTelemetryPort} - nothing it sends is being captured, and whatever holds port ${probe.telemetryPort} is receiving it; run 'hyp client attach ${clientName}' to re-point it`,
           repair: [
-            `hyp attach --client ${clientName}`,
+            `hyp client attach ${clientName}`,
             `start a fresh ${clientName} session - the settings env applies at launch`,
+          ],
+        })
+      }
+      // ----- per-signal OTLP override in the environment -----
+      // The third leg beside the drift check above and the gap below. A
+      // per-signal OTLP key outranks the general endpoint attach wrote, so one
+      // variable left over in the user's shell - a profile, a launchd entry, a
+      // collector switched off months ago - takes every event elsewhere, or
+      // (exported empty, which still outranks) nowhere at all. Nothing else
+      // here can see it: the settings file stays byte-perfect, the listener is
+      // bound and started, and the body spool even keeps growing, because
+      // OTEL_LOG_RAW_API_BODIES is a file path that endpoint precedence cannot
+      // touch. `capture_gap` notices the resulting silence only after a
+      // threshold of transcript activity, and cannot name a cause.
+      //
+      // Read off the shell `hyp status` was run in, which is not necessarily
+      // the shell claude launches from - so a warning, non-degrading: a strong
+      // lead, not a proof. The key name is named; the value never is, being
+      // exactly where a collector credential lives.
+      // @ref LLP 0271#status-names-it-too [implements]
+      //
+      // Reported in two groups, because the list carries two hazards and one
+      // sentence cannot be true of both. A routing key (endpoint, protocol)
+      // stops the export arriving; a headers key routes nothing and its harm
+      // runs the other way, a collector credential attached to requests aimed
+      // at the loopback listener. Telling someone with an unrelated
+      // `OTEL_EXPORTER_OTLP_HEADERS` that nothing is captured would be the
+      // standing false alarm that teaches them to skip the real line.
+      const envOverrides = perSignalOtlpOverrides(/** @type {Record<string, unknown>} */ (env))
+      const routingOverrides = envOverrides.filter((key) => !isOtlpHeadersOverride(key))
+      const headerOverrides = envOverrides.filter(isOtlpHeadersOverride)
+      if (routingOverrides.length > 0) {
+        const names = routingOverrides.join(', ')
+        const many = routingOverrides.length > 1
+        const them = many ? 'them' : 'it'
+        // What is lost, named by signal. Attach turns on two exporters and a
+        // per-signal key only outranks its own: a shell exporting nothing but
+        // `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to a Prometheus collector - an
+        // ordinary setup - loses the token and cost counters while every
+        // prompt and response still reaches the listener. Telling that user on
+        // every `hyp status` run that none of their telemetry is captured is
+        // the same standing false alarm the headers split just below exists to
+        // avoid, one list entry over.
+        const signals = new Set(routingOverrides.map(otlpOverrideSignal))
+        const lost = signals.has('logs') && signals.has('metrics')
+          ? 'none of it is captured'
+          : signals.has('logs')
+            ? 'none of its log records are captured, the prompt and response text ' +
+              'this attach turns on included (its metrics are unaffected)'
+            : 'none of its token and cost metrics are captured (its log records, ' +
+              'and the prompt and response text with them, are unaffected)'
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_env_override',
+          message:
+            names + (many ? ' are' : ' is') + " set in this shell's environment and " +
+            (many ? 'outrank' : 'outranks') + ' the telemetry settings ' + clientName +
+            ' was attached with - a ' + clientName + ' session launched from a shell carrying ' +
+            them + ' sends that traffic somewhere else, or nowhere at all if the value is ' +
+            'empty, and ' + lost,
+          // One `unset` with space-separated names, not the comma-joined list
+          // in the message: `unset A, B` exits 0 in bash and unsets only `B`,
+          // so a comma here would hand the user a repair that reports success
+          // and leaves the key that is eating their capture still exported.
+          repair: [
+            'unset ' + routingOverrides.join(' ') +
+              '  # in the shell profile or launchd entry that exports ' + them,
+            'start a fresh ' + clientName + ' session from a shell without ' + them,
+          ],
+        })
+      }
+      if (headerOverrides.length > 0) {
+        const names = headerOverrides.join(', ')
+        const many = headerOverrides.length > 1
+        const them = many ? 'them' : 'it'
+        diagnostics.push({
+          severity: 'warning',
+          kind: 'client_telemetry_env_override',
+          message:
+            names + (many ? ' are' : ' is') + " set in this shell's environment, so a " +
+            clientName + ' session launched from a shell carrying ' + them +
+            ' sends ' + (many ? 'those headers' : 'that header') +
+            " on every OTLP request to hypaware's local listener - capture still works, but " +
+            'any collector credential in ' + (many ? 'those values' : 'that value') +
+            ' is handed to a listener that never asked for it',
+          repair: [
+            'unset ' + headerOverrides.join(' ') +
+              '  # in the shell profile or launchd entry that exports ' + them,
+            'start a fresh ' + clientName + ' session from a shell without ' + them,
           ],
         })
       }
@@ -1540,7 +1697,7 @@ export async function collectHypAwareStatus(opts = {}) {
           message,
           repair: [
             'hyp daemon restart  # the telemetry listener runs in the daemon',
-            `hyp attach --client ${clientName}  # rewrites the telemetry env block with the live listener port`,
+            `hyp client attach ${clientName}  # rewrites the telemetry env block with the live listener port`,
             `start a fresh ${clientName} session - the settings env applies at launch`,
           ],
         })
@@ -1710,6 +1867,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const proxyTrust = await collectProxyTrust({
     platform,
     stateRoot,
+    config,
     isCaTrustedFn: opts.isCaTrusted
       ?? ((args) => probeCaTrusted({ ...args, timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
     isLaunchdEnvSetFn: opts.isLaunchdEnvSet
@@ -1750,6 +1908,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configPath,
     configExists,
     configValid,
+    configRecordsAnswer,
     activePlugins,
     layered,
     daemon,
@@ -1799,12 +1958,19 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * "non-macOS platforms skip this entirely"), and with no CA on disk proxy
  * mode was never on, so there is nothing to be trusted or untrusted.
  *
- * The two probes shell out, so each is caught independently: a probe that
+ * The two probes shell out, so each is settled independently: a probe that
  * could not run reports `null` (unknown), never `false`, because "the
  * dialog was cancelled" and "`security` did not run" are different answers
- * and only the first is actionable. The fingerprint is computed locally from
- * the DER and is `[0-9A-F:]` by construction, and probe stderr is deliberately
- * not surfaced, so neither needs bounding.
+ * and only the first is actionable. "Did not run" covers one case a try/catch
+ * cannot reach on its own: a probe that never returns. Both probes therefore
+ * spawn on a deadline (`TRUST_PROBE_TIMEOUT_MS`) and reject when it passes,
+ * and they are started concurrently so the worst case is one deadline rather
+ * than the sum of both. An offline or captive-portal host, where macOS trust
+ * evaluation can sit on a revocation fetch indefinitely, then still gets a
+ * rendered report with these lines unknown instead of a `hyp status` that
+ * never prints. The fingerprint is computed locally from the DER and is
+ * `[0-9A-F:]` by construction, and probe stderr is deliberately not surfaced,
+ * so neither of those needs sanitizing.
  *
  * The permitted host set travels with the fingerprint because the grant is
  * wider than any one install uses: the CA is constrained to the whole static
@@ -1823,9 +1989,15 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * that names the same grant, and applied here at collection like every other
  * label in this file so `--json` carries exactly what was printed.
  *
+ * The effective config rides along because the CA alone cannot say whether
+ * it is live or residue: `proxy_mode: true` makes the gateway re-mint and
+ * present it on every start, and that is the difference between "this file
+ * is safe to purge" and "purging this file breaks the running interception".
+ *
  * @param {object} args
  * @param {NodeJS.Platform} args.platform
  * @param {string} args.stateRoot
+ * @param {HypAwareV2Config | null} args.config
  * @param {(args: { certPath: string }) => Promise<boolean>} args.isCaTrustedFn
  * @param {() => Promise<boolean>} args.isLaunchdEnvSetFn
  * @returns {Promise<ProxyTrustReport | null>}
@@ -1833,7 +2005,7 @@ const TRUST_PROBE_TIMEOUT_MS = 5_000
  * @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so a grant wider than the configured providers stays informed
  * @ref LLP 0239#terminals-predating-attach [implements]: hyp status reports whether the variable is present in the launchd environment
  */
-async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchdEnvSetFn }) {
+async function collectProxyTrust({ platform, stateRoot, config, isCaTrustedFn, isLaunchdEnvSetFn }) {
   if (platform !== 'darwin') return null
   /** @type {LocalCaInfo | undefined} */
   let ca
@@ -1844,23 +2016,46 @@ async function collectProxyTrust({ platform, stateRoot, isCaTrustedFn, isLaunchd
   }
   if (!ca) return null
 
+  // Started together, not one after the other: the two probes read
+  // unrelated system state (the login keychain, the launchd environment) and
+  // neither reads the other's answer, so serializing them only adds their
+  // deadlines. On the wedged host this bound exists for that is the
+  // difference between the report stalling for one probe timeout and for
+  // two. `allSettled` keeps the per-probe independence the catches gave: one
+  // rejection reports its own line unknown and leaves the other's answer.
+  const [trustedResult, launchdResult] = await Promise.allSettled([
+    isCaTrustedFn({ certPath: ca.certPath }),
+    isLaunchdEnvSetFn(),
+  ])
   /** @type {boolean | null} */
-  let trusted = null
-  try {
-    trusted = await isCaTrustedFn({ certPath: ca.certPath })
-  } catch {
-    trusted = null
-  }
-
+  const trusted = trustedResult.status === 'fulfilled' ? trustedResult.value : null
   /** @type {boolean | null} */
-  let launchdEnvSet = null
-  try {
-    launchdEnvSet = await isLaunchdEnvSetFn()
-  } catch {
-    launchdEnvSet = null
-  }
+  const launchdEnvSet = launchdResult.status === 'fulfilled' ? launchdResult.value : null
 
-  return { caFingerprint: ca.fingerprint, hosts: displayableCaHosts(ca.hosts), trusted, launchdEnvSet }
+  // Tri-state for the same reason the two probes above are: a plain `false`
+  // sends the caller's note to "this CA is residue, purge it", which is the
+  // wrong advice for a machine whose gateway is still intercepting. `config`
+  // is null when the local config would not parse and no central layer covers
+  // for it, and a config we could not read is not a config with `proxy_mode`
+  // off. A disabled gateway entry is skipped for the same reason
+  // `activePlugins` skips it: it is not what runs.
+  /** @type {boolean | null} */
+  const proxyModeConfigured = config === null
+    ? null
+    : (config.plugins ?? []).some(
+      (entry) =>
+        entry.name === GATEWAY_PLUGIN_NAME &&
+        entry.enabled !== false &&
+        entry.config?.proxy_mode === true
+    )
+
+  return {
+    caFingerprint: ca.fingerprint,
+    hosts: displayableCaHosts(ca.hosts),
+    trusted,
+    launchdEnvSet,
+    proxyModeConfigured,
+  }
 }
 
 /**
@@ -2535,14 +2730,13 @@ function repairForConfigError(kind) {
     case 'sink_plugin_unknown':
     case 'sink_schedule_invalid':
     case 'request_sink_invalid_keys':
-      return ['hyp init --from-file <config.json>']
+      return ['hyp setup --from-file <config.json>']
     case 'capability_ambiguous':
       return ['# Add a disambiguate.<capability> entry to your config']
     case 'duplicate_plugin':
     case 'plugin_unknown':
-      return ['hyp init --from-file <config.json>']
+      return ['hyp setup --from-file <config.json>']
     default:
       return []
   }
 }
-
