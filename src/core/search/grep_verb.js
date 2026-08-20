@@ -84,9 +84,15 @@ export const queryGrepVerb = {
   },
   async operation(params, ctx) {
     const rawLimit = params.limit
+    // Above the ceiling clamps to the ceiling the flag's own help text
+    // advertises; only an unusable value (absent, fractional, zero) falls
+    // back to the default. Falling back for "too large" too would answer a
+    // request for MORE rows with FEWER than the default, and then print
+    // "raise --limit" at a caller who just did - advice that cannot be
+    // followed is worse than a silently capped answer.
     const limit =
-      typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= MAX_LIMIT
-        ? rawLimit
+      typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1
+        ? Math.min(rawLimit, MAX_LIMIT)
         : DEFAULT_LIMIT
     return executeGrepSearch({
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
@@ -94,8 +100,8 @@ export const queryGrepVerb = {
       regex: params.regex === true,
       sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
       chainId: typeof params.chain_id === 'string' ? params.chain_id : undefined,
-      from: typeof params.from === 'string' ? params.from : undefined,
-      to: typeof params.to === 'string' ? params.to : undefined,
+      from: dayBound(params.from, 'from'),
+      to: dayBound(params.to, 'to'),
       limit,
       refresh: ctx.refresh,
       // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
@@ -139,31 +145,62 @@ export const queryGrepVerb = {
 }
 
 /**
+ * A `from`/`to` day bound, refused unless it is shaped `YYYY-MM-DD`.
+ * The window is compared lexicographically against the row's own day
+ * (and prunes whole files the same way), so `2026-8-1` sorts below every
+ * real day and returns an empty answer with nothing on stderr. The
+ * summary works hard to make "zero hits" mean something; a mistyped flag
+ * must not be able to forge one.
+ *
+ * @param {unknown} value
+ * @param {'from' | 'to'} flag
+ * @returns {string | undefined}
+ */
+function dayBound(value, flag) {
+  if (typeof value !== 'string') return undefined
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`--${flag} expects a day as YYYY-MM-DD (got ${value})`)
+  }
+  return value
+}
+
+/**
  * Flatten hits to one row per matched column for the shared formatter.
  * Locators ride every row so a reader can pivot any line straight into
  * `hyp query sql` (`part_id`) or `hyp query grep --session-id`.
+ *
+ * The snippet is last on purpose: it is the one unbounded cell (up to the
+ * `--max-cell` budget), and `renderTable` pads a column to its widest
+ * value only up to 80 columns without truncating the cell, so a snippet
+ * anywhere but the final position shoves every locator after it out of
+ * its column on exactly the rows a reader most wants to scan.
  *
  * @param {GrepSearchHit[]} hits
  * @returns {{ columns: string[], rows: Record<string, unknown>[] }}
  */
 function flattenHits(hits) {
-  const columns = ['date', 'session_id', 'column', 'snippet', 'message_id', 'part_id']
+  const columns = ['date', 'session_id', 'column', 'message_id', 'part_id', 'snippet']
   /** @type {Record<string, unknown>[]} */
   const rows = []
   for (const hit of hits) {
-    const base = {
+    // Keys are inserted in `columns` order: `--format json` serializes the
+    // row objects themselves, so insertion order IS the key order a
+    // pipeline reads, and a table and a json render of one answer should
+    // not disagree about where the snippet sits.
+    /** @param {string | null} column @param {string | null} snippet */
+    const row = (column, snippet) => ({
       date: hit.date,
       session_id: hit.sessionId,
+      column,
       message_id: hit.messageId,
       part_id: hit.partId,
-    }
+      snippet,
+    })
     if (!Array.isArray(hit.matches) || hit.matches.length === 0) {
-      rows.push({ ...base, column: null, snippet: null })
+      rows.push(row(null, null))
       continue
     }
-    for (const match of hit.matches) {
-      rows.push({ ...base, column: match.column, snippet: match.snippet })
-    }
+    for (const match of hit.matches) rows.push(row(match.column, match.snippet))
   }
   return { columns, rows }
 }

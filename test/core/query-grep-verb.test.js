@@ -164,11 +164,47 @@ test('the limit produces the truncation notice on stderr', async () => {
   assert.match(err.join(''), /more matches exist beyond the limit/)
 })
 
-test('an out-of-range limit falls back to the default instead of failing', async () => {
-  const { ctx, out } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+test('a limit above the ceiling clamps to it instead of dropping below the default', async () => {
+  // 60 rows: more than the default 50, so a fallback-to-default and a clamp
+  // to the ceiling are distinguishable. Falling back would answer a request
+  // for more rows with fewer, then advise raising a limit already at 9999.
+  const batch = []
+  for (let i = 0; i < 60; i += 1) batch.push(mkRow({ content_text: `needle ${i}` }))
+  const { ctx, out, err } = await makeCtx([batch])
   const code = await cmd.run(['needle', '--limit', '9999'], ctx)
   assert.equal(code, 0)
+  const rendered = out.join('')
+  assert.match(rendered, /needle 0\b/)
+  assert.equal(rendered.split('\n').filter((line) => /content_text/.test(line)).length, 60)
+  assert.equal(err.join(''), '', 'a clamped limit still covered every match, so nothing is truncated')
+})
+
+test('an unusable limit falls back to the default instead of failing', async () => {
+  const { ctx, out } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  const code = await cmd.run(['needle', '--limit', '0'], ctx)
+  assert.equal(code, 0)
   assert.match(out.join(''), /needle a/)
+})
+
+test('a malformed --from is refused rather than answering zero hits', async () => {
+  const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  // The window is compared lexicographically, so `2026-8-1` would prune
+  // every real day and render an empty, unexplained answer.
+  const code = await cmd.run(['needle', '--from', '2026-8-1'], ctx)
+  assert.notEqual(code, 0)
+  assert.match(err.join(''), /--from expects a day as YYYY-MM-DD \(got 2026-8-1\)/)
+  assert.equal(out.join(''), '')
+})
+
+test('the snippet renders last so a long match cannot shove the locators out of column', async () => {
+  const { ctx, out } = await makeCtx([
+    [mkRow({ content_text: `needle ${'x'.repeat(200)}` })],
+    [mkRow({ date: '2026-08-12', content_text: 'needle short' })],
+  ])
+  const code = await cmd.run(['needle', '--format', 'jsonl'], ctx)
+  assert.equal(code, 0)
+  const first = JSON.parse(out.join('').split('\n')[0])
+  assert.deepEqual(Object.keys(first), ['date', 'session_id', 'column', 'message_id', 'part_id', 'snippet'])
 })
 
 test('a render of a bare server-shaped result works without local fields', () => {
