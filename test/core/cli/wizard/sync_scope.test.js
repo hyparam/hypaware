@@ -570,12 +570,14 @@ test('zero visible candidates with an org row and no hidden pick: keeps the exha
   assert.doesNotMatch(stdout.text(), /also syncs to your server/)
 })
 
-// The org-row branch asks the store the same question its no-locked sibling
-// does (LLP 0289 #not-done): a hidden pick the store already withholds is
-// not standing, so nothing but the fleet's own rows leaves the machine and
-// the exhaustive sentence is true again. The two branches turn on one fact.
+// The two claims on this branch answer to different authorities. An opt-out
+// entry settles whether the machine's own capture *ships*, so the second
+// line goes; it does not make the withheld row the fleet's, so the fleet
+// sentence stays narrowed to the rows the fleet owns (LLP 0281
+// #visible-org-row). The store is not a licence to re-acquire an owner's
+// claim this branch gave up.
 // @ref LLP 0289#ask-the-store [tests]:
-test('zero visible candidates with an org row and a hidden pick already opted out: keeps the exhaustive fleet sentence', async () => {
+test('zero visible candidates with an org row and a hidden pick already opted out: drops the sync line, keeps the narrowed fleet sentence', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
@@ -591,8 +593,12 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
-  assert.match(stdout.text(), /Everything you picked is managed by your fleet and always syncs\./)
+  // The store answered the shipping question, so the export promise goes.
   assert.doesNotMatch(stdout.text(), /also syncs to your server/)
+  // It did not answer the ownership question, so this one may not come back.
+  assert.doesNotMatch(stdout.text(), /Everything you picked is managed by your fleet/)
+  assert.match(stdout.text(), /Your fleet manages these and they always sync:/)
+  assert.match(stdout.text(), /capture claude/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })
 

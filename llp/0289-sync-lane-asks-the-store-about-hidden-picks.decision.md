@@ -96,6 +96,11 @@ between the two fields is the asymmetry between the two kinds of row.
   against it. The visible-candidate path is untouched: `optedOutBefore`
   still governs what the gate and menu render and what the write keeps,
   because those screens edit only what they show.
+- The store answers *"does it ship"*, never *"whose row is it"*. On the
+  sibling branch with a visible org row (LLP 0281 #visible-org-row) it
+  therefore governs only the line that promises an export; that branch's
+  fleet sentence keeps narrowing on a hidden pick existing, withheld or
+  not.
 - The store is still not written on this path, opted-out hidden row or not.
   It stays `noQuestion`, so LLP 0191 #back-edges and the step counter are
   unaffected.
@@ -112,10 +117,19 @@ same reason. When it lands it consults the same `candidatesHiddenIds`
 answer this doc mints, so the two branches keep agreeing rather than
 disagreeing about one fact. Nothing else about LLP 0281 is affected.
 
-It has since landed (PR #925, `d1f13959`), and the merge did exactly that:
-the org-row branch reads the same `hiddenCandidateSyncs` boolean, so a
-hidden pick the store withholds leaves the exhaustive fleet sentence true
-on both branches. Done, not open.
+It has since landed (PR #925, `d1f13959`), and the merge did that for the
+half this doc governs. That branch prints two lines, and they answer to
+different authorities. The second, *"Capture already set up on this machine
+also syncs to your server."*, is a claim about the export seam, so it reads
+the same `hiddenCandidateSyncs` boolean its no-locked sibling reads and the
+two branches agree about what leaves the machine. The first is a claim
+about ownership, and the store has nothing to say about it: a hidden pick
+the store withholds is still not the fleet's row, so the fleet sentence
+stays narrowed whenever such a row exists - the count LLP 0281 settled on.
+Gating the narrowing on the store would have handed the fleet back an
+owner's claim over a source the user had explicitly marked local-only,
+which is the one thing LLP 0281 §visible-org-row exists to prevent. Done,
+not open.
 
 The lane's question is the store's answer, not the seam's. The seam
 withholds `optedOutClientSourceIds(entries)` *minus* the central-classified

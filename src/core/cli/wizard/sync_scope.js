@@ -95,7 +95,8 @@ export async function runWizardSyncScope(opts) {
   // the run where it is not is recorded as accepted in LLP 0289 #not-done.
   // @ref LLP 0289#ask-the-store [implements]: the hidden picks reach the lane as ids so their sentence can be checked against the store the export seam reads
   const optedOutAll = new Set(optedOutClientSourceIds(existing))
-  const hiddenCandidateSyncs = (opts.candidatesHiddenIds ?? []).some((id) => !optedOutAll.has(id))
+  const hiddenCandidates = opts.candidatesHiddenIds ?? []
+  const hiddenCandidateSyncs = hiddenCandidates.some((id) => !optedOutAll.has(id))
 
   if (opts.candidates.length === 0) {
     // Led by a blank line like every other block this lane prints, so the
@@ -142,17 +143,22 @@ export async function runWizardSyncScope(opts) {
     // fleet an owner's claim over capture it does not own. The org rows get
     // a sentence scoped to themselves, and the machine's own capture gets
     // the line the no-locked branch already uses - a fact, never a name.
-    // "Standing" is the store's answer here too, not the count LLP 0281 was
-    // written against: a hidden pick the store already withholds does not
-    // ship, so the exhaustive sentence is true again and the two branches
-    // turn on one fact rather than disagreeing about it (LLP 0289
-    // #not-done).
-    // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it
-    // @ref LLP 0289#ask-the-store [implements]: this branch asks the store the same question the no-locked branch does
-    if (hiddenCandidateSyncs) {
+    // Two claims, two questions. *Ownership* is not the store's to answer:
+    // a hidden pick the store withholds is still not the fleet's, so the
+    // fleet sentence narrows whenever such a row exists, which is the count
+    // LLP 0281 settled on. *Shipping* is the store's, so the second line -
+    // the one that promises an export - prints only when a hidden pick is
+    // not already withheld. That is the same question the no-locked branch
+    // asks, so the two agree about what leaves the machine without this one
+    // re-acquiring an owner's claim it gave up.
+    // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
+    // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
+    if (hiddenCandidates.length > 0) {
       opts.stdout.write('Your fleet manages these and they always sync:\n')
       for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
-      opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
+      if (hiddenCandidateSyncs) {
+        opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
+      }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
