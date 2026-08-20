@@ -43,7 +43,9 @@ const COLUMNS = [
  *    sidecars anywhere (proved from the `query.grep_search` span).
  * 2. `hyp purge --session` then removes one seeded session and grep can
  *    no longer surface it (position deletes honored on a raw file walk).
- * 3. `hyp query maintain --force` compacts and builds sidecars; the same
+ * 3. a forced `maintainCache` compacts and builds sidecars (the pass is
+ *    called directly, not through `hyp cache maintain`, because the step
+ *    asserts on the sidecar counters in its report); the same
  *    grep now answers from the indexed tier (span: indexed>0, scanned=0),
  *    identically, still without the purged row (the sidecar is newer than
  *    the purge here, but the stale-sidecar case is pinned in unit tests).
@@ -154,7 +156,10 @@ export async function run({ harness, expect }) {
     const sessions = rows.map((row) => row.session_id)
     expect.that('scan: the three visible sessions hit', new Set(sessions),
       (v) => v.has('sess-old') && v.has('sess-new') && v.has('sess-purged'))
-    expect.that('scan: newest visible hit leads', sessions[0], (v) => v === 'sess-purged' || v === 'sess-new')
+    // The seed dates make this exact: sess-new is 2026-08-03, the newest
+    // row this caller may see (sess-private is newer but withheld). An
+    // either-or here would pass through a one-day sort inversion.
+    expect.that('scan: newest visible hit leads', sessions[0], (v) => v === 'sess-new')
     expect.that('scan: the local-only hit is withheld from the synced caller',
       sessions.includes('sess-private'), (v) => v === false)
     expect.that('scan: the withheld count rides stderr, never the content',
@@ -225,7 +230,10 @@ export async function run({ harness, expect }) {
   await obs.shutdown()
 
   // ----- smoke_step: assert_telemetry (the tiers are provable from spans) -----
-  await step('assert_telemetry', async () => {
+  // Not wrapped in `step()`: the provider is already shut down, so a span
+  // opened here would be dropped rather than recorded, and a smoke_step
+  // that never reaches the trace is worse than none.
+  {
     const traces = await expect.traces()
     const greps = traces.filter((/** @type {any} */ s) => s.name === 'query.grep_search')
     expect.that('spans: query.grep_search spans were recorded', greps.length, (v) => v >= 3)
@@ -238,7 +246,7 @@ export async function run({ harness, expect }) {
     expect.that('spans: no span carries the query text, only its shape',
       greps, (v) => v.every((/** @type {any} */ s) =>
         !JSON.stringify(s.attributes ?? {}).includes(needle) && s.attributes?.query_length !== undefined))
-  })
+  }
 }
 
 function makeBuf() {

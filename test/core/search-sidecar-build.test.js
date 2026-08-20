@@ -157,11 +157,20 @@ test('maintenance compaction finalizes files and builds their sidecars', async (
   assert.equal(res.scannedFiles, 0)
 
   // Coverage is observable from cacheStatus: indexed equals the data-file
-  // count on the grep dataset, and the field stays absent elsewhere.
+  // count on the grep dataset, and the field stays absent elsewhere. The
+  // second dataset is what makes the absence half of that claim testable:
+  // without it a counter that fired on every dataset would pass here.
+  await appendRowsToSourceTable(cacheRoot, 'logs', ['source=test'], COLUMNS, [mkRow()], {
+    declaration: aiGatewayDatasetRegistration().cachePartitioning,
+  })
   const status = await cacheStatus({ cacheRoot })
   const partition = status.partitions.find((p) => p.dataset === DATASET)
   assert.ok(partition)
+  assert.ok(partition.dataFileCount >= 1)
   assert.equal(partition.indexedFileCount, partition.dataFileCount)
+  const other = status.partitions.find((p) => p.dataset === 'logs')
+  assert.ok(other)
+  assert.equal(other.indexedFileCount, undefined, 'only the grep dataset carries sidecars')
 })
 
 test('sidecars do not re-trigger compaction: the data-file counters exclude them', async () => {

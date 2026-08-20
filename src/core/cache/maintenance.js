@@ -18,7 +18,7 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
-import { buildSidecarsForTable } from '../search/sidecar_build.js'
+import { buildSidecarsForTable, sidecarPathFor } from '../search/sidecar_build.js'
 import { GREP_DATASET } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
@@ -1532,8 +1532,10 @@ function countDataFiles(tableDir) {
 /**
  * How many of the table's data files have a grep sidecar beside them. A
  * pure directory scan (no metadata load), matching the cost profile of
- * the other status counters; the pairing rule is the sidecar naming
- * contract (`<file>.index.parquet`).
+ * the other status counters. The pairing rule is not restated here:
+ * `sidecarPathFor` owns the naming contract the build pass publishes
+ * under and the grep service probes, so a second copy of it would let
+ * this counter drift into reporting coverage that does not exist.
  *
  * @param {string} tableDir
  * @returns {number}
@@ -1545,7 +1547,7 @@ function countIndexedDataFiles(tableDir) {
     let count = 0
     for (const name of names) {
       if (!name.endsWith('.parquet') || name.endsWith('.index.parquet')) continue
-      if (names.has(name.replace(/\.parquet$/, '.index.parquet'))) count += 1
+      if (names.has(sidecarPathFor(name))) count += 1
     }
     return count
   } catch {

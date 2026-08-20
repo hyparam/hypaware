@@ -42,7 +42,7 @@ The core query subcommands are `overview`, `schema`, `sql`, and `grep`; active p
 
 - **Coverage: only ten columns are searched** (`content_text`, `tool_name`, `tool_args`, `session_id`, `conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`). **Zero hits is not evidence the text is absent** from system prompts (`system_text`), tool definitions (`tools`), `attributes`, or `raw_frame`; read those with `hyp query sql`.
 - **Truncation is a notice, not an error.** `grep: more matches exist beyond the limit` on stderr means narrow with `--from`/`--to` or `--session-id`, or raise `--limit`; only the newest matches were shown.
-- **Speed tracks index coverage, correctness never does.** Compacted files are served through sidecar indexes; newer files are brute-scanned. `hyp query status` prints `grep index: N of M data files indexed`, so a slow search over deep unindexed history is expected, not broken.
+- **Speed tracks index coverage, correctness never does.** Compacted files are served through sidecar indexes; newer files are brute-scanned. `hyp cache status` prints `grep index: N of M data files indexed`, so a slow search over deep unindexed history is expected, not broken.
 - **A literal shorter than 5 characters defeats the index**: the n-gram index cannot prune for it, so every candidate file is read in full. The answer stays exact; prefer a longer literal when one exists.
 - Local-only rows are withheld with a stderr count, exactly as in SQL; `--include-local-only` is the same informed-consent override.
 
