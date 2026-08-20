@@ -13,7 +13,8 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { executeGrepSearch } from '../../src/core/search/grep_service.js'
-import { buildSidecarsForTable, createIndexQuarantine, sidecarPathFor } from '../../src/core/search/sidecar_build.js'
+import { sidecarPathFor } from '../../src/core/search/searchable_columns.js'
+import { buildSidecarsForTable, createIndexQuarantine } from '../../src/core/search/sidecar_build.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**

@@ -1,12 +1,14 @@
 // @ts-check
 
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 
 import { urlToPath } from '../cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../cache/iceberg/store.js'
-import { getLogger } from '../observability/index.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { createIndexWorker } from './index_worker.js'
+import { sidecarPathFor } from './searchable_columns.js'
 
 /**
  * The sidecar build pass: give every live data file of a just-compacted
@@ -19,11 +21,20 @@ import { createIndexWorker } from './index_worker.js'
  *
  * Sidecar existence IS the completion marker: there is no ledger to
  * drift, a killed daemon leaves nothing half-claimed (the publish is a
- * write-then-rename, all or nothing), and the next pass simply rebuilds
- * whatever is missing. A file that cannot be indexed is quarantined after
- * a bounded number of attempts and served by the scan tier forever after:
- * index presence is purely a performance property, never a correctness
- * one.
+ * write-then-rename, all or nothing), and a pass over a generation
+ * rebuilds whatever that generation is missing. A file that cannot be
+ * indexed is quarantined after a bounded number of attempts and served by
+ * the scan tier: index presence is purely a performance property, never a
+ * correctness one.
+ *
+ * What that does NOT buy, and callers must not assume it does: a retry.
+ * The pass runs only behind a committed compaction, and a compaction
+ * always publishes a fresh generation directory, so the files this pass
+ * skipped or failed on are gone by the time another pass runs. A missing
+ * sidecar is repaired by the next compaction rewriting the rows into a
+ * new file, not by re-attempting the old one.
+ *
+ * @ref LLP 0264#lifecycle [implements]: sidecar existence is the idempotency marker, no ledger; an unindexed or poisoned file is brute-scanned, so index state is never a correctness input
  */
 
 /**
@@ -33,8 +44,10 @@ import { createIndexWorker } from './index_worker.js'
  * shutdown) clears well inside three passes, while a deterministic one
  * (the file hypgrep cannot index) costs three builds to prove and then
  * costs nothing. The ledger is in-memory and process-lifetime on purpose:
- * a daemon restart is the retry, and a persisted poison list would
- * outlive the bug it recorded.
+ * a persisted poison list would outlive the bug it recorded. Note it only
+ * bites where one path is offered to more than one pass, which under the
+ * compaction gate above means a caller driving this module directly; the
+ * maintenance pass sees fresh paths every time.
  */
 const MAX_INDEX_ATTEMPTS = 3
 
@@ -64,19 +77,6 @@ export function createIndexQuarantine({ maxAttempts = MAX_INDEX_ATTEMPTS } = {})
 
 /** The ledger every pass in this process shares unless a caller injects its own (tests do). */
 const processQuarantine = createIndexQuarantine()
-
-/**
- * The sidecar path beside a data file: hypgrep's own default, which is a
- * contract: any reader with byte access to the cache can search it with
- * the stock hypgrep CLI, no daemon involved. The grep service probes
- * exactly this path.
- *
- * @param {string} dataFilePath
- * @returns {string}
- */
-export function sidecarPathFor(dataFilePath) {
-  return dataFilePath.replace(/\.parquet$/i, '.index.parquet')
-}
 
 /**
  * Build the missing sidecars for one Iceberg table directory, one file at
@@ -111,25 +111,48 @@ export async function buildSidecarsForTable({ tableDir, quarantine = processQuar
         report.quarantined += 1
         continue
       }
+      // Publish atomically: rename is the only step that makes the
+      // sidecar exist, so a crash mid-write can never leave a partial file
+      // that lists as a finished index. The scratch name carries a random
+      // token because a fixed `<sidecar>.tmp` is only safe for one writer:
+      // the daemon's tick and a hand-run `hyp` sharing a cache would
+      // interleave their writes into the same scratch file and then rename
+      // the mixture into place as a finished sidecar. It also ends outside
+      // `.parquet`, so an in-flight or abandoned file joins no data-file
+      // count, and it is removed on the failure path rather than left to
+      // wait for the generation's retirement.
+      const tmpPath = `${sidecarPath}.${randomUUID()}.tmp`
       try {
         const bytes = await fsPromises.readFile(sourcePath)
         const index = await ownWorker.build(bytes)
-        // Publish atomically: rename is the only step that makes the
-        // sidecar exist, so a crash mid-write can never leave a partial
-        // file that lists as a finished index. The `.tmp` suffix also
-        // keeps the in-flight file out of every `*.parquet` count.
-        const tmpPath = `${sidecarPath}.tmp`
         await fsPromises.writeFile(tmpPath, index)
         await fsPromises.rename(tmpPath, sidecarPath)
         quarantine.clear(sourcePath)
         report.built += 1
       } catch (err) {
+        await fsPromises.rm(tmpPath, { force: true }).catch(() => {})
         const { attempts, quarantined } = quarantine.recordFailure(sourcePath)
         report.failed += 1
         const message = err instanceof Error ? err.message : String(err)
-        logger.warn('grep_index.build_failed', { attempts, quarantined, error_message: message })
+        // The data file is named on every line: with one warning per failed
+        // build and a per-file attempt budget, an operator who cannot tell
+        // three retries of one poisoned file from three distinct failures
+        // cannot act on either.
+        logger.warn('grep_index.build_failed', {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.OPERATION]: 'maintenance.grep_index',
+          data_file: sourcePath,
+          attempts,
+          quarantined,
+          error_message: message,
+        })
         if (quarantined) {
-          logger.warn('grep_index.file_quarantined', { attempts })
+          logger.warn('grep_index.file_quarantined', {
+            [Attr.COMPONENT]: 'cache',
+            [Attr.OPERATION]: 'maintenance.grep_index',
+            data_file: sourcePath,
+            attempts,
+          })
         }
       }
     }

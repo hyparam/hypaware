@@ -19,7 +19,7 @@ import {
   resolveCallerClass,
 } from '../query/visibility.js'
 import { cellText, compileMatcher, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
-import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
+import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from './searchable_columns.js'
 
 /**
  * The local grep-search service: the client half of LLP 0264, mirroring the
@@ -210,7 +210,7 @@ export async function executeGrepSearch(args) {
         // #lifecycle): probe the filesystem, then degrade this one file to
         // the scan tier if the read races a delete. Results stay exact
         // either way; only the wall clock changes.
-        const sidecarUrl = file.filePath.replace(/\.parquet$/i, '.index.parquet')
+        const sidecarUrl = sidecarPathFor(file.filePath)
         /** @type {Awaited<ReturnType<typeof io.reader>> | null} */
         let indexFile = null
         if (fs.existsSync(urlToPath(sidecarUrl))) {
@@ -254,12 +254,20 @@ export async function executeGrepSearch(args) {
             }
             indexedFiles += 1
             localOnly.withheldRows += withheldHere
-            hits.push(...found)
+            // Appended, not spread: `limit` reaches this service unvalidated
+            // and one file may fill the whole budget, and a spread of that
+            // many arguments is an argument-count overflow, not a push.
+            for (const hit of found) hits.push(hit)
             return
           } catch (err) {
             if (isAbort(err)) throw err
             getLogger('query').warn('grep_search.sidecar_unreadable', {
               [Attr.COMPONENT]: 'query',
+              [Attr.OPERATION]: 'query.grep_search',
+              // Named, because this warning is the only notice that a
+              // sidecar needs deleting: nothing rebuilds one in place, so
+              // the file it points at is the actionable part of the line.
+              sidecar_file: urlToPath(sidecarUrl),
               error_message: err instanceof Error ? err.message : String(err),
             })
           }

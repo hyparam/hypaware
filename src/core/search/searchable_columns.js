@@ -48,6 +48,23 @@ export const SEARCHABLE_COLUMNS = constantSet([
 export const GREP_DATASET = 'ai_gateway_messages'
 
 /**
+ * The sidecar path beside a data file: hypgrep's own default, which is a
+ * contract. Any reader with byte access to the cache can search a file
+ * with the stock hypgrep CLI, no daemon involved. It lives beside the
+ * allowlist for the same reason `GREP_DATASET` does: the build pass that
+ * publishes a sidecar and the search service that probes for one must
+ * spell this path identically, or the build writes an index nobody looks
+ * for and every file silently falls back to the scan tier. Takes a
+ * filesystem path or a `file://` URL; only the extension is rewritten.
+ *
+ * @param {string} dataFile
+ * @returns {string}
+ */
+export function sidecarPathFor(dataFile) {
+  return dataFile.replace(/\.parquet$/i, '.index.parquet')
+}
+
+/**
  * A Set that cannot be added to, deleted from, or cleared. `SCAN_COLUMNS`
  * below is a load-time snapshot of the allowlist, so a caller mutating the
  * exported Set would make a column searchable process-wide while the brute
