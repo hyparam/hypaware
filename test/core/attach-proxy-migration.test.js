@@ -31,7 +31,7 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-const MIGRATION_QUESTION = 'Switch this install to proxy mode now? [y/N] '
+const MIGRATION_QUESTION = 'Switch this install to proxy mode now? [Y/n] '
 const PROXY_CLIENT = 'proxyclient'
 
 /**

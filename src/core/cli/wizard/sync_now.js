@@ -39,7 +39,8 @@ const NOW = 'now'
  * before this ran, so a cancelled prompt, a failed spawn, or a child that
  * exits non-zero all degrade to the wait the user already had.
  *
- * @ref LLP 0203#offer [implements]: the closing sync offer, attended-only, defaulting to wait
+ * @ref LLP 0203#offer [implements]: the closing sync offer, attended-only
+ * @ref LLP 0299#decision [constrained-by]: send-now leads and is the default; only data destruction earns a no default
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<WizardSyncNowResult>}
  */
@@ -80,8 +81,8 @@ export async function runWizardSyncNow(opts) {
         const choice = await askSendNow(opts, opts.deadline)
         span.setAttribute('choice', choice)
         if (choice !== NOW) {
-          // Waiting is the default answer, so this is the modal end of an
-          // enrolled run - and it has to restate the way out, because
+          // Waiting ends plenty of enrolled runs even off the default - and
+          // this end has to restate the way out, because
           // neither surface that named it survives. The narration above
           // dropped its `hyp sync` sentence on the strength of this offer,
           // and the offer's own frame is erased when it resolves
@@ -92,7 +93,7 @@ export async function runWizardSyncNow(opts) {
           return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
         }
 
-        // The child prints the plan and asks its own y/N, so say what is
+        // The child prints the plan and asks its own Y/n, so say what is
         // starting: two prompts in a row with no seam between them reads as
         // one prompt that ignored the answer.
         opts.stdout.write('\nStarting `hyp sync`...\n\n')
@@ -136,12 +137,11 @@ export async function runWizardSyncNow(opts) {
 }
 
 /**
- * The question. Two rows, waiting first and selected by default, so a stray
- * enter can only ever choose the slower, reversible answer - the same
- * polarity the `hyp sync` prompt itself uses. The overwrite confirm defaults
- * the other way now, and for the same reason read from its own side: there a
- * bare enter commits answers the user just gave to a file that is backed up
- * either way, where here it would send data off the machine.
+ * The question. Two rows, sending first and selected by default: the user
+ * enrolled to sync, so a bare enter takes the path they signed up for, and
+ * waiting stays one arrow away for anyone who wants the review window. The
+ * same polarity the `hyp sync` prompt itself uses, and the child's own
+ * confirm still stands between this answer and anything leaving the machine.
  *
  * The rows say what each answer does rather than yes/no: "send now" is the
  * kind of choice a reader should not have to reconstruct from the question.
@@ -160,17 +160,17 @@ async function askSendNow(opts, deadline) {
     title: 'Send your recorded history to the server now, or wait?',
     options: [
       {
-        value: WAIT,
-        label: `Wait until ${formatFirstSyncDeadline(deadline)}`,
-        summary: 'Nothing leaves this machine before then',
-      },
-      {
         value: NOW,
         label: 'Send now',
         summary: 'Runs `hyp sync`: it lists every destination and asks before sending',
       },
+      {
+        value: WAIT,
+        label: `Wait until ${formatFirstSyncDeadline(deadline)}`,
+        summary: 'Nothing leaves this machine before then',
+      },
     ],
-    default: WAIT,
+    default: NOW,
   }))
 }
 

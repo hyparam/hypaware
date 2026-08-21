@@ -791,7 +791,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     'b',    // pick menu: step back one screen - the express gate
     'b',    // express gate: step back one screen - the fork
     '2',    // fork: Collect agent logs locally
-    '1',    // disconnect?: No, stay connected
+    '2',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): step by step
     'all',  // pick menu: record everything offered
     '1',    // sync gate: Sync all

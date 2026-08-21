@@ -267,10 +267,10 @@ export async function runInitWizard(opts) {
               disconnect = await confirm({
                 title: 'This machine syncs to your team server. Disconnect and go local-only?',
                 options: [
-                  { value: 'stay', label: 'No, stay connected' },
                   { value: 'disconnect', label: 'Yes, disconnect' },
+                  { value: 'stay', label: 'No, stay connected' },
                 ],
-                default: 'stay',
+                default: 'disconnect',
                 // The fork is always behind this question, so escape backs
                 // into it instead of cancelling (LLP 0191).
                 allowBack: true,

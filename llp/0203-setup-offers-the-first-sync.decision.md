@@ -49,13 +49,14 @@ closing question list:
 - **Send now** - "Runs `hyp sync`: it lists every destination and asks
   before sending."
 
-Waiting is first and is the default, so a stray enter chooses the reversible
-answer. This is the polarity the overwrite confirm and `hyp sync`'s own
-prompt already use, and it is the only defensible one here: the unwanted
-outcome of a mis-keyed wait is a few hours' latency, and the unwanted outcome
-of a mis-keyed send cannot be walked back.
+Sending is first and is the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md): confirms
+default yes unless a bare enter would destroy data, and sending is not
+destruction). The user enrolled to sync, so a bare enter takes the path they
+signed up for; waiting stays one arrow away, and `hyp sync`'s own confirm
+still stands between this answer and anything leaving the machine.
 
-The position is not negotiable. The narration keeps its place as the last
+The narration keeps its place as the last
 thing HypAware *says* about privacy
 ([LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy)),
 because a question about sending is only answerable by someone who has just

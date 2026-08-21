@@ -112,17 +112,16 @@ test('a non-interactive run is never asked, and never sends', async () => {
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
 })
 
-// @ref LLP 0203#offer [tests]: waiting leads and is the default, so a stray enter cannot release
-test('the question offers wait first, as the default, and declining spawns nothing', async () => {
+test('the question offers send-now first, as the default, and declining spawns nothing', async () => {
   const o = opts({ answer: 'wait' })
   const result = await runWizardSyncNow(o.args)
 
   assert.equal(o.asked.length, 1)
   const question = o.asked[0]
-  assert.equal(question.options[0].value, 'wait')
-  assert.equal(question.default, 'wait')
-  assert.match(question.options[0].label, /^Wait until /)
-  assert.equal(question.options[1].value, 'now')
+  assert.equal(question.options[0].value, 'now')
+  assert.equal(question.default, 'now')
+  assert.equal(question.options[1].value, 'wait')
+  assert.match(question.options[1].label, /^Wait until /)
   assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
   // The narration upstream dropped its `hyp sync` sentence for this offer,
   // and the offer's own frame is cleared when it resolves, so the wait has

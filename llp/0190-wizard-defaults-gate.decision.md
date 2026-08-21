@@ -190,8 +190,9 @@ a silent surprise for the user who meant "switch this machine to
 local-only". Both intents are real, so the wizard now asks at the moment
 of intent: on a managed machine, choosing local raises one yes/no -
 "This machine syncs to your team server. Disconnect and go local-only?"
-with "No, stay connected" as the default (a bare enter never
-disconnects). Yes runs the real `hyp leave` (LLP 0063: central-layer
+with "Yes, disconnect" as the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md):
+disconnecting destroys nothing, so yes leads). Yes runs the real `hyp leave` (LLP 0063: central-layer
 removal, org-attach reversal, identity drop) and the run continues as a
 true solo install - no locked rows, no sync lane, the local 120-day
 retention default. No keeps today's behavior: the org's rows stay
