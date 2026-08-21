@@ -143,12 +143,21 @@ function resolveForcedGc() {
  * does. That helper is internal to squirreling and not exported, so the rule
  * lives here once rather than at each of the three sites that need it.
  *
+ * The precedence is the engine's, not the convenient one: when a source offers
+ * both `prepareScan` and `schema`, squirreling plans from the schema and never
+ * reads the `columns` such a source may also advertise. Preferring `columns`
+ * here would evaluate the local-only gate below against a list the engine
+ * ignores, so a content column present only in `schema` would slip the gate.
+ * Reading the authoritative list can only widen the set of sources that get
+ * wrapped, which is the fail-closed direction.
+ *
  * @ref LLP 0294#transparent-wrappers [implements]: a prepared-only source is addressed by schema, not by an advertised column list
  * @param {AsyncDataSource} source
  * @returns {string[]}
  */
 function sourceColumnNames(source) {
-  return source.columns ?? source.schema?.fields.map((field) => field.name) ?? []
+  if (source.prepareScan && source.schema) return source.schema.fields.map((field) => field.name)
+  return source.columns ?? []
 }
 
 /**

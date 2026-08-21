@@ -331,6 +331,39 @@ test('a governable prepared-only source refuses restricted visibility without a 
   )
 })
 
+// Squirreling plans a prepared source from its `schema` and never reads the
+// `columns` such a source may also advertise, so the local-only gate has to
+// read the schema too. A gate that trusted `columns` would see no content
+// column here and hand the caller the prepared scan unfiltered.
+// @ref LLP 0105 [tests]: the visibility gate is decided on the column list the engine actually plans from
+test('the local-only gate reads a prepared source schema, not its narrower columns list', async () => {
+  const schema = {
+    fields: [
+      { id: 1, name: 'id', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false },
+      { id: 2, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true },
+    ],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    // Deliberately narrower than `schema`: the engine ignores this list.
+    columns: ['id'],
+    schema,
+    prepareScan() {
+      throw new Error('privacy refusal must happen before the prepared scan')
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT content FROM t',
+      registry: registryFor(source, { localOnlyContentColumns: ['content'] }),
+      storage,
+    }),
+    {
+      message: 'Dataset "t" must provide columns and scan() to enforce local-only visibility',
+    }
+  )
+})
+
 test('transient scan garbage does not trip the budget; only retained growth refuses', async () => {
   // The guard confirms a crossing with a forced GC before refusing (LLP
   // 0097#confirm-with-gc). Each chunk allocates ~25MB, holds it long
