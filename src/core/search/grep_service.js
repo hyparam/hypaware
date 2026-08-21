@@ -275,6 +275,11 @@ export async function executeGrepSearch(args) {
        * degrading the file a decision this function can still take at any
        * point in the read.
        *
+       * An abort is the one failure that commits the buffer instead of
+       * discarding it: it ends the walk rather than degrading the file, so
+       * there is no rescan to double-count against and the rows the index
+       * already produced belong in the partial answer.
+       *
        * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
        * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
        * @param {string} sidecarUrl
@@ -307,23 +312,42 @@ export async function executeGrepSearch(args) {
             if (found.length >= budget * 2) trimBuffer(found)
           }
         } catch (err) {
-          if (isAbort(err, signal)) throw err
-          getLogger('query').warn('grep_search.sidecar_unreadable', {
+          if (isAbort(err, signal)) {
+            // Commit before the abort propagates. A deadline lands INSIDE a
+            // file, not between files (hypgrep checks the signal at every
+            // coalesced range boundary), and a newest-first walk makes the
+            // interrupted file the newest one the caller most wants, so
+            // discarding the buffer would answer zero for exactly that file
+            // and lose its withheld-row count out of the report. Safe
+            // precisely because an abort ends the walk: this file is never
+            // rescanned, so no row can be counted twice. It still does not
+            // count as indexed, because it was not served whole.
+            for (const hit of found) hits.push(hit)
+            localOnly.withheldRows += withheldHere
+            throw err
+          }
+          // Both files are named, because the read that failed spans both:
+          // `parquetFind` opens the source data file through the same
+          // factory as the sidecar and runs the row filter per row, so a
+          // torn source parquet reaches this line too and then fails the
+          // rescan below. Deleting the sidecar is the usual remedy and this
+          // warning is its only notice (nothing rebuilds one in place), but
+          // the line must not claim to have proved which file is at fault.
+          getLogger('query').warn('grep_search.indexed_read_failed', {
             [Attr.COMPONENT]: 'query',
             [Attr.OPERATION]: 'query.grep_search',
-            // Named, because this warning is the only notice that a sidecar
-            // needs deleting: nothing rebuilds one in place, so the file it
-            // points at is the actionable part of the line.
             sidecar_file: urlToPath(sidecarUrl),
+            data_file: urlToPath(file.filePath),
             error_message: err instanceof Error ? err.message : String(err),
           })
           return false
         }
         indexedFiles += 1
         localOnly.withheldRows += withheldHere
-        // Appended, not spread: `limit` reaches this service unvalidated and
-        // one file may fill the whole buffer, and a spread of that many
-        // arguments is an argument-count overflow, not a push.
+        // Appended, not spread: `limit` is validated as a positive safe
+        // integer but is not bounded above, so one file may fill a buffer of
+        // millions, and a spread of that many arguments is an argument-count
+        // overflow, not a push.
         for (const hit of found) hits.push(hit)
         if (hits.length >= budget * 2) trimHits()
         return true

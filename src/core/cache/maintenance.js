@@ -1566,11 +1566,21 @@ function measureMetadataDir(tableDir) {
  * `countDataFiles` excludes them; the avg-file-size heuristic divides
  * these bytes by that count, so the two must see the same file set.
  *
+ * The test is `includes`, not `endsWith`, because the build's publish
+ * scratch (`<file>.index.parquet.<uuid>.tmp`) is index bytes too, and it
+ * is the half of the pair that survives a crash: `countDataFiles` already
+ * skips it for want of a `.parquet` suffix, so counting its bytes would
+ * break the shared-file-set invariant above in the dangerous direction.
+ * The average would read HIGHER than the partition really is, and
+ * `needsCompaction` compacts when the average is LOW, so a genuinely
+ * fragmented partition would look healthy and go unrewritten until its
+ * generation retires.
+ *
  * @param {string} tableDir
  * @returns {number}
  */
 function measureDataDir(tableDir) {
-  return measureDir(path.join(tableDir, 'data'), (name) => !name.endsWith('.index.parquet'))
+  return measureDir(path.join(tableDir, 'data'), (name) => !name.includes('.index.parquet'))
 }
 
 /**

@@ -168,6 +168,34 @@ test('sidecars do not re-trigger compaction: the data-file counters exclude them
   assert.equal(report.compacted, false, 'the sidecars did not read as growth')
 })
 
+test('an orphaned publish scratch counts as index bytes, not data bytes', async () => {
+  // A build killed between the write and the rename leaves
+  // `<file>.index.parquet.<uuid>.tmp` in the live data dir, and nothing
+  // reaps it before the generation retires. `countDataFiles` already skips
+  // it (no `.parquet` suffix), so the byte measure has to skip it too: the
+  // avg-file-size heuristic compacts when the average is LOW, so counting a
+  // large orphan makes a fragmented partition read as healthy and go
+  // unrewritten.
+  const { cacheRoot, tableDir } = await makeCache([[OLD], [NEW]])
+  const files = await listLiveDataFiles(tableDir())
+  assert.ok(files.length >= 2)
+  let dataBytes = 0
+  for (const file of files) dataBytes += (await fs.stat(urlToPath(file.filePath))).size
+  const avgBytes = dataBytes / files.length
+  const orphan = `${sidecarPathFor(urlToPath(files[0].filePath))}.orphaned-build.tmp`
+  await fs.writeFile(orphan, Buffer.alloc(dataBytes * 4))
+
+  // Due by a hair on the real data bytes; not due at all if the orphan's
+  // bytes join the average.
+  const result = await maintainCache({
+    cacheRoot,
+    config: { compact_file_count: 1000, compact_avg_file_bytes: Math.ceil(avgBytes) + 1 },
+  })
+  const report = result.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(report)
+  assert.equal(report.compacted, true, 'the orphaned scratch did not inflate the average file size')
+})
+
 test('a non-grep dataset is compacted without sidecars', async () => {
   const { cacheRoot, tableDir } = await makeCache([[mkRow({ content_text: 'needle' })]], 'other_dataset')
   const result = await maintainCache({ cacheRoot, force: true })

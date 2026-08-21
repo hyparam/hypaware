@@ -34,6 +34,19 @@ import { sidecarPathFor } from './searchable_columns.js'
  * sidecar is repaired by the next compaction rewriting the rows into a
  * new file, not by re-attempting the old one.
  *
+ * A sidecar also freezes the allowlist it was built over. hypgrep records
+ * the indexed columns in the index itself (`hypgrep.text_columns`) and
+ * prunes candidate blocks to them, and nothing on the read side compares
+ * that stamp against today's `SEARCHABLE_COLUMNS`. So ADDING a column to
+ * the allowlist does not reach a file that is already indexed, and under
+ * the no-retry lifecycle above it never will while that generation lives:
+ * the new column answers on the scan tier and zero on the indexed one,
+ * which is the tier disagreement the shared allowlist exists to prevent.
+ * Any change to the set (hyparam/hypaware#977 is the first one queued) has
+ * to invalidate the existing sidecars, not merely start building new ones.
+ * Recorded here rather than left to be rediscovered, in the same spirit as
+ * the column note in `searchable_columns.js`.
+ *
  * @ref LLP 0264#lifecycle [implements]: sidecar existence is the idempotency marker, no ledger; an unindexed or poisoned file is brute-scanned, so index state is never a correctness input
  */
 
