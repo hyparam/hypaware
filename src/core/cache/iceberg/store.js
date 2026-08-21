@@ -40,7 +40,7 @@ import {
 import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
@@ -546,7 +546,7 @@ export function seqValue(raw) {
  * an empty table.
  *
  * @param {string} tablePath
- * @returns {Promise<AsyncDataSource | null>}
+ * @returns {Promise<ScannableDataSource | null>}
  */
 export async function dataSourceForTable(tablePath) {
   if (!tableExists(tablePath)) return null

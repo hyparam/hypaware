@@ -7,6 +7,7 @@ import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { LocalOnlyVisibilityReport } from '../../../src/core/query/types.js'
@@ -111,21 +112,21 @@ export function callerSeesEverything(callerRank) {
  *
  * @ref LLP 0105 [implements]: the one shared filter at the query read path; caller class >= row class on the lattice, never per-command
  * @ref LLP 0105#graph-provenance [implements]: rows lacking per-row cwd provenance get their declared content-bearing columns suppressed, never surfaced
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {{
  *   resolver: UsagePolicyResolver,
  *   callerRank: number,
  *   contentColumns: string[],
  *   report: LocalOnlyVisibilityReport,
  * }} opts
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 export function withLocalOnlyVisibility(source, opts) {
   const { resolver, callerRank, report } = opts
   const hasCwd = source.columns.includes('cwd')
   const declaredContent = opts.contentColumns.filter((c) => source.columns.includes(c))
 
-  /** @type {AsyncDataSource} */
+  /** @type {ScannableDataSource} */
   const guarded = {
     // numRows intentionally absent (see fast-path discipline above).
     columns: source.columns,

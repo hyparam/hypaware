@@ -17,7 +17,8 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { AsyncDataSource, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { SqlPrimitive } from 'squirreling'
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
@@ -44,7 +45,7 @@ export function asyncBufferFromBytes(bytes) {
  * @param {ColumnSpec[]} columns
  * @param {Record<string, SqlPrimitive>[]} rows
  * @param {{ rowGroupSize?: number }} [options] `rowGroupSize` forces multi-row-group iteration
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 export async function parquetSourceFromRows(columns, rows, options = {}) {
   const columnData = rowsToColumnSources(columns, rows)

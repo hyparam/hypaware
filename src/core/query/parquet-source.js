@@ -8,7 +8,8 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
 
 /**
  * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
- * @import { AsyncDataSource, ScanOptions, ScanResults, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ScanOptions, ScanResults, SqlPrimitive } from 'squirreling'
  */
 
 /**
@@ -35,7 +36,7 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
  *
  * @param {AsyncBuffer} file
  * @param {FileMetaData} metadata
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 export function parquetDataSource(file, metadata) {
   const schema = parquetSchema(metadata)

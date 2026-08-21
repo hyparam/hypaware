@@ -1,8 +1,7 @@
-import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ParquetWriter } from 'hyparquet-writer'
 import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
-import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
 // Partitioning declaration promoted to a neutral core home
 // (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
@@ -448,7 +447,7 @@ export interface SourceWithholdResolver {
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
-  dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
+  dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
