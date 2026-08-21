@@ -18,8 +18,8 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
-import { buildSidecarsForTable, sidecarPathFor } from '../search/sidecar_build.js'
-import { GREP_DATASET } from '../search/searchable_columns.js'
+import { buildSidecarsForTable } from '../search/sidecar_build.js'
+import { GREP_DATASET, sidecarPathFor } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
