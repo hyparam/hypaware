@@ -21,15 +21,17 @@ import { isTty } from './stdio.js'
  * explicit off-default word lands on the default the suffix printed, so
  * the caller's question string and its `defaultYes` must agree.
  *
- * That includes a terminal that stops being able to answer. `rl.question`
- * leaves its promise permanently unsettled at EOF, so a ctrl+D or a
- * dropped session hung the verb on its own confirmation instead of
- * answering it. `askLineOnce` settles that case as `null`, read here as
- * the empty line the suffix already routes to the default - so the EOF
- * answer is the printed default, and cannot drift from it.
+ * A terminal that stops being able to answer is the one case the suffix
+ * does not decide. `rl.question` leaves its promise permanently unsettled
+ * at EOF, so a ctrl+D or a dropped session hung the verb on its own
+ * confirmation; `askLineOnce` settles that as `null`, and `null` declines
+ * here whatever the printed default was. A default says what the person
+ * at the terminal probably wants, and EOF is the proof there is no such
+ * person - so a `[Y/n]` prompt must not read a dropped session as the yes
+ * it advertised. `[y/N]` reaches the same decline it always did.
  *
  * @ref LLP 0299#decision [implements]: default yes unless a bare enter would destroy data
- * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
+ * @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines, whatever polarity the prompt printed
  *
  * @param {CommandRunContext} ctx
  * @param {string} question rendered verbatim, including its `[Y/n]` or `[y/N]` suffix
@@ -43,7 +45,9 @@ export async function askYesNo(ctx, question, { defaultYes = false } = {}) {
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr)),
   })
   try {
-    const answer = ((await askLineOnce(rl, input, question)) ?? '').trim()
+    const line = await askLineOnce(rl, input, question)
+    if (line === null) return false
+    const answer = line.trim()
     if (defaultYes) return !/^n(o)?$/i.test(answer)
     return /^y(es)?$/i.test(answer)
   } finally {

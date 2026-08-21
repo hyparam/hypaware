@@ -146,7 +146,12 @@ lane's, and the asker that implements it is shared.** The defect is
 the rule above answers all of them: **a stdin that can no longer answer
 takes the default the prompt printed; a prompt whose enter has no
 default settles as a cancel or a failure instead, never as an invented
-answer.** `queuedLineAsker` moves out of `walkthrough.js` into
+answer.** ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)
+§eof-declines narrows the first clause for `askYesNo` once confirms
+default yes: a printed default that would *proceed* is not what a spent
+stdin takes, because EOF is the proof nobody is there to want it. Every
+default named below still declines to act, so nothing in this section
+changes.) `queuedLineAsker` moves out of `walkthrough.js` into
 `src/core/cli/line_asker.js`, beside `stdio.js` and `flush-streams.js`,
 where a plugin workspace can import it too; `askLineOnce` joins it for
 the prompts that ask once on an interface that may be a real terminal,
@@ -166,7 +171,9 @@ the prompts whose enter answers nothing. The two `[y/N]` confirms
 (`src/core/cli/confirm.js`, `src/core/plugin_install/confirm.js`) take
 their printed no, which is the safe direction for the irreversible verbs
 behind them, and their callers' exit codes are unchanged: an EOF decline
-is reported exactly as a typed `n` is. The one prompt with no default is
+is reported exactly as a typed `n` is. (`confirm.js` since grew `[Y/n]`
+prompts; per LLP 0299 §eof-declines those decline at EOF too, so the
+answer this paragraph gives is unchanged - only its derivation is.) The one prompt with no default is
 `claude-account login`'s `Code: ` paste, and it does not invent one: with
 no loopback listener left to finish the sign-in, EOF is a failure that
 says so, and with a listener up the paste lane stays pending rather than
