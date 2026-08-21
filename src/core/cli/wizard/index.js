@@ -535,6 +535,7 @@ export async function runInitWizard(opts) {
               .filter((d) => d !== undefined)
             const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors)
             const candidateDescriptors = visiblePickerDescriptors(picked.descriptors)
+            const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
             const syncScope = await syncFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
@@ -542,15 +543,22 @@ export async function runInitWizard(opts) {
               env: opts.env,
               candidates: candidateDescriptors,
               locked: lockedDescriptors,
-              // How many rows the display filter removed from each list. The
-              // lane never names them, but it must not tell the user nothing
-              // syncs while they stand: a locked row always syncs (LLP 0188
-              // #locked), and a picked row carries no opt-out entry until the
-              // user writes one, so a hidden row dropped from either list is
+              // What the display filter removed from each list. The lane
+              // never names them, but it must not tell the user nothing syncs
+              // while they stand: a locked row always syncs (LLP 0188
+              // #locked), and a picked row ships unless the policy store
+              // withholds it, so a hidden row dropped from either list may be
               // capture that still leaves the machine.
+              // A count suffices for the locked list, whose rows sync
+              // whatever the store says. The picked list does not: whether a
+              // hidden pick ships is the store's answer about that source, so
+              // the lane gets the ids and asks (it still never prints them).
               // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
+              // @ref LLP 0289#ask-the-store [implements]: the hidden picks cross as ids, the hidden locked rows as a count
               lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
-              candidatesHidden: picked.descriptors.length - candidateDescriptors.length,
+              candidatesHiddenIds: picked.descriptors
+                .filter((d) => !visibleCandidateIds.has(d.id))
+                .map((d) => d.id),
               ...(syncProgress ? { progress: syncProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),
