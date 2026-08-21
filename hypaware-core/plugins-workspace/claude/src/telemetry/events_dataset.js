@@ -8,10 +8,9 @@ import { BODY_EVENT_NAMES } from './bodies.js'
 import { CONTENT_EVENT_NAMES } from './projection.js'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../../src/core/cache/types.js'
  * @import { ClaudeTelemetryEvent } from '../types.js'
- * @import { AsyncDataSource } from 'squirreling'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'
@@ -267,7 +266,7 @@ async function createDataSource(partitions, ctx) {
   }
   for (const p of fresh) tablePaths.add(p.path)
 
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)

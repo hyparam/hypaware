@@ -305,9 +305,11 @@ test('rows written through storage flush, discover, and read back through the re
     assert.equal(partitions[0].tablePath, path.join(cacheRoot, 'datasets', TELEMETRY_EVENTS_DATASET, 'all'))
 
     const source = await registration.createDataSource(partitions, /** @type {any} */ ({ scope: {}, storage }))
+    const scan = source.scan
+    assert.ok(scan, 'cache-backed registration retains the row scan')
     /** @type {Record<string, unknown>[]} */
     const seen = []
-    for await (const row of source.scan({}).rows()) {
+    for await (const row of scan.call(source, {}).rows()) {
       if (/** @type {any} */ (row).resolved) seen.push(/** @type {any} */ (row).resolved)
     }
     assert.equal(seen.length, 2)

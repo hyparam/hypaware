@@ -7,6 +7,8 @@ import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { collect, executeSql } from 'squirreling'
+
 import { readCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
@@ -114,6 +116,18 @@ test('storage.dataSourceForTable keeps columns and cells aligned after internal-
 
     const source = await storage.dataSourceForTable(storage.cacheTablePath('dataset', ['all']))
     assert.ok(source)
+    assert.ok(source.schema, 'storage forwards the public prepared schema')
+    assert.equal(typeof source.prepareScan, 'function', 'storage forwards native batches')
+    assert.deepEqual(source.schema.fields.map((field) => field.name), ['id', 'value'])
+
+    const rowScan = source.scan
+    source.scan = () => { throw new Error('legacy row scan should not run') }
+    const preparedRows = await collect(executeSql({
+      tables: { t: source },
+      query: 'SELECT id, value FROM t',
+    }))
+    assert.deepEqual(preparedRows, [{ id: 7, value: 'kept' }], 'prepared scan returns only public fields')
+    source.scan = rowScan
 
     const scan = source.scan({})
     for await (const row of scan.rows()) {

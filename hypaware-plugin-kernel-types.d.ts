@@ -17,6 +17,16 @@ import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
+/**
+ * A data source that retains Squirreling's row interface. Hypaware's storage,
+ * union, visibility, and legacy parquet adapters all guarantee this stronger
+ * shape even when they also expose prepared native batches.
+ */
+export type ScannableDataSource = AsyncDataSource & {
+  columns: string[]
+  scan(options: ScanOptions): ScanResults
+}
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 
