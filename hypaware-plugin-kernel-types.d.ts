@@ -1417,7 +1417,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
 }
 
 // =============================================================================
@@ -1450,7 +1450,7 @@ export interface DatasetRegistration {
   localOnlyContentColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
   /**
    * Optional flush-time settlement pass. The kernel calls this once per
    * flush batch (before partition write) with the batch's rows; the
