@@ -6,7 +6,7 @@ import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.j
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
- * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ * @import { AsyncRow } from 'squirreling'
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'

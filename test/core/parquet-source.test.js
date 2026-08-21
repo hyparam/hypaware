@@ -13,7 +13,7 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 import { asyncBufferFromBytes, parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, SelectStatement } from 'squirreling/src/types.js'
+ * @import { ExprNode, SelectStatement } from 'squirreling/src/types.js'
  * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  */
 

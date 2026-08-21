@@ -30,9 +30,8 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
- * @import { ColumnSpec, QueryScope } from '../../hypaware-plugin-kernel-types.js'
- * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
- * @import { AsyncDataSource, AsyncRow, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ColumnSpec, QueryScope, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { AsyncRow, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /** Columns every fixture partition carries. */
