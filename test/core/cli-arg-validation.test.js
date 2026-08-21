@@ -27,12 +27,21 @@ const UNKNOWN_FLAG = '--definitely-not-a-real-flag'
 // named after the file the caller meant to write.
 const UNKNOWN_SHORT_FLAG = '-Z'
 /**
- * The one visible core command the short-flag rule deliberately spares. `query
- * sql` is a verb, and its greedy SQL positional legitimately carries tokens
- * like `-1`, so the verb family keeps the lenient reading D1 carved out for it.
+ * The visible core commands the short-flag rule deliberately spares. Both are
+ * verbs, and the verb family keeps the lenient reading D1 carved out for it
+ * (LLP 0293: "the verb family never opts in"), because each binds a greedy
+ * positional whose legitimate values can start with a dash:
+ *
+ * - `query sql`, whose SQL carries tokens like `-1`.
+ * - `query grep`, whose search pattern is text to look for, not a flag. A
+ *   recorded transcript is full of command lines, so `-Z` or `--force` is an
+ *   ordinary thing to search FOR; refusing it would make the one obvious way
+ *   to find a flag in your own history exit 2. This is the same bargain `rg`
+ *   strikes with `rg -- -Z`.
+ *
  * Anything else added here is a design change, not a test fixup.
  */
-const SHORT_FLAG_LENIENT = new Set(['query sql'])
+const SHORT_FLAG_LENIENT = new Set(['query sql', 'query grep'])
 const HYP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-arg-validation-'))
 
 function makeBuf() {
