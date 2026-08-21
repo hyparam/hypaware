@@ -1255,6 +1255,24 @@ function normalizeContent(content) {
 // prefix class already caps it at 255 characters and excludes whitespace and
 // `,`, and what was actually sent is the honest thing to record.
 //
+// #722's allowlist reservation is closed, verbatim, permanently (#736). An
+// allowlist cannot make the marker trustworthy: `data:application/pdf;base64,
+// <stripped>` typed into an ordinary message passes this regex byte-for-byte
+// untouched, because `<` is outside the payload class `[A-Za-z0-9+/=_-]+`
+// (which also requires at least one character), so a consumer that trusted a
+// structured-looking marker could already be fed a byte-identical forgery by
+// the wire, allowlisted mediatype or not. The mediatype class does close
+// one channel: it excludes all whitespace and `,`, so a marker can never
+// carry a newline, carriage return, tab, or a comma to splice a log line
+// or a CSV cell. That class is negated, though, not an allowlist, so it
+// admits every other control character. ESC survives into `content_text`:
+// `data:evil<ESC>[31mX;base64,QUFB` strips to
+// `data:evil<ESC>[31mX;base64,<stripped>`, ESC intact, and the default
+// `table` query-output format does not escape it before writing it to the
+// terminal. Neutralizing terminal escapes is a `content_text` rendering
+// concern for every column, not something an allowlist on this one
+// mediatype would fix; it is open, tracked in #752.
+//
 // The capture group only changes what the replacement does. It must not change
 // what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
 // splice onto an unrelated `;base64,` across prose, a comma, or 255 characters.
@@ -1273,6 +1291,16 @@ function normalizeContent(content) {
 // length cap on `content_text` is a deliberate open question (#718) and is
 // not addressed here.
 const BASE64_DATA_URI = /data:([^\s,]{0,255}?);base64,[A-Za-z0-9+/=_-]+/g
+
+// The empty-mediatype case (`data:;base64,...`) falls back to this rather
+// than echoing an empty string or resolving it the way RFC 2397 does (an
+// omitted mediatype means `text/plain;charset=US-ASCII`). Kept as shipped,
+// deliberately, after re-examination (#736): the RFC default answers "what
+// would a browser render this as", not "what did the row actually see", and
+// a search for it is no more discriminating than this sentinel. The
+// accepted cost: this collides indistinguishably with a genuine
+// `application/octet-stream` payload, and a literal search for
+// `data:;base64` no longer finds the row. Low stakes either way.
 const UNKNOWN_MEDIATYPE = 'application/octet-stream'
 
 /** @param {string | undefined} text */
