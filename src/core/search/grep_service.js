@@ -165,18 +165,27 @@ export async function executeGrepSearch(args) {
       // ago. The SQL seam reaches those tables through the dataset's own
       // discoverParts; this service enumerates them from the spool itself
       // to the same effect.
-      /** @type {{ tablePath: string }[]} */
-      const settleTargets = []
+      //
+      // The two lists OVERLAP by construction: a spool directory sits
+      // inside the partition directory the discovery walk also returns, so
+      // every already-flushed table appears in both. Deduped here rather
+      // than left to `settlePendingCacheForQuery`, which is per-entry and
+      // would push the debounced "last write was N minutes ago" staleness
+      // line once per copy - the same seconds-old cache reported twice on
+      // stderr by grep and once by sql.
+      /** @type {Set<string>} */
+      const settlePaths = new Set()
       try {
         for (const tablePath of await discoverSpoolTables(storage.cacheRoot)) {
-          if (datasetForTablePath(storage.cacheRoot, tablePath) === DATASET) settleTargets.push({ tablePath })
+          if (datasetForTablePath(storage.cacheRoot, tablePath) === DATASET) settlePaths.add(tablePath)
         }
       } catch {
         // An unreadable spool root means nothing is pending to flush.
       }
       for (const p of await storage.discoverCachePartitions({ datasets: [DATASET] })) {
-        settleTargets.push({ tablePath: p.path })
+        settlePaths.add(p.path)
       }
+      const settleTargets = [...settlePaths].map((tablePath) => ({ tablePath }))
       /** @type {string[]} */
       const freshnessMessages = []
       await settlePendingCacheForQuery({
@@ -290,10 +299,15 @@ export async function executeGrepSearch(args) {
         const found = []
         let withheldHere = 0
         try {
-          // No `limit` is passed down: a purged or withheld row is filtered
-          // AFTER parquetFind accepts it, so a passed-down limit would count
-          // rows this walk then discards and under-return. The generator is
-          // simply not pulled past the budget instead.
+          // No `limit` is passed down, and the generator below is drained
+          // rather than broken out of at the budget. Two separate reasons,
+          // both correctness: a purged or withheld row is filtered AFTER
+          // parquetFind accepts it, so a passed-down limit would count rows
+          // this walk then discards and under-return; and rows inside one
+          // file arrive in WRITE order, not date order, so stopping at the
+          // budget would keep that file's oldest matches rather than its
+          // newest. `found` is trimmed in sort order instead, which is what
+          // actually bounds the memory here.
           const rows = parquetFind({
             query: matcher.hypQuery,
             url: file.filePath,
