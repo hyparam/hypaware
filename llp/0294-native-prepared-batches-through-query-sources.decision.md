@@ -7,7 +7,7 @@
 **Date:** 2026-08-18
 **Related:** LLP 0015, LLP 0055, LLP 0097, LLP 0098, LLP 0105, LLP 0241, LLP 0261
 
-> Squirreling 0.16.1 and Icebird 0.8.23 add schema-addressed native batch
+> Squirreling 0.16.1 and Icebird 0.8.25 add schema-addressed native batch
 > scans. Hypaware forwards that path through semantically transparent source
 > wrappers, concatenates only compatible partition schemas, keeps ranges
 > global to a union, and retains the established row fallback wherever schema
@@ -85,13 +85,17 @@ prepared scan only when the physical schema already contains every column the
 wrapper advertises. If an old partition lacks a declared field, the existing
 row and `scanColumn` paths retain control.
 
-Icebird 0.8.23 has a pre-existing row-scan defect when a pushed filter and
-position deletes coexist: filtering loses physical row ordinals before delete
-application, so a live matching row can be dropped. This is tracked in
-[icebird#41](https://github.com/hyparam/icebird/issues/41). The prepared path
-avoids the defect by withholding the filter when deletes exist, but visibility
-wrappers, `scanColumn` aggregates, and schema-drift fallbacks remain exposed
-until Icebird fixes its row path.
+Icebird 0.8.23 carried a row-scan defect when a pushed filter and position
+deletes coexisted: filtering lost physical row ordinals before delete
+application, so a live matching row could be dropped
+([icebird#41](https://github.com/hyparam/icebird/issues/41), now closed). The
+0.8.25 pinned here recovers each row's physical position before applying
+deletes, and the prepared path passes a filter only as a non-strict pruning
+predicate over whole ranges, so row ordinals survive on both paths. The row
+fallbacks this document keeps (visibility wrappers, `scanColumn` aggregates,
+schema drift) therefore read a purged table the same way the native path does.
+A union test pins that agreement so a future Icebird bump cannot regress
+`hyp purge` (LLP 0104) through the batch route unnoticed.
 
 ## Consequences
 

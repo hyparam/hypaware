@@ -231,7 +231,12 @@ function defaultTablePath() {
   if (candidates.length === 0) {
     throw new Error(`no real ai_gateway_messages Iceberg tables found under ${sourceDir}`)
   }
-  return candidates.sort((left, right) => directoryStats(path.join(right, 'data')).bytes - directoryStats(path.join(left, 'data')).bytes)[0]
+  // Size each candidate once: `directoryStats` walks the whole data tree, and
+  // a comparator calls it O(n log n) times over tables holding thousands of
+  // parquet files.
+  const sized = candidates.map((table) => ({ table, bytes: directoryStats(path.join(table, 'data')).bytes }))
+  sized.sort((left, right) => right.bytes - left.bytes)
+  return sized[0].table
 }
 
 /**

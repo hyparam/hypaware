@@ -1,9 +1,13 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { asyncRow, collect, executeSql, parseSql } from 'squirreling'
+import { appendRowsToTable, dataSourceForTable, deleteMatchingRows } from '../../src/core/cache/iceberg/store.js'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
@@ -267,6 +271,68 @@ test('unionSources treats equivalent data types as compatible regardless of obje
     preparedSource(fieldsB, [{ values: ['b'] }], []),
   ])
   assert.equal(typeof union.prepareScan, 'function')
+})
+
+// `hyp purge` deletes cache rows with Iceberg position deletes rather than
+// rewriting files, so every read path has to apply the delete map or a purged
+// row comes back. The prepared union is a NEW read path around that guarantee:
+// the older row/scanColumn coverage in purge-command.test.js cannot see it,
+// and a wrong answer here is silent (a resurrected row, not an error).
+// @ref LLP 0104 [tests]: a position-deleted row stays deleted on the native batch route, not just the row route
+// @ref LLP 0294#partition-union [tests]: deletes, residual filter, COUNT, and the global range all agree with the row path over real Iceberg partitions
+test('purged rows stay purged through the prepared union over real Iceberg partitions', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-union-purge-'))
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'v', type: 'STRING', nullable: true },
+    ]
+    const first = path.join(cacheRoot, 'part-a')
+    const second = path.join(cacheRoot, 'part-b')
+    // Purge the LEADING row of the first file: a delete applied against
+    // filtered rather than physical ordinals would drop `id = 2` instead.
+    await appendRowsToTable(first, columns, [
+      { id: 1, v: 'secret' },
+      { id: 2, v: 'keep' },
+      { id: 3, v: 'keep' },
+    ])
+    await appendRowsToTable(second, columns, [
+      { id: 4, v: 'keep' },
+      { id: 5, v: 'secret' },
+    ])
+    for (const table of [first, second]) {
+      await deleteMatchingRows(table, (row) => row.v === 'secret', { columns: ['v'] })
+    }
+
+    const sources = []
+    for (const table of [first, second]) {
+      const source = await dataSourceForTable(table)
+      assert.ok(source, 'the purged table still reads')
+      assert.equal(typeof source.prepareScan, 'function', 'icebird offers native batches')
+      sources.push(source)
+    }
+    const union = unionSources(sources)
+    assert.equal(typeof union.prepareScan, 'function', 'aligned partitions expose one prepared union')
+    // icebird cannot count a snapshot carrying position deletes, and one
+    // unknown child must not let the union report a short total.
+    assert.equal(union.numRows, undefined)
+
+    /** @param {string} query */
+    const run = (query) => collect(executeSql({ tables: { t: union }, query }))
+    assert.deepEqual(
+      (await run('SELECT id FROM t ORDER BY id')).map((row) => Number(row.id)),
+      [2, 3, 4]
+    )
+    assert.deepEqual(await run("SELECT id FROM t WHERE v = 'secret'"), [])
+    assert.deepEqual(await run('SELECT COUNT(*) AS n FROM t'), [{ n: 3 }])
+    assert.deepEqual(
+      (await run('SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 1')).map((row) => Number(row.id)),
+      [3, 4]
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
 })
 
 /**

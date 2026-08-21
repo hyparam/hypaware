@@ -21,7 +21,7 @@ import {
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncBatch, AsyncDataSource, PrepareScan } from 'squirreling'
+ * @import { AsyncBatch, AsyncDataSource, ColumnResult, ColumnVector, PrepareScan } from 'squirreling'
  */
 
 /**
@@ -251,6 +251,14 @@ function budgetedPrepareScan(prepareScan, guard) {
 }
 
 /**
+ * Sample the budget after a deferred column materializes, WITHOUT converting a
+ * synchronous read into a promise. `ReadColumn` returns `ColumnVector |
+ * Promise<ColumnVector>`, and squirreling keeps whole expression and projection
+ * batches off the promise machinery when every column result resolves inline
+ * (`resolveColumnResults`). An `async read` would hand it a thenable every
+ * time and reintroduce exactly the per-batch microtask this path exists to
+ * remove.
+ *
  * @param {AsyncBatch} batch
  * @param {{ check: (site: string) => void }} guard
  * @returns {AsyncBatch}
@@ -263,14 +271,28 @@ function budgetedBatch(batch, guard) {
       const read = column.read
       return {
         ...column,
-        async read(request) {
-          const vector = await read.call(column, request)
-          guard.check('native_batch')
-          return vector
+        read(request) {
+          const result = read.call(column, request)
+          if (!isThenable(result)) {
+            guard.check('native_batch')
+            return result
+          }
+          return result.then((vector) => {
+            guard.check('native_batch')
+            return vector
+          })
         },
       }
     }),
   }
+}
+
+/**
+ * @param {ColumnResult} value
+ * @returns {value is Promise<ColumnVector>}
+ */
+function isThenable(value) {
+  return typeof (/** @type {{ then?: unknown }} */ (value))?.then === 'function'
 }
 
 /**
