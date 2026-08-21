@@ -390,10 +390,16 @@ function legacyConfirmSelectPromptFactory(opts) {
       // `askLine` rather than `rl.question`, which never settles at EOF. The
       // gate prints its default in the prompt (`select [2]`), so a stdin that
       // can no longer answer takes that default instead of hanging the wizard.
+      // A question whose printed default acts rather than declines names an
+      // `eofValue` to land on instead: a default says what the person at the
+      // terminal probably wants, and EOF is the proof there is no such person.
       // @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default
-      const answer = (await askLine(
+      // @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines the gates that would act
+      const line = await askLine(
         question.allowBack ? `select [${fallbackIdx + 1}, b back]: ` : `select [${fallbackIdx + 1}]: `
-      )) ?? ''
+      )
+      if (line === null && question.eofValue !== undefined) return question.eofValue
+      const answer = line ?? ''
       // The readline form of the TUI's escape (LLP 0191).
       if (question.allowBack && answer.trim().toLowerCase() === 'b') throw new PromptBackRequestedError()
       const n = Number.parseInt(answer.trim(), 10)

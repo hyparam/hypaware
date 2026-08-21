@@ -62,9 +62,20 @@ everywhere else, because every other default there already declines to
 act - the wizard fork menu's Quit, `plugin_install`'s `[y/N]`, and
 `claude-account login`'s `Code:` paste, which has no default and fails
 rather than inventing one. The wizard's `ConfirmSelectQuestion` gates
-keep taking their stated default at EOF; the sync release they lead to is
-gated by `askYesNo` on the same spent stdin, so the hold is safe without
-changing the select factory.
+keep taking their stated default at EOF, and the sync release they lead
+to needs nothing more: it is gated by `askYesNo` on the same spent
+stdin, so the hold is safe without changing the select factory.
+
+The exception is a select whose stated default *acts*, which this
+decision creates exactly one of: the enrolled fork's disconnect
+question, whose yes runs `hyp leave` with no `askYesNo` behind it
+(LLP 0190 #fork-disconnect). There a spent stdin would disconnect a
+managed machine with nobody at the terminal, so such a question names an
+`eofValue` and the legacy select returns it instead of coalescing the
+asker's `null` into the empty line. The default is still what is printed
+and what a bare enter takes; `eofValue` only answers "and if there is no
+one to press it". A question that does not name one is unchanged, which
+is every other gate.
 
 ## Consequences {#consequences}
 

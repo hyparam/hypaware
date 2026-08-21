@@ -45,6 +45,13 @@ export interface ConfirmSelectQuestion {
   /** Value returned on a bare enter; defaults to the first option. */
   default?: string
   /**
+   * Value returned when stdin can no longer answer, for the gates whose
+   * printed default acts rather than declines (LLP 0299 #eof-declines).
+   * Unset questions keep taking `default` at EOF, which is what the
+   * sync gate's stated-default fallback relies on (LLP 0190 #sync-gate).
+   */
+  eofValue?: string
+  /**
    * Back-navigation opt-in (LLP 0191): the TUI select's escape and the
    * readline fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling, returning the user to the previous screen.
