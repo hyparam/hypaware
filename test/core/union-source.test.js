@@ -13,10 +13,9 @@ import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { AsyncCells, AsyncDataSource, ExprNode, Field, ScanOptions, ScanRequest, SqlPrimitive } from 'squirreling'
  * @import { IdentifierNode, ScanColumnResults } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

@@ -17,9 +17,8 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { SqlPrimitive } from 'squirreling'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

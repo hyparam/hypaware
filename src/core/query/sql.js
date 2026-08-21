@@ -137,6 +137,21 @@ function resolveForcedGc() {
 }
 
 /**
+ * A source's logical column names. Squirreling widened `AsyncDataSource` so a
+ * prepared-only source may carry `schema` instead of `columns`; the kernel
+ * therefore derives the names the way the engine's own `dataSourceColumns`
+ * does. That helper is internal to squirreling and not exported, so the rule
+ * lives here once rather than at each of the three sites that need it.
+ *
+ * @ref LLP 0294#transparent-wrappers [implements]: a prepared-only source is addressed by schema, not by an advertised column list
+ * @param {AsyncDataSource} source
+ * @returns {string[]}
+ */
+function sourceColumnNames(source) {
+  return source.columns ?? source.schema?.fields.map((field) => field.name) ?? []
+}
+
+/**
  * Decorate a data source so its scans enforce the query's heap budget
  * INLINE, from within the row loop itself. A timer-based watchdog alone is
  * not enough: a query whose reads resolve without real I/O (warm cache,
@@ -157,7 +172,7 @@ function withHeapBudget(source, guard) {
     /** @type {AsyncDataSource} */
     const bounded = {
       numRows: source.numRows,
-      columns: source.columns ?? schema.fields.map((field) => field.name),
+      columns: sourceColumnNames(source),
       schema,
       prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
     }
@@ -168,7 +183,7 @@ function withHeapBudget(source, guard) {
   /** @type {AsyncDataSource} */
   const bounded = {
     numRows: source.numRows,
-    columns: source.columns ?? source.schema?.fields.map((field) => field.name) ?? [],
+    columns: sourceColumnNames(source),
     scan(options) {
       const inner = scan.call(source, options)
       return {
@@ -429,7 +444,7 @@ export async function executeQuerySql(args) {
           let table = source
           if (!includeLocalOnly) {
             const contentColumns = dataset.localOnlyContentColumns ?? []
-            const sourceColumns = source.columns ?? source.schema?.fields.map((field) => field.name) ?? []
+            const sourceColumns = sourceColumnNames(source)
             const governable = sourceColumns.includes('cwd') ||
               contentColumns.some((c) => sourceColumns.includes(c))
             if (governable) {

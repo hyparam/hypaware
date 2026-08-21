@@ -34,9 +34,8 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { AsyncDataSource, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 // The same fixture `test/core/parquet-source.test.js` uses, so the two

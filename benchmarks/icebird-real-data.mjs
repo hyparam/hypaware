@@ -28,14 +28,16 @@ const SCENARIOS = {
 }
 
 const args = parseArgs(process.argv.slice(2))
+// Validate before the table walk below: sizing candidate tables reads every
+// parquet file's stat, which is a long wait for a mistyped scenario name.
+if (!SCENARIOS[args.scenario]) {
+  throw new Error(`unknown scenario "${args.scenario}", expected one of: ${Object.keys(SCENARIOS).join(', ')}`)
+}
+
 const tablePath = path.resolve(args.table ?? defaultTablePath())
 const metadata = tableMetadata(tablePath)
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const dataStats = directoryStats(path.join(tablePath, 'data'))
-
-if (!SCENARIOS[args.scenario]) {
-  throw new Error(`unknown scenario "${args.scenario}", expected one of: ${Object.keys(SCENARIOS).join(', ')}`)
-}
 
 const storage = createQueryStorageService({ cacheRoot: path.dirname(tablePath) })
 const dataset = {
@@ -115,6 +117,8 @@ const output = {
   run: {
     warmup_iterations: args.warmup,
     measured_iterations: args.iterations,
+    max_heap_mb: args.maxHeapMb,
+    heap_budget_wrapper: args.maxHeapMb > 0,
     exposed_gc: typeof globalThis.gc === 'function',
     checksum: expectedChecksum,
   },
@@ -139,13 +143,20 @@ async function measureOnce(scenario) {
  * @returns {Promise<string>}
  */
 async function runScenario(scenario) {
+  // A zero budget makes `executeQuerySql` skip `withHeapBudget` outright, so
+  // the default run measures the bare source stack and the projection scenario
+  // can materialize every row without refusing. That is NOT what a real query
+  // does: production wraps each source, sampling `process.memoryUsage()` once
+  // per native batch and once per deferred column read. Pass `--max-heap-mb`
+  // to measure the same workload with the wrapper in place and see what the
+  // sampling costs on the path this benchmark exists to defend.
   const result = await executeQuerySql({
     query: SCENARIOS[scenario],
     registry: /** @type {any} */ (registry),
     storage,
     refresh: 'never',
     includeLocalOnly: true,
-    maxHeapBytes: 0,
+    maxHeapBytes: args.maxHeapMb * 1024 * 1024,
   })
   if (scenario !== 'projection') {
     return `${result.rows.length}:${scalarChecksum(result.rows[0]?.value)}`
@@ -190,12 +201,14 @@ function parseArgs(argv) {
   let scenario = /** @type {keyof typeof SCENARIOS} */ ('two_column_sum')
   let iterations = 5
   let warmup = 1
+  let maxHeapMb = 0
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
     if (arg === '--table') table = requiredValue(argv, ++index, arg)
     else if (arg === '--scenario') scenario = /** @type {keyof typeof SCENARIOS} */ (requiredValue(argv, ++index, arg))
     else if (arg === '--iterations') iterations = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--warmup') warmup = nonNegativeInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--max-heap-mb') maxHeapMb = nonNegativeInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--help') {
       process.stdout.write(usage())
       process.exit(0)
@@ -203,7 +216,7 @@ function parseArgs(argv) {
       throw new Error(`unknown argument: ${arg}\n${usage()}`)
     }
   }
-  return { table, scenario, iterations, warmup }
+  return { table, scenario, iterations, warmup, maxHeapMb }
 }
 
 /**
@@ -373,5 +386,6 @@ function usage() {
     `  --table PATH          Iceberg table directory (defaults to largest retired Claude table)\n` +
     `  --scenario NAME       ${Object.keys(SCENARIOS).join(', ')}\n` +
     `  --iterations NUMBER   measured iterations (default: 5)\n` +
-    `  --warmup NUMBER       warmup iterations (default: 1)\n`
+    `  --warmup NUMBER       warmup iterations (default: 1)\n` +
+    `  --max-heap-mb NUMBER  per-query heap budget in MiB; 0 (default) skips the budget wrapper entirely\n`
 }
