@@ -19,7 +19,7 @@ import {
   resolveCallerClass,
 } from '../query/visibility.js'
 import { cellText, compileMatcher, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
-import { SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
+import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from './searchable_columns.js'
 
 /**
  * The local grep-search service: the client half of LLP 0264, mirroring the
@@ -58,7 +58,7 @@ import { SCAN_COLUMNS, SEARCHABLE_COLUMNS } from './searchable_columns.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
-const DATASET = 'ai_gateway_messages'
+const DATASET = GREP_DATASET
 
 /**
  * Rows between abort checks inside one brute-scanned file. The deadline has
@@ -233,11 +233,19 @@ export async function executeGrepSearch(args) {
        * the limit promises. Trimming is amortized (it runs once the buffer
        * has doubled), so the walk still costs a bounded number of hits
        * rather than one per match in the cache.
+       *
+       * The same trim runs over the indexed tier's per-file buffer below,
+       * for the same reason: a buffer that grew with the file rather than
+       * with the budget would give up the memory bound this walk promises,
+       * and cutting it in walk order would reintroduce the bug.
+       *
+       * @param {GrepSearchHit[]} list
        */
-      const trimHits = () => {
-        sortHits(hits)
-        if (hits.length > budget) hits.length = budget
+      const trimBuffer = (list) => {
+        sortHits(list)
+        if (list.length > budget) list.length = budget
       }
+      const trimHits = () => trimBuffer(hits)
       /** @param {Record<string, unknown>} row */
       const collect = (row) => {
         hits.push(toHit(row, matcher))
@@ -246,10 +254,7 @@ export async function executeGrepSearch(args) {
 
       /**
        * Search one file through its sidecar. Returns false when the index
-       * proved unusable BEFORE it produced a row, which hands the file to
-       * the scan tier instead; a failure after the first row cannot be
-       * retried that way (the hits already collected would be counted a
-       * second time), so it propagates.
+       * proved unusable, which hands that one file to the scan tier below.
        *
        * The existence probe only rules out a missing sidecar. A sidecar
        * that exists but cannot be read (a half-written index from a killed
@@ -261,39 +266,90 @@ export async function executeGrepSearch(args) {
        * correctness input; LLP 0264 #lifecycle says it never is, so a
        * poisoned file is brute-scanned exactly like an unindexed one.
        *
+       * The attempt therefore runs into a local buffer and commits only
+       * once the index tier finished. A sidecar can tear mid-read (an
+       * external writer; the build's own publish is atomic), and rows
+       * already pushed to the shared buffer could not be taken back, so
+       * committing as it went would leave the choice between double-counting
+       * them on the rescan and failing the whole query. Buffering makes
+       * degrading the file a decision this function can still take at any
+       * point in the read.
+       *
+       * An abort is the one failure that commits the buffer instead of
+       * discarding it: it ends the walk rather than degrading the file, so
+       * there is no rescan to double-count against and the rows the index
+       * already produced belong in the partial answer.
+       *
        * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
        * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
+       * @param {string} sidecarUrl
        * @returns {Promise<boolean>}
        */
-      const searchIndexed = async (file, indexFile) => {
-        // No `limit` is passed down: a purged or withheld row is filtered
-        // AFTER parquetFind accepts it, so a passed-down limit would count
-        // rows this walk then discards and under-return. The generator is
-        // simply not pulled past the budget instead.
-        const rows = parquetFind({
-          query: matcher.hypQuery,
-          url: file.filePath,
-          indexFile,
-          asyncBufferFactory: async ({ url }) => await io.reader(url),
-          rowFilter: accept,
-          signal,
-        })
-        let produced = false
+      const searchIndexed = async (file, indexFile, sidecarUrl) => {
+        /** @type {GrepSearchHit[]} */
+        const found = []
+        let withheldHere = 0
         try {
+          // No `limit` is passed down: a purged or withheld row is filtered
+          // AFTER parquetFind accepts it, so a passed-down limit would count
+          // rows this walk then discards and under-return. The generator is
+          // simply not pulled past the budget instead.
+          const rows = parquetFind({
+            query: matcher.hypQuery,
+            url: file.filePath,
+            indexFile,
+            asyncBufferFactory: async ({ url }) => await io.reader(url),
+            rowFilter: accept,
+            signal,
+          })
           for await (const row of rows) {
-            produced = true
             if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
             if (withheld?.(row)) {
-              localOnly.withheldRows += 1
+              withheldHere += 1
               continue
             }
-            collect(row)
+            found.push(toHit(row, matcher))
+            if (found.length >= budget * 2) trimBuffer(found)
           }
         } catch (err) {
-          if (produced || isAbort(err, signal)) throw err
+          if (isAbort(err, signal)) {
+            // Commit before the abort propagates. A deadline lands INSIDE a
+            // file, not between files (hypgrep checks the signal at every
+            // coalesced range boundary), and a newest-first walk makes the
+            // interrupted file the newest one the caller most wants, so
+            // discarding the buffer would answer zero for exactly that file
+            // and lose its withheld-row count out of the report. Safe
+            // precisely because an abort ends the walk: this file is never
+            // rescanned, so no row can be counted twice. It still does not
+            // count as indexed, because it was not served whole.
+            for (const hit of found) hits.push(hit)
+            localOnly.withheldRows += withheldHere
+            throw err
+          }
+          // Both files are named, because the read that failed spans both:
+          // `parquetFind` opens the source data file through the same
+          // factory as the sidecar and runs the row filter per row, so a
+          // torn source parquet reaches this line too and then fails the
+          // rescan below. Deleting the sidecar is the usual remedy and this
+          // warning is its only notice (nothing rebuilds one in place), but
+          // the line must not claim to have proved which file is at fault.
+          getLogger('query').warn('grep_search.indexed_read_failed', {
+            [Attr.COMPONENT]: 'query',
+            [Attr.OPERATION]: 'query.grep_search',
+            sidecar_file: urlToPath(sidecarUrl),
+            data_file: urlToPath(file.filePath),
+            error_message: err instanceof Error ? err.message : String(err),
+          })
           return false
         }
         indexedFiles += 1
+        localOnly.withheldRows += withheldHere
+        // Appended, not spread: `limit` is validated as a positive safe
+        // integer but is not bounded above, so one file may fill a buffer of
+        // millions, and a spread of that many arguments is an argument-count
+        // overflow, not a push.
+        for (const hit of found) hits.push(hit)
+        if (hits.length >= budget * 2) trimHits()
         return true
       }
 
@@ -303,7 +359,7 @@ export async function executeGrepSearch(args) {
         // #lifecycle): probe the filesystem, then degrade this one file to
         // the scan tier if the read races a delete. Results stay exact
         // either way; only the wall clock changes.
-        const sidecarUrl = file.filePath.replace(/\.parquet$/i, '.index.parquet')
+        const sidecarUrl = sidecarPathFor(file.filePath)
         /** @type {Awaited<ReturnType<typeof io.reader>> | null} */
         let indexFile = null
         if (fs.existsSync(urlToPath(sidecarUrl))) {
@@ -317,7 +373,7 @@ export async function executeGrepSearch(args) {
             indexFile = null
           }
         }
-        if (indexFile && await searchIndexed(file, indexFile)) return
+        if (indexFile && await searchIndexed(file, indexFile, sidecarUrl)) return
         scannedFiles += 1
         const sourceFile = await io.reader(file.filePath)
         const rows = await parquetReadObjects({ file: sourceFile, columns: SCAN_COLUMNS })
@@ -426,9 +482,9 @@ function sortHits(hits) {
  * Project a matched row to the shared hit shape. Matched columns come from
  * the same allowlist the row predicate tested, in the set's order, so the
  * content column leads and a column the predicate could not have matched is
- * never reported. Cells render through `cellText` first, so the JSON column
- * (`tool_args`) that produced a `rowTest` match also produces the matched
- * column and its snippet here rather than being skipped as a non-string.
+ * never reported. Cells render through `cellText` first, the same coercion
+ * the row predicate applied, so a row that matched always names at least one
+ * matched column here rather than reporting a hit with none.
  *
  * @param {Record<string, unknown>} row
  * @param {GrepSearchMatcher} matcher

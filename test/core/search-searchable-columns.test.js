@@ -18,7 +18,6 @@ test('the searchable allowlist is exactly the server-shared set, content column 
   assert.deepEqual([...SEARCHABLE_COLUMNS], [
     'content_text',
     'tool_name',
-    'tool_args',
     'session_id',
     'conversation_id',
     'agent_id',
@@ -35,6 +34,17 @@ test('the bulk machinery columns stay out of the allowlist', () => {
   for (const column of ['system_text', 'tools', 'attributes', 'raw_frame', 'status']) {
     assert.equal(SEARCHABLE_COLUMNS.has(column), false, `${column} must not be searchable`)
   }
+})
+
+test('the VARIANT column stays out of the allowlist, and out of the scan', () => {
+  // `tool_args` is the dataset's one iceberg `variant` column. No tier in
+  // either repository can produce a hit from it: the index workers filter
+  // VARIANT out before building, and the server's row predicate takes
+  // strings only. So it is absent rather than decoded on every brute scan
+  // for nothing. hyparam/hypaware#977 restores it once hypgrep can index
+  // VARIANT; until then its absence is the thing both repos agree on.
+  assert.equal(SEARCHABLE_COLUMNS.has('tool_args'), false)
+  assert.equal(SCAN_COLUMNS.includes('tool_args'), false)
 })
 
 test('every searchable column exists on the ai_gateway_messages schema', () => {

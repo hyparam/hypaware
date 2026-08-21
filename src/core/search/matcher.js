@@ -109,14 +109,22 @@ export function compileMatcher(query, regex) {
 }
 
 /**
- * The searchable text of one cell. Most searchable columns hold STRING,
- * but `tool_args` is a JSON column (iceberg `variant`), so it reads back
- * from parquet as an object. Without this coercion a column named in the
- * allowlist could never produce a hit: a `typeof value === 'string'` gate
- * drops the object form, so searching for a file path or a shell command
- * inside a tool call answers zero while the indexed tier, which reads the
- * column's own text, answers otherwise. That split is precisely the drift
- * the shared module exists to prevent.
+ * The searchable text of one cell. Every allowlisted column holds STRING
+ * today, so on the live path this coercion is a no-op. It stays because it
+ * is what makes `rowTest`, `test`, `locate` and `makeSnippet` answer
+ * identically for whatever a cell decodes to, string or not: the consumer
+ * loop row-tests a row and then per-cell tests each allowlisted column, and
+ * a per-cell predicate narrower than the row predicate makes that loop
+ * report a hit with no matched columns, or throw on `value.slice`.
+ *
+ * What it deliberately does NOT do is make a non-string column searchable
+ * end to end. The indexed tier cannot follow it there: an index worker
+ * skips a VARIANT column, so a cell only this coercion can read would match
+ * on the scan tier and answer zero on the indexed one, which is the drift
+ * the shared module exists to prevent. That is why `tool_args` is out of
+ * the allowlist rather than carried by this function (see
+ * `searchable_columns.js`, and hyparam/hypaware#977, which would restore it
+ * on both tiers at once).
  *
  * A decoded object is rendered as its keys and primitive leaves, one per
  * line, rather than as `JSON.stringify` text. Serialized text carries the
@@ -125,16 +133,11 @@ export function compileMatcher(query, regex) {
  * query for a Windows path or for a multi-line command would miss the
  * very cell it names. The leaf rendering searches what the user sees.
  *
- * A cell that arrives already serialized (the paths that carry `tool_args`
- * verbatim, as `parseMaybeJson` handles elsewhere in the contract) is
- * matched as the text it is: nothing here knows the column, so parsing
- * every JSON-looking string would change what a `content_text` holding a
- * JSON document matches. That asymmetry is bounded (it only shows up for
- * a query containing a JSON escape) and is for the scan paths in T4/T5 to
- * settle with the server, which is the only place the column name is in
- * hand.
+ * A cell that arrives already serialized is matched as the text it is:
+ * nothing here knows the column, so parsing every JSON-looking string would
+ * change what a `content_text` holding a JSON document matches.
  *
- * @ref LLP 0264#shared [implements]: every allowlisted column is really searchable on every tier, including the JSON one
+ * @ref LLP 0264#shared [implements]: one cell coercion, so the row predicate and the per-cell predicate cannot disagree about a cell
  * @param {unknown} value
  * @returns {string}
  */

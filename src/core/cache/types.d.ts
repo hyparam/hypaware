@@ -295,6 +295,12 @@ export interface MaintenancePartitionReport {
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
+  /** Grep sidecars built for the just-compacted generation; absent when the build did not run. */
+  sidecarsBuilt?: number
+  /** Files whose sidecar build failed or is quarantined; the scan tier serves them. */
+  sidecarsFailed?: number
+  /** The build pass's own error, when the pass itself threw (never fails the partition). */
+  sidecarError?: string
   // Compaction of this partition is known not to reduce its data-file
   // count under the writer running now: either this run's rewrite
   // reproduced the count it started from, or a previous one did and the

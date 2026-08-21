@@ -238,18 +238,35 @@ test('literal matching is case-insensitive; regex mode is operator-shaped', asyn
   assert.deepEqual(rx.hits.map((h) => h.sessionId), ['s2'])
 })
 
-test('the JSON column matches through cellText, and reports as the matched column', async () => {
+test('a row matching only in tool_args returns zero hits from BOTH tiers', async () => {
+  // The invariant is tier agreement, not coverage. `tool_args` is VARIANT,
+  // the index worker filters it out, so an indexed file can never answer a
+  // match through it; the scan tier must therefore not answer one either.
+  // Dropping the column from the allowlist is what makes the two agree, and
+  // hyparam/hypaware#977 is where they would agree the other way instead.
   const toolRow = mkRow({
     date: '2026-08-11',
     session_id: 's3',
     tool_name: 'Read',
     tool_args: { file_path: '/repo/hidden_needle_path.js' },
   })
-  const { storage } = await makeCache([[toolRow]])
-  const res = await grep(storage, { query: 'hidden_needle_path' })
-  assert.equal(res.hits.length, 1)
-  assert.equal(res.hits[0].matches[0].column, 'tool_args')
-  assert.match(res.hits[0].matches[0].snippet, /hidden_needle_path/)
+  const { storage, tableDir } = await makeCache([[toolRow]])
+
+  const scanned = await grep(storage, { query: 'hidden_needle_path' })
+  assert.equal(scanned.hits.length, 0)
+  assert.equal(scanned.indexedFiles, 0)
+  assert.ok(scanned.scannedFiles >= 1, 'the scan tier really read the file')
+
+  assert.ok(await buildSidecars(tableDir()) >= 1, 'a sidecar was built')
+  const indexed = await grep(storage, { query: 'hidden_needle_path' })
+  assert.equal(indexed.hits.length, 0)
+  assert.equal(indexed.scannedFiles, 0)
+  assert.ok(indexed.indexedFiles >= 1, 'the indexed tier really served the file')
+
+  // The row itself is still reachable, so the zero above is the column
+  // being unsearchable rather than the row being missing.
+  const byName = await grep(storage, { query: 'Read' })
+  assert.deepEqual(byName.hits.map((h) => h.sessionId), ['s3'])
 })
 
 test('local-only rows are withheld from lower-rank callers, and only from them', async () => {
