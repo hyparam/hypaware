@@ -118,7 +118,9 @@ async function liveDataFiles(dir) {
   const dataDir = path.join(dir, cursor.tableDir ?? 'table', 'data')
   const entries = await fs.readdir(dataDir, { withFileTypes: true })
   return entries
-    .filter((e) => e.isFile() && e.name.endsWith('.parquet'))
+    // Data files only: compaction now leaves a grep sidecar beside each
+    // one, and truncating a sidecar would not make the rewrite fail.
+    .filter((e) => e.isFile() && e.name.endsWith('.parquet') && !e.name.endsWith('.index.parquet'))
     .map((e) => path.join(dataDir, e.name))
 }
 
