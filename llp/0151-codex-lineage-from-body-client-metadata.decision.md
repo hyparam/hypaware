@@ -43,6 +43,9 @@ Two consequences the projector was on the wrong side of:
    ([LLP 0030](./0030-session-id-partition-key.decision.md)). `parent-thread-id`
    was simply the wrong spelling of the real `x-codex-parent-thread-id`, so
    header-route subagent lineage never resolved at all.
+   (**Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction)** -
+   two of the three are real names on paths this audit did not reach, and
+   correctly unread anyway.)
 
 The premise that `x-codex-turn-metadata` is a Codex Desktop signal
 ([LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md#context),
@@ -92,6 +95,12 @@ defect class as the fictional `thread-id` header
 header, and in a capture product a misfiled client is a privacy question and not
 a cosmetic one.
 
+> **Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#flat-pair-corroboration).**
+> The user-agent branch is dropped from the corroborating predicate below. It
+> is a product-name convention any local process can copy, so it may name the
+> client but not promote the flat pair into the partition key. The other three
+> signals are unchanged, and so is everything else in this section.
+
 So the pair is honoured only once the transport has already identified the
 exchange as Codex independently of the body: the `chatgpt` upstream, the
 `/backend-api/codex/` namespace, an `x-codex-*` compatibility header, or a
@@ -123,6 +132,14 @@ read.** The audit of every header this file reads:
 | `x-client-request-id` | yes | `codex-api`'s responses endpoint |
 | `x-oai-request-id` (response) | yes | the service |
 | ~~`thread-id`~~, ~~`session-id`~~, ~~`parent-thread-id`~~ | **no** | nothing emits them; removed |
+
+> **Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction).**
+> The last row overstates: `session-id` and `thread-id` are real header names on
+> Codex's `/responses/compact` and websocket-handshake paths, though not on the
+> turn-streaming path this document audited, and `parent-thread-id` is fictional
+> as stated. The verdict is unaffected (both remain correctly unread, since the
+> turn-metadata blob states the same ids for the one request kind that carries
+> them), only the reason.
 
 `x-openai-subagent` is real and still **unread**. Adopting it would change what
 `is_sidechain` means (its values are Codex's subagent *kinds*: `review`,
