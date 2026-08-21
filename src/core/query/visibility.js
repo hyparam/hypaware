@@ -70,6 +70,31 @@ export function callerSeesEverything(callerRank) {
 }
 
 /**
+ * The one row-level withholding rule: a row whose `cwd` resolves to a class
+ * that outranks the caller's on the restrictiveness lattice is withheld.
+ * `withLocalOnlyVisibility` below applies it on the SQL read path; the grep
+ * service applies it per scanned row on its file walk (which cannot route
+ * through an `AsyncDataSource` wrapper). One exported predicate rather than
+ * two copies, so the two read surfaces cannot drift on what "local-only"
+ * hides. A cwd-less value returns false: those rows are `full`-class by
+ * construction on cwd-bearing datasets (see the wrapper's contract below).
+ *
+ * A corrupt machine-local list makes `resolve` throw
+ * (LocalOnlyListUnreadableError); callers let it propagate so the read
+ * fails loudly rather than silently resolving to "nothing withheld".
+ *
+ * @ref LLP 0105 [implements]: caller class >= row class on the lattice, the shared predicate form
+ * @param {UsagePolicyResolver} resolver
+ * @param {number} callerRank
+ * @param {unknown} cwd
+ * @returns {boolean}
+ */
+export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return false
+  return CLASS_RANK[resolver.resolve(cwd).class] > callerRank
+}
+
+/**
  * Decorate one dataset's data source so every row the engine pulls honors
  * LLP 0105's invariant: content may only surface in a context at least as
  * non-exported as the content itself.
@@ -154,7 +179,7 @@ export function withLocalOnlyVisibility(source, opts) {
               // (LocalOnlyListUnreadableError); let it propagate so the query
               // fails loudly rather than silently resolving to "nothing
               // withheld", matching the export seam's fail-safe polarity.
-              if (CLASS_RANK[resolver.resolve(cwd).class] > callerRank) {
+              if (cwdWithheldFromCaller(resolver, callerRank, cwd)) {
                 report.withheldRows += 1
                 continue
               }

@@ -627,7 +627,7 @@ test('bare group command with an unknown subcommand reports the registry childre
 
   assert.equal(code, 2)
   assert.match(stderr.text(), /hyp query: unknown subcommand 'bogus'/)
-  assert.match(stderr.text(), /expected one of: overview, schema, sql/)
+  assert.match(stderr.text(), /expected one of: grep, overview, schema, sql/)
 })
 
 test('a token that is neither a command nor a group prefix still errors', async () => {
