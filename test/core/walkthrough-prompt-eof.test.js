@@ -152,6 +152,59 @@ test('defaults gate still honours an explicit pick', async () => {
   assert.equal(await settles(answer, 'defaults gate with an answer'), 'accept')
 })
 
+// The disconnect gate is the one select whose stated default acts: it runs
+// `hyp leave`, tearing down the org connection. Landing a spent stdin on
+// that default would let a piped `hyp setup` disconnect a managed machine
+// with nobody at the terminal, so the question names an `eofValue` and EOF
+// takes that instead. The prompt still prints `select [1]` - the default is
+// what the person is offered, `eofValue` is what happens when there is no
+// person.
+//
+// @ref LLP 0299#eof-declines [tests]: a stdin that cannot answer declines the gates that would act
+test('a gate naming an eofValue takes it, not the acting default, when stdin ends', async () => {
+  const stdin = new PassThrough()
+  const stdout = makeBuf()
+  const ask = defaultConfirmSelectPromptFactory({
+    stdin: /** @type {any} */ (stdin),
+    stdout,
+    env: { HYP_NO_TUI: '1' },
+  })
+  const answer = ask(/** @type {any} */ ({
+    title: 'This machine syncs to your team server. Disconnect and go local-only?',
+    options: [
+      { value: 'disconnect', label: 'Yes, disconnect' },
+      { value: 'stay', label: 'No, stay connected' },
+    ],
+    default: 'disconnect',
+    eofValue: 'stay',
+  }))
+  stdin.end()
+
+  assert.equal(await settles(answer, 'disconnect gate at EOF'), 'stay')
+  assert.match(stdout.text(), /select \[1\]: $/, 'the acting default is still the one offered')
+})
+
+test('a gate naming an eofValue still honours an explicit pick', async () => {
+  const stdin = new PassThrough()
+  const ask = defaultConfirmSelectPromptFactory({
+    stdin: /** @type {any} */ (stdin),
+    stdout: makeBuf(),
+    env: { HYP_NO_TUI: '1' },
+  })
+  const answer = ask(/** @type {any} */ ({
+    title: 'This machine syncs to your team server. Disconnect and go local-only?',
+    options: [
+      { value: 'disconnect', label: 'Yes, disconnect' },
+      { value: 'stay', label: 'No, stay connected' },
+    ],
+    default: 'disconnect',
+    eofValue: 'stay',
+  }))
+  stdin.write('1\n')
+
+  assert.equal(await settles(answer, 'disconnect gate with an answer'), 'disconnect')
+})
+
 test('backfill consent takes its printed default on a stdin that ends without a line', async () => {
   const stdin = new PassThrough()
   const stdout = makeBuf()

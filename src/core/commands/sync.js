@@ -140,8 +140,9 @@ export async function runSync(argv, ctx) {
     ctx,
     yes,
     question: deadline !== null
-      ? 'Send now and end the review window? [y/N] '
-      : `Send now to ${describeScope(destinations)}? [y/N] `,
+      ? 'Send now and end the review window? [Y/n] '
+      : `Send now to ${describeScope(destinations)}? [Y/n] `,
+    defaultYes: true,
   })
   if (outcome === 'no-tty') {
     ctx.stderr.write(

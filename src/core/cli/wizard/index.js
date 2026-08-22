@@ -267,10 +267,15 @@ export async function runInitWizard(opts) {
               disconnect = await confirm({
                 title: 'This machine syncs to your team server. Disconnect and go local-only?',
                 options: [
-                  { value: 'stay', label: 'No, stay connected' },
                   { value: 'disconnect', label: 'Yes, disconnect' },
+                  { value: 'stay', label: 'No, stay connected' },
                 ],
-                default: 'stay',
+                default: 'disconnect',
+                // A gate whose default acts, so it cannot let a spent
+                // stdin take it: `hyp leave` is not something a
+                // piped run should fall into with nobody at the terminal
+                // (LLP 0299 #eof-declines).
+                eofValue: 'stay',
                 // The fork is always behind this question, so escape backs
                 // into it instead of cancelling (LLP 0191).
                 allowBack: true,

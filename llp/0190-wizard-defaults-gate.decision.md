@@ -146,7 +146,14 @@ lane's, and the asker that implements it is shared.** The defect is
 the rule above answers all of them: **a stdin that can no longer answer
 takes the default the prompt printed; a prompt whose enter has no
 default settles as a cancel or a failure instead, never as an invented
-answer.** `queuedLineAsker` moves out of `walkthrough.js` into
+answer.** ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)
+§eof-declines narrows the first clause wherever a printed default would
+*proceed*: that is not what a spent stdin takes, because EOF is the
+proof nobody is there to want it. `askYesNo` applies this to every
+`[Y/n]` confirm; the select factory applies it only where a question
+names an `eofValue`, which today is the disconnect gate of
+§fork-disconnect. Every other default named below still declines to
+act, so the answers this section gives are unchanged.) `queuedLineAsker` moves out of `walkthrough.js` into
 `src/core/cli/line_asker.js`, beside `stdio.js` and `flush-streams.js`,
 where a plugin workspace can import it too; `askLineOnce` joins it for
 the prompts that ask once on an interface that may be a real terminal,
@@ -166,7 +173,9 @@ the prompts whose enter answers nothing. The two `[y/N]` confirms
 (`src/core/cli/confirm.js`, `src/core/plugin_install/confirm.js`) take
 their printed no, which is the safe direction for the irreversible verbs
 behind them, and their callers' exit codes are unchanged: an EOF decline
-is reported exactly as a typed `n` is. The one prompt with no default is
+is reported exactly as a typed `n` is. (`confirm.js` since grew `[Y/n]`
+prompts; per LLP 0299 §eof-declines those decline at EOF too, so the
+answer this paragraph gives is unchanged - only its derivation is.) The one prompt with no default is
 `claude-account login`'s `Code: ` paste, and it does not invent one: with
 no loopback listener left to finish the sign-in, EOF is a failure that
 says so, and with a listener up the paste lane stays pending rather than
@@ -190,8 +199,13 @@ a silent surprise for the user who meant "switch this machine to
 local-only". Both intents are real, so the wizard now asks at the moment
 of intent: on a managed machine, choosing local raises one yes/no -
 "This machine syncs to your team server. Disconnect and go local-only?"
-with "No, stay connected" as the default (a bare enter never
-disconnects). Yes runs the real `hyp leave` (LLP 0063: central-layer
+with "Yes, disconnect" as the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md):
+disconnecting destroys nothing, so yes leads). It is the one gate here
+whose default *acts*, so it is also the one that names an `eofValue`: a
+stdin that can no longer answer stays connected rather than taking the
+printed default, because §eof-everywhere's rule is about what the person
+at the terminal wants and EOF proves there is none. Yes runs the real `hyp leave` (LLP 0063: central-layer
 removal, org-attach reversal, identity drop) and the run continues as a
 true solo install - no locked rows, no sync lane, the local 120-day
 retention default. No keeps today's behavior: the org's rows stay
