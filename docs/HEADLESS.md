@@ -36,8 +36,10 @@ output, so `hyp remote mint > ci.token` captures exactly the secret. Options:
   pipeline name.
 - `--expires-days <n>` overrides the 365-day default expiry.
 
-The token never rotates. When it nears expiry, mint a new one and swap the
-CI secret; nothing on the server needs cleanup.
+The token never rotates. When it nears expiry, mint a new one and swap the CI
+secret. Minting binds a **new gateway row** at mint time (the id is printed on
+standard error next to the token), so runs before and after the swap group
+under different gateways, and the old row stays in place server-side.
 
 ## Each run: join, capture, flush
 
@@ -101,7 +103,10 @@ printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com
 ```
 
 Without `--no-daemon`, join installs and starts the daemon under launchd or
-systemd, and it survives reboots. In a container image or a host without a
+systemd. Both are per-user services, not system ones: on Linux it is a systemd
+**user** unit, so a headless host needs `loginctl enable-linger <user>` for it
+to start at boot and to survive the last session logging out, and on macOS it
+is a LaunchAgent, which needs a logged-in user session. In a container image or a host without a
 service manager, keep `--no-daemon` and run `hyp daemon run --foreground` as
 the entrypoint or under your own supervisor. No teardown flush is needed on a
 machine that keeps running; the scheduled exports drain it. Flush with
@@ -109,13 +114,15 @@ machine that keeps running; the scheduled exports drain it. Flush with
 
 ## Troubleshooting
 
-- `hyp status` on the runner reports whether recording is active and which
-  gateway the machine forwards to.
+- `hyp status` on the runner reports whether recording is active, and what is
+  shared with your team versus kept on the machine.
 - `hyp remote mint` failing with HTTP 404 means the server predates the mint
   endpoint; upgrade the server.
-- A join that hangs or exits nonzero usually means the URL is a query target
-  (`.../v1/mcp`) rather than the server base, or the token has expired; mint
-  a fresh token and retry.
+- A join that hangs is waiting on standard input: no token was piped in, and
+  no positional token or `--token-file` was given.
+- Join never contacts the server, so a query-target URL (`.../v1/mcp`) instead
+  of the server base, or an expired token, still joins cleanly and surfaces
+  later as a daemon bootstrap failure.
 
 Command details live in
 [the CLI reference](./CLI_REFERENCE.md#hyp-remote-mint), and the enrollment
