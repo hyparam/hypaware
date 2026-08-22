@@ -37,6 +37,14 @@ is the same reasoning as #eof-declines one step earlier: a default says
 what the person at the terminal probably wants, and it may only be taken
 by the keypress that means "what you said".
 
+That binds the prompts this decision moves: `askYesNo` and the wizard's
+confirm-select gates. The two `[Y/n]` prompts it does not move keep the
+rounding they were built with - the config overwrite confirm (LLP 0183
+#say-so) and the init finale's backfill consent, both settled elsewhere,
+neither sending nor destroying anything, and both leaving a backup or an
+opt-out behind them. Moving them is a separate request, not a silent
+consequence of this one.
+
 "Irreversible" alone no longer earns a no default; only destruction
 does. Sending data off the machine, disconnecting, and config writes
 with backups are all default yes.

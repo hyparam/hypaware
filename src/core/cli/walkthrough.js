@@ -76,12 +76,14 @@ export function resolveHypHome(env) {
 }
 
 /**
- * How many extra times a question that opted in may re-ask after an
- * answer that names no row. One: enough to catch a typo, small enough
- * that a pipe of garbage costs a fixed two lines of output and then
- * moves on. Questions that do not opt in never re-ask at all.
+ * How many extra times a prompt may re-ask after an answer that names no
+ * row. One: enough to catch a typo, small enough that a pipe of garbage
+ * costs a fixed two lines of output and then moves on. Every confirm-select
+ * gate re-asks (LLP 0299: only a bare enter may take a default that acts);
+ * among the multi-select pick menus, only a question that opted in with
+ * `enterKeepsChecked` does, and the rest never re-ask at all.
  *
- * @ref LLP 0190#sync-gate [implements]: the malformed-answer re-ask is capped and gated
+ * @ref LLP 0190#sync-gate [implements]: the malformed-answer re-ask is capped
  */
 const MAX_MALFORMED_REASKS = 1
 
@@ -401,6 +403,11 @@ function legacyConfirmSelectPromptFactory(opts) {
       // @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default
       // @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines the gates that would act
       const unanswered = () => (question.eofValue !== undefined ? question.eofValue : fallback)
+      // The row values are internal tokens ('stay', 'accept', 'now'), so the
+      // line that says which row was taken has to name it the way the menu
+      // above it did.
+      const labelOf = (/** @type {string} */ value) =>
+        question.options.find((o) => o.value === value)?.label ?? value
       const attempts = 1 + MAX_MALFORMED_REASKS
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         const line = await askLine(prompt)
@@ -416,7 +423,7 @@ function legacyConfirmSelectPromptFactory(opts) {
         if (attempt < attempts) {
           output.write(`nothing matched '${answer}' - enter a number from 1 to ${question.options.length}\n`)
         } else {
-          output.write(`nothing matched '${answer}' - taking '${unanswered()}'\n`)
+          output.write(`nothing matched '${answer}' - taking '${labelOf(unanswered())}'\n`)
         }
       }
       return unanswered()
