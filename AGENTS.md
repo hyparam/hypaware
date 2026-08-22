@@ -8,11 +8,14 @@ unless a task explicitly provides that context.
 ## Adding things
 
 Make the smallest change that fixes the problem. When a bigger change looks
-right, land the small one and file the bigger one as a GitHub issue instead of
-building it.
+right, land the small one and defer the rest. File a GitHub issue autonomously
+only when the follow-up is concrete, consequential, and clearly outside the
+current task. Do not file issues for speculative improvements, minor cleanup,
+or observations that are adequately captured in the PR description.
 
 - **No new runtime dependencies.** Use the standard library and the code already
-  here. If nothing here can do the job, keep the fix small and file an issue.
+  here. If nothing here can do the job, keep the fix small and apply the same
+  follow-up threshold above.
 - **Do not invent columns, config keys, or schema fields.** Reuse or derive.
   Add one only when the task calls for it, and a rejected one stays rejected.
 - **Reuse before you add** a file, helper, wrapper, or abstraction, unless the
