@@ -3,6 +3,7 @@
 **Type:** plan
 **Status:** Active
 **Related:** LLP 0174
+**Extended-by:** LLP 0299 (prompt polarity: T9's quoted `[y/N]` copy is now `[Y/n]`, default yes)
 **Generated-by:** neutral
 
 > [LLP 0174](./0174-attach-prompts-to-enable.design.md) settles that `hyp

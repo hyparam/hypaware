@@ -131,7 +131,7 @@ function makeCtx({ home, answer, stdin = true }) {
   // has its own tests.
   const stderrBuf = makeBuf({
     onWrite: (chunk) => {
-      if (String(chunk).includes('Switch this install to proxy mode now? [y/N] ')) {
+      if (String(chunk).includes('Switch this install to proxy mode now? [Y/n] ')) {
         answerStdin.feedNext('n')
       }
     },
@@ -179,19 +179,19 @@ test('decline: exits 1 with zero side effects, no config or backup file written'
     const { ctx, stderr } = makeCtx({ home, answer: 'n' })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
-    assert.match(stderr.text(), /Enable @hypaware\/claude \(and @hypaware\/ai-gateway\) now\? \[y\/N\] /)
+    assert.match(stderr.text(), /Enable @hypaware\/claude \(and @hypaware\/ai-gateway\) now\? \[Y\/n\] /)
     assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
     assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
   })
 })
 
-test('decline via a bare Enter (empty line) is treated as no', async () => {
+test('a bare Enter (empty line) takes the printed Y default and enables', async () => {
   await withTempHome(async (home) => {
     writeLocalConfig(home)
-    const { ctx } = makeCtx({ home, answer: '' })
+    const { ctx, stderr } = makeCtx({ home, answer: '' })
     const code = await runAttach(['claude'], ctx)
-    assert.equal(code, 1)
+    assert.equal(code, 0, stderr.text())
   })
 })
 
@@ -235,7 +235,7 @@ test('OpenClaw prompt names the periodic sweep import; Claude/Codex does not', a
       openclawStderr.text(),
       /^The OpenClaw adapter is not enabled on this install\. Enabling it starts a periodic sweep that will import existing OpenClaw session history within about 5 minutes\. /
     )
-    assert.match(openclawStderr.text(), /Enable @hypaware\/openclaw \(and @hypaware\/ai-gateway\) now\? \[y\/N\] /)
+    assert.match(openclawStderr.text(), /Enable @hypaware\/openclaw \(and @hypaware\/ai-gateway\) now\? \[Y\/n\] /)
   })
 })
 
@@ -248,7 +248,7 @@ test('bootstrap floor: no local config file at all skips the prompt entirely', a
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
     assert.doesNotMatch(stderr.text(), /Enable @hypaware/)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.match(stderr.text(), /enable it with 'hyp setup'/)
   })
 })
@@ -273,7 +273,7 @@ test('an entry already present but disabled skips the prompt: the additive write
     const { ctx, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.doesNotMatch(stderr.text(), /Enable @hypaware/)
     // Never claims an enable that did not happen.
     assert.doesNotMatch(stderr.text(), /enabled the claude adapter/)
@@ -300,7 +300,7 @@ test('a disabled @hypaware/ai-gateway entry also skips the prompt, not just the 
     const { ctx, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
     assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
   })
@@ -328,7 +328,7 @@ test('every requested plugin already present and enabled skips the prompt: the w
     const { ctx, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.doesNotMatch(stderr.text(), /enabled the claude adapter/)
     assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
@@ -362,7 +362,7 @@ test('non-interactive (no stdin/TTY) keeps the unchanged not_enabled refusal', a
     const { ctx, stderr } = makeCtx({ home, stdin: false })
     const code = await runAttach(['claude'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
   })
 })
@@ -374,7 +374,7 @@ test('--dry-run never prompts: no config write, no backup, no attach', async () 
     const { ctx, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude', '--dry-run'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
     assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
@@ -387,7 +387,7 @@ test('--json never prompts even with a TTY', async () => {
     const { ctx, stdout, stderr } = makeCtx({ home, answer: 'y' })
     const code = await runAttach(['claude', '--json'], ctx)
     assert.equal(code, 1)
-    assert.doesNotMatch(stderr.text(), /\[y\/N\]/)
+    assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     const payload = JSON.parse(stdout.text())
     assert.equal(payload.error_kind, 'adapter_not_enabled')
   })

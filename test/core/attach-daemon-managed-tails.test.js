@@ -232,7 +232,7 @@ function makeDaemonManagedCtx({ home, preEnabled, answers = [], backfillProvider
       // The LLP 0244 proxy-migration question sits between the enable prompt
       // and the backfill consent; decline it directly so the queued answers
       // keep meaning [enable, backfill].
-      if (String(chunk).includes('Switch this install to proxy mode now? [y/N] ')) {
+      if (String(chunk).includes('Switch this install to proxy mode now? [Y/n] ')) {
         stdin.stream.write('n\n')
       }
     },

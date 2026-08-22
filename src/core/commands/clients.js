@@ -816,11 +816,11 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
     name === 'openclaw'
       ? `The OpenClaw adapter is not enabled on this install. Enabling it starts a periodic sweep ` +
         `that will import existing OpenClaw session history within about 5 minutes. ` +
-        `Enable ${primary}${depSuffix} now? [y/N] `
+        `Enable ${primary}${depSuffix} now? [Y/n] `
       : `The ${capitalizeClientLabel(name)} adapter is not enabled on this install. Attaching requires ` +
-        `it. Enable ${primary}${depSuffix} now? [y/N] `
+        `it. Enable ${primary}${depSuffix} now? [Y/n] `
 
-  const accepted = await askYesNo(ctx, question)
+  const accepted = await askYesNo(ctx, question, { defaultYes: true })
   if (!accepted) {
     getLogger('cmd-attach').info('client.attach.enable_prompt', {
       [Attr.COMPONENT]: 'cmd-attach',
@@ -1011,7 +1011,8 @@ async function maybeOfferProxyModeMigration({ name, ctx, parsed }) {
     `repointed base URL, which keeps Remote Control working. Switching writes proxy_mode ` +
     `into the local config and restarts the daemon, which mints the HypAware Local CA; ` +
     `nothing adds that CA to a system trust store, so the client trusts it through its own ` +
-    `settings. Switch this install to proxy mode now? [y/N] `
+    `settings. Switch this install to proxy mode now? [Y/n] `,
+    { defaultYes: true }
   )
   if (!accepted) {
     ctx.stderr.write(

@@ -11,35 +11,65 @@ import { isTty } from './stdio.js'
  */
 
 /**
- * Ask a y/N question on the interactive terminal. The question goes to
+ * Ask a yes/no question on the interactive terminal. The question goes to
  * stderr, not stdout, so a command's machine-readable output stays clean
  * for a caller that pipes it.
  *
- * Anything other than `y`/`yes` is a no: the default has to be the safe
- * one for a verb nobody can undo.
+ * Polarity is the caller's: prompts default yes (`[Y/n]`, `defaultYes:
+ * true`) unless a bare enter would destroy data, where only an explicit
+ * `y`/`yes` may proceed (`[y/N]`). The default belongs to the bare enter
+ * the suffix advertises, and to nothing else: `y`/`yes` and `n`/`no` are
+ * read as themselves, and everything else declines, with a line saying so
+ * rather than a silent stop. Rounding the rest to the default was harmless
+ * while every prompt was `[y/N]`, because the default declined and a
+ * mistyped "nope" landed where a clean "no" did. Under `[Y/n]` the same
+ * rounding reads a typo, a stray keystroke, or a "no thanks" as consent to
+ * act, which at `hyp sync`'s send confirm is the one gate holding the
+ * machine's recorded history (LLP 0101 #no-release).
  *
- * That includes a terminal that stops being able to answer. `rl.question`
- * leaves its promise permanently unsettled at EOF, so a ctrl+D or a
- * dropped session hung the irreversible verb on its own confirmation
- * instead of declining it. `askLineOnce` settles that case as `null`,
- * read here as the empty line the `[y/N]` already treats as a no - so
- * the EOF answer is the printed default, and cannot drift from it.
+ * It declines rather than re-asking because it asks through `askLineOnce`,
+ * which is exactly one question: `rl.question` registers its `line`
+ * listener when it is called, so a second answer arriving in the same
+ * burst is emitted and dropped before a re-ask could ask for it, and the
+ * re-ask then waits on a line that already went by. The wizard's numbered
+ * fallback does re-ask, because `queuedLineAsker` holds those lines; this
+ * caller keeps `rl.question` for its cursor bookkeeping on a real terminal
+ * and takes the single ask that comes with it. A decline costs a re-run of
+ * a verb the user typed; the alternative costs a send nobody asked for.
  *
- * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
+ * A terminal that stops being able to answer is the one case the suffix
+ * does not decide. `rl.question` leaves its promise permanently unsettled
+ * at EOF, so a ctrl+D or a dropped session hung the verb on its own
+ * confirmation; `askLineOnce` settles that as `null`, and `null` declines
+ * here whatever the printed default was. A default says what the person
+ * at the terminal probably wants, and EOF is the proof there is no such
+ * person - so a `[Y/n]` prompt must not read a dropped session as the yes
+ * it advertised. `[y/N]` reaches the same decline it always did.
+ *
+ * @ref LLP 0299#decision [implements]: default yes unless a bare enter would destroy data
+ * @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines, whatever polarity the prompt printed
  *
  * @param {CommandRunContext} ctx
- * @param {string} question rendered verbatim, including its `[y/N]` suffix
+ * @param {string} question rendered verbatim, including its `[Y/n]` or `[y/N]` suffix
+ * @param {{ defaultYes?: boolean }} [opts]
  * @returns {Promise<boolean>}
  */
-export async function askYesNo(ctx, question) {
+export async function askYesNo(ctx, question, { defaultYes = false } = {}) {
   const input = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
   const rl = readline.createInterface({
     input,
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr)),
   })
+  const stderr = /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr))
   try {
-    const answer = await askLineOnce(rl, input, question)
-    return /^y(es)?$/i.test((answer ?? '').trim())
+    const line = await askLineOnce(rl, input, question)
+    if (line === null) return false
+    const answer = line.trim()
+    if (answer === '') return defaultYes
+    if (/^y(es)?$/i.test(answer)) return true
+    if (/^n(o)?$/i.test(answer)) return false
+    stderr.write(`didn't catch '${answer}' - answer y or n, or press enter. Not proceeding.\n`)
+    return false
   } finally {
     rl.close()
   }
@@ -56,11 +86,11 @@ export async function askYesNo(ctx, question) {
  * flags in their hints, and a shared string would have to be vague about
  * both.
  *
- * @param {{ ctx: CommandRunContext, yes: boolean, question: string }} opts
+ * @param {{ ctx: CommandRunContext, yes: boolean, question: string, defaultYes?: boolean }} opts
  * @returns {Promise<'confirmed' | 'declined' | 'no-tty'>}
  */
-export async function requireConfirmation({ ctx, yes, question }) {
+export async function requireConfirmation({ ctx, yes, question, defaultYes = false }) {
   if (yes) return 'confirmed'
   if (!isTty(ctx.stdin)) return 'no-tty'
-  return (await askYesNo(ctx, question)) ? 'confirmed' : 'declined'
+  return (await askYesNo(ctx, question, { defaultYes })) ? 'confirmed' : 'declined'
 }

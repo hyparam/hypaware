@@ -45,17 +45,26 @@ non-cancelled, non-dry-run install that enrolled *and* carries a live hold,
 the wizard renders a two-row question between the privacy narration and the
 closing question list:
 
-- **Wait until `<deadline>`** - "Nothing leaves this machine before then."
 - **Send now** - "Runs `hyp sync`: it lists every destination and asks
   before sending."
+- **Wait until `<deadline>`** - "Nothing leaves this machine before then."
 
-Waiting is first and is the default, so a stray enter chooses the reversible
-answer. This is the polarity the overwrite confirm and `hyp sync`'s own
-prompt already use, and it is the only defensible one here: the unwanted
-outcome of a mis-keyed wait is a few hours' latency, and the unwanted outcome
-of a mis-keyed send cannot be walked back.
+Sending is first and is the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md): confirms
+default yes unless a bare enter would destroy data, and sending is not
+destruction). The user enrolled to sync, so a bare enter takes the path they
+signed up for; waiting stays one arrow away, and `hyp sync`'s own confirm
+still stands between this answer and anything leaving the machine.
 
-The position is not negotiable. The narration keeps its place as the last
+A bare enter, and nothing else: the default here *acts*, so the question
+names waiting as its `eofValue`
+([LLP 0299 §eof-declines](./0299-confirm-prompts-default-to-yes.decision.md#eof-declines)).
+The child's confirm does not cover this case on its own, because it inherits
+the terminal rather than the stream, and a ctrl+D on a real tty is a keypress
+rather than a spent stream: it would ask again rather than decline, and a
+terminal that gave up would end on a sync it started.
+
+The narration keeps its place as the last
 thing HypAware *says* about privacy
 ([LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy)),
 because a question about sending is only answerable by someone who has just
