@@ -22,9 +22,20 @@ Yes is the default everywhere, unless a bare enter would destroy data.
 - **Default yes (`[Y/n]`, selects with "yes" first):** enabling a client
   adapter, switching to proxy mode, `hyp sync`'s send confirm, the
   wizard's send-now-or-wait offer, and the enrolled fork's disconnect
-  question. Only an explicit `n`/`no` declines.
+  question. An explicit `n`/`no` declines.
 - **Default no (`[y/N]`), the data-loss carve-out:** `hyp purge` and
   `hyp report delete`. Only an explicit `y`/`yes` proceeds.
+
+The default belongs to the bare enter the suffix advertises and to
+nothing else. `y`/`yes` and `n`/`no` are read as themselves, and an
+answer that is neither is not rounded to the default: it declines, or is
+re-asked once where the prompt's asker can hold the next line. Rounding
+was harmless while every prompt was `[y/N]` - the default declined, so a
+mistyped "nope" landed where a clean "no" did - but under `[Y/n]` it
+reads a typo, a stray keystroke, or a "no thanks" as consent to act. It
+is the same reasoning as #eof-declines one step earlier: a default says
+what the person at the terminal probably wants, and it may only be taken
+by the keypress that means "what you said".
 
 "Irreversible" alone no longer earns a no default; only destruction
 does. Sending data off the machine, disconnecting, and config writes
@@ -83,7 +94,8 @@ is every other gate.
   stay-connected default of LLP 0190 #fork-disconnect (both edited to
   match, still Drafts), and the `[y/N]` copy quoted in LLP 0174/0178.
 - A stray enter can now send, enable, or disconnect. Accepted: each of
-  those is recoverable, and the sync path still shows its plan first.
+  those is recoverable, and the sync path still shows its plan first. A
+  stray anything-else cannot: only enter carries the default.
 - A dropped terminal cannot (#eof-declines). `askLineOnce`'s `null`
   becomes load-bearing at that call site: it is the difference between
   "answered empty" and "cannot answer", so callers there may no longer
