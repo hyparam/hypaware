@@ -271,8 +271,8 @@ export async function runInitWizard(opts) {
                   { value: 'stay', label: 'No, stay connected' },
                 ],
                 default: 'disconnect',
-                // The one gate whose default acts, so it cannot let a
-                // spent stdin take it: `hyp leave` is not something a
+                // A gate whose default acts, so it cannot let a spent
+                // stdin take it: `hyp leave` is not something a
                 // piped run should fall into with nobody at the terminal
                 // (LLP 0299 #eof-declines).
                 eofValue: 'stay',

@@ -38,12 +38,20 @@ what the person at the terminal probably wants, and it may only be taken
 by the keypress that means "what you said".
 
 That binds the prompts this decision moves: `askYesNo` and the wizard's
-confirm-select gates. The two `[Y/n]` prompts it does not move keep the
+confirm-select gates. The three `[Y/n]` prompts it does not move keep the
 rounding they were built with - the config overwrite confirm (LLP 0183
-#say-so) and the init finale's backfill consent, both settled elsewhere,
-neither sending nor destroying anything, and both leaving a backup or an
-opt-out behind them. Moving them is a separate request, not a silent
-consequence of this one.
+#say-so), the init finale's backfill consent, and Claude Desktop's
+install consent - all settled elsewhere, none sending or destroying
+anything, and each leaving a backup or an opt-out behind it. Moving them
+is a separate request, not a silent consequence of this one.
+
+One `[y/N]` prompt is left where it is for the same reason, and it is the
+one exception to the rule at the top of this section: `hyp plugin`'s
+install confirm (`src/core/plugin_install/confirm.js`). It destroys
+nothing, so "yes unless a bare enter would destroy data" would flip it,
+but what it consents to is running third-party code this install has
+never seen. That is its own question, answerable on its own evidence,
+and not a silent consequence of this one either.
 
 "Irreversible" alone no longer earns a no default; only destruction
 does. Sending data off the machine, disconnecting, and config writes
@@ -81,20 +89,28 @@ everywhere else, because every other default there already declines to
 act - the wizard fork menu's Quit, `plugin_install`'s `[y/N]`, and
 `claude-account login`'s `Code:` paste, which has no default and fails
 rather than inventing one. The wizard's `ConfirmSelectQuestion` gates
-keep taking their stated default at EOF, and the sync release they lead
-to needs nothing more: it is gated by `askYesNo` on the same spent
-stdin, so the hold is safe without changing the select factory.
+keep taking their stated default at EOF, because those defaults accept a
+stated set of rows and do nothing by themselves.
 
-The exception is a select whose stated default *acts*, which this
-decision creates exactly one of: the enrolled fork's disconnect
-question, whose yes runs `hyp leave` with no `askYesNo` behind it
-(LLP 0190 #fork-disconnect). There a spent stdin would disconnect a
-managed machine with nobody at the terminal, so such a question names an
-`eofValue` and the legacy select returns it instead of coalescing the
-asker's `null` into the empty line. The default is still what is printed
-and what a bare enter takes; `eofValue` only answers "and if there is no
-one to press it". A question that does not name one is unchanged, which
-is every other gate.
+The exception is a select whose stated default *acts*, and this decision
+creates two. The enrolled fork's disconnect question is the plain one:
+its yes runs `hyp leave` with no `askYesNo` behind it (LLP 0190
+#fork-disconnect), so a spent stdin would disconnect a managed machine
+with nobody at the terminal. The wizard's send-now offer is the subtle
+one, because its yes looks gated and is not: it spawns `hyp sync` on this
+terminal (LLP 0203 #child-process), and the child inherits the terminal
+rather than the stream, so it is not asking on the same spent stdin. On a
+real tty a ctrl+D is a keypress, not a spent stream; the child asks again
+instead of declining. The hold is safe either way - nothing is forwarded
+without an answer - but "the terminal gave up" would end with a sync
+started rather than with the wait the offer asked for, which is the
+outcome this section exists to rule out.
+
+So a question of that kind names an `eofValue` and the legacy select
+returns it instead of coalescing the asker's `null` into the empty line.
+The default is still what is printed and what a bare enter takes;
+`eofValue` only answers "and if there is no one to press it". A question
+that does not name one is unchanged, which is every other gate.
 
 ## Consequences {#consequences}
 

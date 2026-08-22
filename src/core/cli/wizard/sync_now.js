@@ -146,6 +146,7 @@ export async function runWizardSyncNow(opts) {
  * The rows say what each answer does rather than yes/no: "send now" is the
  * kind of choice a reader should not have to reconstruct from the question.
  *
+ * @ref LLP 0299#eof-declines [implements]: the acting default is what a bare enter takes, not what a spent stdin lands on
  * @param {RunWizardSyncNowOptions} opts
  * @param {number} deadline
  * @returns {Promise<string>}
@@ -171,6 +172,14 @@ async function askSendNow(opts, deadline) {
       },
     ],
     default: NOW,
+    // The default acts: `now` spawns `hyp sync` on this terminal, and the
+    // child's own confirm is not the backstop it looks like, because the
+    // child inherits the terminal rather than the stream. On a real tty a
+    // ctrl+D is a keypress, not a spent stream, so the child asks again
+    // instead of declining, and "the terminal gave up" ends with a sync
+    // started rather than with the wait it asked for (LLP 0299
+    // #eof-declines).
+    eofValue: WAIT,
   }))
 }
 
