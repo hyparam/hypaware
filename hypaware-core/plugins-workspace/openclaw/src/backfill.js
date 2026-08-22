@@ -16,11 +16,16 @@ import {
   readOpenclawSessionMessages,
   SESSION_FILE_NAME,
 } from './session_file.js'
+import {
+  pickOpenclawRunContext,
+  readOpenclawRunContexts,
+  resolveOpenclawTrajectoryPath,
+} from './trajectory_file.js'
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
+ * @import { OpenclawRunContext, OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -241,6 +246,8 @@ async function* runOpenclawBackfill(args) {
   let sessionsIgnored = 0
   let messagesProjected = 0
   let recordsExcluded = 0
+  let messagesWithTools = 0
+  let messagesWithSystemText = 0
 
   for (const { agentId, filePath } of await listSessionFiles(agentsDir, quiesceBeforeMs)) {
     if (ctx.signal?.aborted) break
@@ -344,17 +351,39 @@ async function* runOpenclawBackfill(args) {
       }
     }
 
-    const exchange = projectedExchangeFromSession({ agentId, sessionId, header, projectable, clientName })
+    // The run trajectory is read per session file, beside the transcript and
+    // after the policy gate: an ignored session must not have its trajectory
+    // opened either, and a session that projects nothing should not pay for
+    // the read. A session that recorded none reads as an empty list and the
+    // rows project exactly as they did before this lane existed.
+    // @ref LLP 0265#backfill-stamping [implements]: the sweep fills
+    // `system_text`/`tools` from the run that compiled them
+    const contexts = await readOpenclawRunContexts(
+      await resolveOpenclawTrajectoryPath(path.dirname(filePath), sessionId),
+      { sessionId }
+    )
+
+    const exchange = projectedExchangeFromSession({ agentId, sessionId, header, projectable, clientName, contexts })
     if (!exchange) continue
 
     sessionsProjected += 1
     messagesProjected += exchange.messages.length
+    const contextCounts = countContextStamps(exchange.messages)
+    messagesWithTools += contextCounts.tools
+    messagesWithSystemText += contextCounts.systemText
     log.info('openclaw.backfill.session_projected', {
       component: COMPONENT,
       operation: 'backfill.project',
       session_id: sessionId,
       message_count: exchange.messages.length,
       identity_source: 'native',
+      // Three separate numbers because they fail separately: no runs at all
+      // is a session with no trajectory, runs but no matched rows is a
+      // windowing miss, and matched rows carrying tools but no system text is
+      // the 32k field cap. A single "enriched" count would hide which.
+      run_context_count: contexts.length,
+      messages_with_tools: contextCounts.tools,
+      messages_with_system_text: contextCounts.systemText,
       status: 'ok',
     })
 
@@ -373,8 +402,27 @@ async function* runOpenclawBackfill(args) {
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
     records_excluded: recordsExcluded,
+    messages_with_tools: messagesWithTools,
+    messages_with_system_text: messagesWithSystemText,
     status: 'ok',
   })
+}
+
+/**
+ * How many of an exchange's messages carry each trajectory-sourced column,
+ * for the run's log line.
+ *
+ * @param {AiGatewayProjectedMessage[]} messages
+ * @returns {{ tools: number, systemText: number }}
+ */
+function countContextStamps(messages) {
+  let tools = 0
+  let systemText = 0
+  for (const message of messages) {
+    if (message.tools !== undefined) tools += 1
+    if (message.system_text !== undefined) systemText += 1
+  }
+  return { tools, systemText }
 }
 
 /**
@@ -579,11 +627,12 @@ function siblingCoverageFor(provider) {
  *   header: OpenclawSessionHeader | undefined,
  *   projectable: Array<{ record: OpenclawSessionMessage, provider: string }>,
  *   clientName: string,
+ *   contexts: OpenclawRunContext[],
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
  */
 function projectedExchangeFromSession(args) {
-  const { agentId, sessionId, header, projectable, clientName } = args
+  const { agentId, sessionId, header, projectable, clientName, contexts } = args
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   /** @type {string | undefined} */
@@ -591,6 +640,7 @@ function projectedExchangeFromSession(args) {
   for (const { record, provider: recordProvider } of projectable) {
     const message = projectedMessageFromRecord(record)
     if (!message) continue
+    stampRunContext(message, record, contexts)
     // Every row carries its own turn's provider: `recordProvider` is the
     // smeared effective backend (partitionByBackend), so the user prompt and
     // tool results of an `ollama` turn stamp `ollama` too, not just the
@@ -683,6 +733,66 @@ function projectedMessageFromRecord(message) {
   const attributes = messageAttributes(message)
   if (attributes) projected.attributes = attributes
   return projected
+}
+
+/**
+ * Stamp one message with the system prompt and tool definitions of the run
+ * that produced it, from the session's trajectory.
+ *
+ * Per message, not per exchange, and that is the whole reason the kernel
+ * contract grew the pair (LLP 0265): a backfilled OpenClaw exchange is an
+ * entire session, and OpenClaw compiles a fresh context per run. One
+ * observed session ran with 23, then 21, then 26 tools and three different
+ * system prompts, so a single exchange-level value would be some turn's
+ * answer presented as every turn's.
+ *
+ * The match is on the session file's RECORDING time, not the message's own
+ * timestamp: a webchat prompt carries the moment the user sent it, which can
+ * predate its own run's compile (see `OpenclawSessionMessage.recordedAtMs`).
+ * A message no run window covers is left alone, which is the honest reading
+ * of a turn that compiled no context: a run that failed before compiling,
+ * or one an embedded CLI harness owned, is not described by whatever the
+ * previous run happened to compile.
+ *
+ * `system_text` holds what the run RECORDED, and
+ * `attributes.openclaw.system_prompt` says whether that is the whole prompt.
+ * OpenClaw truncates at two caps and only announces one: past 32768
+ * characters the trajectory drops the value entirely (so no text is stamped
+ * at all), and below that it can still clip to 20000 characters plus an
+ * ellipsis while writing an ordinary-looking string. Every real agent run in
+ * the verified corpus hit one cap or the other, so `truncated: true` beside
+ * a present `system_text` is the normal case here, not an edge one. The
+ * digest carries the prompt's true size (`chars`), the content `hash` the
+ * run reported, and `recorded_chars` for how much of it the column holds, so
+ * two runs of the same prompt stay joinable and no reader has to infer
+ * completeness from a column that cannot express it.
+ *
+ * @ref LLP 0265#backfill-stamping [implements]: per-message stamping from
+ * the matched run context, truncated prompts described rather than invented
+ * @param {AiGatewayProjectedMessage} message
+ * @param {OpenclawSessionMessage} record
+ * @param {OpenclawRunContext[]} contexts
+ * @returns {void}
+ */
+function stampRunContext(message, record, contexts) {
+  const context = pickOpenclawRunContext(contexts, record.recordedAtMs ?? record.timestampMs)
+  if (!context) return
+  if (context.systemText !== undefined) message.system_text = context.systemText
+  if (context.tools !== undefined) message.tools = /** @type {any} */ (context.tools)
+  if (!context.systemPromptDigest) return
+  /** @type {JsonObject} */
+  const digest = {}
+  if (context.systemPromptDigest.chars !== undefined) digest.chars = context.systemPromptDigest.chars
+  if (context.systemPromptDigest.hash !== undefined) digest.hash = context.systemPromptDigest.hash
+  if (context.systemPromptDigest.recordedChars !== undefined) {
+    digest.recorded_chars = context.systemPromptDigest.recordedChars
+  }
+  if (context.systemPromptDigest.truncated) digest.truncated = true
+  if (Object.keys(digest).length === 0) return
+  const attributes = message.attributes ?? {}
+  const openclaw = isPlainObject(attributes.openclaw) ? attributes.openclaw : {}
+  attributes.openclaw = { ...openclaw, system_prompt: digest }
+  message.attributes = attributes
 }
 
 /**

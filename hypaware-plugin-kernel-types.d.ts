@@ -2189,6 +2189,19 @@ export interface AiGatewayProjectedMessage {
    * the field exists to fix (LLP 0194).
    */
   provider?: string
+  /**
+   * Per-message system prompt and tool definitions, for exchanges whose
+   * every message did not share one. Live capture is one request per
+   * exchange, so the exchange-level pair is already exact there and no live
+   * projector sets these. A backfilled exchange is a whole session, and an
+   * agent that recompiles its context per turn (OpenClaw writes one
+   * `context.compiled` per run, and its system prompt and tool set both
+   * change mid-session) has as many pairs as it has turns. The gateway
+   * prefers the per-message value over the exchange one, the same precedence
+   * `model` and `provider` carry (LLP 0265).
+   */
+  system_text?: string
+  tools?: JsonValue
   entrypoint?: string
   user_type?: string
   permission_mode?: string

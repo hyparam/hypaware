@@ -324,6 +324,17 @@ function parseOpenclawSessionMessage(line) {
   if (id !== undefined) message.id = id
   const timestampMs = messageField(envelope, row, 'timestamp', parseTimestampMs)
   if (timestampMs !== undefined) message.timestampMs = timestampMs
+  // The record LINE's timestamp, read at that level only, never through the
+  // envelope: the two are different facts and only one of them orders the
+  // file. The envelope states when the MESSAGE was made (a webchat prompt
+  // carries the moment the user sent it, seconds before OpenClaw received
+  // it), the line states when this file RECORDED it. `timestampMs` prefers
+  // the envelope and is the right value for `message_created_at`; anything
+  // lining the transcript up against another file OpenClaw wrote in the same
+  // instant (the run trajectory) needs the recording time, or a prompt whose
+  // send time predates its own run reads as belonging to the previous one.
+  const recordedAtMs = parseTimestampMs(row.timestamp)
+  if (recordedAtMs !== undefined) message.recordedAtMs = recordedAtMs
   const role = messageField(envelope, row, 'role', nonBlankString)
   if (role !== undefined) message.role = role
   const content = messageField(envelope, row, 'content', statedValue)

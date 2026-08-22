@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-31
 **Related:** LLP 0167 (the accepted RFC), LLP 0168, LLP 0169, LLP 0170 (the decisions this spec makes implementable), LLP 0157 (the prior spec; R8, R9, R10, R11, R14 remain binding), LLP 0163, LLP 0044, LLP 0045
+**Extended-by:** LLP 0265 (the trajectory-file non-goal below is lifted for `system_text` and `tools`; every other non-goal stands)
 
 > Requirements for implementing LLP 0168 (config override), LLP 0169
 > (attach surface), and LLP 0170 (scheduled sweep), replacing the dead
@@ -91,6 +92,11 @@ Per LLP 0167#future: overrides beyond the two canonical vendors, an
 `fs.watch` live tail, the trajectory-file and probe-session streams,
 a refuse-instead-of-capture mode, and OpenClaw-to-child-CLI session
 correlation.
+
+LLP 0265 lifts the trajectory-file half of that list, narrowly: the
+sweep reads `context.compiled` for the system prompt and tool set it
+carries, and nothing else in the stream. The probe-session stream, the
+live tail, and the rest stay out.
 
 ## References
 

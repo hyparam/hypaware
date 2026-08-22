@@ -12,7 +12,7 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
-import { writeOpenclawSessionFixture } from '../lib/openclaw_session_fixture.js'
+import { writeOpenclawSessionFixture, writeOpenclawTrajectoryFixture } from '../lib/openclaw_session_fixture.js'
 
 /**
  * Hermetic smoke: OpenClaw session backfill → query → idempotent rerun.
@@ -142,6 +142,32 @@ export async function run({ harness, expect }) {
     ],
   })
 
+  // The run trajectory OpenClaw writes beside the session, the only source
+  // for the turn's system prompt and tool set (LLP 0265). The run window
+  // opens at 10:00:00.500 and closes at 10:00:03, which contains both
+  // records' LINE timestamps (10:00:01 and 10:00:02) and NOT the assistant
+  // envelope's 10:00:09. That is deliberate: the same two-level
+  // disagreement this flow already uses to pin envelope-first precedence
+  // for `message_created_at` pins recording-time matching for the run
+  // window, and a matcher that used the envelope timestamp would leave the
+  // assistant row unstamped.
+  const systemPrompt = 'You are an OpenClaw agent working in the smoke workspace.'
+  const tools = [
+    { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } },
+    { name: 'exec', description: 'Run a command', parameters: { type: 'object', properties: {} } },
+  ]
+  await writeOpenclawTrajectoryFixture({
+    homeDir: fakeHome,
+    agentId,
+    sessionId,
+    runs: [{
+      compiledAt: '2026-05-20T10:00:00.500Z',
+      endedAt: '2026-05-20T10:00:03.000Z',
+      systemPrompt,
+      tools,
+    }],
+  })
+
   // The fixture states the two-level shape; assert that before asserting
   // anything downstream of it. A flow that quietly wrote a flat record
   // would pass every assertion below against the pre-#543 reader too, which
@@ -245,7 +271,7 @@ export async function run({ harness, expect }) {
 
     // ----- 2. Query the projected rows -----
     const sql = `
-      select role, content_text, message_id, model, provider, conversation_source, client_name, message_created_at
+      select role, content_text, message_id, model, provider, conversation_source, client_name, message_created_at, system_text, tools
       from ai_gateway_messages
       where session_id = '${sessionId}'
       order by message_index, part_index
@@ -283,6 +309,27 @@ export async function run({ harness, expect }) {
       assistant,
       (v) => v !== undefined && v.message_created_at === '2026-05-20T10:00:09.000Z',
     )
+    // The two columns the session transcript states nowhere, and the reason
+    // the sweep opens the trajectory at all. Both rows carry them: the
+    // system prompt and tool set are the run's, and every row of that run
+    // was produced under them.
+    expect.that(
+      'query: every row carries the run trajectory\'s system prompt',
+      rows1,
+      (v) => Array.isArray(v) && v.every((r) => r.system_text === systemPrompt),
+    )
+    expect.that(
+      'query: every row carries the run trajectory\'s tool definitions, verbatim',
+      rows1,
+      (v) => Array.isArray(v) && v.every((r) => {
+        const parsed = typeof r.tools === 'string' ? JSON.parse(r.tools) : r.tools
+        return Array.isArray(parsed)
+          && parsed.length === 2
+          && parsed[0]?.name === 'read'
+          && parsed[1]?.description === 'Run a command'
+      }),
+    )
+
     // `provider` is the field the two-level read actually gates on: read off
     // the line it is absent, the allowlist resolves the record to `unknown`,
     // and the session is excluded fail-closed.
