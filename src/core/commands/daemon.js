@@ -1,5 +1,6 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
@@ -38,7 +39,8 @@ export async function runDaemonRun(argv, ctx) {
     return 2
   }
   const { runDaemon } = await import('../daemon/runtime.js')
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would put the daemon's state root at ./.hyp on a HOME-less shell (Windows)
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME ?? os.homedir(), '.hyp')
   try {
     const handle = await runDaemon({
       hypHome,

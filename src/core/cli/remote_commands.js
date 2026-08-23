@@ -113,7 +113,7 @@ export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAI
  */
 async function buildDefaultAttachProbe(env, homeDir) {
   const stateDir = readObservabilityEnv(env).stateDir
-  const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? ''
+  const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
   const descriptors = await loadClientDescriptors({ stateDir })
   return () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
 }

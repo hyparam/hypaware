@@ -1,6 +1,7 @@
 // @ts-check
 
 import { execFile } from 'node:child_process'
+import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -267,7 +268,7 @@ function parseArgs(argv) {
 
 /** @param {NodeJS.ProcessEnv} env */
 function legacyStateFile(env) {
-  const home = env.HOME
+  const home = env.HOME ?? os.homedir()
   const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
   if (!hypHome) return undefined
   return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')

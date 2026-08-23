@@ -2347,9 +2347,9 @@ export async function runSkillsInstall(argv, ctx) {
     return 2
   }
 
-  const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
+  const homeDir = ctx.env.HOME ?? process.env.HOME ?? os.homedir()
   if (!homeDir) {
-    ctx.stderr.write('error: HOME is not set; cannot resolve skill install paths\n')
+    ctx.stderr.write('error: no home directory could be resolved; cannot resolve skill install paths\n')
     return 1
   }
 

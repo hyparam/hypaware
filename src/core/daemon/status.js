@@ -1,6 +1,7 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -905,7 +906,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const hypHome = obsEnv.hypHome
   const stateRoot = obsEnv.stateDir
   const platform = opts.platform ?? process.platform
-  const homeDir = opts.homeDir ?? env.HOME ?? process.env.HOME ?? ''
+  const homeDir = opts.homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
 
   // ----- config (LLP 0031: central ⊕ local) -----
   // The user-facing config path is the local layer; the central layer is

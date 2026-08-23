@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0011, LLP 0012, LLP 0014, LLP 0025
-**Extended-by:** LLP 0181 (the fixed labels installed here live in a per-uid namespace, so a temp `HOME` does not sandbox them: `runServiceCommand` refuses to spawn `launchctl` / `systemctl` under the test runner)
+**Extended-by:** LLP 0181 (the fixed labels installed here live in a per-uid namespace, so a temp `HOME` does not sandbox them: `runServiceCommand` refuses to spawn `launchctl` / `systemctl` under the test runner), LLP 0300 (stop/reload gain a signal-free file transport under `<stateRoot>/run/control/`; win32 `hyp daemon stop` uses it, POSIX keeps SIGTERM/SIGHUP primary)
 
 > The primary daemon and how it is installed. Decomposed from the V1 finishing
 > plan (`finish-v1` Phases 3–4, now tombstoned) and `hypaware-design.md`.

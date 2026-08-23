@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
@@ -71,7 +72,8 @@ export const LOCAL_INSTALL_RETENTION_DAYS = 120
  */
 export function resolveHypHome(env) {
   if (env.HYP_HOME) return env.HYP_HOME
-  const home = env.HOME ?? ''
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would make this cwd-relative on a HOME-less shell (Windows)
+  const home = env.HOME ?? os.homedir()
   return path.join(home, '.hyp')
 }
 
@@ -1614,7 +1616,7 @@ export async function runPickerFinale(args) {
   // it unset and the line is not printed.
   // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
   if (args.progress) stdout.write(`${args.progress}\n`)
-  const homeDir = env.HOME ?? ''
+  const homeDir = env.HOME ?? os.homedir()
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 
   // The attach/start cutoff: backfill imports history strictly before

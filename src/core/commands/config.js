@@ -1,5 +1,6 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
@@ -74,6 +75,7 @@ function parseConfigValidateArgv(argv, env) {
   const p = /** @type {{ path?: string }} */ (parsed.params)
   if (p.path) return { configPath: path.resolve(p.path) }
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
-  const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would make `.hyp` cwd-relative on a HOME-less shell (Windows)
+  const hypHome = env.HYP_HOME || path.join(env.HOME ?? os.homedir(), '.hyp')
   return { configPath: defaultConfigPath(hypHome) }
 }

@@ -24,6 +24,11 @@ import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
 import {
+  clearControlRequests,
+  watchControlRequests,
+  writeControlRequest,
+} from './control.js'
+import {
   clearPidFile,
   pidFilePath,
   processIsAlive,
@@ -99,13 +104,16 @@ export const DAEMON_RESTART_EXIT_CODE = 75
  *  5. A 60s (or `tickIntervalMs`) loop drives the sink driver. Each
  *     tick is a `sink.tick` child span; the bundled sink driver opens
  *     its own `sink.export_batch` spans inside.
- *  6. SIGTERM / SIGINT / `handle.stop()` flip the daemon into
- *     `stopping`, stop every source (each one inside a `source.stop`
- *     span), close the daemon log, write `stopped`, and remove the
- *     PID file. `daemon.shutdown` is the explicit child span the
- *     smoke greps for.
- *  7. SIGHUP / `handle.reload()` re-runs config diff: removed sources
- *     stop, new sources start, unchanged sources `reload()`.
+ *  6. SIGTERM / SIGINT / a `stop.request` control file /
+ *     `handle.stop()` flip the daemon into `stopping`, stop every
+ *     source (each one inside a `source.stop` span), close the daemon
+ *     log, write `stopped`, and remove the PID file. `daemon.shutdown`
+ *     is the explicit child span the smoke greps for.
+ *  7. SIGHUP / a `reload.request` control file / `handle.reload()`
+ *     re-runs config diff: removed sources stop, new sources start,
+ *     unchanged sources `reload()`. The control files (LLP 0300) are
+ *     the win32 transport for both verbs; on POSIX signals remain
+ *     primary and the file channel is a second door.
  *
  * The smoke harness opts out of signal handlers via
  * `installSignalHandlers: false` so multiple smoke runs can share
@@ -146,7 +154,7 @@ export async function runDaemon(opts = {}) {
   const sinkSnapshots = new Map()
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
-  /** @type {((reason: 'signal'|'manual'|'restart') => Promise<number>) | null} */
+  /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
   let triggerShutdown = null
   let shutdownInFlight = false
   /** @type {((value: number) => void) | null} */
@@ -155,6 +163,8 @@ export async function runDaemon(opts = {}) {
   const done = new Promise((resolve) => { resolveDone = resolve })
   /** @type {(() => Promise<void>) | null} */
   let triggerReload = null
+  /** @type {{ close(): void } | null} */
+  let controlWatcher = null
   // Forward reference to the client-action reconcile scheduler. It can only
   // be built after `boot` resolves (it needs the effective config + the
   // kernel backfill registry), but the confirmation-edge hook below is wired
@@ -164,6 +174,12 @@ export async function runDaemon(opts = {}) {
   /** @type {((reason: string) => void) | null} */
   let scheduleReconcile = null
   let healthyAtMs = 0
+
+  // Stale control requests are consumed before the PID file goes down: a
+  // `stop.request` that survived a crash or a hard kill is an instruction to
+  // a daemon that no longer exists, and must not stop this boot on sight.
+  // @ref LLP 0300#boot-clears-stale [implements]: anything the watcher sees after this point is a live request
+  clearControlRequests(stateRoot)
 
   // PID file is written before any plugin activation: that way a
   // crash during `bootKernel` still leaves something `daemon stop`
@@ -781,7 +797,7 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Shutdown -----
-  /** @param {'signal'|'manual'|'restart'} reason */
+  /** @param {'signal'|'manual'|'restart'|'control'} reason */
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
@@ -846,6 +862,8 @@ export async function runDaemon(opts = {}) {
     await fileLog.close()
     clearPidFile(stateRoot)
 
+    controlWatcher?.close()
+    controlWatcher = null
     if (installSignals) {
       removeSignalHandlers()
     }
@@ -945,6 +963,18 @@ export async function runDaemon(opts = {}) {
     process.on('SIGINT', sigIntHandler)
     process.on('SIGHUP', sigHupHandler)
   }
+
+  // ----- Control-file channel (LLP 0300) -----
+  // Installed on every platform: it is the only stop/reload transport on
+  // win32 (a cross-process SIGTERM there is TerminateProcess, skipping this
+  // whole shutdown path) and a harmless second door on POSIX. Dispatches
+  // into the same shutdown/reload the signal handlers call.
+  // @ref LLP 0300#file-channel [implements]: the watcher is the signal handlers' transport-agnostic twin
+  controlWatcher = watchControlRequests(stateRoot, {
+    onStop: () => { void shutdown('control') },
+    onReload: () => { void reload() },
+    log: fileLog,
+  })
 
   if (pendingRestart) {
     void shutdown('restart')
@@ -1271,29 +1301,44 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
 }
 
 /**
- * `hyp daemon stop` helper. Reads the PID file, signals the running
- * daemon with SIGTERM, and waits (up to `timeoutMs`) for the
- * process to clear the PID file. Returns the resulting state for
- * the command body to render.
+ * `hyp daemon stop` helper. Reads the PID file, requests an orderly stop,
+ * and waits (up to `timeoutMs`) for the process to clear the PID file.
+ * Returns the resulting state for the command body to render.
  *
- * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number }} args
+ * The request transport is per-platform: POSIX sends SIGTERM (the proven
+ * path, and what the service managers speak regardless); win32 writes a
+ * `stop.request` control file instead, because a cross-process SIGTERM
+ * there is `TerminateProcess` - a hard kill that skips the shutdown path,
+ * leaves the PID file stale, and drops unflushed log lines.
+ *
+ * @ref LLP 0300#posix-keeps-signals [implements]: only win32 routes through the file channel
+ * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number, platform?: NodeJS.Platform }} args
  * @returns {Promise<'stopped'|'not_running'|'timed_out'>}
  */
-export async function requestDaemonStop({ stateRoot, timeoutMs = 5_000, pollIntervalMs = 50 }) {
+export async function requestDaemonStop({
+  stateRoot,
+  timeoutMs = 5_000,
+  pollIntervalMs = 50,
+  platform = process.platform,
+}) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
     if (entry) clearPidFile(stateRoot)
     return 'not_running'
   }
-  try {
-    process.kill(entry.pid, 'SIGTERM')
-  } catch (err) {
-    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-    if (code === 'ESRCH') {
-      clearPidFile(stateRoot)
-      return 'not_running'
+  if (platform === 'win32') {
+    writeControlRequest(stateRoot, 'stop')
+  } else {
+    try {
+      process.kill(entry.pid, 'SIGTERM')
+    } catch (err) {
+      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+      if (code === 'ESRCH') {
+        clearPidFile(stateRoot)
+        return 'not_running'
+      }
+      throw err
     }
-    throw err
   }
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
