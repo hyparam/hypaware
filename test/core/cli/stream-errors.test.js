@@ -73,7 +73,7 @@ function writeIntoAClosedPipe({ install, bytes }) {
   })
 }
 
-test('a write past the pipe buffer survives a reader that walked away', async () => {
+test('a write past the pipe buffer survives a reader that walked away', { skip: process.platform === 'win32' && 'POSIX pipe/EPIPE semantics' }, async () => {
   // 400 KB, well past the ~64 KiB pipe buffer. Under that, the write
   // completes before the reader's exit can matter, which is why small
   // outputs never showed this. `hyp query overview --json` is unbounded by

@@ -68,7 +68,7 @@ async function registeredSkills(client) {
     requireCapability: () => anything,
     provideCapability: noop,
   })
-  const { activate } = await import(path.join(workspace, client, 'src/index.js'))
+  const { activate } = await import(url.pathToFileURL(path.join(workspace, client, 'src/index.js')).href)
   await activate(ctx)
   return skills
 }

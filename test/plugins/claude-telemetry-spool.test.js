@@ -55,7 +55,7 @@ test('the spool path is fixed under the HypAware home', () => {
   assert.equal(claudeBodySpoolDir('/home/u/.hyp'), path.join('/home/u/.hyp', 'spool', 'claude-bodies'))
 })
 
-test('ensureClaudeBodySpool creates the directory owner-only', async () => {
+test('ensureClaudeBodySpool creates the directory owner-only', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
   const dir = await tmpSpool()
   await ensureClaudeBodySpool(dir)
   const stat = await fsp.stat(dir)
@@ -72,7 +72,7 @@ test('ensureClaudeBodySpool creates the directory owner-only', async () => {
  *
  * @ref LLP 0253#spool-location [tests]: the daemon keeps the directory owner-only without minting it
  */
-test('tightenClaudeBodySpool repairs an existing spool and creates nothing', async () => {
+test('tightenClaudeBodySpool repairs an existing spool and creates nothing', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
   const dir = await tmpSpool()
 
   assert.equal(await tightenClaudeBodySpool(dir), false)
@@ -84,7 +84,7 @@ test('tightenClaudeBodySpool repairs an existing spool and creates nothing', asy
   assert.equal((await fsp.stat(dir)).mode & 0o777, 0o700)
 })
 
-test('an existing spool with loose permissions is tightened, not trusted', async () => {
+test('an existing spool with loose permissions is tightened, not trusted', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
   const dir = await tmpSpool()
   // Claude Code creates the directory itself when it writes the first
   // body before the daemon ever ran; that copy gets the default umask.

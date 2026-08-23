@@ -42,7 +42,10 @@ export async function run({ harness, expect }) {
   }
 
   const binPath = '/usr/local/bin/hypaware'
-  const configPath = `${harness.hypHome}/hypaware-config.json`
+  // POSIX form even when the harness home is a win32 temp dir: the config
+  // path lands verbatim inside POSIX artifacts (plist / unit), and systemd
+  // quoting escapes backslashes, which would defeat the includes() checks.
+  const configPath = `${harness.hypHome.replaceAll('\\', '/')}/hypaware-config.json`
   const nodePath = '/usr/local/bin/node'
   const homeDir = harness.hypHome
 
@@ -64,7 +67,7 @@ export async function run({ harness, expect }) {
   expect.that(
     'macos: target path is <home>/Library/LaunchAgents/<label>.plist',
     macosPlan.targetPath,
-    (v) => v === path.join(defaultPlistDir(homeDir), plistFileName(LAUNCH_LABEL))
+    (v) => v === path.posix.join(defaultPlistDir(homeDir), plistFileName(LAUNCH_LABEL))
   )
   expect.that(
     `macos: plist content includes label '${LAUNCH_LABEL}'`,
@@ -110,12 +113,12 @@ export async function run({ harness, expect }) {
   expect.that(
     'macos: plist content includes stdout log path under ~/.hyp/hypaware/logs',
     macosContent,
-    (v) => v.includes(`<string>${path.join(expectedMacosLogDir, 'daemon.out.log')}</string>`)
+    (v) => v.includes(`<string>${path.posix.join(expectedMacosLogDir, 'daemon.out.log')}</string>`)
   )
   expect.that(
     'macos: plist content includes stderr log path under ~/.hyp/hypaware/logs',
     macosContent,
-    (v) => v.includes(`<string>${path.join(expectedMacosLogDir, 'daemon.err.log')}</string>`)
+    (v) => v.includes(`<string>${path.posix.join(expectedMacosLogDir, 'daemon.err.log')}</string>`)
   )
   expect.that(
     'macos: plist content does not reference collectivus',
@@ -141,7 +144,7 @@ export async function run({ harness, expect }) {
   expect.that(
     'linux: target path is <home>/.config/systemd/user/hypaware.service',
     linuxPlan.targetPath,
-    (v) => v === path.join(defaultUnitDir(homeDir), unitFileName(SYSTEMD_UNIT_BASE))
+    (v) => v === path.posix.join(defaultUnitDir(homeDir), unitFileName(SYSTEMD_UNIT_BASE))
   )
   expect.that(
     'linux: unit file name uses the short systemd base (hypaware.service)',
@@ -178,12 +181,12 @@ export async function run({ harness, expect }) {
   expect.that(
     'linux: unit content writes stdout to ~/.hyp/hypaware/logs/daemon.out.log',
     linuxContent,
-    (v) => v.includes(`StandardOutput=append:${path.join(defaultLogDir(homeDir), 'daemon.out.log')}`)
+    (v) => v.includes(`StandardOutput=append:${path.posix.join(defaultLogDir(homeDir), 'daemon.out.log')}`)
   )
   expect.that(
     'linux: unit content writes stderr to ~/.hyp/hypaware/logs/daemon.err.log',
     linuxContent,
-    (v) => v.includes(`StandardError=append:${path.join(defaultLogDir(homeDir), 'daemon.err.log')}`)
+    (v) => v.includes(`StandardError=append:${path.posix.join(defaultLogDir(homeDir), 'daemon.err.log')}`)
   )
   expect.that(
     'linux: unit content does not reference collectivus',

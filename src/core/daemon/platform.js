@@ -25,7 +25,11 @@ export const SYSTEMD_UNIT_BASE = 'hypaware'
  * @returns {string}
  */
 export function defaultLogDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.hyp', 'hypaware', 'logs')
+  // path.posix here and below: these paths name locations on a darwin/linux
+  // host and land inside plist/unit content, so they must keep POSIX form
+  // even when rendered elsewhere (`--dry-run` on win32). Identical to
+  // path.join on the platforms the service actually installs on.
+  return path.posix.join(homeDir ?? os.homedir(), '.hyp', 'hypaware', 'logs')
 }
 
 /**
@@ -36,7 +40,7 @@ export function defaultLogDir(homeDir) {
  * @returns {string}
  */
 export function defaultConfigPath(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.hyp', 'hypaware-config.json')
+  return path.posix.join(homeDir ?? os.homedir(), '.hyp', 'hypaware-config.json')
 }
 
 /**
@@ -46,7 +50,7 @@ export function defaultConfigPath(homeDir) {
  * @returns {string}
  */
 export function defaultPlistDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), 'Library', 'LaunchAgents')
+  return path.posix.join(homeDir ?? os.homedir(), 'Library', 'LaunchAgents')
 }
 
 /**
@@ -56,7 +60,7 @@ export function defaultPlistDir(homeDir) {
  * @returns {string}
  */
 export function defaultUnitDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.config', 'systemd', 'user')
+  return path.posix.join(homeDir ?? os.homedir(), '.config', 'systemd', 'user')
 }
 
 /**

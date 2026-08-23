@@ -36,7 +36,7 @@ test('writeToken persists, is 0600, and round-trips', async () => {
   const creds = await readCredentials(dir)
   assert.deepEqual(creds.prod, { kind: 'static', token: 'sk-1' })
   const st = await fs.stat(remoteCredentialsPath(dir))
-  assert.equal(st.mode & 0o777, 0o600)
+  if (process.platform !== 'win32') assert.equal(st.mode & 0o777, 0o600)
 })
 
 test('writeToken merges, removeToken drops only the named target', async () => {

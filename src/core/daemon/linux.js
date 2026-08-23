@@ -95,8 +95,8 @@ export function buildUnit(options) {
   if (!configPath || typeof configPath !== 'string') throw new SystemdUnitError('configPath is required')
   if (!logDir || typeof logDir !== 'string') throw new SystemdUnitError('logDir is required')
 
-  const stdoutPath = path.join(logDir, 'daemon.out.log')
-  const stderrPath = path.join(logDir, 'daemon.err.log')
+  const stdoutPath = path.posix.join(logDir, 'daemon.out.log')
+  const stderrPath = path.posix.join(logDir, 'daemon.err.log')
 
   /** @type {string[]} */
   const execArgs = [
@@ -168,7 +168,7 @@ function escapeQuoted(value) {
  * @returns {string}
  */
 export function unitPathFor(unitDir, label = SYSTEMD_UNIT_BASE) {
-  return path.join(unitDir, unitFileName(label))
+  return path.posix.join(unitDir, unitFileName(label))
 }
 
 /**
