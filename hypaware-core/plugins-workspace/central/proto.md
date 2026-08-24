@@ -121,16 +121,51 @@ backs off linearly (30s → 60s → 120s → 300s).
 
 ## Ingest
 
+### PUT `/v1/datasets/{dataset}`
+
+Bearer-authenticated. Announces one dataset's schema so the server's
+catalog can resolve rows POSTed under that name. Body is JSON:
+
+```json
+{ "schema": { "columns": [ { "name": "…", "type": "STRING", "nullable": true } ] },
+  "sourceSignal": "claude_telemetry",
+  "primaryTimestampColumn": "event_timestamp" }
+```
+
+`sourceSignal` and `primaryTimestampColumn` are sent only when the
+dataset declares them. `{dataset}` is URL-escaped, and the ingest POST
+below escapes it identically, so the two calls always name one resource.
+
+Registration is expected to be idempotent: the client announces a dataset
+once per sink instance, before that dataset's first ingest chunk, and a
+daemon restart (or a second concurrent tick) may announce it again.
+
+Response 2xx: registered. Any other status throws, which fails that
+partition for the driver's outbox retry, so the dataset re-announces on
+the next tick; the dataset is not marked registered until a call
+succeeds. A `401` refreshes the JWT once and retries, exactly as ingest
+does.
+
+> **Server status:** unverified from this repo. If the deployed server
+> does not serve this route, every non-legacy dataset PUTs and fails on
+> each tick and its rows never drain. That is visible only as a repeated
+> `central.forward.failed` warn naming the PUT URL.
+
 ### POST `/v1/ingest/{signal}`
 
 Bearer-authenticated. Body is NDJSON (one row per line, terminated by
 `\n`). One request carries one signal. The kernel forwards each cache
-partition independently, resolving its signal from the dataset's
-`sourceSignal` (defaulting to the dataset name) and streaming the
-partition's rows as one or more bounded chunks: one POST per chunk (see
-"Batch boundaries").
+partition independently and streams the partition's rows as one or more
+bounded chunks: one POST per chunk (see "Batch boundaries").
 
-`{signal}` is one of:
+`{signal}` is resolved from the dataset in two ways:
+
+- the four **legacy signals** keep their fixed paths, chosen by the
+  dataset's declared `sourceSignal`;
+- every **other** dataset ingests under its own dataset name, after its
+  schema is registered by the `PUT` above. Its `sourceSignal`, if it
+  declares one, travels in the registration body and does **not** select
+  the path.
 
 | Signal    | Source                                            |
 |-----------|---------------------------------------------------|

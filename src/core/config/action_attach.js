@@ -227,8 +227,8 @@ export function createAttachHandler(opts = {}) {
     },
 
     /**
-     * Freshness predicate for a `done` attach marker (LLP 0086). Two things can
-     * go stale, and each is checked against what the marker recorded.
+     * Freshness predicate for a `done` attach marker (LLP 0086). Three things
+     * can go stale, and each is checked against what the marker recorded.
      *
      * **The endpoint.** Returns `false` when the recorded endpoint no longer
      * matches the live gateway endpoint: the daemon rebound to a new ephemeral
@@ -259,6 +259,15 @@ export function createAttachHandler(opts = {}) {
      * where the install half is inert anyway): nothing to compare, stay current.
      * A pre-LLP-0138 marker recorded no key: stale exactly once, which records
      * one and self-heals.
+     *
+     * **The attach mode**, for `claude` only. The adapter has exactly one
+     * desired mode (`otel`), and a proxy-era attach sits at the same gateway
+     * endpoint with the same asset set, so neither key above can see it. A
+     * marker recording anything other than `otel` (including a pre-LLP-0262
+     * marker recording no mode at all) is stale, and re-performing it is the
+     * migration itself: `attach()` releases the proxy keys and writes the OTEL
+     * block. It self-heals the same way the other two do, because `perform()`
+     * records the mode the adapter reports.
      *
      * @param {ActionMarker} marker
      * @param {DesiredAction} action

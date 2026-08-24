@@ -29,9 +29,12 @@ export const TELEMETRY_EVENTS_DATASET = 'claude_telemetry_events'
 export const PARTITION_LABEL = 'all'
 
 /**
- * The ingest signal the central forward sink POSTs this dataset's rows
- * under (`/v1/ingest/claude_telemetry`). Declared so forwarding never
- * falls back to the dataset name, which is not a signal the server maps.
+ * The signal name this dataset declares to the central forward sink. It is
+ * announced in the dataset's schema registration rather than used as the
+ * ingest path: only the four legacy signals (`logs`, `traces`, `metrics`,
+ * `proxy`) keep a fixed `/v1/ingest/{signal}` path, and every other dataset
+ * ingests under its own name (`/v1/ingest/claude_telemetry_events`) once its
+ * schema is registered.
  *
  * @ref LLP 0255#owned-by-claude [implements]: registration sets the source
  *   signal so the rows forward centrally by the same rules message rows follow

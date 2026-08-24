@@ -90,8 +90,15 @@ export function createForwardSink(args) {
       // grouping every partition's rows up front) is what keeps memory
       // bounded on a large backlog.
       for (const partition of batch.partitions) {
-        const target = forwardingTarget(query, partition)
+        // Resolved INSIDE the try: `forwardingTarget` throws for a partition
+        // whose dataset the local registry cannot resolve, and a throw that
+        // escapes `exportBatch` costs the whole batch (the driver respools
+        // every partition, including the ones already POSTed, and reports
+        // zero exported). Per-partition isolation is the contract above.
+        /** @type {{ ingestName: string, registration?: DatasetRegistration } | undefined} */
+        let target
         try {
+          target = forwardingTarget(query, partition)
           if (target.registration) {
             await ensureDatasetRegistered({
               centralUrl: config.url,
@@ -113,10 +120,11 @@ export function createForwardSink(args) {
           retry.push(partition)
           // `forwardPartition` annotates the error with the failing
           // chunk's id and the count that already landed (undefined for
-          // pre-stream failures like an unknown signal).
+          // pre-stream failures like an unresolvable dataset or a rejected
+          // schema registration, which throw before any chunk is built).
           const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err ?? {})
           log.warn('central.forward.failed', {
-            hyp_sink_signal: target.ingestName,
+            hyp_sink_signal: target?.ingestName ?? partition.dataset,
             hyp_dataset: partition.dataset,
             message,
             batch_id: e.hyp_batch_id,
@@ -489,7 +497,13 @@ function serializeValue(value) {
  */
 async function postNdjson(args) {
   const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn, hyp_dataset, chunkIndex } = args
-  const url = joinUrl(centralUrl, `/v1/ingest/${signal}`)
+  // Escaped the same way `ensureDatasetRegistered` escapes the registration
+  // path: since the open-dataset protocol puts an arbitrary dataset name here
+  // (not one of the four fixed signals), the two paths would otherwise be able
+  // to name different resources, and `joinUrl`'s `new URL()` would normalize a
+  // `..` segment out of the ingest path. The four legacy signals are
+  // encode-invariant, so their URLs are byte-identical to before.
+  const url = joinUrl(centralUrl, `/v1/ingest/${encodeURIComponent(signal)}`)
 
   /** @param {string} jwt */
   const send = (jwt) => fetchFn(url, {

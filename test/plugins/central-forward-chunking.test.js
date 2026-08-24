@@ -180,11 +180,12 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   responder?: (c: any) => (number | { status: number, retryAfter?: number }),
  *   rowFactory?: (i: number) => Record<string, unknown>,
  *   signal?: string | null,
+ *   query?: { getDataset: (name: string) => unknown },
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   watermark?: { v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn, watermark }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
@@ -199,7 +200,7 @@ function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn, wat
   const sink = createForwardSink({
     config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
     identityClient: /** @type {any} */ (identityClient),
-    query: /** @type {any} */ (makeQuery(signal)),
+    query: /** @type {any} */ (query ?? makeQuery(signal)),
     storage: /** @type {any} */ (storage),
     watermarks: /** @type {any} */ (watermarks),
     log: /** @type {any} */ (log),
@@ -323,6 +324,81 @@ test('claude telemetry registers its schema before forwarding under its dataset 
   assert.equal(calls[1].method, 'POST')
   assert.equal(calls[1].url, 'http://server:8740/v1/ingest/claude_telemetry_events')
   assert.equal(calls[1].rowCount, 10)
+})
+
+const TELEMETRY_BATCH = {
+  partitions: [{ dataset: 'claude_telemetry_events', tablePath: TABLE }],
+}
+
+test('a dataset schema announces once per sink instance, not once per tick', async () => {
+  const { sink, calls } = buildSink({ count: 10, signal: 'claude_telemetry' })
+
+  const first = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  const second = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(first.status, 'exported')
+  assert.equal(second.status, 'exported')
+  // The bound the sink claims: the announce is remembered for the sink's
+  // lifetime, so a second tick over the same dataset re-announces nothing.
+  // (A new sink instance - a daemon restart - starts a fresh memory and may
+  // announce again, which is why the server side has to stay idempotent.)
+  assert.deepEqual(calls.filter((c) => c.method === 'PUT').length, 1)
+})
+
+test('a rejected schema announce fails the partition and never reaches ingest', async () => {
+  let putStatus = 500
+  const { sink, calls } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    responder: (c) => (c.method === 'PUT' ? putStatus : 202),
+  })
+
+  const failed = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.partitionsExported, 0)
+  assert.equal(failed.retryPartitions?.length, 1)
+  assert.match(String(failed.error), /PUT http:\/\/server:8740\/v1\/datasets\/claude_telemetry_events/)
+  // Registration gates ingest: no rows go to a dataset the server has not
+  // been told the schema of.
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
+
+  // A failed announce is not remembered, so the driver's next tick retries it
+  // rather than POSTing into an unregistered dataset forever.
+  putStatus = 200
+  const ok = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(ok.status, 'exported')
+  assert.equal(calls.filter((c) => c.method === 'PUT').length, 2)
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 1)
+})
+
+test('an unresolvable dataset fails only its own partition', async () => {
+  // The per-partition isolation the sink documents: resolving the wire target
+  // can throw, and a throw that escapes `exportBatch` costs the whole batch
+  // (the driver respools every partition and reports zero exported).
+  const query = {
+    /** @param {string} name */
+    getDataset: (name) => (name === 'ghost_dataset'
+      ? undefined
+      : { name, plugin: '@hypaware/test', schema: { columns: [] }, sourceSignal: 'logs' }),
+  }
+  const { sink, calls } = buildSink({ count: 10, query })
+
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({
+      partitions: [
+        { dataset: 'ghost_dataset', tablePath: TABLE },
+        { dataset: 'ai_gateway_messages', tablePath: TABLE },
+      ],
+    }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'partial')
+  assert.equal(result.partitionsExported, 1)
+  assert.deepEqual(result.retryPartitions?.map((p) => p.dataset), ['ghost_dataset'])
+  assert.match(String(result.error), /not registered locally/)
+  // the healthy partition still shipped
+  assert.deepEqual(calls.map((c) => c.url), ['http://server:8740/v1/ingest/logs'])
 })
 
 // Mirrors MAX_CHUNK_BYTES in sink.js; the byte budget is otherwise

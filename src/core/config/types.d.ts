@@ -360,6 +360,16 @@ export interface ActionMarker {
    */
   assets_key?: string
   /**
+   * The attach mode the adapter reported (recorded on a `done` attach marker
+   * from its `--json` payload). The third freshness key beside `endpoint` and
+   * `assets_key`, and the only one that can see a `claude` machine still
+   * carrying a proxy attach: it sits at the same gateway endpoint with the
+   * same asset set, so re-performing on a mode other than `otel` is what
+   * migrates it (LLP 0262 §Migration). Absent on pre-LLP-0262 attach markers
+   * and on markers whose adapter payload did not parse.
+   */
+  mode?: string
+  /**
    * `true` when an earlier pass at this request key reached `done`, i.e. the
    * handler applied an effect that is still on disk. Recorded only on a
    * `failed`/`refused` marker rewritten over such a pass; a `done` marker says
