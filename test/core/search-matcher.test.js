@@ -131,17 +131,19 @@ test('literal offsets index the original value, not a lowercased copy', () => {
   assert.equal(makeSnippet(value, compileMatcher('needle', false)), value)
 })
 
-test('a JSON cell is searchable, not silently skipped', () => {
-  // tool_args is a JSON column (iceberg variant), so it reads back from
-  // parquet as an object. It is in the allowlist, so it has to be able to
-  // produce a hit; a typeof-string gate would make it dead weight that is
-  // still decoded on every brute scan.
+test('a non-string cell is coerced, not silently skipped', () => {
+  // Every allowlisted column holds STRING today, so the coercion is not
+  // there to cover a JSON column any more (tool_args is out: #977). It is
+  // there so the row predicate is never wider than the per-cell one for
+  // whatever a cell actually decodes to.
   const matcher = compileMatcher('src/core/search', false)
-  assert.equal(matcher.rowTest({ tool_args: { file_path: 'src/core/search/matcher.js' } }), true)
-  assert.equal(matcher.rowTest({ tool_args: '{"file_path":"src/core/search/matcher.js"}' }), true)
-  assert.equal(matcher.rowTest({ tool_args: { file_path: 'elsewhere.js' } }), false)
-  // An excluded column stays excluded whatever shape it holds.
+  assert.equal(matcher.rowTest({ content_text: { file_path: 'src/core/search/matcher.js' } }), true)
+  assert.equal(matcher.rowTest({ content_text: '{"file_path":"src/core/search/matcher.js"}' }), true)
+  assert.equal(matcher.rowTest({ content_text: { file_path: 'elsewhere.js' } }), false)
+  // An excluded column stays excluded whatever shape it holds, tool_args
+  // now included: the coercion never widens the allowlist.
   assert.equal(matcher.rowTest({ attributes: { path: 'src/core/search/matcher.js' } }), false)
+  assert.equal(matcher.rowTest({ tool_args: { file_path: 'src/core/search/matcher.js' } }), false)
 })
 
 test('cellText renders only the shapes a searchable cell can hold', () => {
@@ -161,26 +163,26 @@ test('cellText renders only the shapes a searchable cell can hold', () => {
   assert.equal(cellText(cyclic), 'file_path\na.js\nself')
 })
 
-test('a JSON cell is searched as its decoded text, escapes and all', () => {
+test('an object cell is searched as its decoded text, escapes and all', () => {
   // JSON.stringify would store a Windows path as C:\\Users\\me and a
   // shell command's newline as the two characters \\n, so a literal query
   // for either would miss the very cell it names.
   const args = { path: 'C:\\Users\\me', command: 'cd /repo\nnpm test', quoted: 'say "hi"' }
-  assert.equal(compileMatcher('C:\\Users\\me', false).rowTest({ tool_args: args }), true)
-  assert.equal(compileMatcher('cd /repo\nnpm test', false).rowTest({ tool_args: args }), true)
-  assert.equal(compileMatcher('say "hi"', false).rowTest({ tool_args: args }), true)
-  // The keys are searchable too, so a query naming a tool argument finds it.
-  assert.equal(compileMatcher('command', false).rowTest({ tool_args: args }), true)
+  assert.equal(compileMatcher('C:\\Users\\me', false).rowTest({ content_text: args }), true)
+  assert.equal(compileMatcher('cd /repo\nnpm test', false).rowTest({ content_text: args }), true)
+  assert.equal(compileMatcher('say "hi"', false).rowTest({ content_text: args }), true)
+  // The keys are rendered too, so a query naming one finds the cell.
+  assert.equal(compileMatcher('command', false).rowTest({ content_text: args }), true)
 })
 
-test('test, locate and makeSnippet agree with rowTest on a JSON cell', () => {
+test('test, locate and makeSnippet agree with rowTest on a non-string cell', () => {
   // The consumer loop is: rowTest the row, then test each allowlisted cell
   // and snippet the ones that matched. A per-cell predicate that only takes
   // strings makes that loop report a hit with no matched columns, or throw
   // on value.slice, for exactly the column the row matched through.
   const matcher = compileMatcher('file_path', false)
   const cell = { file_path: 'src/core/search/matcher.js' }
-  assert.equal(matcher.rowTest({ tool_args: cell }), true)
+  assert.equal(matcher.rowTest({ content_text: cell }), true)
   assert.equal(matcher.test(cell), true)
   assert.deepEqual(matcher.locate(cell), { index: 0, length: 9 })
   assert.equal(makeSnippet(cell, matcher), 'file_path\nsrc/core/search/matcher.js')

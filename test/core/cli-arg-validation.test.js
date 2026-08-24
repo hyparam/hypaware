@@ -27,12 +27,27 @@ const UNKNOWN_FLAG = '--definitely-not-a-real-flag'
 // named after the file the caller meant to write.
 const UNKNOWN_SHORT_FLAG = '-Z'
 /**
- * The one visible core command the short-flag rule deliberately spares. `query
- * sql` is a verb, and its greedy SQL positional legitimately carries tokens
- * like `-1`, so the verb family keeps the lenient reading D1 carved out for it.
+ * The visible core commands the short-flag rule deliberately spares. Both are
+ * verbs, and D1 gives the verb family the lenient reading while the core set
+ * opts in through `strictShortFlags` (LLP 0293), because each verb binds a
+ * greedy positional whose legitimate values can start with a single dash:
+ *
+ * - `query sql`, whose SQL carries tokens like `-1`.
+ * - `query grep`, whose search pattern is text to look for, not a flag. A
+ *   recorded transcript is mostly command lines, so `-Z` is an ordinary thing
+ *   to search FOR, and refusing it would make the obvious way to find a short
+ *   flag in your own history exit 2.
+ *
+ * This buys the single-dash case only. The verb codec reads every `--` token
+ * as a flag and has no end-of-flags escape, so `hyp query grep -- --force` and
+ * `hyp query grep --force` both still exit 2, exactly as `hyp query sql`
+ * does for the same argv. That is the codec's shape, not this set's: `rg`'s
+ * `rg -- -Z` has no equivalent here, and giving verbs one is a change to
+ * `parseCommandArgv`, not a line in this file.
+ *
  * Anything else added here is a design change, not a test fixup.
  */
-const SHORT_FLAG_LENIENT = new Set(['query sql'])
+const SHORT_FLAG_LENIENT = new Set(['query sql', 'query grep'])
 const HYP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-arg-validation-'))
 
 function makeBuf() {

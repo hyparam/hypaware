@@ -309,6 +309,25 @@ export interface MaintenancePartitionReport {
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
+  /** Grep sidecars built for the live generation; absent when the build pass did not run. */
+  sidecarsBuilt?: number
+  /** Files whose sidecar build failed on THIS pass; the scan tier serves them. */
+  sidecarsFailed?: number
+  /**
+   * Files skipped without a build because the per-file attempt budget is
+   * spent. Separate from `sidecarsFailed`, which counts work this pass
+   * actually attempted: a quarantined file costs nothing and would
+   * otherwise report a fresh failure on every later tick.
+   */
+  sidecarsQuarantined?: number
+  /**
+   * Files still missing a sidecar when the tick's budget ran out. They are
+   * built by a later tick: the pass is resumable because sidecar existence
+   * is its only completion marker.
+   */
+  sidecarsDeferred?: number
+  /** The build pass's own error, when the pass itself threw (never fails the partition). */
+  sidecarError?: string
   // Compaction of this partition is known not to reduce its data-file
   // count under the writer running now: either this run's rewrite
   // reproduced the count it started from, or a previous one did and the
@@ -368,6 +387,15 @@ export interface CacheStatusPartition {
   deleteFileCount?: number
   lastRetentionCutoffDate?: string
   layout?: 'epoch' | 'source-table'
+  /** Data files with a grep sidecar beside them; present only on the grep dataset's partitions. */
+  indexedFileCount?: number
+  /**
+   * Data files a sidecar could be built beside, the honest denominator for
+   * `indexedFileCount`. Not `dataFileCount`: position-delete files live in
+   * the same `data/` directory and that counter includes them, while no
+   * sidecar is ever built for one.
+   */
+  indexableFileCount?: number
 }
 
 export interface CacheStatusReport {

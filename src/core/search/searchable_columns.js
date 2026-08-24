@@ -13,10 +13,18 @@
  * Insertion order is meaningful: matched columns are reported in this
  * order, so the content column leads a hit's snippets.
  *
- * All but one of these hold STRING. `tool_args` is a JSON column, so it
- * reads back from parquet as an object rather than text; the matcher's
- * `cellText` renders it before testing, because a column in this set that
- * cannot produce a hit is worse than one that is absent from it.
+ * Every column here holds STRING. `tool_args` is deliberately absent, and
+ * its absence is a gap recorded rather than left to be rediscovered (the
+ * discipline of server LLP 0157 #identifier-columns). It is the dataset's
+ * one VARIANT column (iceberg `variant`, a JSON cell), and no tier in
+ * either repository can produce a hit from it: both index workers filter
+ * VARIANT out before building, and the server's shared row predicate gates
+ * on `typeof value === 'string' && value !== ''`, which an object-valued
+ * cell fails. A column in this set that cannot produce a hit is worse than
+ * one absent from it, because it is decoded on every brute scan for the
+ * cost and named in the tool description for the promise while answering
+ * zero. hyparam/hypaware#977 restores the coverage on every tier at once,
+ * once hypgrep can index VARIANT.
  *
  * The set is a constant, not configuration. Sharing it is what makes
  * "zero hits" mean the same thing locally and remotely, and a per-install
@@ -28,7 +36,6 @@
 export const SEARCHABLE_COLUMNS = constantSet([
   'content_text',
   'tool_name',
-  'tool_args',
   'session_id',
   'conversation_id',
   'agent_id',
@@ -37,6 +44,32 @@ export const SEARCHABLE_COLUMNS = constantSet([
   'git_branch',
   'git_remote',
 ])
+
+/**
+ * The one dataset grep search covers, on both repositories: the client
+ * greps its own `ai_gateway_messages` cache, the server the same dataset's
+ * cache and archive. Named here beside the columns it scopes so the search
+ * service and the sidecar-build pass cannot disagree about which tables
+ * carry indexes.
+ */
+export const GREP_DATASET = 'ai_gateway_messages'
+
+/**
+ * The sidecar path beside a data file: hypgrep's own default, which is a
+ * contract. Any reader with byte access to the cache can search a file
+ * with the stock hypgrep CLI, no daemon involved. It lives beside the
+ * allowlist for the same reason `GREP_DATASET` does: the build pass that
+ * publishes a sidecar and the search service that probes for one must
+ * spell this path identically, or the build writes an index nobody looks
+ * for and every file silently falls back to the scan tier. Takes a
+ * filesystem path or a `file://` URL; only the extension is rewritten.
+ *
+ * @param {string} dataFile
+ * @returns {string}
+ */
+export function sidecarPathFor(dataFile) {
+  return dataFile.replace(/\.parquet$/i, '.index.parquet')
+}
 
 /**
  * A Set that cannot be added to, deleted from, or cleared. `SCAN_COLUMNS`
@@ -63,23 +96,30 @@ function constantSet(columns) {
 }
 
 /**
- * The columns a brute scan has to decode: the searchable set plus every
- * column the scan's own readers consult. A brute scan reads a whole
+ * The columns EITHER tier has to decode. A brute scan reads a whole
  * parquet file with no index to prune it, so without this list it
  * decodes `system_text` and the other bulk machinery columns only to
  * ignore them. Server LLP 0157 measured `system_text` alone at 90.8% of
  * decoded index-build text, which is why "every string column" is
- * refuted by production measurement. The indexed path is unaffected:
- * hypgrep's `parquetFind` reads whole candidate rows and this list does
- * not reach it.
+ * refuted by production measurement. The indexed tier passes the same
+ * list down: `parquetFind` forwards `columns` into its own read of each
+ * candidate range, and a range is a whole coalesced run of blocks capped
+ * only at row-group boundaries, so an unprojected indexed read can decode
+ * more bytes than the brute scan it exists to beat.
  *
  * The extras beyond `SEARCHABLE_COLUMNS` are derived from the readers,
  * not guessed, because a starved column throws nothing: it reads as
  * missing and silently yields a wrong or empty hit.
  *
  * - `date`: the from/to window predicate, and the hit's own day.
- * - `received_at`: the tier exclusion, the rule that keeps a row held by
- *   two tiers at once from being counted twice.
+ * - `received_at`: the SERVER's tier exclusion, the rule that keeps a row
+ *   its cache and its archive both hold from being counted twice. The
+ *   client has no such rule (a row lives in exactly one data file, and one
+ *   file takes exactly one tier) and its `ai_gateway_messages` carries no
+ *   such column at all, so on this side the name is inert and the read
+ *   below simply skips it. It is listed because this constant is shared:
+ *   dropping it would starve the server's own exclusion, which is a wrong
+ *   answer rather than a slower one.
  * - `part_id`, `message_id`, `message_created_at`: the hit's locator
  *   fields, and the sort key plus tiebreak that order the answer.
  *

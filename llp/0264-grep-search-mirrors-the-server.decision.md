@@ -5,7 +5,7 @@
 **Systems:** Query, Cache, CLI, MCP
 **Author:** Brendan / Claude
 **Date:** 2026-08-18
-**Extended-by:** LLP 0265 (implementation plan; its #sequencing resolves the #open item)
+**Extended-by:** LLP 0265 (implementation plan; its #sequencing resolves the #open item), LLP 0302 (#visibility-predicate, #purge-by-position, #build-site: where the shipped mechanism differs from #visibility and #lifecycle)
 **Related:** LLP 0003, LLP 0013, LLP 0034, LLP 0104, LLP 0105, LLP 0209, LLP 0222; hypaware-server LLP 0127, LLP 0128, LLP 0130, LLP 0136, LLP 0157, LLP 0158 (out of tree, design authority for the mechanism)
 
 > Full-text search over recorded sessions ships as `hyp query grep`, a
@@ -108,6 +108,14 @@ the icebird source applies position deletes (LLP 0104), and the indexed
 path prunes *files*, so a pruned-in row still passes through the
 delete-applying read.
 
+**Extended-by:** [LLP 0302 #visibility-predicate](./0302-grep-search-integration-divergences.decision.md#visibility-predicate)
+and [#purge-by-position](./0302-grep-search-integration-divergences.decision.md#purge-by-position).
+The grep walk chooses its tier per file and so reads data files directly, with
+no `AsyncDataSource` to decorate: the lattice check is hoisted into a shared
+predicate both read surfaces call, and position deletes are applied by the walk
+from the committed delete positions. Both rules are unchanged; only where they
+are enforced moved.
+
 ## Index lifecycle {#lifecycle}
 
 Sidecars are built during **maintenance/compaction**, the moment a file
@@ -118,6 +126,12 @@ a crashed build resumes by listing and skipping. Orphan sweep and
 retention delete recursively, so a sidecar dies with its file; a test pins
 that. An unindexed file (fresh, raced, or poisoned) is brute-scanned, so
 index state is never a correctness input (server LLP 0130's invariant).
+
+**Extended-by:** [LLP 0302 #build-site](./0302-grep-search-integration-divergences.decision.md#build-site).
+Building only behind a committed compaction strands a partition already at the
+compaction floor: it never rewrites, so its files never index. The shipped pass
+runs on missing coverage instead, bounded by the maintenance tick's budget and
+resumable across ticks on the existence marker this section already names.
 
 ## Dependency {#dependency}
 

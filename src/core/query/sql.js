@@ -623,6 +623,13 @@ export async function executeQuerySql(args) {
 }
 
 /**
+ * The query seam's freshness move: flush each referenced partition's
+ * pending spool (debounced under `auto`, forced under `always`, skipped
+ * under `never`) and report the staleness the debounce accepted.
+ * Exported so the grep service applies the identical policy; two read
+ * surfaces with different flush rules would answer differently about
+ * the same seconds-old row.
+ *
  * @param {{
  *   partitions: Array<{ tablePath?: string }>,
  *   storage: ExtendedQueryStorageService,
@@ -630,7 +637,7 @@ export async function executeQuerySql(args) {
  *   messages: string[],
  * }} args
  */
-async function settlePendingCacheForQuery(args) {
+export async function settlePendingCacheForQuery(args) {
   const now = Date.now()
   for (const partition of args.partitions) {
     if (!partition.tablePath) continue

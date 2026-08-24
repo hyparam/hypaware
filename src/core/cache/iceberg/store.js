@@ -449,6 +449,52 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
 }
 
 /**
+ * List the table's live data files with their identity-partition values and
+ * committed position-delete positions, for readers that walk files directly
+ * rather than scanning the table as one stream. The grep service is the
+ * consumer: its two tiers are per FILE (a sidecar-indexed file is searched
+ * through `parquetFind`, an unindexed one is brute-scanned), so it needs the
+ * file list, each file's partition `date` for the newest-first walk, and the
+ * deleted positions, because a raw file read does not apply position deletes
+ * and would otherwise resurrect purged rows (LLP 0104).
+ *
+ * Files whose manifest entry is deleted (status 2) or not parquet are
+ * excluded. A missing or snapshot-less table returns `[]`, matching the
+ * "empty table" degradation of `dataSourceForTable`. A metadata load that
+ * FAILS propagates, for the same reason: unreadable table metadata means an
+ * unknown row set, and a reader that swallows it reports "no matches" over a
+ * partition it never read. `dataSourceForTable` lets that error out, so
+ * `hyp query sql` fails loudly; grep search must not answer zero where SQL
+ * raises.
+ *
+ * @param {string} tablePath
+ * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]>}
+ * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
+ */
+export async function listLiveDataFiles(tablePath) {
+  if (!tableExists(tablePath)) return []
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
+  const dataFileMap = await findDataFileEntries(metadata, resolver)
+  if (dataFileMap.size === 0) return []
+  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  /** @type {{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]} */
+  const out = []
+  for (const [filePath, { partition, entry }] of dataFileMap) {
+    const file = entry.data_file
+    if (String(file.file_format).toLowerCase() !== 'parquet') continue
+    out.push({
+      filePath,
+      partition,
+      deletedPositions: deleted.get(filePath),
+    })
+  }
+  return out
+}
+
+/**
  * Streaming counterpart to `readRowsFromTable`. Yields rows one at a
  * time so callers (in particular `QueryStorageService.readRows`) never
  * materialize the full table in memory.
