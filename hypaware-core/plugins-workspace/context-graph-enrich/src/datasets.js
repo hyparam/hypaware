@@ -89,6 +89,26 @@ const COLUMNS = /** @type {Record<string, ReadonlyArray<ColumnSpec>>} */ ({
 })
 
 /**
+ * Content-bearing columns in the enrichment plugin's derived tables. These
+ * rows aggregate model output across source sessions and carry no per-row cwd,
+ * so the query seam cannot derive a row-level usage class. Declaring the
+ * columns both suppresses them for restricted query callers and makes raw-row
+ * central forwarding fail closed for the whole dataset.
+ *
+ * IDs that are natural keys (`anchor_key`, `item_id`) are content here for the
+ * same reason context-graph classifies `natural_key` as content: they can embed
+ * session-derived text or paths. Hash-only `prospect_id` remains structural.
+ * Every column is independently classified by the allowlist test.
+ *
+ * @ref LLP 0105#graph-provenance [implements]: unprovenanced enrichment rows expose no derived content outside a private query context
+ */
+const CONTENT_COLUMNS = {
+  [PROSPECTS_DATASET]: ['label', 'props', 'evidence', 'anchor_key', 'source_keys'],
+  [RESOLUTIONS_DATASET]: ['committed_ids', 'note'],
+  [COMMITTED_DATASET]: ['item_id', 'label', 'props', 'anchor_key', 'source_keys'],
+}
+
+/**
  * Spool/label table path the plugin appends to. Mirrors the context-graph
  * derived-table convention (see context-graph/src/datasets.js).
  *
@@ -126,6 +146,7 @@ export function enrichDatasetRegistration(dataset, timestampColumn) {
     name: dataset,
     plugin: PLUGIN_NAME,
     schema: { columns: [...columnsFor(dataset)] },
+    localOnlyContentColumns: [...CONTENT_COLUMNS[dataset]],
     primaryTimestampColumn: timestampColumn,
     discoverPartitions: (ctx) => discoverParts(ctx, dataset),
     refreshPartition: async () => /** @type {DatasetRefreshResult} */ ({ status: 'skipped', rows: 0 }),
