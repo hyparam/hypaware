@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
+import { access } from 'node:fs/promises'
 
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
@@ -68,6 +69,9 @@ export function createForwardSink(args) {
   const sleepFn = args.sleepFn ?? abortableSleep
   const nowFn = args.nowFn ?? Date.now
   const registeredDatasets = new Set()
+  // Datasets this sink instance has already reported as ineligible, so a
+  // permanent verdict is stated once rather than once per tick forever.
+  const withheldDatasets = new Set()
   /** @type {Map<string, Promise<void>>} */
   const datasetRegistrations = new Map()
   /** @type {Map<string, number>} */
@@ -114,6 +118,24 @@ export function createForwardSink(args) {
         let target
         try {
           const resolved = forwardingTarget(query, partition)
+          // A withheld dataset is a settled verdict, not a transport failure: it
+          // can never succeed, so routing it through `retry` would write one
+          // outbox file per tick forever (the driver writes one on every non-ok
+          // result and nothing drains it, src/core/sinks/driver.js persistOutbox)
+          // and hold the sink at `partial` for a condition LLP 0305 calls
+          // correct. `@hypaware/context-graph` is default-bundled, so on a joined
+          // machine that is every tick. Skip the partition, say so once, and
+          // leave the batch's health signal honest.
+          // @ref LLP 0305#eligibility [implements]: an ineligible dataset is withheld, never announced, never ingested, and never retried
+          if ('withheld' in resolved) {
+            if (!withheldDatasets.has(partition.dataset)) {
+              withheldDatasets.add(partition.dataset)
+              const fields = { hyp_dataset: partition.dataset, reason: resolved.withheld }
+              if (resolved.level === 'warn') log.warn('central.forward.dataset_withheld', fields)
+              else log.info('central.forward.dataset_withheld', fields)
+            }
+            continue
+          }
           target = resolved
           // Scheduled ticks may overlap. Serialize one logical partition so two
           // scans cannot POST the same suffix concurrently or race a later
@@ -194,11 +216,16 @@ export function createForwardSink(args) {
  * stable `/v1/ingest/{signal}` paths. Every other eligible dataset uses the
  * open-dataset protocol: announce its schema, then POST under the dataset name
  * so the server's catalog can resolve it. A dataset declaring local-only
- * content columns cannot safely use this raw-row protocol and is rejected.
+ * content columns cannot safely use this raw-row protocol and is withheld, as
+ * is one whose name a legacy ingest path has reserved.
+ *
+ * Throws only for a partition whose dataset the local registry cannot resolve,
+ * which is a real and retryable inconsistency. A permanent verdict is RETURNED
+ * instead: the caller skips it rather than retrying it forever.
  *
  * @param {QueryRegistry} query
  * @param {QueryPartition} partition
- * @returns {{ ingestName: string, registration?: DatasetRegistration }}
+ * @returns {{ ingestName: string, registration?: DatasetRegistration } | { withheld: string, level: 'info' | 'warn' }}
  */
 // @ref LLP 0305#routing [implements]: legacy signals keep fixed paths while eligible open datasets register and ingest under their dataset name.
 function forwardingTarget(query, partition) {
@@ -211,14 +238,14 @@ function forwardingTarget(query, partition) {
   // @ref LLP 0305#eligibility [implements]: fail closed when a dataset declares unprovenanced local-only content that this raw-row protocol cannot suppress.
   // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced derived content cannot leave through a raw-row export path that has no column-suppression seam.
   if ((dataset.localOnlyContentColumns?.length ?? 0) > 0) {
-    throw new Error(
-      `central.forward: dataset '${partition.dataset}' declares local-only content columns and cannot be forwarded`
-    )
+    // Expected and correct, not a fault: LLP 0305 names this outcome, so it
+    // reports at info.
+    return { withheld: 'declares local-only content columns', level: 'info' }
   }
   if (KNOWN_SIGNALS.has(partition.dataset)) {
-    throw new Error(
-      `central.forward: open dataset name '${partition.dataset}' is reserved by a legacy ingest path`
-    )
+    // A plugin bug rather than a policy outcome, so it reports at warn: the
+    // dataset silently forwards nothing until the name is changed.
+    return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
   }
   return { ingestName: partition.dataset, registration: dataset }
 }
@@ -278,7 +305,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
 
-  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
+  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; for a LEGACY signal a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip. An open dataset takes neither fallback: it baselines only when no watermark was ever written, and fails the partition otherwise (LLP 0305#start-now).
   /** @type {SinkContinuation | undefined} */
   let since
   /** @type {SinkWatermarkKey | undefined} */
@@ -300,6 +327,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
           storage,
           watermarks,
           watermarkKey,
+          baselineKey,
           log,
         }).catch((err) => {
           initialHistoryBaselines.delete(baselineKey)
@@ -486,18 +514,36 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
  * map so overlapping ticks cannot race two baselines and skip rows that arrive
  * between them. Legacy signals keep LLP 0040's full first export unchanged.
  *
+ * Refuses when a watermark file is already on disk. `SinkWatermarkStore.read`
+ * returns `null` for BOTH "no watermark has ever been written" and "a watermark
+ * is there but could not be read or parsed" (src/core/sinks/watermarks.js
+ * swallows the read error, and `parseRecord` returns null on a malformed
+ * record), so `read()` never throws and the caller's catch cannot tell them
+ * apart. Only the first may baseline: treating a corrupt or transiently
+ * unreadable watermark as "never forwarded" would jump the cursor to the current
+ * high-water and permanently drop every row this sink still owes central,
+ * turning LLP 0040's at-least-once degradation into silent at-most-once loss.
+ * The refusal throws, so it fails only this partition and the next tick retries.
+ *
  * @param {{
  *   partition: QueryPartition,
  *   tablePath: string,
  *   storage: QueryStorageService,
  *   watermarks: SinkWatermarkStore,
  *   watermarkKey: SinkWatermarkKey,
+ *   baselineKey: string,
  *   log: PluginLogger,
  * }} args
  * @returns {Promise<SinkContinuation>}
  */
-// @ref LLP 0305#start-now [implements]: first support for an open dataset checkpoints existing rows without sending them, then forwards only later seqs.
-async function writeInitialHistoryBaseline({ partition, tablePath, storage, watermarks, watermarkKey, log }) {
+// @ref LLP 0305#start-now [implements]: first support for an open dataset checkpoints existing rows without sending them, then forwards only later seqs; only the genuine absence of a watermark qualifies.
+async function writeInitialHistoryBaseline({ partition, tablePath, storage, watermarks, watermarkKey, baselineKey, log }) {
+  if (await pathExists(baselineKey)) {
+    throw new Error(
+      `central.forward: watermark ${baselineKey} for dataset '${partition.dataset}' exists but could not be read; ` +
+      'refusing to re-baseline past rows it may still owe'
+    )
+  }
   /** @type {SinkContinuation} */
   let continuation = { v: 1, seq: '0' }
   let skippedRowCount = 0
@@ -512,6 +558,23 @@ async function writeInitialHistoryBaseline({ partition, tablePath, storage, wate
     baseline_seq: continuation.seq,
   })
   return continuation
+}
+
+/**
+ * True when something is at `filePath`. Used to tell "no watermark yet" from
+ * "watermark present but unreadable", a distinction `SinkWatermarkStore.read`
+ * collapses into `null`.
+ *
+ * @param {string} filePath
+ * @returns {Promise<boolean>}
+ */
+async function pathExists(filePath) {
+  try {
+    await access(filePath)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

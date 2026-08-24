@@ -2,6 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
@@ -68,9 +71,13 @@ function makeStorage(tablePath, count, rowFactory) {
  * `write` records every advance so a test can assert per-chunk progress and the
  * ship-first/advance-second ordering.
  *
+ * `filePath` is a real seam: the sink stats it to tell "no watermark yet" from
+ * "watermark present but unreadable", which `read()` collapses into `null`.
+ *
  * @param {{ v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null} [initial]
+ * @param {string} [filePath]
  */
-function makeWatermarks(initial) {
+function makeWatermarks(initial, filePath) {
   let record = initial ?? null
   /** @type {Array<{ v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string }>} */
   const writes = []
@@ -79,7 +86,7 @@ function makeWatermarks(initial) {
     get writes() { return writes },
     keyFor: () => ({ dataset: 'ai_gateway_messages', partitionKey: 'source=claude' }),
     /** @param {any} _key */
-    filePath: (_key) => '/state/watermarks/ai_gateway_messages/source=claude.json',
+    filePath: (_key) => filePath ?? '/state/watermarks/ai_gateway_messages/source=claude.json',
     async read() { return record },
     /**
      * @param {any} _key
@@ -185,14 +192,15 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   watermark?: { v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null,
  *   nowFn?: () => number,
+ *   watermarkFilePath?: string,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, nowFn }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, nowFn, watermarkFilePath }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
   const log = makeLog()
-  const watermarks = makeWatermarks(watermark)
+  const watermarks = makeWatermarks(watermark, watermarkFilePath)
   // Default sleep records the requested delay and returns instantly, so
   // backpressure pacing is asserted without real waits; a test can pass
   // the real abortableSleep to exercise close()-driven abort.
@@ -596,9 +604,13 @@ test('an unresolvable dataset fails only its own partition', async () => {
   assert.deepEqual(calls.map((c) => c.url), ['http://server:8740/v1/ingest/logs'])
 })
 
-test('an open dataset with local-only content columns is not forwarded', async () => {
+test('an open dataset with local-only content columns is withheld, not retried', async () => {
+  // Ineligibility is a permanent verdict, so it must never reach
+  // `retryPartitions`: the driver writes one outbox file per non-ok result and
+  // nothing drains it, so retrying it is unbounded state growth plus a sink
+  // stuck at `partial` for a condition LLP 0305 calls correct.
   const query = makeQuery(null)
-  const { sink, calls } = buildSink({
+  const { sink, calls, log } = buildSink({
     count: 10,
     query: {
       getDataset(name) {
@@ -607,13 +619,76 @@ test('an open dataset with local-only content columns is not forwarded', async (
     },
   })
 
-  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  const first = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  const second = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
 
-  assert.equal(result.status, 'failed')
-  assert.equal(result.partitionsExported, 0)
-  assert.deepEqual(result.retryPartitions, batch.partitions)
-  assert.match(result.error ?? '', /declares local-only content columns/)
-  assert.equal(calls.length, 0)
+  assert.equal(first.status, 'exported')
+  assert.equal(first.partitionsExported, 0)
+  assert.equal(first.retryPartitions, undefined)
+  assert.equal(second.status, 'exported')
+  assert.equal(calls.length, 0, 'neither announced nor ingested')
+
+  const withheld = log.rows.filter((r) => r.message === 'central.forward.dataset_withheld')
+  assert.equal(withheld.length, 1, 'stated once per sink instance, not once per tick')
+  assert.equal(withheld[0].level, 'info')
+  assert.match(String(withheld[0].fields.reason), /local-only content columns/)
+})
+
+test('a withheld dataset does not stop a sibling partition from shipping', async () => {
+  const base = makeQuery('logs')
+  const { sink, calls } = buildSink({
+    count: 10,
+    query: {
+      getDataset(name) {
+        const dataset = /** @type {Record<string, unknown>} */ (base.getDataset(name))
+        return name === 'node'
+          ? { ...dataset, sourceSignal: undefined, localOnlyContentColumns: ['label'] }
+          : dataset
+      },
+    },
+  })
+
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({
+      partitions: [
+        { dataset: 'node', tablePath: TABLE },
+        { dataset: 'ai_gateway_messages', tablePath: TABLE },
+      ],
+    }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  assert.deepEqual(calls.map((c) => c.url), ['http://server:8740/v1/ingest/logs'])
+})
+
+test('a present-but-unreadable watermark fails the open-dataset partition instead of re-baselining', async () => {
+  // `SinkWatermarkStore.read` returns null for a corrupt watermark exactly as it
+  // does for a missing one, and never throws, so the caller's catch cannot tell
+  // them apart. Baselining there would jump the cursor to the current high-water
+  // and permanently drop every row this sink still owes central: silent
+  // at-most-once loss where LLP 0040 promises at-least-once.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-watermark-'))
+  const watermarkFilePath = path.join(dir, 'source=claude.json')
+  await fsp.writeFile(watermarkFilePath, '{ "continuation": ', 'utf8')
+  try {
+    const { sink, calls, watermarks } = buildSink({
+      count: 10,
+      signal: 'claude_telemetry',
+      watermarkFilePath,
+    })
+
+    const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.retryPartitions?.map((p) => p.dataset), ['claude_telemetry_events'])
+    assert.match(String(result.error), /exists but could not be read/)
+    assert.equal(watermarks.record, null, 'the watermark is not jumped forward')
+    assert.equal(calls.length, 0, 'nothing announced, nothing ingested')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('an open dataset cannot claim a reserved legacy ingest path', async () => {
@@ -625,16 +700,23 @@ test('an open dataset cannot claim a reserved legacy ingest path', async () => {
       sourceSignal: 'custom',
     }),
   }
-  const { sink, calls } = buildSink({ count: 10, query })
+  const { sink, calls, log } = buildSink({ count: 10, query })
 
   const result = await sink.exportBatch(
     /** @type {any} */ ({ partitions: [{ dataset: 'proxy', tablePath: TABLE }] }),
     /** @type {any} */ ({})
   )
 
-  assert.equal(result.status, 'failed')
-  assert.match(result.error ?? '', /reserved by a legacy ingest path/)
+  // Permanent like the local-only withhold, so it is skipped rather than
+  // retried, but it is a plugin bug rather than a policy outcome: warn, not info.
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 0)
+  assert.equal(result.retryPartitions, undefined)
   assert.equal(calls.length, 0)
+  const withheld = log.rows.filter((r) => r.message === 'central.forward.dataset_withheld')
+  assert.equal(withheld.length, 1)
+  assert.equal(withheld[0].level, 'warn')
+  assert.match(String(withheld[0].fields.reason), /reserved by a legacy ingest path/)
 })
 
 // Mirrors MAX_CHUNK_BYTES in sink.js; the byte budget is otherwise

@@ -139,7 +139,11 @@ below escapes it identically, so the two calls always name one resource.
 Datasets declaring `localOnlyContentColumns` are not eligible for this raw-row
 protocol: those columns may contain local-only content without per-row `cwd`
 provenance, and registration cannot make the server enforce the machine's
-local usage policy. The client rejects such a dataset before either request.
+local usage policy. The client withholds such a dataset before either request.
+The withhold is permanent, not an error: the partition is skipped (and named
+once per sink instance in `central.forward.dataset_withheld`) rather than
+retried, so it never fills the driver's outbox. A dataset whose name collides
+with a reserved legacy signal is withheld the same way, at warn.
 
 Registration is expected to be idempotent: the client announces an eligible
 dataset once per sink instance, before that dataset's first ingest chunk, and
@@ -150,7 +154,10 @@ watermark, the client records the partition's current sequence high-water and
 sends none of its existing rows. Establishing that boundary locally first means
 a registration outage cannot absorb later rows into a delayed baseline. A
 baseline failure fails the partition closed: it never falls through to the
-legacy full-history scan. Later rows use the ordinary incremental path. The four
+legacy full-history scan. "No forward watermark" means none was ever written,
+not merely one the client failed to read: a watermark that is present but
+unreadable also fails the partition, because baselining there would skip every
+row between the real watermark and now. Later rows use the ordinary incremental path. The four
 legacy signals keep their existing full first-export behavior.
 
 Response 2xx: registered. A `404` or `405` means the server predates this
