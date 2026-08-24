@@ -1,15 +1,14 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
-import { access } from 'node:fs/promises'
 
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { DatasetRegistration, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
- * @import { CentralSinkConfig } from './types.js'
+ * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from './types.js'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
@@ -55,6 +54,7 @@ const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
  *   query: QueryRegistry,
  *   storage: QueryStorageService,
  *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
@@ -63,7 +63,7 @@ const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
  * @returns {Sink}
  */
 export function createForwardSink(args) {
-  const { config, identityClient, query, storage, watermarks, log } = args
+  const { config, identityClient, query, storage, watermarks, rollouts, log } = args
   const fetchFn = args.fetchFn ?? fetch
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
@@ -76,8 +76,8 @@ export function createForwardSink(args) {
   const datasetRegistrations = new Map()
   /** @type {Map<string, number>} */
   const unsupportedDatasetsUntil = new Map()
-  /** @type {Map<string, Promise<SinkContinuation>>} */
-  const initialHistoryBaselines = new Map()
+  /** @type {Map<string, Promise<void>>} */
+  const datasetRolloutLocks = new Map()
   /** @type {Map<string, Promise<number>>} */
   const partitionExports = new Map()
 
@@ -143,17 +143,30 @@ export function createForwardSink(args) {
           // @ref LLP 0040#watermark-contract [constrained-by]: a partition has one ordered ship-then-advance sequence even when daemon ticks overlap.
           const exportKey = partition.tablePath ?? `${partition.dataset}:${JSON.stringify(partition.partition ?? {})}`
           const previous = partitionExports.get(exportKey) ?? Promise.resolve(0)
-          const pending = previous.catch(() => 0).then(() => forwardPartition({
-            partition, signal: resolved.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
-            abortSignal: abortController.signal, sleepFn,
-            registration: resolved.registration,
-            registeredDatasets,
-            datasetRegistrations,
-            unsupportedDatasetsUntil,
-            nowFn,
-            skipInitialHistory: resolved.registration !== undefined,
-            initialHistoryBaselines,
-          }))
+          const pending = previous.catch(() => 0).then(async () => {
+            if (resolved.registration) {
+              await ensureOpenDatasetPartition({
+                partition,
+                rolloutPartitions: batch.partitions.filter((candidate) => candidate.dataset === partition.dataset),
+                dataset: resolved.registration,
+                storage,
+                watermarks,
+                rollouts,
+                log,
+                datasetRolloutLocks,
+              })
+            }
+            return forwardPartition({
+              partition, signal: resolved.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
+              abortSignal: abortController.signal, sleepFn,
+              registration: resolved.registration,
+              registeredDatasets,
+              datasetRegistrations,
+              unsupportedDatasetsUntil,
+              nowFn,
+              requireWatermark: resolved.registration !== undefined,
+            })
+          })
           partitionExports.set(exportKey, pending)
           try {
             bytesWritten += await pending
@@ -233,6 +246,14 @@ function forwardingTarget(query, partition) {
   if (!dataset) {
     throw new Error(`central.forward: dataset '${partition.dataset}' is not registered locally`)
   }
+  // A built-in dataset claims its reserved route explicitly. Without this
+  // ordering, an unrelated open dataset named `logs` with no sourceSignal
+  // falls through the default and silently impersonates the legacy endpoint.
+  if (KNOWN_SIGNALS.has(partition.dataset) && dataset.sourceSignal !== partition.dataset) {
+    // A plugin bug rather than a policy outcome, so it reports at warn: the
+    // dataset silently forwards nothing until the name is changed.
+    return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
+  }
   const signal = dataset.sourceSignal ?? partition.dataset
   if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
   // @ref LLP 0305#eligibility [implements]: fail closed when a dataset declares unprovenanced local-only content that this raw-row protocol cannot suppress.
@@ -242,12 +263,226 @@ function forwardingTarget(query, partition) {
     // reports at info.
     return { withheld: 'declares local-only content columns', level: 'info' }
   }
-  if (KNOWN_SIGNALS.has(partition.dataset)) {
-    // A plugin bug rather than a policy outcome, so it reports at warn: the
-    // dataset silently forwards nothing until the name is changed.
-    return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
-  }
   return { ingestName: partition.dataset, registration: dataset }
+}
+
+/**
+ * Establish the start-now boundary while the sink is being created, before a
+ * cold machine can capture its first post-rollout row. Existing materialized
+ * partitions are baselined; an empty dataset gets an initialized empty
+ * manifest, so a partition created later starts at zero and forwards its first
+ * row. An existing manifest is authoritative and is never reconstructed from
+ * watermarks.
+ *
+ * @param {{
+ *   query: QueryRegistry,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ * }} args
+ */
+export async function initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log }) {
+  for (const dataset of query.listDatasets()) {
+    if (!isEligibleOpenDataset(dataset)) continue
+    const existing = await rollouts.read(dataset.name)
+    if (existing) continue
+    const partitions = await discoverRolloutPartitions(dataset, storage)
+    await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
+  }
+}
+
+/** @param {DatasetRegistration} dataset */
+function isEligibleOpenDataset(dataset) {
+  if (KNOWN_SIGNALS.has(dataset.name)) return false
+  if (KNOWN_SIGNALS.has(dataset.sourceSignal ?? dataset.name)) return false
+  return (dataset.localOnlyContentColumns?.length ?? 0) === 0
+}
+
+/**
+ * Make one open partition safe to read. The dataset lock serializes manifest
+ * initialization and future-partition admission across overlapping ticks.
+ *
+ * @param {{
+ *   partition: QueryPartition,
+ *   rolloutPartitions: QueryPartition[],
+ *   dataset: DatasetRegistration,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ *   datasetRolloutLocks: Map<string, Promise<void>>,
+ * }} args
+ */
+async function ensureOpenDatasetPartition(args) {
+  const { partition, rolloutPartitions, dataset, storage, watermarks, rollouts, log, datasetRolloutLocks } = args
+  return withDatasetRolloutLock(dataset.name, datasetRolloutLocks, async () => {
+    let rollout = await rollouts.read(dataset.name)
+    if (!rollout) {
+      let partitions = rolloutPartitions
+      if (typeof dataset.discoverPartitions === 'function') {
+        partitions = await discoverRolloutPartitions(dataset, storage)
+      }
+      rollout = await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
+    }
+
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) return
+    await flushPartition(storage, partition.tablePath, 'central_rollout_partition')
+    if (!storage.tableExists(partition.tablePath)) return
+    const key = watermarks.keyFor(storage.cacheRoot, partition.tablePath)
+    const known = new Set(rollout.partitions)
+    // @ref LLP 0307#missing-progress [implements]: known partition plus absent or invalid progress is an integrity failure, never a new baseline
+    if (known.has(key.partitionKey)) {
+      const progress = await watermarks.read(key)
+      if (!progress) {
+        throw new Error(
+          `central.forward: rollout progress for '${dataset.name}' partition '${key.partitionKey}' is missing or invalid`
+        )
+      }
+      return
+    }
+
+    // New partitions are post-rollout by definition. Persist zero progress
+    // before admitting the key to the manifest. A crash in between retries the
+    // manifest update without moving the zero boundary; the first rows remain
+    // forwardable. Once admitted, missing progress fails closed above.
+    // @ref LLP 0307#future-partitions [implements]: zero progress commits before the manifest admits a post-rollout partition
+    let progress = await watermarks.read(key)
+    if (!progress) {
+      progress = await watermarks.write(key, {
+        continuation: { v: 1, seq: '0' },
+        exportedRowCount: 0,
+      })
+    }
+    known.add(key.partitionKey)
+    await rollouts.write(dataset.name, [...known], rollout)
+    log.info('central.forward.rollout_partition_added', {
+      hyp_dataset: dataset.name,
+      partition_key: key.partitionKey,
+      baseline_seq: progress.continuation.seq,
+    })
+  })
+}
+
+/**
+ * @param {{
+ *   dataset: DatasetRegistration,
+ *   partitions: QueryPartition[],
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ * }} args
+ * @returns {Promise<DatasetRolloutRecord>}
+ */
+async function initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log }) {
+  const existing = await rollouts.read(dataset.name)
+  if (existing) return existing
+
+  /** @type {Set<string>} */
+  const partitionKeys = new Set()
+  for (const partition of partitions) {
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+    const key = watermarks.keyFor(storage.cacheRoot, partition.tablePath)
+    partitionKeys.add(key.partitionKey)
+    const progress = await watermarks.read(key)
+    if (progress) continue
+    await writeHistoryBaseline({
+      dataset: dataset.name,
+      tablePath: partition.tablePath,
+      storage,
+      watermarks,
+      watermarkKey: key,
+      log,
+    })
+  }
+
+  // Every baseline is durable before the manifest becomes authoritative. If a
+  // crash happens before this write, retry preserves any baseline already on
+  // disk instead of scanning it again and moving the rollout boundary.
+  // @ref LLP 0307#existing-partitions [implements]: every existing partition baseline is durable before the manifest becomes authoritative
+  const rollout = await rollouts.write(dataset.name, [...partitionKeys], null)
+  log.info('central.forward.rollout_initialized', {
+    hyp_dataset: dataset.name,
+    partitions_count: partitionKeys.size,
+  })
+  return rollout
+}
+
+/**
+ * Flush pending spool rows, then rediscover because an undeclared dataset can
+ * move from its advertised `all` spool into a committed `source=unknown`
+ * partition during that flush.
+ *
+ * @param {DatasetRegistration} dataset
+ * @param {QueryStorageService} storage
+ * @returns {Promise<QueryPartition[]>}
+ */
+async function discoverRolloutPartitions(dataset, storage) {
+  const discover = async () => dataset.discoverPartitions({
+    config: /** @type {HypAwareV2Config} */ ({ version: 2 }),
+    scope: { limit: 1_000_000 },
+    cacheDir: storage.cacheRoot,
+  })
+  const first = await discover()
+  for (const partition of first ?? []) {
+    if (!partition.tablePath) continue
+    const extended = /** @type {QueryStorageService & { hasPendingSync?: (tablePath: string) => boolean }} */ (storage)
+    if (extended.hasPendingSync?.(partition.tablePath)) {
+      await flushPartition(storage, partition.tablePath, 'central_rollout_initialize')
+    }
+  }
+  const second = await discover()
+  /** @type {Map<string, QueryPartition>} */
+  const unique = new Map()
+  for (const partition of [...(first ?? []), ...(second ?? [])]) {
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+    unique.set(partition.tablePath, partition)
+  }
+  return [...unique.values()]
+}
+
+/**
+ * @param {{
+ *   dataset: string,
+ *   tablePath: string,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   watermarkKey: SinkWatermarkKey,
+ *   log: PluginLogger,
+ * }} args
+ */
+async function writeHistoryBaseline({ dataset, tablePath, storage, watermarks, watermarkKey, log }) {
+  /** @type {SinkContinuation} */
+  let continuation = { v: 1, seq: '0' }
+  let skippedRowCount = 0
+  for await (const entry of storage.readRowsSince(tablePath, { includeLegacy: false })) {
+    continuation = entry.after
+    skippedRowCount += 1
+  }
+  await watermarks.write(watermarkKey, { continuation, exportedRowCount: 0 })
+  log.info('central.forward.initial_history_skipped', {
+    hyp_dataset: dataset,
+    skipped_row_count: skippedRowCount,
+    baseline_seq: continuation.seq,
+  })
+}
+
+/**
+ * @template T
+ * @param {string} dataset
+ * @param {Map<string, Promise<void>>} locks
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function withDatasetRolloutLock(dataset, locks, fn) {
+  const previous = locks.get(dataset) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(fn)
+  const settled = current.then(() => undefined, () => undefined)
+  locks.set(dataset, settled)
+  return current.finally(() => {
+    if (locks.get(dataset) === settled) locks.delete(dataset)
+  })
 }
 
 /**
@@ -255,9 +490,10 @@ function forwardingTarget(query, partition) {
  * chunks, never materializing the whole table. Only rows added since the
  * last durable export are read: the `(sink instance, partition)`
  * watermark is loaded up front and handed to `readRowsSince({ since })`.
- * A newly eligible open dataset first baselines that watermark at the current
- * high-water, while a legacy signal keeps LLP 0040's full first export. A tick
- * with no new rows reads zero rows and sends zero chunks. Each
+ * A newly eligible open dataset has already established its dataset-level
+ * rollout manifest and partition watermark, while a legacy signal keeps LLP
+ * 0040's full first export. A tick with no new rows reads zero rows and sends
+ * zero chunks. Each
  * chunk POSTs with an `X-Hyp-Batch-Id` derived from the signal, the
  * partition identity, the chunk's position, and its bytes (see
  * {@link batchIdForChunk}): stable across retries of that exact chunk,
@@ -292,12 +528,11 @@ function forwardingTarget(query, partition) {
  *   datasetRegistrations: Map<string, Promise<void>>,
  *   unsupportedDatasetsUntil: Map<string, number>,
  *   nowFn: () => number,
- *   skipInitialHistory: boolean,
- *   initialHistoryBaselines: Map<string, Promise<SinkContinuation>>,
+ *   requireWatermark: boolean,
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, skipInitialHistory, initialHistoryBaselines }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark }) {
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -305,7 +540,8 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
 
-  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; for a LEGACY signal a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip. An open dataset takes neither fallback: it baselines only when no watermark was ever written, and fails the partition otherwise (LLP 0305#start-now).
+  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a legacy signal still reads from the start when progress is absent.
+  // @ref LLP 0307#missing-progress [constrained-by]: an open partition named by its rollout manifest must fail closed when progress is absent or invalid.
   /** @type {SinkContinuation | undefined} */
   let since
   /** @type {SinkWatermarkKey | undefined} */
@@ -317,33 +553,17 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     if (record) {
       since = record.continuation
       exportedRowCount = record.exportedRowCount
-    } else if (skipInitialHistory) {
-      const baselineKey = watermarks.filePath(watermarkKey)
-      let baseline = initialHistoryBaselines.get(baselineKey)
-      if (!baseline) {
-        baseline = writeInitialHistoryBaseline({
-          partition,
-          tablePath,
-          storage,
-          watermarks,
-          watermarkKey,
-          baselineKey,
-          log,
-        }).catch((err) => {
-          initialHistoryBaselines.delete(baselineKey)
-          throw err
-        })
-        initialHistoryBaselines.set(baselineKey, baseline)
-      }
-      since = await baseline
+    } else if (requireWatermark) {
+      throw new Error(
+        `central.forward: rollout progress for '${partition.dataset}' partition '${watermarkKey.partitionKey}' is missing or invalid`
+      )
     }
   } catch (err) {
-    // A newly eligible open dataset must never turn an initialization failure
-    // into the legacy full-scan fallback. Keep the partition retryable until
-    // its start-now watermark is durable; otherwise a disk/read error here
-    // replays exactly the history LLP 0305 excludes.
-    if (skipInitialHistory) {
-      log.warn('central.forward.initial_history_baseline_failed', {
+    // An initialized open-dataset partition must never turn missing or corrupt
+    // progress into either a full replay or a new baseline. Keep it retryable
+    // until an operator repairs the state.
+    if (requireWatermark) {
+      log.warn('central.forward.rollout_progress_failed', {
         hyp_dataset: partition.dataset,
         message: err instanceof Error ? err.message : String(err),
       })
@@ -361,10 +581,9 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     })
   }
 
-  // Establish the local start-now boundary before the remote capability
-  // handshake. If registration is temporarily unavailable, rows arriving
-  // after this durable baseline remain pending and forward on the retry rather
-  // than being absorbed into a later baseline.
+  // The rollout boundary is durable before the remote capability handshake.
+  // If registration is temporarily unavailable, later rows remain pending and
+  // forward on retry rather than being absorbed into a new baseline.
   if (registration) {
     const supported = await ensureDatasetRegistered({
       centralUrl: config.url,
@@ -506,75 +725,6 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     })
   }
   return bytesWritten
-}
-
-/**
- * Start a newly forwardable open dataset at the current high-water instead of
- * replaying its local history. The resolved promise stays in the sink-instance
- * map so overlapping ticks cannot race two baselines and skip rows that arrive
- * between them. Legacy signals keep LLP 0040's full first export unchanged.
- *
- * Refuses when a watermark file is already on disk. `SinkWatermarkStore.read`
- * returns `null` for BOTH "no watermark has ever been written" and "a watermark
- * is there but could not be read or parsed" (src/core/sinks/watermarks.js
- * swallows the read error, and `parseRecord` returns null on a malformed
- * record), so `read()` never throws and the caller's catch cannot tell them
- * apart. Only the first may baseline: treating a corrupt or transiently
- * unreadable watermark as "never forwarded" would jump the cursor to the current
- * high-water and permanently drop every row this sink still owes central,
- * turning LLP 0040's at-least-once degradation into silent at-most-once loss.
- * The refusal throws, so it fails only this partition and the next tick retries.
- *
- * @param {{
- *   partition: QueryPartition,
- *   tablePath: string,
- *   storage: QueryStorageService,
- *   watermarks: SinkWatermarkStore,
- *   watermarkKey: SinkWatermarkKey,
- *   baselineKey: string,
- *   log: PluginLogger,
- * }} args
- * @returns {Promise<SinkContinuation>}
- */
-// @ref LLP 0305#start-now [implements]: first support for an open dataset checkpoints existing rows without sending them, then forwards only later seqs; only the genuine absence of a watermark qualifies.
-async function writeInitialHistoryBaseline({ partition, tablePath, storage, watermarks, watermarkKey, baselineKey, log }) {
-  if (await pathExists(baselineKey)) {
-    throw new Error(
-      `central.forward: watermark ${baselineKey} for dataset '${partition.dataset}' exists but could not be read; ` +
-      'refusing to re-baseline past rows it may still owe'
-    )
-  }
-  /** @type {SinkContinuation} */
-  let continuation = { v: 1, seq: '0' }
-  let skippedRowCount = 0
-  for await (const entry of storage.readRowsSince(tablePath, { includeLegacy: false })) {
-    continuation = entry.after
-    skippedRowCount += 1
-  }
-  await watermarks.write(watermarkKey, { continuation, exportedRowCount: 0 })
-  log.info('central.forward.initial_history_skipped', {
-    hyp_dataset: partition.dataset,
-    skipped_row_count: skippedRowCount,
-    baseline_seq: continuation.seq,
-  })
-  return continuation
-}
-
-/**
- * True when something is at `filePath`. Used to tell "no watermark yet" from
- * "watermark present but unreadable", a distinction `SinkWatermarkStore.read`
- * collapses into `null`.
- *
- * @param {string} filePath
- * @returns {Promise<boolean>}
- */
-async function pathExists(filePath) {
-  try {
-    await access(filePath)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**

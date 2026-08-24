@@ -149,16 +149,17 @@ Registration is expected to be idempotent: the client announces an eligible
 dataset once per sink instance, before that dataset's first ingest chunk, and
 a daemon restart (or a second concurrent tick) may announce it again.
 
-Before the first registration attempt for a local partition with no forward
-watermark, the client records the partition's current sequence high-water and
-sends none of its existing rows. Establishing that boundary locally first means
-a registration outage cannot absorb later rows into a delayed baseline. A
-baseline failure fails the partition closed: it never falls through to the
-legacy full-history scan. "No forward watermark" means none was ever written,
-not merely one the client failed to read: a watermark that is present but
-unreadable also fails the partition, because baselining there would skip every
-row between the real watermark and now. Later rows use the ordinary incremental path. The four
-legacy signals keep their existing full first-export behavior.
+When the sink instance starts, the client initializes a durable rollout
+manifest for every eligible open dataset. It flushes and rediscovers pending
+spools, records every existing partition's current sequence high-water without
+sending its rows, then commits the manifest. Establishing that boundary locally
+first means a registration outage cannot absorb later rows into a delayed
+baseline. An empty dataset still commits an empty manifest, so a partition
+created later starts at sequence zero and forwards its first rows.
+
+Once the manifest names a partition, missing or invalid progress fails closed:
+it never falls through to either a full-history read or a new baseline. Legacy
+signals keep their existing full first-export behavior. See LLP 0307.
 
 Response 2xx: registered. A `404` or `405` means the server predates this
 additive route: the client holds the dataset locally, logs once, and re-probes

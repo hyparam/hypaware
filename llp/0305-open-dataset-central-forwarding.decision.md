@@ -7,6 +7,8 @@
 **Date:** 2026-08-24
 **Related:** LLP 0014, LLP 0040, LLP 0070, LLP 0105, LLP 0255, LLP 0262, LLP 0278
 
+**Extended-by:** LLP 0307 (durable dataset rollout manifest disambiguates existing, future, and damaged partition progress)
+
 > The central server already accepts catalog registration with
 > `PUT /v1/datasets/{name}` followed by `POST /v1/ingest/{name}`. The client
 > adopts that protocol for datasets outside the four legacy signal paths, but

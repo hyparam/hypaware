@@ -6,7 +6,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 
 function makeLog() {
@@ -106,6 +106,38 @@ function makeWatermarks(initial, filePath) {
 }
 
 /**
+ * In-memory stand-in for the durable open-dataset rollout manifest.
+ *
+ * @param {{ v: 1, partitions: string[], initializedAt: string, updatedAt: string } | null} [initial]
+ */
+function makeRollouts(initial) {
+  let record = initial ?? null
+  /** @type {Array<{ v: 1, partitions: string[], initializedAt: string, updatedAt: string }>} */
+  const writes = []
+  return {
+    get record() { return record },
+    get writes() { return writes },
+    filePath: () => '/state/open-dataset-rollouts/claude_telemetry_events.json',
+    async read() { return record },
+    /**
+     * @param {string} _dataset
+     * @param {string[]} partitionKeys
+     * @param {any} previous
+     */
+    async write(_dataset, partitionKeys, previous) {
+      record = {
+        v: 1,
+        partitions: [...new Set(partitionKeys)].sort(),
+        initializedAt: previous?.initializedAt ?? '2026-08-24T00:00:00.000Z',
+        updatedAt: '2026-08-24T00:00:00.000Z',
+      }
+      writes.push(record)
+      return record
+    },
+  }
+}
+
+/**
  * A query registry whose dataset resolves to `signal`. Pass `null` to
  * model a plugin dataset that relies on the dataset-name default.
  *
@@ -191,16 +223,18 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   query?: { getDataset: (name: string) => unknown },
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   watermark?: { v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null,
+ *   rollout?: { v: 1, partitions: string[], initializedAt: string, updatedAt: string } | null,
  *   nowFn?: () => number,
  *   watermarkFilePath?: string,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, nowFn, watermarkFilePath }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
   const log = makeLog()
   const watermarks = makeWatermarks(watermark, watermarkFilePath)
+  const rollouts = makeRollouts(rollout)
   // Default sleep records the requested delay and returns instantly, so
   // backpressure pacing is asserted without real waits; a test can pass
   // the real abortableSleep to exercise close()-driven abort.
@@ -213,12 +247,13 @@ function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleep
     query: /** @type {any} */ (query ?? makeQuery(signal)),
     storage: /** @type {any} */ (storage),
     watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ (rollouts),
     log: /** @type {any} */ (log),
     fetchFn: fn,
     sleepFn: sleepFn ?? recordingSleep,
     nowFn,
   })
-  return { sink, calls, storage, identityClient, log, sleeps, drains, watermarks }
+  return { sink, calls, storage, identityClient, log, sleeps, drains, watermarks, rollouts }
 }
 
 const batch = { partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE }] }
@@ -227,6 +262,16 @@ const ZERO_WATERMARK = {
   continuation: { v: /** @type {const} */ (1), seq: '0' },
   exportedRowCount: 0,
   updatedAt: '2026-06-25T00:00:00.000Z',
+}
+const INITIALIZED_EMPTY_ROLLOUT = {
+  v: /** @type {const} */ (1),
+  partitions: [],
+  initializedAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
+}
+const INITIALIZED_CLAUDE_ROLLOUT = {
+  ...INITIALIZED_EMPTY_ROLLOUT,
+  partitions: ['source=claude'],
 }
 
 test('forward sink chunks a large partition into bounded POSTs', async () => {
@@ -390,6 +435,169 @@ test('a newly forwardable open dataset starts after its existing local history',
   assert.deepEqual(calls[1].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
   assert.equal(watermarks.record?.continuation.seq, '12')
   assert.equal(watermarks.record?.exportedRowCount, 2)
+})
+
+test('a cold open dataset forwards the first partition created after rollout initialization', async () => {
+  let count = 0
+  const { sink, calls, watermarks, rollouts, log, storage } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+  })
+  const dataset = {
+    ...makeQuery('claude_telemetry').getDataset('claude_telemetry_events'),
+    discoverPartitions: async () => [],
+  }
+  await initializeOpenDatasetRollouts({
+    query: /** @type {any} */ ({ listDatasets: () => [dataset] }),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ (rollouts),
+    log: /** @type {any} */ (log),
+  })
+  assert.deepEqual(rollouts.record?.partitions, [])
+
+  count = 2
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.deepEqual(calls.map((call) => call.method), ['PUT', 'POST'])
+  assert.deepEqual(calls[1].lines.map((line) => JSON.parse(line).message_id), ['m0', 'm1'])
+  assert.equal(watermarks.writes[0].continuation.seq, '0')
+  assert.equal(watermarks.record?.continuation.seq, '2')
+  assert.deepEqual(rollouts.record?.partitions, ['source=claude'])
+})
+
+test('rollout initialization baselines the source=unknown partition created by flushing Claude all', async () => {
+  const spoolPath = '/cache/claude_telemetry_events/all'
+  const committedPath = '/cache/claude_telemetry_events/source=unknown'
+  let pending = true
+  let committed = false
+  const storage = {
+    cacheRoot: '/cache',
+    tableExists(path) {
+      return path === spoolPath ? pending : path === committedPath && committed
+    },
+    hasPendingSync: (path) => path === spoolPath && pending,
+    async flushTable(path) {
+      assert.equal(path, spoolPath)
+      pending = false
+      committed = true
+    },
+    async *readRowsSince(path) {
+      assert.equal(path, committedPath)
+      for (let i = 1; i <= 3; i += 1) {
+        yield { row: { event_name: `event_${i}` }, after: { v: 1, seq: String(i) } }
+      }
+    },
+  }
+  const records = new Map()
+  const watermarks = {
+    keyFor(_cacheRoot, path) {
+      return {
+        dataset: 'claude_telemetry_events',
+        partitionKey: path === committedPath ? 'source=unknown' : 'all',
+      }
+    },
+    filePath: (key) => `/state/watermarks/${key.partitionKey}.json`,
+    async read(key) { return records.get(key.partitionKey) ?? null },
+    async write(key, update) {
+      const record = { v: 1, continuation: update.continuation, exportedRowCount: update.exportedRowCount ?? 0, updatedAt: '' }
+      records.set(key.partitionKey, record)
+      return record
+    },
+  }
+  const dataset = {
+    ...makeQuery('claude_telemetry').getDataset('claude_telemetry_events'),
+    async discoverPartitions() {
+      return pending
+        ? [{ dataset: 'claude_telemetry_events', tablePath: spoolPath }]
+        : [
+            { dataset: 'claude_telemetry_events', tablePath: spoolPath },
+            { dataset: 'claude_telemetry_events', tablePath: committedPath },
+          ]
+    },
+  }
+  const rollouts = makeRollouts()
+
+  await initializeOpenDatasetRollouts({
+    query: /** @type {any} */ ({ listDatasets: () => [dataset] }),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ (rollouts),
+    log: /** @type {any} */ (makeLog()),
+  })
+
+  assert.equal(records.get('source=unknown')?.continuation.seq, '3')
+  assert.equal(records.has('all'), false)
+  assert.deepEqual(rollouts.record?.partitions, ['source=unknown'])
+})
+
+test('a future open-dataset partition starts at zero instead of inheriting rollout history rules', async () => {
+  const { sink, calls, watermarks, rollouts } = buildSink({
+    count: 2,
+    signal: 'claude_telemetry',
+    rollout: { ...INITIALIZED_EMPTY_ROLLOUT, partitions: ['source=older'] },
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.filter((call) => call.method === 'POST')[0].rowCount, 2)
+  assert.equal(watermarks.writes[0].continuation.seq, '0')
+  assert.deepEqual(rollouts.record?.partitions, ['source=claude', 'source=older'])
+})
+
+test('an established open partition with missing progress fails closed', async () => {
+  const { sink, calls } = buildSink({
+    count: 2,
+    signal: 'claude_telemetry',
+    rollout: INITIALIZED_CLAUDE_ROLLOUT,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'failed')
+  assert.match(result.error ?? '', /rollout progress .* missing or invalid/)
+  assert.equal(calls.length, 0)
+})
+
+test('a restarted sink preserves the rollout manifest and resumes its persisted progress', async () => {
+  const { sink, calls, watermarks, rollouts } = buildSink({
+    count: 12,
+    signal: 'claude_telemetry',
+    rollout: INITIALIZED_CLAUDE_ROLLOUT,
+    watermark: {
+      v: 1,
+      continuation: { v: 1, seq: '10' },
+      exportedRowCount: 0,
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    },
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.deepEqual(calls.filter((call) => call.method === 'POST')[0].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+  assert.equal(rollouts.writes.length, 0)
+  assert.equal(watermarks.record?.continuation.seq, '12')
+})
+
+test('overlapping ticks admit a future partition once and forward it once', async () => {
+  const { sink, calls, watermarks, rollouts } = buildSink({
+    count: 2,
+    signal: 'claude_telemetry',
+    rollout: INITIALIZED_EMPTY_ROLLOUT,
+  })
+
+  const results = await Promise.all([
+    sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({})),
+    sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({})),
+  ])
+
+  assert.deepEqual(results.map((result) => result.status), ['exported', 'exported'])
+  assert.equal(rollouts.writes.length, 1)
+  assert.equal(watermarks.writes.filter((record) => record.continuation.seq === '0').length, 1)
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 1)
 })
 
 test('an open-dataset baseline failure never falls back to historical ingest', async () => {
@@ -676,6 +884,7 @@ test('a present-but-unreadable watermark fails the open-dataset partition instea
     const { sink, calls, watermarks } = buildSink({
       count: 10,
       signal: 'claude_telemetry',
+      rollout: INITIALIZED_CLAUDE_ROLLOUT,
       watermarkFilePath,
     })
 
@@ -683,7 +892,7 @@ test('a present-but-unreadable watermark fails the open-dataset partition instea
 
     assert.equal(result.status, 'failed')
     assert.deepEqual(result.retryPartitions?.map((p) => p.dataset), ['claude_telemetry_events'])
-    assert.match(String(result.error), /exists but could not be read/)
+    assert.match(String(result.error), /rollout progress .* missing or invalid/)
     assert.equal(watermarks.record, null, 'the watermark is not jumped forward')
     assert.equal(calls.length, 0, 'nothing announced, nothing ingested')
   } finally {
@@ -714,6 +923,31 @@ test('an open dataset cannot claim a reserved legacy ingest path', async () => {
   assert.equal(result.retryPartitions, undefined)
   assert.equal(calls.length, 0)
   const withheld = log.rows.filter((r) => r.message === 'central.forward.dataset_withheld')
+  assert.equal(withheld.length, 1)
+  assert.equal(withheld[0].level, 'warn')
+  assert.match(String(withheld[0].fields.reason), /reserved by a legacy ingest path/)
+})
+
+test('a reserved dataset name with no sourceSignal is withheld before it can impersonate a legacy path', async () => {
+  const query = {
+    getDataset: () => ({
+      name: 'proxy',
+      plugin: '@hypaware/test',
+      schema: { columns: [] },
+    }),
+  }
+  const { sink, calls, log } = buildSink({ count: 10, query })
+
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({ partitions: [{ dataset: 'proxy', tablePath: TABLE }] }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 0)
+  assert.equal(result.retryPartitions, undefined)
+  assert.equal(calls.length, 0)
+  const withheld = log.rows.filter((row) => row.message === 'central.forward.dataset_withheld')
   assert.equal(withheld.length, 1)
   assert.equal(withheld[0].level, 'warn')
   assert.match(String(withheld[0].fields.reason), /reserved by a legacy ingest path/)
@@ -1100,6 +1334,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
     query: /** @type {any} */ (makeQuery('logs')),
     storage: /** @type {any} */ (storage),
     watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ (makeRollouts()),
     log: /** @type {any} */ (makeLog()),
     fetchFn,
     sleepFn: async () => {},
