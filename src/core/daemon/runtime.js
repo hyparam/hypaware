@@ -178,16 +178,16 @@ export async function runDaemon(opts = {}) {
   // Stale control requests are consumed before the PID file goes down: a
   // `stop.request` that survived a crash or a hard kill is an instruction to
   // a daemon that no longer exists, and must not stop this boot on sight.
-  // Best-effort: a leftover request the clear cannot remove (EPERM/EBUSY on
-  // win32, a directory squatting on the name) must not stop the boot; the
-  // watcher's own consume will hit the same error and retry, not dispatch.
-  // @ref LLP 0300#boot-clears-stale [implements]: anything the watcher sees after this point is a live request
-  try {
-    clearControlRequests(stateRoot)
-  } catch (err) {
-    fileLog.warn('daemon.control_clear_failed', {
-      message: err instanceof Error ? err.message : String(err),
-    })
+  // Best-effort per file, and it cannot block the boot. A leftover the clear
+  // could not remove (win32 EPERM/EBUSY from a dying writer, a directory
+  // squatting on the name) is handed to the watcher below as stale: if the
+  // failure was transient the watcher will be able to consume the file
+  // later, and without the handoff it would mistake that leftover for a
+  // live request and stop the freshly booted daemon.
+  // @ref LLP 0300#boot-clears-stale [implements]: leftovers are cleared, or recorded so they can never dispatch
+  const staleControlRequests = clearControlRequests(stateRoot)
+  for (const [request, info] of Object.entries(staleControlRequests)) {
+    fileLog.warn('daemon.control_clear_failed', { request, message: info.message })
   }
 
   // PID file is written before any plugin activation: that way a
@@ -961,10 +961,22 @@ export async function runDaemon(opts = {}) {
   }
   triggerReload = reload
 
+  // reload() rethrows through withSpan and has no top-level catch, so a bare
+  // `void reload()` from a signal handler or the control watcher would turn
+  // a failed reload (an unreadable config layer, a throwing source) into an
+  // uncaught rejection that kills the daemon.
+  const reloadSafely = () => {
+    reload().catch((err) => {
+      fileLog.error('daemon.reload_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
   // ----- Signal wiring -----
   const sigTermHandler = () => { void shutdown('signal') }
   const sigIntHandler = () => { void shutdown('signal') }
-  const sigHupHandler = () => { void reload() }
+  const sigHupHandler = () => { reloadSafely() }
 
   function removeSignalHandlers() {
     if (!installSignals) return
@@ -992,8 +1004,9 @@ export async function runDaemon(opts = {}) {
   try {
     controlWatcher = watchControlRequests(stateRoot, {
       onStop: () => { void shutdown('control') },
-      onReload: () => { void reload() },
+      onReload: () => { reloadSafely() },
       log: fileLog,
+      staleRequests: staleControlRequests,
     })
   } catch (err) {
     fileLog.warn('daemon.control_watch_install_failed', {

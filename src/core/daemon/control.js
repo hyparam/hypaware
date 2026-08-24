@@ -21,6 +21,10 @@ import { daemonRunDir } from './pid.js'
  * @ref LLP 0300#file-channel [implements]: stop/reload ride marker files in the daemon-owned state dir, not signals or a port
  */
 
+/**
+ * @import { UnclearedRequest } from '../../../src/core/daemon/types.js'
+ */
+
 /** @param {string} stateRoot */
 export function controlDirPath(stateRoot) {
   return path.join(daemonRunDir(stateRoot), 'control')
@@ -41,25 +45,30 @@ export function controlRequestPath(stateRoot, kind) {
  * Create the control directory owner-only. `mkdirSync`'s `mode` applies only
  * to directories it creates, so a directory that already exists at a looser
  * mode (an older build created it under the umask) is tightened explicitly.
- * The chmod is best-effort: a directory this user cannot chmod is one the
- * channel cannot use anyway, and the failure surfaces at the write.
+ * The chmod is best-effort, but not silent: a directory this user cannot
+ * chmod leaves LLP 0300's trust argument unenforced, so a caller with a
+ * logger hears about it.
  *
  * @param {string} dir
+ * @param {{ warn(event: string, fields?: Record<string, unknown>): void } | undefined} [log]
  */
-function ensureControlDir(dir) {
+function ensureControlDir(dir, log) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   try {
     fs.chmodSync(dir, 0o700)
-  } catch {
-    // best-effort, see above
+  } catch (err) {
+    log?.warn('daemon.control_dir_mode_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 
 /**
  * Ask the daemon watching `stateRoot` to stop or reload. The file content is
- * for a human debugging a stuck request; the watcher keys on the filename
- * alone. Creating the directory is part of the write: the requester may run
- * before the daemon ever has.
+ * for a human debugging a stuck request, and it is what distinguishes a
+ * fresh request from a stale leftover the boot clear could not remove; the
+ * watcher keys on the filename alone. Creating the directory is part of the
+ * write: the requester may run before the daemon ever has.
  *
  * @param {string} stateRoot
  * @param {'stop'|'reload'} kind
@@ -79,18 +88,43 @@ export function writeControlRequest(stateRoot, kind) {
  * daemon, and one that survived a crash or a hard kill must not stop the
  * next boot on sight.
  *
+ * Best-effort per file, and never throws: one file's failure does not skip
+ * the sibling, and a cleanup failure must not block a boot. The return value
+ * names each request the clear could NOT remove, with the file's content
+ * when readable. The boot hands it to `watchControlRequests` as
+ * `staleRequests`, so a leftover whose unlink failure was transient (win32
+ * EPERM/EBUSY while a dying writer still held the handle) is consumed
+ * without dispatch when the watcher meets it later, instead of stopping the
+ * fresh daemon.
+ *
  * @param {string} stateRoot
- * @ref LLP 0300#boot-clears-stale [implements]: boot consumes leftovers before the PID write, so anything seen later is a live request
+ * @returns {Partial<Record<'stop'|'reload', UnclearedRequest>>}
+ * @ref LLP 0300#boot-clears-stale [implements]: boot clears leftovers before the PID write and hands the watcher what it could not clear, so nothing stale ever dispatches
  */
 export function clearControlRequests(stateRoot) {
-  for (const name of Object.values(REQUEST_FILES)) {
+  /** @type {Partial<Record<'stop'|'reload', UnclearedRequest>>} */
+  const uncleared = {}
+  for (const kind of /** @type {Array<'stop'|'reload'>} */ (Object.keys(REQUEST_FILES))) {
+    const file = path.join(controlDirPath(stateRoot), REQUEST_FILES[kind])
     try {
-      fs.unlinkSync(path.join(controlDirPath(stateRoot), name))
+      fs.unlinkSync(file)
     } catch (err) {
       if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') continue
-      throw err
+      /** @type {string | null} */
+      let content = null
+      try {
+        content = fs.readFileSync(file, 'utf8')
+      } catch {
+        // Unreadable as well as unremovable: recorded as null, which the
+        // watcher matches conservatively (never dispatches).
+      }
+      uncleared[kind] = {
+        content,
+        message: err instanceof Error ? err.message : String(err),
+      }
     }
   }
+  return uncleared
 }
 
 /**
@@ -103,8 +137,10 @@ export function clearControlRequests(stateRoot) {
  *
  * Consumption order: a request file is deleted *before* its handler runs, so
  * a handler that stops the watcher (stop does) can never re-observe the
- * request. When both requests are present, stop wins and both are consumed:
- * reloading a daemon that has been asked to stop is work thrown away.
+ * request - and nothing is ever deleted that will not be dispatched (or is
+ * known stale). When both requests are present, stop wins and both are
+ * consumed: reloading a daemon that has been asked to stop is work thrown
+ * away.
  *
  * @param {string} stateRoot
  * @param {{
@@ -112,40 +148,84 @@ export function clearControlRequests(stateRoot) {
  *   onReload: () => void,
  *   log?: { warn(event: string, fields?: Record<string, unknown>): void },
  *   pollIntervalMs?: number,
+ *   staleRequests?: Partial<Record<'stop'|'reload', UnclearedRequest>>,
  * }} handlers
  * @returns {{ close(): void }}
  * @ref LLP 0300#stop-wins [implements]: both present consumes both, dispatches stop only
  */
 export function watchControlRequests(stateRoot, handlers) {
   const dir = controlDirPath(stateRoot)
-  ensureControlDir(dir)
+  ensureControlDir(dir, handlers.log)
   let closed = false
   let scanning = false
   let rescan = false
 
+  // Requests the boot-time clear could not remove (see clearControlRequests).
+  // A consume that meets one of these deletes the file but does not
+  // dispatch: it is an instruction to a daemon that no longer exists. A
+  // fresh request overwrites the file with a new requestedAt/pid, so it no
+  // longer matches the recorded content and dispatches normally.
+  const stale = { ...(handlers.staleRequests ?? {}) }
+
+  // Warn on transition, not on every pass: an unconsumable file under the
+  // win32 1s poll would otherwise append ~86k identical lines a day to a
+  // daemon log that never rotates.
+  const failing = { stop: false, reload: false }
+
   /**
-   * Delete one request file. `'consumed'` earns a dispatch, `'absent'` is
-   * the steady state, and `'failed'` (win32 EPERM/EBUSY while the writer
-   * still holds the handle) leaves the file for the poller's next pass.
-   * Each consume swallows its own error so one file's failure can never
-   * discard the sibling's dispatch: a stop that was already unlinked has no
-   * file left for a retry to find.
+   * Delete one request file. `'consumed'` earns a dispatch, `'stale'` is a
+   * consumed boot leftover that must not dispatch, `'absent'` is the steady
+   * state, and `'failed'` (win32 EPERM/EBUSY while the writer still holds
+   * the handle) leaves the file for the poller's next pass. Each consume
+   * swallows its own error so one file's failure can never discard the
+   * sibling's dispatch: a file that was already unlinked has nothing left
+   * for a retry to find.
    *
    * @param {'stop'|'reload'} kind
-   * @returns {'consumed'|'absent'|'failed'}
+   * @returns {'consumed'|'stale'|'absent'|'failed'}
    */
   function consume(kind) {
+    const file = path.join(dir, REQUEST_FILES[kind])
+    const staleEntry = stale[kind]
+    /** @type {string | null} */
+    let content = null
+    if (staleEntry !== undefined) {
+      try {
+        content = fs.readFileSync(file, 'utf8')
+      } catch (err) {
+        if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 'absent'
+        // Present but unreadable: the unlink below decides, and the null
+        // content matches the stale entry conservatively.
+      }
+    }
     try {
-      fs.unlinkSync(path.join(dir, REQUEST_FILES[kind]))
-      return 'consumed'
+      fs.unlinkSync(file)
     } catch (err) {
       if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 'absent'
-      handlers.log?.warn('daemon.control_scan_failed', {
-        request: REQUEST_FILES[kind],
-        message: err instanceof Error ? err.message : String(err),
-      })
+      if (!failing[kind]) {
+        failing[kind] = true
+        handlers.log?.warn('daemon.control_scan_failed', {
+          request: REQUEST_FILES[kind],
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
       return 'failed'
     }
+    if (failing[kind]) {
+      failing[kind] = false
+      handlers.log?.warn('daemon.control_scan_recovered', { request: REQUEST_FILES[kind] })
+    }
+    if (staleEntry !== undefined) {
+      delete stale[kind]
+      // Match on content when both sides are readable; when either side is
+      // unknown, err on "stale": the cost of dropping one ambiguous request
+      // (the CLI retries) is smaller than stopping a fresh boot on a
+      // leftover, which is the invariant boot-clears-stale exists for.
+      if (staleEntry.content === null || content === null || content === staleEntry.content) {
+        return 'stale'
+      }
+    }
+    return 'consumed'
   }
 
   function scan() {
@@ -159,17 +239,31 @@ export function watchControlRequests(stateRoot, handlers) {
       do {
         rescan = false
         const stop = consume('stop')
-        const reload = consume('reload')
+        if (stop === 'failed') {
+          // Nothing else is consumed while the stop is stuck: stop wins, so
+          // this pass would never dispatch a reload, and unlinking one here
+          // would destroy a request that was never acted on ("deleted"
+          // must imply "dispatched or stale"). The poller retries the stop
+          // on its next pass.
+          break
+        }
         if (stop === 'consumed') {
+          // Stop wins: a pending reload is consumed too, never dispatched;
+          // reloading a daemon that has been asked to stop is work thrown
+          // away.
+          consume('reload')
           handlers.onStop()
-        } else if (stop === 'failed') {
-          // Stop is still pending on disk, so dispatching a reload consumed
-          // above would be work thrown away; the poller retries the stop on
-          // its next pass.
-        } else if (reload === 'consumed') {
+        } else if (consume('reload') === 'consumed') {
           handlers.onReload()
         }
       } while (rescan && !closed)
+    } catch (err) {
+      // consume() swallows its own errors, so only a throwing handler lands
+      // here. A warn keeps a handler bug a named, visible failure instead of
+      // an uncaught exception escaping a timer and killing the process.
+      handlers.log?.warn('daemon.control_dispatch_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
     } finally {
       scanning = false
     }

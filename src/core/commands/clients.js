@@ -2348,8 +2348,21 @@ export async function runSkillsInstall(argv, ctx) {
   }
 
   // An explicit install command resolves a real home rather than staying
-  // inert: the user asked for the write. `||` so '' is never a home.
-  const homeDir = ctx.env.HOME || process.env.HOME || os.homedir()
+  // inert like the attach/finale write seams: the user asked for the write.
+  // os.homedir() is not total (no passwd entry for the uid throws), so the
+  // no-home case keeps its one-line refusal instead of an uncaught stack.
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback, '' is never a home; this write is user-requested, so it resolves instead of staying inert
+  /** @type {string} */
+  let homeDir = ''
+  try {
+    homeDir = ctx.env.HOME || process.env.HOME || os.homedir()
+  } catch {
+    homeDir = ''
+  }
+  if (!homeDir) {
+    ctx.stderr.write('error: no home directory could be resolved; cannot resolve skill install paths\n')
+    return 1
+  }
 
   const descriptors = await buildClientDescriptorMap(ctx)
   const { installed } = await materializeClientAssets({

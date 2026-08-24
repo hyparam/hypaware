@@ -94,8 +94,13 @@ transport on win32 and a harmless second door elsewhere.
 <a id="boot-clears-stale"></a>**Boot clears stale requests before the PID
 file is written.** A request file is an instruction to the *running* daemon.
 One that survived a crash, or a hard kill, must not stop the next boot on
-sight. Clearing before the PID write means anything observed after the
-watcher installs is a genuine live request.
+sight. The clear is best-effort per file and cannot block the boot; a
+leftover it cannot remove (a transient win32 EPERM/EBUSY can outlive the
+clear) is recorded, by content, and handed to the watcher, which consumes a
+matching file without dispatching it. A fresh request rewrites the file with
+a new `requestedAt`/`pid`, so it no longer matches and dispatches normally.
+Anything the watcher dispatches is therefore a genuine live request, whether
+the clear succeeded or not.
 
 <a id="stop-wins"></a>**When both requests are present, stop wins.** A
 reload of a daemon that has been asked to stop is work thrown away; both
@@ -116,6 +121,13 @@ steer via `process.env.HOME` (which `os.homedir()` reads on POSIX), and unit
 tests steer via an injected env object (which the `env.HOME` arm honors). On
 Windows, `os.homedir()` resolves `USERPROFILE`, which is what fixes the
 relative-`.hyp` bug.
+
+The rule is for read-side resolution. Write-side seams decide for
+themselves and say so at the site: the attach reconcile
+(`action_attach.js`) and the walkthrough finale keep `''` as a deliberate
+"no env-provided home, write nothing" sentinel, while the explicit
+`hyp skills install` command resolves a real home because the user asked
+for that write.
 
 ## Consequences
 

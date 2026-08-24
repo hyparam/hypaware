@@ -130,6 +130,76 @@ test('a stop request still dispatches when consuming the reload file fails', asy
   }
 })
 
+// The mirror case: while the stop file is unconsumable, the reload must not
+// be unlinked either (nothing is deleted that will not be dispatched), and
+// once the stop clears, the pending reload dispatches.
+test('a pending reload survives while the stop file is unconsumable', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-stop-stuck-'))
+  let reloads = 0
+  fsSync.mkdirSync(controlRequestPath(stateRoot, 'stop'), { recursive: true })
+  const watcher = watchControlRequests(stateRoot, {
+    onStop: () => assert.fail('stop dispatched for an unconsumable file'),
+    onReload: () => { reloads += 1 },
+    pollIntervalMs: 50,
+  })
+  try {
+    writeControlRequest(stateRoot, 'reload')
+    // Several polls' worth of time: the reload must still be on disk,
+    // undispatched, because stop-wins means this pass may not act on it.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(reloads, 0)
+    assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'reload')), true)
+    // Unblock the stop: the untouched reload now dispatches.
+    fsSync.rmdirSync(controlRequestPath(stateRoot, 'stop'))
+    await waitFor(() => reloads === 1, 'reload dispatch after the stop unblocks')
+  } finally {
+    watcher.close()
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0300#boot-clears-stale [tests]: a leftover the clear could not remove is consumed without dispatch; a fresh request still dispatches
+test('a stale request handed over by the boot clear never dispatches, a fresh one does', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-stale-'))
+  let stops = 0
+  writeControlRequest(stateRoot, 'stop')
+  const staleContent = fsSync.readFileSync(controlRequestPath(stateRoot, 'stop'), 'utf8')
+  const watcher = watchControlRequests(stateRoot, {
+    onStop: () => { stops += 1 },
+    onReload: () => assert.fail('reload dispatched with none written'),
+    pollIntervalMs: 50,
+    staleRequests: { stop: { content: staleContent, message: 'EBUSY (simulated)' } },
+  })
+  try {
+    await waitFor(() => !fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), 'stale request consumed')
+    assert.equal(stops, 0, 'a stale leftover must not stop a fresh boot')
+    // A fresh request carries new content, so it no longer matches the
+    // recorded leftover and dispatches normally.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    writeControlRequest(stateRoot, 'stop')
+    await waitFor(() => stops === 1, 'fresh stop dispatch after the stale one')
+  } finally {
+    watcher.close()
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('clearControlRequests clears per file and reports what it could not remove', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-clear-partial-'))
+  try {
+    // stop.request is a directory (unremovable by unlink); reload.request a
+    // normal file. One file's failure must not skip the sibling.
+    fsSync.mkdirSync(controlRequestPath(stateRoot, 'stop'), { recursive: true })
+    writeControlRequest(stateRoot, 'reload')
+    const uncleared = clearControlRequests(stateRoot)
+    assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'reload')), false)
+    assert.ok(uncleared.stop, 'the unremovable stop is reported')
+    assert.equal(uncleared.reload, undefined)
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
 // @ref LLP 0300#boot-clears-stale [tests]: a leftover request must not survive the boot-time clear
 test('clearControlRequests removes leftover requests and tolerates none', async () => {
   const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-clear-'))
