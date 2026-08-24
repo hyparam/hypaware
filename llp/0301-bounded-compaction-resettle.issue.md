@@ -1,4 +1,4 @@
-# LLP 0300: Compaction re-settlement retains keys, not gateway history
+# LLP 0301: Compaction re-settlement retains keys, not gateway history
 
 **Type:** Issue
 **Status:** Active

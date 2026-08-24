@@ -833,7 +833,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   // narrow first pass instead of retaining every fat fallback row until the
   // full data scan ends. The second pass can settle fallbacks in the same
   // byte-bounded batches used by parquet output.
-  // @ref LLP 0300#bounded-resettle [implements]: retain identity keys across
+  // @ref LLP 0301#bounded-resettle [implements]: retain identity keys across
   // the generation, never the full fallback rows.
   const emittedPartIds = settle ? await scanNativePartIds(oldDir) : null
   /** @type {Record<string, unknown>[]} */
@@ -981,7 +981,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
  * corresponding gateway rows retained their large content and attributes
  * columns and made daemon compaction heap-sized.
  *
- * @ref LLP 0300#bounded-resettle [implements]: a narrow identity pass makes
+ * @ref LLP 0301#bounded-resettle [implements]: a narrow identity pass makes
  * later fallback batches independent of scan order.
  * @param {string} tableDir
  * @returns {Promise<Set<string>>}

@@ -146,7 +146,7 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
    new data has flushed.
 
 The sweep's in-memory shape is extended by
-[LLP 0300](./0300-bounded-compaction-resettle.issue.md): native identity keys
+[LLP 0301](./0301-bounded-compaction-resettle.issue.md): native identity keys
 are discovered in a narrow pass, then fallback rows are settled in
 `compact_batch_bytes`-bounded batches instead of one generation-sized buffer.
 

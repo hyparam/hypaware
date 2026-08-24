@@ -162,7 +162,7 @@ test('re-settle sweep leaves the fallback row untouched when the transcript is u
   }
 })
 
-// @ref LLP 0300#bounded-resettle [tests]: compaction's row batch is also the
+// @ref LLP 0301#bounded-resettle [tests]: compaction's row batch is also the
 // upper bound for gateway rows retained while the re-settle hook runs. A
 // history-sized fallback array makes the hourly daemon rewrite heap-sized even
 // though its ordinary parquet output batches are bounded.
