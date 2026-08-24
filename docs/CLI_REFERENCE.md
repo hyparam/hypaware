@@ -145,6 +145,39 @@ hyp query sql "select count(*) as rows from ai_gateway_messages"
 Invalid or non-read-only SQL returns a usage error. Query, remote, or output
 failures return `1`.
 
+### `hyp query grep`
+
+```text
+hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+```
+
+Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
+case-insensitive substring by default, or a regular expression with `--regex`.
+Hits arrive newest first, one row per matched column, each carrying
+`session_id`, `message_id`, and `part_id` locators you can pivot into
+`hyp query sql`. The default limit is `50` and the ceiling is `1000`; a larger
+value clamps to the ceiling, and an unusable value falls back to the default.
+
+Only these columns are searched: `content_text`, `tool_name`, `session_id`,
+`conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`. Zero
+hits is not evidence the text is absent from `system_text`, `tools`,
+`tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
+
+Compacted data files are served through hypgrep sidecar indexes and the rest
+are scanned, so coverage affects speed and never correctness.
+`hyp cache status` prints the index coverage. Local-only rows are withheld with
+a count on stderr, exactly as in SQL, and `--include-local-only` is the same
+informed-consent override. `--remote TARGET` runs the same search on a server,
+which enforces its own visibility: `--regex` is operator-only there, and
+`--include-local-only` is rejected.
+
+```sh
+hyp query grep "connection refused" --from 2026-08-01 --format json
+```
+
+An unknown flag returns a usage error. A malformed `--from` or `--to`, an
+invalid regular expression, and search or output failures all return `1`.
+
 ### `hyp query schema`
 
 ```text

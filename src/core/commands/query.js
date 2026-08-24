@@ -115,7 +115,16 @@ export async function runQueryStatus(argv, ctx) {
       const label = `${p.dataset}/${partKey || 'all'}`
       if (p.layout === 'source-table') {
         const extras = []
-        if (p.indexedFileCount !== undefined) extras.push(`indexed=${p.indexedFileCount}`)
+        // Carries its own denominator, because `files=` on this same line is
+        // `dataFileCount`, which counts the position-delete files sharing the
+        // data directory. No sidecar is ever built beside one, so a bare
+        // `indexed=N` invites the reader to compare it against `files=M` and
+        // read a purged partition as permanently under-indexed - the exact
+        // misreading the aggregate coverage line above avoids by using
+        // `indexableFileCount`.
+        if (p.indexedFileCount !== undefined) {
+          extras.push(`indexed=${p.indexedFileCount}/${p.indexableFileCount ?? p.dataFileCount}`)
+        }
         if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
         if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
         ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
