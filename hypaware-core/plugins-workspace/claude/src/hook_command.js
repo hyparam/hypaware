@@ -1,7 +1,6 @@
 // @ts-check
 
 import { execFile } from 'node:child_process'
-import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -268,7 +267,11 @@ function parseArgs(argv) {
 
 /** @param {NodeJS.ProcessEnv} env */
 function legacyStateFile(env) {
-  const home = env.HOME ?? os.homedir()
+  // No os.homedir() fallback here on purpose: a legacy `--port` hook with no
+  // env-provided home stays inert rather than writing into the invoking
+  // user's real home. Legacy hooks predate win32 support, so the fallback
+  // that LLP 0300 prescribes for read-side resolution buys nothing here.
+  const home = env.HOME
   const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
   if (!hypHome) return undefined
   return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')

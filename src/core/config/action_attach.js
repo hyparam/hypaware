@@ -465,10 +465,10 @@ function attachActionClient(action) {
 
 /**
  * The materialization options for one attached client, or `undefined` when this
- * boot cannot materialize at all (no client catalog, no resolvable home
- * directory, or neither registry threaded - a CLI boot, where the install half
- * of attach is inert by construction). One builder, so the copy and the
- * freshness digest taken over it can never be computed from different inputs.
+ * boot cannot materialize at all (no client catalog, no HOME, or neither
+ * registry threaded - a CLI boot, where the install half of attach is inert by
+ * construction). One builder, so the copy and the freshness digest taken over
+ * it can never be computed from different inputs.
  *
  * @param {string} client
  * @param {ActionContext} ctx
@@ -476,7 +476,11 @@ function attachActionClient(action) {
  */
 function attachedAssetOptions(client, ctx) {
   const descriptors = ctx.clientDescriptors
-  const homeDir = ctx.env.HOME ?? os.homedir()
+  // `?? ''`, not os.homedir(): the install side stays deliberately inert
+  // without an env-provided HOME (see the removal-side comment above); the
+  // empty string is what arms the guard below. LLP 0300's homedir fallback
+  // is for read-side path resolution, not this write-side seam.
+  const homeDir = ctx.env.HOME ?? ''
   if (!descriptors || homeDir.length === 0) return undefined
   if (!ctx.skills && !ctx.agents) return undefined
   return {

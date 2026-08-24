@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import os from 'node:os'
@@ -112,12 +113,15 @@ test('clearControlRequests removes leftover requests and tolerates none', async 
 // @ref LLP 0300#posix-keeps-signals [tests]: the win32 lane writes the request file and never signals
 test('requestDaemonStop on win32 writes stop.request instead of signaling', async () => {
   const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-win32-'))
+  // Point the PID file at a throwaway child, not the test runner: a
+  // regression into the SIGTERM branch then kills the child (the wait sees
+  // it die and reports 'stopped', failing the assertion below) instead of
+  // taking the whole suite down with it.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
   try {
-    // Point the PID file at this very process: alive, and a process a
-    // SIGTERM would visibly kill. The test surviving is itself the proof
-    // that the win32 lane never calls process.kill.
+    assert.ok(child.pid, 'child process spawned')
     writePidFile(stateRoot, {
-      pid: process.pid,
+      pid: child.pid,
       startedAt: new Date().toISOString(),
       runId: 'control-test',
       mode: 'foreground',
@@ -134,11 +138,14 @@ test('requestDaemonStop on win32 writes stop.request instead of signaling', asyn
     assert.equal(outcome, 'timed_out')
     assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), true)
   } finally {
+    child.kill('SIGKILL')
     await fs.rm(stateRoot, { recursive: true, force: true })
   }
 })
 
-test('a running daemon stops end-to-end on a stop.request control file', async () => {
+// The timeout turns a watcher that never dispatches into a failure instead
+// of a hung run: `handle.done` only resolves when the control file is seen.
+test('a running daemon stops end-to-end on a stop.request control file', { timeout: 30_000 }, async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-e2e-'))
   const stateRoot = path.join(hypHome, 'hypaware')
   /** @type {Awaited<ReturnType<typeof runDaemon>> | undefined} */
@@ -178,6 +185,9 @@ test('resolveHypHome prefers HYP_HOME, then HOME, then os.homedir()', () => {
   const home = path.join(os.tmpdir(), 'control-test-home')
   assert.equal(resolveHypHome({ HYP_HOME: '/explicit/hyp', HOME: home }), '/explicit/hyp')
   assert.equal(resolveHypHome({ HOME: home }), path.join(home, '.hyp'))
+  // '' is never a home: an empty HOME must fall through to os.homedir(),
+  // not produce a cwd-relative '.hyp'.
+  assert.equal(resolveHypHome({ HOME: '' }), path.join(os.homedir(), '.hyp'))
   const fallback = resolveHypHome({})
   assert.equal(fallback, path.join(os.homedir(), '.hyp'))
   assert.equal(path.isAbsolute(fallback), true)

@@ -48,7 +48,10 @@ export function controlRequestPath(stateRoot, kind) {
  */
 export function writeControlRequest(stateRoot, kind) {
   const file = controlRequestPath(stateRoot, kind)
-  fs.mkdirSync(path.dirname(file), { recursive: true })
+  // 0700, not the umask: the trust argument above is "writing here requires
+  // owning the state dir", so the directory must not pick up group write
+  // from a permissive umask (same shape as the config-control dir).
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
   fs.writeFileSync(file, JSON.stringify({ requestedAt: new Date().toISOString(), pid: process.pid }))
 }
 
@@ -75,9 +78,10 @@ export function clearControlRequests(stateRoot) {
 /**
  * Watch the control directory and dispatch consumed requests. Uses
  * `fs.watch` (non-persistent, so the watcher never holds the process open)
- * and degrades to a polling interval where watch is unavailable. Scans once
- * immediately after installing, so a request written between the caller's
- * boot-time clear and this install is not lost.
+ * for low latency, with a polling interval always running underneath it as
+ * the delivery guarantee (both timers unref'd). Scans once immediately after
+ * installing, so a request written between the caller's boot-time clear and
+ * this install is not lost.
  *
  * Consumption order: a request file is deleted *before* its handler runs, so
  * a handler that stops the watcher (stop does) can never re-observe the
@@ -96,7 +100,7 @@ export function clearControlRequests(stateRoot) {
  */
 export function watchControlRequests(stateRoot, handlers) {
   const dir = controlDirPath(stateRoot)
-  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   let closed = false
   let scanning = false
   let rescan = false
@@ -134,6 +138,9 @@ export function watchControlRequests(stateRoot, handlers) {
       handlers.log?.warn('daemon.control_scan_failed', {
         message: err instanceof Error ? err.message : String(err),
       })
+      // No rescheduling needed: the poller below rescans on its interval, so
+      // a transient failure (win32 unlink returns EPERM/EBUSY while the
+      // writer still holds the handle) retries until the file is gone.
     } finally {
       scanning = false
     }
@@ -141,21 +148,33 @@ export function watchControlRequests(stateRoot, handlers) {
 
   /** @type {fs.FSWatcher | null} */
   let watcher = null
-  /** @type {NodeJS.Timeout | null} */
-  let poller = null
+
+  // The poller is not a fallback: it always runs, as the delivery guarantee
+  // underneath the watcher. A watch event can be dropped or delayed under
+  // load, a scan can fail transiently (win32 unlink while the writer still
+  // holds the handle), and fs.watch fires no further event for a file that
+  // already exists - and a missed stop request leaves a win32 daemon
+  // permanently unreachable by `hyp daemon stop`. fs.watch is the
+  // low-latency path; the poller is the correctness path.
+  const poller = setInterval(() => scan(), handlers.pollIntervalMs ?? 1000)
+  if (typeof poller.unref === 'function') poller.unref()
+
   try {
     watcher = fs.watch(dir, { persistent: false }, () => scan())
+    // A watcher that errors after install (the watched directory replaced,
+    // a backend giving up) is dead: close it; the poller keeps the channel
+    // live, same as when fs.watch is unavailable outright.
     watcher.on('error', (err) => {
       handlers.log?.warn('daemon.control_watch_failed', {
         message: err instanceof Error ? err.message : String(err),
       })
+      watcher?.close()
+      watcher = null
     })
   } catch (err) {
     handlers.log?.warn('daemon.control_watch_unavailable', {
       message: err instanceof Error ? err.message : String(err),
     })
-    poller = setInterval(() => scan(), handlers.pollIntervalMs ?? 1000)
-    if (typeof poller.unref === 'function') poller.unref()
   }
 
   scan()
@@ -167,10 +186,7 @@ export function watchControlRequests(stateRoot, handlers) {
         watcher.close()
         watcher = null
       }
-      if (poller) {
-        clearInterval(poller)
-        poller = null
-      }
+      clearInterval(poller)
     },
   }
 }

@@ -178,8 +178,17 @@ export async function runDaemon(opts = {}) {
   // Stale control requests are consumed before the PID file goes down: a
   // `stop.request` that survived a crash or a hard kill is an instruction to
   // a daemon that no longer exists, and must not stop this boot on sight.
+  // Best-effort: a leftover request the clear cannot remove (EPERM/EBUSY on
+  // win32, a directory squatting on the name) must not stop the boot; the
+  // watcher's own consume will hit the same error and retry, not dispatch.
   // @ref LLP 0300#boot-clears-stale [implements]: anything the watcher sees after this point is a live request
-  clearControlRequests(stateRoot)
+  try {
+    clearControlRequests(stateRoot)
+  } catch (err) {
+    fileLog.warn('daemon.control_clear_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   // PID file is written before any plugin activation: that way a
   // crash during `bootKernel` still leaves something `daemon stop`
@@ -801,6 +810,14 @@ export async function runDaemon(opts = {}) {
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    // Close the control watcher first: reconcile settle below can hold
+    // shutdown open for minutes, and a reload.request landing in that window
+    // must not dispatch reload() into sources that are being stopped (or log
+    // through a fileLog that is closed further down). The request that
+    // triggered this shutdown was already consumed before dispatch, and any
+    // file written from here on is cleared by the next boot.
+    controlWatcher?.close()
+    controlWatcher = null
     configControl.disarmProbationWatchdog()
     if (tickHandle) {
       clearInterval(tickHandle)
@@ -862,8 +879,6 @@ export async function runDaemon(opts = {}) {
     await fileLog.close()
     clearPidFile(stateRoot)
 
-    controlWatcher?.close()
-    controlWatcher = null
     if (installSignals) {
       removeSignalHandlers()
     }

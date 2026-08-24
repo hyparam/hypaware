@@ -39,8 +39,8 @@ export async function runDaemonRun(argv, ctx) {
     return 2
   }
   const { runDaemon } = await import('../daemon/runtime.js')
-  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would put the daemon's state root at ./.hyp on a HOME-less shell (Windows)
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME ?? os.homedir(), '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   try {
     const handle = await runDaemon({
       hypHome,
@@ -213,7 +213,13 @@ export async function runDaemonStop(argv, ctx) {
     // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
     // is a failure (exit 1), and the `hyp <cmd>:` shape is what every other
     // daemon subcommand's errors already use - and what marks it as one.
-    ctx.stderr.write('hyp daemon stop: stop signal sent but the daemon did not exit within 5s\n')
+    // The transport differs per platform (win32 writes a stop.request file
+    // and deliberately leaves it for the daemon to consume), so the message
+    // names the one actually used.
+    const detail = process.platform === 'win32'
+      ? 'stop request written but the daemon did not exit within 5s; the request file is left for it to consume'
+      : 'stop signal sent but the daemon did not exit within 5s'
+    ctx.stderr.write(`hyp daemon stop: ${detail}\n`)
     return 1
   }
   ctx.stdout.write('daemon: stopped\n')

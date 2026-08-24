@@ -72,8 +72,8 @@ export const LOCAL_INSTALL_RETENTION_DAYS = 120
  */
 export function resolveHypHome(env) {
   if (env.HYP_HOME) return env.HYP_HOME
-  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would make this cwd-relative on a HOME-less shell (Windows)
-  const home = env.HOME ?? os.homedir()
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
+  const home = env.HOME || os.homedir()
   return path.join(home, '.hyp')
 }
 

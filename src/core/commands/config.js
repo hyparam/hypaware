@@ -75,7 +75,7 @@ function parseConfigValidateArgv(argv, env) {
   const p = /** @type {{ path?: string }} */ (parsed.params)
   if (p.path) return { configPath: path.resolve(p.path) }
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
-  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' would make `.hyp` cwd-relative on a HOME-less shell (Windows)
-  const hypHome = env.HYP_HOME || path.join(env.HOME ?? os.homedir(), '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make `.hyp` cwd-relative)
+  const hypHome = env.HYP_HOME || path.join(env.HOME || os.homedir(), '.hyp')
   return { configPath: defaultConfigPath(hypHome) }
 }

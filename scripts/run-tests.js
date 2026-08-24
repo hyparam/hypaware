@@ -23,9 +23,9 @@ const IGNORED_DIRS = new Set(['.git', '.github', 'node_modules'])
  *   systemctl attach fixtures
  */
 const WIN32_SKIPPED_FILES = new Set([
-  path.join('test', 'core', 'usage-policy-symlink.test.js'),
-  path.join('test', 'core', 'service-command-timeout.test.js'),
-  path.join('test', 'core', 'service-manager-test-sandbox.test.js'),
+  path.join('core', 'usage-policy-symlink.test.js'),
+  path.join('core', 'service-command-timeout.test.js'),
+  path.join('core', 'service-manager-test-sandbox.test.js'),
 ])
 
 if (isMain(import.meta.url, process.argv[1])) {
@@ -43,7 +43,9 @@ export function run(forwardedArgs) {
   files.sort()
 
   if (process.platform === 'win32') {
-    const skipped = files.filter((f) => WIN32_SKIPPED_FILES.has(path.relative('', f)))
+    // Anchor on the same resolved root the collector walked, so matching
+    // does not silently depend on npm test running from the repo root.
+    const skipped = files.filter((f) => WIN32_SKIPPED_FILES.has(path.relative(path.resolve(ROOT), f)))
     if (skipped.length > 0) {
       // Loud, never silent: name what this platform is not running.
       process.stderr.write(`win32: skipping ${skipped.length} POSIX-bound test file(s): ${skipped.map((f) => path.basename(f)).join(', ')}\n`)

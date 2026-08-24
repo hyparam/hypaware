@@ -80,8 +80,11 @@ injected env is a load-bearing test seam for unit tests that never touch
 
 <a id="file-channel"></a>**Stop and reload requests ride marker files under
 `<stateRoot>/run/control/`.** `stop.request` and `reload.request` are the two
-verbs. The daemon watches the directory (`fs.watch`, falling back to a
-polling interval where watch is unavailable), consumes a request by deleting
+verbs. The daemon watches the directory (`fs.watch` for low latency, with a
+polling interval always running underneath it: a watch event can be dropped
+or delayed, a win32 unlink can fail transiently while the writer still holds
+the handle, and a missed stop request would leave a win32 daemon
+unstoppable), consumes a request by deleting
 its file, then dispatches into the same `shutdown()` / `reload()` the signal
 handlers call. The watcher is installed on every platform: it is the only
 transport on win32 and a harmless second door elsewhere.
@@ -104,8 +107,9 @@ proven by the existing smokes, and service managers (`launchctl bootout`,
 
 <a id="home-resolution"></a>**Home resolution: `env.HOME` wins when set,
 `os.homedir()` is the fallback, `''` is never a home.** For `HYP_HOME`
-derivations, the shape is `env.HYP_HOME || path.join(env.HOME ??
-os.homedir(), '.hyp')`. This preserves both existing seams: smoke flows
+derivations, the shape is `env.HYP_HOME || path.join(env.HOME ||
+os.homedir(), '.hyp')`, with `||` rather than `??` so an empty `HOME`
+falls through too. This preserves both existing seams: smoke flows
 steer via `process.env.HOME` (which `os.homedir()` reads on POSIX), and unit
 tests steer via an injected env object (which the `env.HOME` arm honors). On
 Windows, `os.homedir()` resolves `USERPROFILE`, which is what fixes the
