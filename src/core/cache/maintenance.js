@@ -624,7 +624,9 @@ export async function cacheStatus({ cacheRoot }) {
     // rather than a brute scan. Reported so "grep is slow on deep history"
     // is diagnosable from `hyp query status` instead of from tracing.
     if (part.dataset === GREP_DATASET) {
-      status.indexedFileCount = countIndexedDataFiles(liveDir)
+      const coverage = countIndexCoverage(liveDir)
+      status.indexedFileCount = coverage.indexed
+      status.indexableFileCount = coverage.indexable
     }
     statusPartitions.push(status)
   }
@@ -1530,28 +1532,37 @@ function countDataFiles(tableDir) {
 }
 
 /**
- * How many of the table's data files have a grep sidecar beside them. A
- * pure directory scan (no metadata load), matching the cost profile of
- * the other status counters. The pairing rule is not restated here:
- * `sidecarPathFor` owns the naming contract the build pass publishes
- * under and the grep service probes, so a second copy of it would let
- * this counter drift into reporting coverage that does not exist.
+ * How many of the table's data files have a grep sidecar beside them, and
+ * how many could. A pure directory scan (no metadata load), matching the
+ * cost profile of the other status counters. The pairing rule is not
+ * restated here: `sidecarPathFor` owns the naming contract the build pass
+ * publishes under and the grep service probes, so a second copy of it would
+ * let this counter drift into reporting coverage that does not exist.
+ *
+ * The denominator is measured here rather than taken from `countDataFiles`,
+ * which counts position-delete files too (icebird writes them into the same
+ * `data/` directory as `<uuid>-deletes.parquet`). No sidecar is ever built
+ * beside a delete file, so borrowing that count would make any partition
+ * purged since its last compaction report permanently incomplete coverage,
+ * and advise a compaction that cannot close the gap.
  *
  * @param {string} tableDir
- * @returns {number}
+ * @returns {{ indexed: number, indexable: number }}
  */
-function countIndexedDataFiles(tableDir) {
+function countIndexCoverage(tableDir) {
   const dataDir = path.join(tableDir, 'data')
+  const coverage = { indexed: 0, indexable: 0 }
   try {
     const names = new Set(fs.readdirSync(dataDir))
-    let count = 0
     for (const name of names) {
-      if (!name.endsWith('.parquet') || name.endsWith('.index.parquet')) continue
-      if (names.has(sidecarPathFor(name))) count += 1
+      if (!name.endsWith('.parquet')) continue
+      if (name.endsWith('.index.parquet') || name.endsWith('-deletes.parquet')) continue
+      coverage.indexable += 1
+      if (names.has(sidecarPathFor(name))) coverage.indexed += 1
     }
-    return count
+    return coverage
   } catch {
-    return 0
+    return { indexed: 0, indexable: 0 }
   }
 }
 

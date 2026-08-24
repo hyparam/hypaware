@@ -376,6 +376,13 @@ export interface CacheStatusPartition {
   layout?: 'epoch' | 'source-table'
   /** Data files with a grep sidecar beside them; present only on the grep dataset's partitions. */
   indexedFileCount?: number
+  /**
+   * Data files a sidecar could be built beside, the honest denominator for
+   * `indexedFileCount`. Not `dataFileCount`: position-delete files live in
+   * the same `data/` directory and that counter includes them, while no
+   * sidecar is ever built for one.
+   */
+  indexableFileCount?: number
 }
 
 export interface CacheStatusReport {

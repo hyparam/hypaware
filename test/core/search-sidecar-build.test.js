@@ -168,9 +168,36 @@ test('maintenance compaction finalizes files and builds their sidecars', async (
   assert.ok(partition)
   assert.ok(partition.dataFileCount >= 1)
   assert.equal(partition.indexedFileCount, partition.dataFileCount)
+  assert.equal(partition.indexableFileCount, partition.dataFileCount)
   const other = status.partitions.find((p) => p.dataset === 'logs')
   assert.ok(other)
   assert.equal(other.indexedFileCount, undefined, 'only the grep dataset carries sidecars')
+  assert.equal(other.indexableFileCount, undefined, 'only the grep dataset carries sidecars')
+})
+
+test('a purge after the index build does not report coverage that can never be reached', async () => {
+  // Position deletes land in the live `data/` directory as
+  // `<uuid>-deletes.parquet`, so `countDataFiles` counts them. No sidecar is
+  // ever built beside one, so borrowing that count as the coverage
+  // denominator would make every partition purged since its last compaction
+  // read as permanently under-indexed and advise a compaction that cannot
+  // close the gap.
+  const { cacheRoot, tableDir } = await makeCache([[OLD], [NEW]])
+  await maintainCache({ cacheRoot, force: true })
+  const before = await cacheStatus({ cacheRoot })
+  const indexed = before.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(indexed)
+  assert.equal(indexed.indexedFileCount, indexed.indexableFileCount)
+
+  const dataDir = path.join(tableDir(), 'data')
+  await fs.writeFile(path.join(dataDir, 'aaaaaaaa-deletes.parquet'), Buffer.alloc(64))
+
+  const after = await cacheStatus({ cacheRoot })
+  const purged = after.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(purged)
+  assert.equal(purged.dataFileCount, indexed.dataFileCount + 1, 'the delete file joins the data-file count')
+  assert.equal(purged.indexableFileCount, indexed.indexableFileCount, 'but not the indexable set')
+  assert.equal(purged.indexedFileCount, purged.indexableFileCount, 'so coverage still reads complete')
 })
 
 test('sidecars do not re-trigger compaction: the data-file counters exclude them', async () => {

@@ -95,7 +95,11 @@ export async function runQueryStatus(argv, ctx) {
   // @ref LLP 0264#lifecycle [implements]: index coverage is observable where the operator already looks
   const searchable = report.partitions.filter((p) => p.indexedFileCount !== undefined)
   if (searchable.length > 0) {
-    const files = searchable.reduce((n, p) => n + p.dataFileCount, 0)
+    // `indexableFileCount`, never `dataFileCount`: the latter counts the
+    // position-delete files that share the data directory, and no sidecar is
+    // ever built beside one, so a partition purged since its last compaction
+    // would report coverage it can never reach.
+    const files = searchable.reduce((n, p) => n + (p.indexableFileCount ?? p.dataFileCount), 0)
     const indexed = searchable.reduce((n, p) => n + (p.indexedFileCount ?? 0), 0)
     ctx.stdout.write(`grep index: ${indexed} of ${files} data files indexed` +
       (indexed < files ? ' (searches brute-scan the rest; compaction indexes them)\n' : '\n'))
