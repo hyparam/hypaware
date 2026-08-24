@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig } from './types.js'
@@ -60,6 +60,7 @@ export function createForwardSink(args) {
   const fetchFn = args.fetchFn ?? fetch
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
+  const registeredDatasets = new Set()
 
   // Aborts an in-flight backpressure wait when the sink is closed, so a
   // chunk paused on `Retry-After` cannot wedge daemon shutdown.
@@ -89,10 +90,20 @@ export function createForwardSink(args) {
       // grouping every partition's rows up front) is what keeps memory
       // bounded on a large backlog.
       for (const partition of batch.partitions) {
-        const signal = signalForPartition(query, partition)
+        const target = forwardingTarget(query, partition)
         try {
+          if (target.registration) {
+            await ensureDatasetRegistered({
+              centralUrl: config.url,
+              dataset: target.registration,
+              registeredDatasets,
+              identityClient,
+              fetchFn,
+              log,
+            })
+          }
           bytesWritten += await forwardPartition({
-            partition, signal, config, identityClient, storage, watermarks, fetchFn, log,
+            partition, signal: target.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
             abortSignal: abortController.signal, sleepFn,
           })
           partitionsExported += 1
@@ -105,7 +116,7 @@ export function createForwardSink(args) {
           // pre-stream failures like an unknown signal).
           const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err ?? {})
           log.warn('central.forward.failed', {
-            hyp_sink_signal: signal,
+            hyp_sink_signal: target.ingestName,
             hyp_dataset: partition.dataset,
             message,
             batch_id: e.hyp_batch_id,
@@ -146,16 +157,23 @@ export function createForwardSink(args) {
 }
 
 /**
- * The ingest signal a partition forwards under: each dataset declares
- * its `sourceSignal`, defaulting to the dataset name.
+ * Resolve the wire target for a partition. The four legacy signals keep their
+ * stable `/v1/ingest/{signal}` paths. Every other dataset uses the open-dataset
+ * protocol: announce its schema, then POST under the dataset name so the
+ * server's catalog can resolve it.
  *
  * @param {QueryRegistry} query
  * @param {QueryPartition} partition
- * @returns {string}
+ * @returns {{ ingestName: string, registration?: DatasetRegistration }}
  */
-function signalForPartition(query, partition) {
+function forwardingTarget(query, partition) {
   const dataset = query.getDataset(partition.dataset)
-  return dataset?.sourceSignal ?? partition.dataset
+  if (!dataset) {
+    throw new Error(`central.forward: dataset '${partition.dataset}' is not registered locally`)
+  }
+  const signal = dataset.sourceSignal ?? partition.dataset
+  if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
+  return { ingestName: partition.dataset, registration: dataset }
 }
 
 /**
@@ -197,9 +215,6 @@ function signalForPartition(query, partition) {
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
 async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn }) {
-  if (!KNOWN_SIGNALS.has(signal)) {
-    throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
-  }
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -474,9 +489,6 @@ function serializeValue(value) {
  */
 async function postNdjson(args) {
   const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn, hyp_dataset, chunkIndex } = args
-  if (!KNOWN_SIGNALS.has(signal)) {
-    throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
-  }
   const url = joinUrl(centralUrl, `/v1/ingest/${signal}`)
 
   /** @param {string} jwt */
@@ -546,6 +558,59 @@ async function postNdjson(args) {
     const detail = await readErrorDetail(response)
     throw new Error(`central.forward POST ${url} failed: ${detail}`)
   }
+}
+
+/**
+ * Announce one non-legacy dataset before its first ingest on this sink
+ * instance. Registration is idempotent server-side, so a daemon restart may
+ * announce it again. A 401 refreshes once through the same identity seam as
+ * ingest; any other failure leaves the partition retryable in the outbox.
+ *
+ * @param {{
+ *   centralUrl: string,
+ *   dataset: DatasetRegistration,
+ *   registeredDatasets: Set<string>,
+ *   identityClient: IdentityClient,
+ *   fetchFn: typeof fetch,
+ *   log: PluginLogger,
+ * }} args
+ */
+async function ensureDatasetRegistered(args) {
+  const { centralUrl, dataset, registeredDatasets, identityClient, fetchFn, log } = args
+  if (registeredDatasets.has(dataset.name)) return
+
+  const body = {
+    schema: dataset.schema,
+    ...(dataset.sourceSignal ? { sourceSignal: dataset.sourceSignal } : {}),
+    ...(dataset.primaryTimestampColumn
+      ? { primaryTimestampColumn: dataset.primaryTimestampColumn }
+      : {}),
+  }
+  const url = joinUrl(centralUrl, `/v1/datasets/${encodeURIComponent(dataset.name)}`)
+  const send = (jwt) => fetchFn(url, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${jwt}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  let response = await send(await identityClient.getCurrentJwt())
+  if (response.status === 401) {
+    await discardBody(response)
+    await identityClient.refresh()
+    response = await send(await identityClient.getCurrentJwt())
+  }
+  if (!response.ok) {
+    const detail = await readErrorDetail(response)
+    throw new Error(`central.forward PUT ${url} failed: ${detail}`)
+  }
+  registeredDatasets.add(dataset.name)
+  log.info('central.forward.dataset_registered', {
+    hyp_dataset: dataset.name,
+    hyp_sink_signal: dataset.sourceSignal ?? dataset.name,
+  })
 }
 
 /**

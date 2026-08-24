@@ -207,6 +207,7 @@ export function createAttachHandler(opts = {}) {
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
+        if (typeof parsed.mode === 'string') detail.mode = parsed.mode
       }
       // The undo record for the copies: reverse() removes exactly these paths,
       // so a user's own `hyp skills install` (which records no marker) survives
@@ -272,6 +273,11 @@ export function createAttachHandler(opts = {}) {
       if (typeof live !== 'string' || live.length === 0) return true
       if (marker.endpoint !== live) return false
       const client = attachActionClient(action)
+      // A proxy-era marker at an unchanged gateway endpoint is still stale:
+      // Claude's adapter now has one desired mode, and re-performing it is the
+      // migration that releases the proxy settings and writes the OTEL block.
+      // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
+      if (client === 'claude' && marker.mode !== 'otel') return false
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey === undefined) return true
       return marker.assets_key === assetsKey

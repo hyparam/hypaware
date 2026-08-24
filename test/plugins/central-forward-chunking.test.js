@@ -99,13 +99,25 @@ function makeWatermarks(initial) {
 
 /**
  * A query registry whose dataset resolves to `signal`. Pass `null` to
- * model a dataset with **no** `sourceSignal`: the failure mode bug #2
- * fixed, where the sink falls back to the (unknown) dataset name.
+ * model a plugin dataset that relies on the dataset-name default.
  *
  * @param {string | null} signal
  */
 function makeQuery(signal) {
-  return { getDataset: () => (signal === null ? {} : { sourceSignal: signal }) }
+  return {
+    /** @param {string} name */
+    getDataset: (name) => ({
+      name,
+      plugin: '@hypaware/test',
+      schema: {
+        columns: [
+          { name: 'message_id', type: 'STRING', nullable: false },
+          { name: 'content_text', type: 'STRING', nullable: true },
+        ],
+      },
+      ...(signal === null ? {} : { sourceSignal: signal }),
+    }),
+  }
 }
 
 function makeIdentity() {
@@ -123,10 +135,10 @@ function makeIdentity() {
  * a 429/503. Default 202. The response exposes a real `headers.get` so
  * the sink's header read is exercised.
  *
- * @param {(call: { url: string, batchId: string, lines: string[] }) => (number | { status: number, retryAfter?: number })} [responder]
+ * @param {(call: { url: string, method: string, batchId: string | undefined, lines: string[] }) => (number | { status: number, retryAfter?: number })} [responder]
  */
 function makeFetch(responder) {
-  /** @type {Array<{ url: string, batchId: string, lines: string[], rowCount: number }>} */
+  /** @type {Array<{ url: string, method: string, batchId: string | undefined, lines: string[], rowCount: number }>} */
   const calls = []
   // Count of response bodies the sink cancelled (drained) before parking on
   // backpressure: proves it releases the socket rather than leaking it.
@@ -136,7 +148,13 @@ function makeFetch(responder) {
     const headers = /** @type {Record<string, string>} */ (init?.headers ?? {})
     const body = String(init?.body ?? '')
     const lines = body.split('\n').filter((l) => l.length > 0)
-    const call = { url: String(url), batchId: headers['x-hyp-batch-id'], lines, rowCount: lines.length }
+    const call = {
+      url: String(url),
+      method: String(init?.method ?? 'GET'),
+      batchId: headers['x-hyp-batch-id'],
+      lines,
+      rowCount: lines.length,
+    }
     calls.push(call)
     const result = responder ? responder(call) : 202
     const status = typeof result === 'number' ? result : result.status
@@ -206,6 +224,7 @@ test('forward sink chunks a large partition into bounded POSTs', async () => {
   // every chunk goes to the resolved signal endpoint with an idempotency key
   for (const c of calls) {
     assert.equal(c.url, 'http://server:8740/v1/ingest/logs')
+    assert.ok(c.batchId)
     assert.match(c.batchId, /^[0-9a-f]{32}$/)
   }
 })
@@ -267,18 +286,43 @@ test('byte-identical chunks get distinct batch-ids (no ledger collision)', async
   assert.notEqual(calls[0].batchId, calls[1].batchId)
 })
 
-test('a dataset with no sourceSignal fails the partition for retry (unknown signal)', async () => {
-  // Bug #2: deleting `sourceSignal: 'proxy'` makes the sink fall back to
-  // the dataset name, which is not a known ingest signal. Guard the
-  // load-bearing fix so a regression is loud, not silent.
+test('a dataset with no sourceSignal registers and forwards under its dataset name', async () => {
   const { sink, calls } = buildSink({ count: 10, signal: null })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
-  assert.equal(result.status, 'failed')
-  assert.equal(result.partitionsExported, 0)
-  assert.equal(result.retryPartitions?.length, 1)
-  assert.match(String(result.error), /unknown signal/)
-  // it never reached the wire: the signal is rejected before streaming
-  assert.equal(calls.length, 0)
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].method, 'PUT')
+  assert.equal(calls[0].url, 'http://server:8740/v1/datasets/ai_gateway_messages')
+  assert.deepEqual(JSON.parse(calls[0].lines[0]), {
+    schema: {
+      columns: [
+        { name: 'message_id', type: 'STRING', nullable: false },
+        { name: 'content_text', type: 'STRING', nullable: true },
+      ],
+    },
+  })
+  assert.equal(calls[1].method, 'POST')
+  assert.equal(calls[1].url, 'http://server:8740/v1/ingest/ai_gateway_messages')
+  assert.equal(calls[1].rowCount, 10)
+})
+
+test('claude telemetry registers its schema before forwarding under its dataset name', async () => {
+  const { sink, calls } = buildSink({ count: 10, signal: 'claude_telemetry' })
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({
+      partitions: [{ dataset: 'claude_telemetry_events', tablePath: TABLE }],
+    }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].method, 'PUT')
+  assert.equal(calls[0].url, 'http://server:8740/v1/datasets/claude_telemetry_events')
+  assert.equal(JSON.parse(calls[0].lines[0]).sourceSignal, 'claude_telemetry')
+  assert.equal(calls[1].method, 'POST')
+  assert.equal(calls[1].url, 'http://server:8740/v1/ingest/claude_telemetry_events')
+  assert.equal(calls[1].rowCount, 10)
 })
 
 // Mirrors MAX_CHUNK_BYTES in sink.js; the byte budget is otherwise
