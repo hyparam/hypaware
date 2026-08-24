@@ -215,6 +215,11 @@ reachable from the cache's declared types today.
   heap and statistics granularity, and it now sets the scale of the
   retained-metadata budget it is matched to.
 
+**Extended-by: [LLP 0300](./0300-bounded-compaction-resettle.issue.md).** The
+same byte cap now also bounds gateway fallback rows retained for compaction
+re-settlement; cross-scan twin detection retains native identity keys instead
+of full historical rows.
+
 ## Extends {#extends}
 
 LLP 0199 named "batches flush on estimated in-memory bytes" as the reason

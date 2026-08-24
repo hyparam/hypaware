@@ -828,13 +828,17 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
     ? { partitionSpec: existingSpec, sortOrder: sortColumns }
     : undefined
 
-  // Buffer committed fallback rows so the re-settle sweep can upgrade them
-  // after the full partition has been seen (a fallback row may stream
-  // before its native twin). Non-fallback rows emit immediately to keep
-  // peak heap bounded: settlement is rare and only touches the buffer.
+  // A fallback may stream before its native twin, so de-twinning needs to
+  // know every native part_id in the generation. Discover those keys in a
+  // narrow first pass instead of retaining every fat fallback row until the
+  // full data scan ends. The second pass can settle fallbacks in the same
+  // byte-bounded batches used by parquet output.
+  // @ref LLP 0300#bounded-resettle [implements]: retain identity keys across
+  // the generation, never the full fallback rows.
+  const emittedPartIds = settle ? await scanNativePartIds(oldDir) : null
   /** @type {Record<string, unknown>[]} */
-  const fallbackBuffer = []
-  const emittedPartIds = settle ? new Set() : null
+  let fallbackBatch = []
+  let fallbackBatchBytes = 0
 
   /** @type {{ current: StreamingTableAppend | null }} */
   const sink = { current: null }
@@ -869,6 +873,16 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
     }
   }
 
+  const flushFallbackBatch = async () => {
+    if (!settle || !emittedPartIds || fallbackBatch.length === 0) return
+    const pending = fallbackBatch
+    fallbackBatch = []
+    fallbackBatchBytes = 0
+    for (const row of await resettleFallbackRows(pending, settle, emittedPartIds)) {
+      await emit(row)
+    }
+  }
+
   // The sink holds one file descriptor and one `.tmp.*` file per open
   // output file until it is closed. A throw anywhere in the rewrite - a bad
   // row mid-scan, a settle hook, a failed roll - used to leave all of them
@@ -886,19 +900,20 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
         }))
       }
       // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
-      // Emit only after the sweep upgrades and de-twins them at end-of-scan.
+      // The narrow first pass already found native twins that appear later in
+      // scan order, so this pass only needs to retain one bounded settle batch.
       if (settle && isGatewayFallbackRow(row)) {
-        fallbackBuffer.push(row)
+        fallbackBatch.push(row)
+        fallbackBatchBytes += estimateRowBytes(row)
+        if (fallbackBatch.length >= COMPACT_BATCH_SIZE || fallbackBatchBytes >= maxBatchBytes) {
+          await flushFallbackBatch()
+        }
         continue
       }
       await emit(row)
     }
 
-    if (settle && emittedPartIds && fallbackBuffer.length > 0) {
-      for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
-        await emit(row)
-      }
-    }
+    await flushFallbackBatch()
 
     await flushBatch()
     streamed = sink.current ? await sink.current.close() : null
@@ -961,6 +976,30 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
  * reusing the exact transcript-match-and-dedupe the flush path uses. */
 
 /**
+ * Read only the identity columns needed to recognize every native twin in a
+ * generation. Keeping these short keys is bounded by row count; keeping the
+ * corresponding gateway rows retained their large content and attributes
+ * columns and made daemon compaction heap-sized.
+ *
+ * @ref LLP 0300#bounded-resettle [implements]: a narrow identity pass makes
+ * later fallback batches independent of scan order.
+ * @param {string} tableDir
+ * @returns {Promise<Set<string>>}
+ */
+async function scanNativePartIds(tableDir) {
+  const partIds = new Set()
+  for await (const row of scanRowsFromTable(
+    tableDir,
+    ['attributes', 'part_id', 'message_id', 'part_index']
+  )) {
+    if (isGatewayFallbackRow(row)) continue
+    const key = rowPartId(row)
+    if (key !== undefined) partIds.add(key)
+  }
+  return partIds
+}
+
+/**
  * Resolve the per-partition settle context. Returns null unless the
  * caller threaded both a storage handle and a settle hook for this
  * dataset, so every existing maintenance path (CLI, tests) stays a pure
@@ -994,9 +1033,9 @@ function resolveSettleContext(opts, dataset) {
  *     unchanged for a later sweep.
  *
  *  2. **De-twin within the rewrite set.** A fallback that upgraded onto a
- *     `part_id` already emitted from this same partition (its native twin,
- *     which streamed as a normal non-fallback row) is the duplicate the
- *     race left behind: drop it. The native twin wins. The twins share
+ *     `part_id` found in the narrow identity pass (its native twin) is the
+ *     duplicate the race left behind: drop it. The native twin wins. The
+ *     twins share
  *     the partition key (`conversation_id`/`cwd`/`date`), so the twin is
  *     guaranteed to be in this rewrite set: no committed-partition scan is
  *     needed, and a row whose identity did NOT change can never collide
@@ -1012,7 +1051,7 @@ function resolveSettleContext(opts, dataset) {
  * @ref LLP 0027#re-settle-sweep: reuse the flush enricher. De-twin within the partition rewrite.
  * @param {Record<string, unknown>[]} fallbackRows
  * @param {SettleContext} settle
- * @param {Set<unknown>} emittedPartIds  part_ids already emitted from this partition rewrite
+ * @param {Set<string>} emittedPartIds  native and already-emitted upgraded part_ids in this partition rewrite
  * @returns {Promise<Record<string, unknown>[]>}
  */
 async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {

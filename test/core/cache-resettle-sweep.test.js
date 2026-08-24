@@ -162,6 +162,52 @@ test('re-settle sweep leaves the fallback row untouched when the transcript is u
   }
 })
 
+// @ref LLP 0300#bounded-resettle [tests]: compaction's row batch is also the
+// upper bound for gateway rows retained while the re-settle hook runs. A
+// history-sized fallback array makes the hourly daemon rewrite heap-sized even
+// though its ordinary parquet output batches are bounded.
+test('re-settle sweep sends fallback rows to the hook in byte-bounded batches', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    const payload = 'x'.repeat(64 * 1024)
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      ...fallbackRow(),
+      message_id: `fallback-${i}`,
+      part_id: `fallback-${i}#0`,
+      content_text: `${i}:${payload}`,
+    }))
+    await storage.appendRows(tablePath, COLUMNS, rows)
+    await storage.flushTable(tablePath, { force: true })
+
+    /** @type {number[]} */
+    const batchSizes = []
+    const report = await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => {
+        batchSizes.push(batch.length)
+        return batch
+      },
+      config: { compact_batch_bytes: 256 * 1024 },
+    })
+
+    assert.equal(report.totalFailed, 0)
+    assert.ok(batchSizes.length > 1, `expected bounded re-settle batches, got ${JSON.stringify(batchSizes)}`)
+    assert.ok(Math.max(...batchSizes) <= 2, `a re-settle batch exceeded the byte cap: ${JSON.stringify(batchSizes)}`)
+    assert.equal((await readRows(storage, tablePath)).length, rows.length)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // Config under which the file-count/avg-size heuristics never fire, so the
 // ONLY thing that can trigger a compaction is the fallback-marker auto-sweep.
 const NO_NATURAL_COMPACTION = { compact_file_count: 1000, compact_avg_file_bytes: 1 }
