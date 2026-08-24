@@ -145,6 +145,11 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
    trigger left). The baseline makes an unchanged fallback set retried only when
    new data has flushed.
 
+The sweep's in-memory shape is extended by
+[LLP 0301](./0301-bounded-compaction-resettle.issue.md): native identity keys
+are discovered in a narrow pass, then fallback rows are settled in
+`compact_batch_bytes`-bounded batches instead of one generation-sized buffer.
+
 Conservative and bounded: an enricher miss/failure leaves the fallback row
 untouched for a later sweep; a matchable second sweep collapses the twin and the
 survivor is no longer fallback; and an **unmatchable** fallback set, once swept,

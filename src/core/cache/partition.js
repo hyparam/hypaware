@@ -18,6 +18,31 @@ const CURSOR_FILE = 'cursor.json'
 const SPOOL_DIR = '_hypaware_spool'
 const RETIRED_DIR = '.retired'
 
+/** @type {Map<string, Promise<unknown>>} */
+const partitionMutationLocks = new Map()
+
+/**
+ * Serialize cursor-coupled mutations of one logical cache partition inside
+ * the process. Flush and maintenance run on independent daemon timers, but a
+ * compaction cursor swap must not strand an append in the retired generation.
+ *
+ * @ref LLP 0301#requirements [implements]: keep the replacement-generation cursor swap atomic with respect to daemon flushes
+ * @template T
+ * @param {string} partitionDir
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLock(partitionDir, fn) {
+  const previous = partitionMutationLocks.get(partitionDir) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(fn)
+  partitionMutationLocks.set(partitionDir, current)
+  return current.finally(() => {
+    if (partitionMutationLocks.get(partitionDir) === current) {
+      partitionMutationLocks.delete(partitionDir)
+    }
+  })
+}
+
 /**
  * Read the cursor for a logical partition directory.  Returns the
  * default epoch-0 cursor when the file is missing or unparseable.
@@ -104,20 +129,22 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  const cursor = readCursorSync(partitionDir)
-  const tableDir = cursor.tableDir ?? 'table'
-  const icebergDir = path.join(partitionDir, tableDir)
-  const declaration = options?.declaration
-  const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
-    layout: 'source-table',
-    tableDir,
-    retention: cursor.retention,
+  return withPartitionMutationLock(partitionDir, async () => {
+    const cursor = readCursorSync(partitionDir)
+    const tableDir = cursor.tableDir ?? 'table'
+    const icebergDir = path.join(partitionDir, tableDir)
+    const declaration = options?.declaration
+    const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    await writeCursor(partitionDir, {
+      epoch: cursor.epoch,
+      rowCount: cursor.rowCount + rows.length,
+      compaction: cursor.compaction,
+      layout: 'source-table',
+      tableDir,
+      retention: cursor.retention,
+    })
+    return result
   })
-  return result
 }
 
 /**
@@ -137,15 +164,17 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, partitionSegments)
-  const cursor = readCursorSync(partitionDir)
-  const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-  const result = await appendRowsToTable(epochDir, columns, rows)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
+  return withPartitionMutationLock(partitionDir, async () => {
+    const cursor = readCursorSync(partitionDir)
+    const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
+    const result = await appendRowsToTable(epochDir, columns, rows)
+    await writeCursor(partitionDir, {
+      epoch: cursor.epoch,
+      rowCount: cursor.rowCount + rows.length,
+      compaction: cursor.compaction,
+    })
+    return result
   })
-  return result
 }
 
 /**

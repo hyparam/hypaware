@@ -484,7 +484,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
- * @param {{ since?: bigint, includeLegacy?: boolean }} [opts]
+ * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 export async function* scanRowsFromTable(tablePath, columns, opts) {
@@ -494,7 +494,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   const includeLegacy = opts?.includeLegacy !== false
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
-  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  const metadata = opts?.metadata ?? (await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })).metadata
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
   const source = await icebergDataSource({ tableUrl: url, metadata, resolver, lister })
   // A table that has never been flushed under the seq-column schema carries no
