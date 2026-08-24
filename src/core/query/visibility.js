@@ -84,6 +84,7 @@ export function callerSeesEverything(callerRank) {
  * fails loudly rather than silently resolving to "nothing withheld".
  *
  * @ref LLP 0105 [implements]: caller class >= row class on the lattice, the shared predicate form
+ * @ref LLP 0302#visibility-predicate [implements]: the lattice is shared as a predicate because the grep walk has no data source to wrap
  * @param {UsagePolicyResolver} resolver
  * @param {number} callerRank
  * @param {unknown} cwd

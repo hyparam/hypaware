@@ -27,12 +27,19 @@ import { sidecarPathFor } from './searchable_columns.js'
  * the scan tier: index presence is purely a performance property, never a
  * correctness one.
  *
- * What that does NOT buy, and callers must not assume it does: a retry.
- * The pass runs only behind a committed compaction, and a compaction
- * always publishes a fresh generation directory, so the files this pass
- * skipped or failed on are gone by the time another pass runs. A missing
- * sidecar is repaired by the next compaction rewriting the rows into a
- * new file, not by re-attempting the old one.
+ * Because existence is the marker, a pass is also resumable: one cut short
+ * by `deadlineMs` leaves every sidecar it did publish and the next pass
+ * picks up the files it never reached. That is what lets the maintenance
+ * caller run this on any generation with missing coverage rather than only
+ * behind a committed compaction, and what bounds the tick when a partition
+ * carries more unindexed files than one tick's budget can build
+ * (LLP 0302 #build-site).
+ *
+ * A file this pass FAILED on is retried by the next pass, up to the poison
+ * bound below, which is the retry the quarantine exists to bound. What no
+ * pass ever does is rebuild a sidecar that already exists: a stale index is
+ * impossible by construction, because a committed data file never changes
+ * its rows.
  *
  * A sidecar also freezes the allowlist it was built over. hypgrep records
  * the indexed columns in the index itself (`hypgrep.text_columns`) and
@@ -57,10 +64,11 @@ import { sidecarPathFor } from './searchable_columns.js'
  * shutdown) clears well inside three passes, while a deterministic one
  * (the file hypgrep cannot index) costs three builds to prove and then
  * costs nothing. The ledger is in-memory and process-lifetime on purpose:
- * a persisted poison list would outlive the bug it recorded. Note it only
- * bites where one path is offered to more than one pass, which under the
- * compaction gate above means a caller driving this module directly; the
- * maintenance pass sees fresh paths every time.
+ * a persisted poison list would outlive the bug it recorded. It bites where
+ * one path is offered to more than one pass, which is every tick over a
+ * generation the maintenance caller keeps revisiting: without it a file
+ * hypgrep cannot index would cost a build on every tick for the life of its
+ * generation, and its warning would repeat forever in the log.
  */
 const MAX_INDEX_ATTEMPTS = 3
 
@@ -98,20 +106,33 @@ const processQuarantine = createIndexQuarantine()
  * quarantined files are skipped without spending a build. A failure is
  * recorded, logged, and isolated to its file: the rest of the pass runs.
  *
+ * `deadlineMs` is an absolute `Date.now()` instant the pass stops at,
+ * reported as `deferred`. Indexing is seconds of CPU per file and a
+ * partition can hold far more unindexed files than one maintenance tick
+ * should spend, so an unbounded pass would run the tick's own budget out
+ * from under it - the budget's job is to leave the daemon responsive, and a
+ * build pass appended after the cutoff undoes exactly that. The first
+ * missing file is always attempted, for the reason `maintainCache` always
+ * works one partition: a pass that could build nothing on an
+ * already-exhausted tick would never index anything on a busy cache.
+ *
  * @param {{
  *   tableDir: string,
  *   quarantine?: ReturnType<typeof createIndexQuarantine>,
  *   worker?: ReturnType<typeof createIndexWorker>,
+ *   deadlineMs?: number,
  *   log?: { info(msg: string, fields?: object): void, warn(msg: string, fields?: object): void },
  * }} args
- * @returns {Promise<{ built: number, present: number, failed: number, quarantined: number }>}
+ * @returns {Promise<{ built: number, present: number, failed: number, quarantined: number, deferred: number }>}
+ * @ref LLP 0302#build-site [implements]: the build pass is budgeted and resumable, so it can run on coverage rather than only behind a compaction
  */
-export async function buildSidecarsForTable({ tableDir, quarantine = processQuarantine, worker, log }) {
+export async function buildSidecarsForTable({ tableDir, quarantine = processQuarantine, worker, deadlineMs, log }) {
   const logger = log ?? getLogger('cache')
-  const report = { built: 0, present: 0, failed: 0, quarantined: 0 }
+  const report = { built: 0, present: 0, failed: 0, quarantined: 0, deferred: 0 }
   const files = await listLiveDataFiles(tableDir)
   if (files.length === 0) return report
   const ownWorker = worker ?? createIndexWorker({ log: logger })
+  let attempted = 0
   try {
     for (const file of files) {
       const sourcePath = urlToPath(file.filePath)
@@ -124,6 +145,15 @@ export async function buildSidecarsForTable({ tableDir, quarantine = processQuar
         report.quarantined += 1
         continue
       }
+      // Checked after the two cheap skips, so a table whose coverage is
+      // already complete costs the same directory walk it always did even
+      // on an exhausted tick, and `deferred` counts only files that really
+      // still need a build.
+      if (attempted > 0 && deadlineMs !== undefined && Date.now() > deadlineMs) {
+        report.deferred += 1
+        continue
+      }
+      attempted += 1
       // Publish atomically: rename is the only step that makes the
       // sidecar exist, so a crash mid-write can never leave a partial file
       // that lists as a finished index. The scratch name carries a random

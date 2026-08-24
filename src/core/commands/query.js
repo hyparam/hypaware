@@ -88,10 +88,14 @@ export async function runQueryStatus(argv, ctx) {
   ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
   ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
   // Grep-index coverage over the searchable dataset: how much of a `hyp
-  // query grep` is served by sidecar indexes versus the brute scan. The
-  // gap is expected (fresh files are indexed only when compaction
-  // finalizes them), so the line explains the remainder rather than
-  // leaving "grep is slow" to tracing.
+  // query grep` is served by sidecar indexes versus the brute scan. A gap
+  // is expected on a cache that has taken writes since the last
+  // maintenance tick, so the line names the mechanism that closes it. It
+  // says "maintenance", not "compaction": the build pass runs on any
+  // generation with missing coverage, so a partition already at the
+  // compaction floor closes its gap too, and advice naming a rewrite that
+  // will never run is advice the reader cannot act on.
+  // @ref LLP 0302#build-site [constrained-by]: the remedy the line names is the one the build pass actually runs
   // @ref LLP 0264#lifecycle [implements]: index coverage is observable where the operator already looks
   const searchable = report.partitions.filter((p) => p.indexedFileCount !== undefined)
   if (searchable.length > 0) {
@@ -102,7 +106,7 @@ export async function runQueryStatus(argv, ctx) {
     const files = searchable.reduce((n, p) => n + (p.indexableFileCount ?? p.dataFileCount), 0)
     const indexed = searchable.reduce((n, p) => n + (p.indexedFileCount ?? 0), 0)
     ctx.stdout.write(`grep index: ${indexed} of ${files} data files indexed` +
-      (indexed < files ? ' (searches brute-scan the rest; compaction indexes them)\n' : '\n'))
+      (indexed < files ? ' (searches brute-scan the rest; maintenance indexes them)\n' : '\n'))
   }
   ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
   for (const dataset of datasets) {

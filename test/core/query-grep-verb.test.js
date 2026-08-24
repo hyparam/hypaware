@@ -234,9 +234,36 @@ test('a malformed --from is refused rather than answering zero hits', async () =
   // The window is compared lexicographically, so `2026-8-1` would prune
   // every real day and render an empty, unexplained answer.
   const code = await cmd.run(['needle', '--from', '2026-8-1'], ctx)
-  assert.notEqual(code, 0)
+  // Exit 2, the usage code, not 1: a script retries on 1 (the cache was
+  // busy) and reports on 2 (the command was wrong), so a typo answering 1
+  // is answered by a retry loop that can never succeed.
+  assert.equal(code, 2)
   assert.match(err.join(''), /--from expects a day as YYYY-MM-DD \(got 2026-8-1\)/)
+  assert.match(err.join(''), /^usage: hyp query grep/m, 'a usage refusal prints the usage line')
   assert.equal(out.join(''), '')
+})
+
+test('an inverted --from/--to window is refused rather than forging an empty answer', async () => {
+  const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  // Both days are well-formed, so the shape check above cannot catch this:
+  // the window simply selects nothing, and every file is pruned. Without
+  // the cross-field check that renders as a silent zero, which is exactly
+  // the "nothing is recorded" the coverage clause works to make honest.
+  const code = await cmd.run(['needle', '--from', '2026-08-20', '--to', '2026-08-01'], ctx)
+  assert.equal(code, 2)
+  assert.match(err.join(''), /--from 2026-08-20 is after --to 2026-08-01/)
+  assert.equal(out.join(''), '')
+})
+
+test('a well-ordered window still runs, including the single-day case', async () => {
+  const { ctx, out } = await makeCtx([
+    [mkRow({ date: '2026-08-10', content_text: 'needle old' })],
+    [mkRow({ date: '2026-08-12', content_text: 'needle new' })],
+  ])
+  const code = await cmd.run(['needle', '--from', '2026-08-12', '--to', '2026-08-12'], ctx)
+  assert.equal(code, 0, 'from === to is a one-day window, not an inverted one')
+  assert.match(out.join(''), /needle new/)
+  assert.doesNotMatch(out.join(''), /needle old/)
 })
 
 test('the snippet renders last so a long match cannot shove the locators out of column', async () => {

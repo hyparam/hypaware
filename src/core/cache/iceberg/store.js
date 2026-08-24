@@ -469,6 +469,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  *
  * @param {string} tablePath
  * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]>}
+ * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
  */
 export async function listLiveDataFiles(tablePath) {
   if (!tableExists(tablePath)) return []

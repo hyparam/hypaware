@@ -247,38 +247,58 @@ export async function maintainCache(opts) {
       report.errorMessage = err instanceof Error ? err.message : String(err)
       totalFailed++
     }
-    // The grep sidecar build, on the files the rewrite just finalized:
-    // compaction is the moment a file stops changing, so this is the one
-    // point in a file's life where an index can be built once and stay
-    // valid (LLP 0264 #lifecycle). Only the grep dataset carries indexes,
-    // and only a rewrite that committed has new files to index. Isolated
-    // from the partition's own verdict: an index that cannot be built
-    // costs speed, never the tick, and never correctness (the scan tier
-    // serves whatever has no sidecar).
-    // @ref LLP 0264#lifecycle [implements]: sidecars are built at maintenance right after compaction finalizes the generation's files
-    if (!opts.dryRun && report.compacted && !report.failed && part.dataset === GREP_DATASET) {
+    // The grep sidecar build. Compaction is where a generation's files are
+    // minted, so a rewrite that just committed always leaves work here, but
+    // gating on that alone strands a partition already at the compaction
+    // floor: it never rewrites, so its files never get indexed, every grep
+    // brute-scans them forever, and `hyp query status` advises a compaction
+    // that will not run (hyparam/hypaware#984 review). Coverage is the
+    // honest gate instead, and it is cheap: one `readdir` of the live data
+    // directory, the same cost profile as the file counters beside it, and
+    // it reads zero-work whenever every file already has its sidecar. A
+    // committed data file never changes its rows, so indexing one the
+    // compactor has not touched is as valid as indexing one it just wrote;
+    // what compaction buys is that the index is built once over merged
+    // files rather than repeatedly over the fragments it will replace,
+    // which is a cost argument, not a correctness one.
+    //
+    // Isolated from the partition's own verdict: an index that cannot be
+    // built costs speed, never the tick, and never correctness (the scan
+    // tier serves whatever has no sidecar). Bounded by the tick's own
+    // deadline for the same reason the walk above is, and resumable across
+    // ticks because sidecar existence is the marker.
+    // @ref LLP 0264#lifecycle [constrained-by]: sidecar existence is the idempotency marker and an unindexed file is brute-scanned; both are what let this run on coverage
+    // @ref LLP 0302#build-site [implements]: the build pass runs on missing coverage under the tick budget, not only behind a committed compaction
+    if (!opts.dryRun && !report.failed && part.dataset === GREP_DATASET) {
       try {
         const cursorAfter = readCursorSync(part.path)
         const liveDir = path.join(part.path, generationLayout(cursorAfter).liveDir)
-        await withSpan(
-          'maintenance.grep_index',
-          {
-            [Attr.COMPONENT]: 'cache',
-            [Attr.OPERATION]: 'maintenance.grep_index',
-            [Attr.DATASET]: part.dataset,
-            status: 'ok',
-          },
-          async (span) => {
-            const built = await buildSidecarsForTable({ tableDir: liveDir })
-            report.sidecarsBuilt = built.built
-            report.sidecarsFailed = built.failed + built.quarantined
-            span.setAttribute('sidecars_built', built.built)
-            span.setAttribute('sidecars_present', built.present)
-            span.setAttribute('sidecars_failed', built.failed)
-            span.setAttribute('sidecars_quarantined', built.quarantined)
-          },
-          { component: 'cache' }
-        )
+        const coverage = countIndexCoverage(liveDir)
+        if (coverage.indexed < coverage.indexable) {
+          await withSpan(
+            'maintenance.grep_index',
+            {
+              [Attr.COMPONENT]: 'cache',
+              [Attr.OPERATION]: 'maintenance.grep_index',
+              [Attr.DATASET]: part.dataset,
+              status: 'ok',
+            },
+            async (span) => {
+              // An absent `budgetMs` is `Infinity`, which makes the
+              // deadline unreachable rather than needing a second shape.
+              const built = await buildSidecarsForTable({ tableDir: liveDir, deadlineMs: startMs + budgetMs })
+              report.sidecarsBuilt = built.built
+              report.sidecarsFailed = built.failed + built.quarantined
+              report.sidecarsDeferred = built.deferred
+              span.setAttribute('sidecars_built', built.built)
+              span.setAttribute('sidecars_present', built.present)
+              span.setAttribute('sidecars_failed', built.failed)
+              span.setAttribute('sidecars_quarantined', built.quarantined)
+              span.setAttribute('sidecars_deferred', built.deferred)
+            },
+            { component: 'cache' }
+          )
+        }
       } catch (err) {
         // Index absence is served by the scan tier, so a build-pass throw
         // is a warning on the report, never a failed partition.

@@ -1,5 +1,6 @@
 // @ts-check
 
+import { VerbUsageError } from '../cli/verb_errors.js'
 import { buildQuerySqlOutput } from '../query/format.js'
 import { renderLocalOnlyNotice } from '../query/verb.js'
 import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
@@ -100,14 +101,26 @@ export const queryGrepVerb = {
     // at ~16ms on `hyp --help`, ~10%) for the one command that needs them.
     // The remote stack in `verb_command.js` is deferred for the same reason.
     const { executeGrepSearch } = await import('./grep_service.js')
+    const from = dayBound(params.from, 'from')
+    const to = dayBound(params.to, 'to')
+    // An inverted window selects no day at all, so the walk would prune
+    // every file and answer zero with nothing on stderr - the forged
+    // "nothing is recorded" the shape check below exists to prevent, just
+    // reached with two individually well-formed days. The schema cannot
+    // state this rule (it relates two properties), so it is checked here
+    // and refused with the same usage code the codec would have used.
+    // @ref LLP 0302#usage-exit [implements]: the window is a cross-field rule, refused as a usage error rather than answered with a silent zero
+    if (from !== undefined && to !== undefined && from > to) {
+      throw new VerbUsageError(`--from ${from} is after --to ${to}, so the window selects no days`)
+    }
     const result = await executeGrepSearch({
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       query: String(params.query ?? ''),
       regex: params.regex === true,
       sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
       chainId: typeof params.chain_id === 'string' ? params.chain_id : undefined,
-      from: dayBound(params.from, 'from'),
-      to: dayBound(params.to, 'to'),
+      from,
+      to,
       limit,
       refresh: ctx.refresh,
       // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
@@ -186,6 +199,13 @@ export const queryGrepVerb = {
  * summary works hard to make "zero hits" mean something; a mistyped flag
  * must not be able to forge one.
  *
+ * Refused as a `VerbUsageError`, so the caller gets exit 2 and the usage
+ * line rather than exit 1: `hyp query grep x --from 2026-8-1` is a typo, and
+ * a script that retries on 1 (the cache was busy) and reports on 2 (the
+ * command was wrong) must be able to tell them apart. The rule cannot move
+ * into the schema, whose vocabulary has no string-shape word.
+ *
+ * @ref LLP 0302#usage-exit [implements]: a value shape the schema cannot state is still a usage refusal
  * @param {unknown} value
  * @param {'from' | 'to'} flag
  * @returns {string | undefined}
@@ -193,7 +213,7 @@ export const queryGrepVerb = {
 function dayBound(value, flag) {
   if (typeof value !== 'string') return undefined
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new Error(`--${flag} expects a day as YYYY-MM-DD (got ${value})`)
+    throw new VerbUsageError(`--${flag} expects a day as YYYY-MM-DD (got ${value})`)
   }
   return value
 }

@@ -175,6 +175,69 @@ test('maintenance compaction finalizes files and builds their sidecars', async (
   assert.equal(other.indexableFileCount, undefined, 'only the grep dataset carries sidecars')
 })
 
+test('a partition already at the compaction floor is still indexed', async () => {
+  // The gap the compaction gate left: a partition that never becomes due
+  // for a rewrite never gets a sidecar, so every grep brute-scans it for
+  // the life of its generation and the status line advises a compaction
+  // that will not run. Coverage is the gate now, so an untouched
+  // generation is indexed on its first tick.
+  const { cacheRoot, storage, tableDir } = await makeCache([[OLD]])
+  // Thresholds no fixture-sized partition can trip, so "not due for a
+  // rewrite" is the test's premise rather than an accident of file size.
+  const atFloor = { compact_file_count: 1000, compact_avg_file_bytes: 1 }
+  const result = await maintainCache({ cacheRoot, config: atFloor })
+  const report = result.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(report)
+  assert.equal(report.compacted, false, 'the partition is not due for a rewrite')
+  assert.equal(report.sidecarsBuilt, 1, 'but its file is indexed anyway')
+
+  for (const file of await listLiveDataFiles(tableDir())) {
+    assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))))
+  }
+  const res = await executeGrepSearch({ storage, query: 'needle', limit: 10, includeLocalOnly: true })
+  assert.equal(res.hits.length, 1)
+  assert.equal(res.indexedFiles, 1)
+  assert.equal(res.scannedFiles, 0)
+
+  // And the pass does not re-run once coverage is complete: the gate is a
+  // directory read, so a fully indexed partition costs no build pass at all.
+  const second = await maintainCache({ cacheRoot, config: atFloor })
+  const secondReport = second.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(secondReport)
+  assert.equal(secondReport.sidecarsBuilt, undefined, 'complete coverage skips the pass entirely')
+})
+
+test('a spent tick budget defers the rest of the build to the next tick', async () => {
+  // Indexing is seconds of CPU per file, so an unbounded pass appended
+  // after the tick's cutoff undoes the budget's whole point. One file is
+  // always attempted so a busy cache still makes progress; the rest are
+  // deferred and picked up later, which is only sound because sidecar
+  // existence is the completion marker.
+  const { cacheRoot, tableDir } = await makeCache([[OLD], [NEW]])
+  const files = await listLiveDataFiles(tableDir())
+  assert.ok(files.length >= 2, 'the fixture needs more than one file to defer any')
+  // Same at-floor thresholds as above: no rewrite, so the file set the two
+  // ticks below see is the one measured here.
+  const atFloor = { compact_file_count: 1000, compact_avg_file_bytes: 1 }
+
+  const first = await maintainCache({ cacheRoot, config: atFloor, budgetMs: 0 })
+  const firstReport = first.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(firstReport)
+  assert.equal(firstReport.sidecarsBuilt, 1, 'the first missing file is always attempted')
+  assert.equal(firstReport.sidecarsDeferred, files.length - 1)
+
+  // A later tick with room finishes the job, without rebuilding the one
+  // the exhausted tick already published.
+  const second = await maintainCache({ cacheRoot, config: atFloor })
+  const secondReport = second.partitions.find((p) => p.dataset === DATASET)
+  assert.ok(secondReport)
+  assert.equal(secondReport.sidecarsBuilt, files.length - 1)
+  assert.equal(secondReport.sidecarsDeferred, 0)
+  for (const file of await listLiveDataFiles(tableDir())) {
+    assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))))
+  }
+})
+
 test('a purge after the index build does not report coverage that can never be reached', async () => {
   // Position deletes land in the live `data/` directory as
   // `<uuid>-deletes.parquet`, so `countDataFiles` counts them. No sidecar is

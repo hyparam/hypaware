@@ -163,8 +163,9 @@ Only these columns are searched: `content_text`, `tool_name`, `session_id`,
 hits is not evidence the text is absent from `system_text`, `tools`,
 `tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
 
-Compacted data files are served through hypgrep sidecar indexes and the rest
-are scanned, so coverage affects speed and never correctness.
+Data files the daemon has indexed at maintenance are served through hypgrep
+sidecar indexes and the rest are scanned, so coverage affects speed and never
+correctness.
 `hyp cache status` prints the index coverage. Local-only rows are withheld with
 a count on stderr, exactly as in SQL, and `--include-local-only` is the same
 informed-consent override. `--remote TARGET` runs the same search on a server,
@@ -175,8 +176,11 @@ which enforces its own visibility: `--regex` is operator-only there, and
 hyp query grep "connection refused" --from 2026-08-01 --format json
 ```
 
-An unknown flag returns a usage error. A malformed `--from` or `--to`, an
-invalid regular expression, and search or output failures all return `1`.
+An unknown flag returns a usage error, and so does any `--from`/`--to` that
+cannot select a day: one not shaped `YYYY-MM-DD`, or a `--from` later than the
+`--to`. Both would otherwise prune every file and render an empty answer that
+reads like "nothing is recorded". An invalid regular expression and search or
+output failures return `1`.
 
 ### `hyp query schema`
 

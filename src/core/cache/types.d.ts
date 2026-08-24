@@ -309,10 +309,16 @@ export interface MaintenancePartitionReport {
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
-  /** Grep sidecars built for the just-compacted generation; absent when the build did not run. */
+  /** Grep sidecars built for the live generation; absent when the build pass did not run. */
   sidecarsBuilt?: number
   /** Files whose sidecar build failed or is quarantined; the scan tier serves them. */
   sidecarsFailed?: number
+  /**
+   * Files still missing a sidecar when the tick's budget ran out. They are
+   * built by a later tick: the pass is resumable because sidecar existence
+   * is its only completion marker.
+   */
+  sidecarsDeferred?: number
   /** The build pass's own error, when the pass itself threw (never fails the partition). */
   sidecarError?: string
   // Compaction of this partition is known not to reduce its data-file
