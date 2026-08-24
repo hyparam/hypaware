@@ -511,6 +511,13 @@ async function readLastFlushAt(tablePath) {
  * dataset's spool and would otherwise readdir the traces, logs and metrics
  * trees on every search to find it.
  *
+ * An EMPTY `datasets` means every dataset, not none, matching the scoping
+ * word of `discoverCachePartitions` (`scope.datasets && length > 0`). The
+ * two are routinely passed the same computed list, and one reading it as
+ * "all" while the other read it as "nothing" would make a caller whose list
+ * came out empty walk every partition and flush no spool: the failure would
+ * surface as a query answering from a stale cache, not as an error.
+ *
  * @param {string} cacheRoot
  * @param {{ datasets?: string[] }} [opts]
  * @returns {Promise<string[]>}
@@ -519,7 +526,8 @@ export async function discoverSpoolTables(cacheRoot, opts = {}) {
   /** @type {string[]} */
   const tables = []
   const root = path.join(cacheRoot, 'datasets')
-  const roots = opts.datasets ? opts.datasets.map((name) => path.join(root, name)) : [root]
+  const scoped = opts.datasets && opts.datasets.length > 0 ? opts.datasets : null
+  const roots = scoped ? scoped.map((name) => path.join(root, name)) : [root]
   for (const dir of roots) await walk(dir)
   return tables
 

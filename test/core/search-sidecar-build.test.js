@@ -15,7 +15,7 @@ import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { executeGrepSearch } from '../../src/core/search/grep_service.js'
 import { sidecarPathFor } from '../../src/core/search/searchable_columns.js'
-import { buildSidecarsForTable, createIndexQuarantine } from '../../src/core/search/sidecar_build.js'
+import { buildSidecarsForTable, createIndexQuarantine, sweepIndexScratch } from '../../src/core/search/sidecar_build.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
@@ -346,7 +346,6 @@ test('an abandoned publish scratch is reclaimed, and a live one is left alone', 
   // it grew the cache invisibly until the generation retired, once per
   // crash because the scratch token is random.
   const { tableDir } = await makeCache([[OLD]])
-  const dataDir = path.join(tableDir(), 'data')
   const [file] = await listLiveDataFiles(tableDir())
   const sidecar = sidecarPathFor(urlToPath(file.filePath))
   const stale = `${sidecar}.aaaaaaaa-dead.tmp`
@@ -357,10 +356,33 @@ test('an abandoned publish scratch is reclaimed, and a live one is left alone', 
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
   await fs.utimes(stale, old, old)
 
-  await buildSidecarsForTable({ tableDir: tableDir(), log: quietLog })
+  sweepIndexScratch(tableDir(), quietLog)
   assert.equal(fsSync.existsSync(stale), false, 'the abandoned scratch is gone')
   assert.equal(fsSync.existsSync(live), true, 'a scratch young enough to be in flight is untouched')
-  assert.ok(fsSync.readdirSync(dataDir).some((n) => n.endsWith('.index.parquet')), 'and the pass still built')
+})
+
+test('a scratch left on a fully indexed partition is still reclaimed', async () => {
+  // The regression the sweep's first home hid. A build killed between its
+  // write and its rename leaves the sidecar UNPUBLISHED, so the next tick
+  // rebuilds it and coverage goes complete again - within seconds, and so
+  // inside the one-hour grace window that (correctly) spared the scratch on
+  // that tick. Behind the coverage gate the pass then never ran again for
+  // that generation, and the scratch aged past the window with nothing left
+  // to reclaim it: the unbounded, unbilled leak the sweep exists to close.
+  const { cacheRoot, tableDir } = await makeCache([[OLD]])
+  await maintainCache({ cacheRoot, force: true })
+  const files = await listLiveDataFiles(tableDir())
+  for (const file of files) {
+    assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))), 'the fixture starts fully indexed')
+  }
+  const stale = `${sidecarPathFor(urlToPath(files[0].filePath))}.aaaaaaaa-dead.tmp`
+  await fs.writeFile(stale, Buffer.alloc(64))
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+  await fs.utimes(stale, old, old)
+
+  const report = (await maintainCache({ cacheRoot })).partitions.find((p) => p.dataset === DATASET)
+  assert.equal(report?.sidecarsBuilt, undefined, 'coverage was complete, so no build pass ran')
+  assert.equal(fsSync.existsSync(stale), false, 'and the scratch was swept anyway')
 })
 
 test('a quarantined file is reported as quarantined, not as a fresh failure every tick', async () => {

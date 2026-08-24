@@ -74,20 +74,19 @@ import { sidecarPathFor } from './searchable_columns.js'
 const MAX_INDEX_ATTEMPTS = 3
 
 /**
- * How long an abandoned publish scratch file is left alone before the pass
- * reclaims it. The publish is write-then-rename, and the failure path
- * unlinks its own scratch, but a SIGKILL between the two (a shut-down
- * daemon, an OOM kill) leaves an index-sized file behind. Nothing else
- * would ever remove it: the scratch name is outside `.parquet` precisely so
- * it joins no data-file count, which also means `measureDataDir` does not
- * bill its bytes and `hyp cache status` under-reports the partition, and
- * the random token means each crash leaks a NEW file rather than reusing
- * one. So the pass sweeps them, but only past a grace window: a build takes
- * seconds, and a second writer over the same cache (the daemon's tick and a
- * hand-run `hyp`) must never have its in-flight scratch pulled out from
- * under it.
+ * How long an abandoned publish scratch file is left alone before it is
+ * reclaimed. The publish is write-then-rename, and the failure path unlinks
+ * its own scratch, but a SIGKILL between the two (a shut-down daemon, an OOM
+ * kill) leaves an index-sized file behind. Nothing else would ever remove it:
+ * the scratch name is outside `.parquet` precisely so it joins no data-file
+ * count, which also means `measureDataDir` does not bill its bytes and
+ * `hyp cache status` under-reports the partition, and the random token means
+ * each crash leaks a NEW file rather than reusing one. So it is swept, but
+ * only past a grace window: a build takes seconds, and a second writer over
+ * the same cache (the daemon's tick and a hand-run `hyp`) must never have
+ * its in-flight scratch pulled out from under it.
  *
- * @ref LLP 0303#scratch-sweep [implements]: nothing else bills or removes an abandoned scratch, so the pass that writes them reclaims them
+ * @ref LLP 0303#scratch-sweep [implements]: nothing else bills or removes an abandoned scratch, so maintenance reclaims it
  */
 const SCRATCH_GRACE_MS = 60 * 60 * 1000
 
@@ -130,15 +129,27 @@ function scanForBuildable(dataDir, quarantine) {
 
 /**
  * Remove publish scratch files old enough that no live build can own them.
- * Synchronous and best effort: it runs once per pass over a directory the
- * pass is about to read anyway, and a scratch that races the unlink is one
- * a crash would have left for the next tick regardless.
+ * Synchronous and best effort: one directory read, and a scratch that races
+ * the unlink is one a crash would have left for the next tick regardless.
  *
- * @param {string} dataDir
- * @param {{ warn(msg: string, fields?: object): void }} logger
+ * Deliberately outside `buildSidecarsForTable`, and deliberately gated on
+ * nothing. The crash this reclaims after leaves the sidecar UNPUBLISHED, so
+ * the next tick rebuilds it and the partition returns to complete coverage
+ * well inside the grace window - before the scratch is old enough to sweep.
+ * A sweep that ran only when there was a build to do would therefore never
+ * run again for that generation, and the leak the grace window was supposed
+ * to merely delay would last until the generation retired. The caller runs
+ * this on every tick over a table that carries sidecars, whatever its
+ * coverage.
+ *
+ * @ref LLP 0304#scratch-sweep-site [implements]: the sweep has to run on coverage-complete ticks too, because the republished sidecar is what hides the scratch
+ * @param {string} tableDir
+ * @param {{ warn(msg: string, fields?: object): void }} [log]
  * @returns {void}
  */
-function sweepStaleScratch(dataDir, logger) {
+export function sweepIndexScratch(tableDir, log) {
+  const logger = log ?? getLogger('cache')
+  const dataDir = path.join(tableDir, 'data')
   const cutoff = Date.now() - SCRATCH_GRACE_MS
   /** @type {string[]} */
   let names
@@ -222,7 +233,8 @@ export async function buildSidecarsForTable({ tableDir, quarantine = processQuar
   const logger = log ?? getLogger('cache')
   const report = { built: 0, present: 0, failed: 0, quarantined: 0, deferred: 0 }
   const dataDir = path.join(tableDir, 'data')
-  sweepStaleScratch(dataDir, logger)
+  // The publish scratch is swept by `sweepIndexScratch`, which the caller
+  // runs whether or not this pass has anything to build (see its comment).
   // Ahead of `listLiveDataFiles`, which is a metadata plus manifest load.
   // A file that needs a build is always ON DISK in this directory, so
   // "every missing sidecar is quarantined" can never hide a build the pass

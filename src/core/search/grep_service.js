@@ -30,15 +30,29 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * changes which rows are decoded and never how wide. Files are processed
  * strictly sequentially and each is read one ROW GROUP at a time, over a
  * file-handle-backed `AsyncBuffer` that fetches only the byte ranges the
- * projection needs. Both halves are load-bearing for the memory bound: the
- * row-group split bounds the DECODED rows, and the handle-backed buffer
- * bounds the RAW bytes. The cache's own `resolver.reader` cannot do the
- * second (it is `readFileSync` of the whole file, which would leave a
- * 128 MiB `target_file_bytes` data file resident behind a walk that reads
- * it a row group at a time, and would block the loop for the read). So the
- * request's memory bound really is one row group plus, on the indexed tier,
- * its index. No sidecar anywhere (the tree before T6 of LLP 0265 runs) means
- * every file takes the scan tier: slower, never wrong.
+ * projection needs. Both halves are load-bearing: the row-group split
+ * bounds the DECODED rows, and the handle-backed buffer bounds the RAW
+ * bytes. The cache's own `resolver.reader` cannot do the second (it is
+ * `readFileSync` of the whole file, which would leave a 128 MiB
+ * `target_file_bytes` data file resident behind a walk that reads it a row
+ * group at a time, and would block the loop for the read).
+ *
+ * That makes the SCAN tier's bound one row group, decoded and raw. The
+ * INDEXED tier's is looser, and it is hypgrep's to set rather than this
+ * module's: `parquetFind` wraps whatever buffer it is handed in
+ * hyparquet's `cachedAsyncBuffer`, which memoizes every slice for the life
+ * of one file's search. Its raw residency is therefore the UNION of the
+ * candidate ranges it read, which approaches the projected bytes of the
+ * whole file for a query the index cannot prune (a literal shorter than
+ * hypgrep's n-gram length prunes to nothing at all). The handle-backed
+ * buffer is still strictly better there than the whole-file resident
+ * reader it replaced; it just does not make that tier's bound a row group,
+ * and claiming it did would be a bound no call path holds. Either way the
+ * bound is PER FILE: the walk is sequential and nothing survives a file
+ * but the trimmed hit buffer.
+ *
+ * No sidecar anywhere (the tree before T6 of LLP 0265 runs) means every
+ * file takes the scan tier: slower, never wrong.
  *
  * Unlike the server there is no cross-tier day exclusion: a client row lives
  * in exactly one data file, and each file is served by exactly one tier, so
@@ -59,6 +73,7 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  *
  * @ref LLP 0264#decision [implements]: the client mirror of the server's two-tier grep, cache scan beside sidecar-indexed files
  * @ref LLP 0264#visibility [implements]: the local scan enforces LLP 0105 with the caller's cwd; --remote inherits the server's own gate instead
+ * @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep caches the slices it reads, so the indexed tier's raw bound is the candidate ranges, not one row group
  *
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { GrepSearchHit, GrepSearchMatcher, GrepSearchParams, GrepSearchResult } from '../../../src/core/search/types.js'
@@ -348,13 +363,18 @@ export async function executeGrepSearch(args) {
             query: matcher.hypQuery,
             url: file.filePath,
             indexFile,
-            // hypgrep opens the SOURCE data file through this factory and
-            // wraps it in its own `cachedAsyncBuffer`, so a handle-backed
-            // buffer gives the indexed tier the same raw-byte bound the
-            // scan tier gets below: a candidate range fetches the byte
-            // ranges its row group needs, not the whole file. The sidecar
+            // hypgrep opens the SOURCE data file through this factory, so
+            // a candidate range fetches the byte ranges its row group
+            // needs rather than coming out of a whole-file resident
+            // buffer. It then wraps the result in its own
+            // `cachedAsyncBuffer`, which holds every slice for the life of
+            // this generator, so the residency here is the union of the
+            // candidate ranges and NOT one row group: strictly less than
+            // the whole file the cache's resident reader would have held,
+            // and not the same bound the scan tier below gets. The sidecar
             // is deliberately NOT read this way (see `searchFile`).
-            // @ref LLP 0303#memory-bound [implements]: the row-group split bounds decoded rows, the handle-backed buffer bounds raw bytes
+            // @ref LLP 0303#memory-bound [implements]: the source is opened per slice rather than read whole
+            // @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep memoizes the slices, so this tier's raw bound is the candidate ranges
             asyncBufferFactory: async ({ url }) => await asyncBufferFromFile(urlToPath(url)),
             columns: SCAN_COLUMNS,
             rowFilter: accept,

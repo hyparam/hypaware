@@ -21,7 +21,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createCacheSpool } from '../../src/core/cache/spool.js'
+import { createCacheSpool, discoverSpoolTables, SPOOL_DIR } from '../../src/core/cache/spool.js'
 
 /**
  * @import { FileHandle } from 'node:fs/promises'
@@ -257,6 +257,26 @@ test('an append whose whole record survives a refused rollback is reported as wr
     assert.deepEqual(committed.map((row) => row.id), [1])
   } finally {
     restore()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('an empty datasets scope means every dataset, like discoverCachePartitions', async () => {
+  // The two scoping APIs are routinely handed the same computed list. One
+  // reading `[]` as "all" while the other read it as "nothing" would make a
+  // caller whose list came out empty walk every partition and flush no
+  // spool, and that surfaces as a query answering from a stale cache rather
+  // than as an error.
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-scope-'))
+  try {
+    await fs.mkdir(path.join(cacheRoot, 'datasets', 'ds_a', 'source=x', SPOOL_DIR), { recursive: true })
+    await fs.mkdir(path.join(cacheRoot, 'datasets', 'ds_b', 'source=y', SPOOL_DIR), { recursive: true })
+
+    assert.equal((await discoverSpoolTables(cacheRoot)).length, 2)
+    assert.equal((await discoverSpoolTables(cacheRoot, {})).length, 2)
+    assert.equal((await discoverSpoolTables(cacheRoot, { datasets: [] })).length, 2, 'an empty scope is not an empty answer')
+    assert.equal((await discoverSpoolTables(cacheRoot, { datasets: ['ds_a'] })).length, 1)
+  } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })

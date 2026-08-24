@@ -6,6 +6,7 @@
 **Author:** neutral
 **Date:** 2026-08-24
 **Extends:** LLP 0302 (#residuals), LLP 0264 (#shared), LLP 0265 (T6)
+**Extended-by:** [LLP 0304](./0304-grep-search-round-4-corrections.decision.md) (#scratch-sweep moves out of the build pass, because gating it on missing coverage made it unreachable in the case it was written for; #memory-bound holds on the scan tier only, and the indexed tier's raw bound is named honestly)
 **Related:** LLP 0199 (the neediest-first maintenance walk), LLP 0293 (#one-contract: exit 2 is the usage code), LLP 0105 (local-only visibility); hypaware-server LLP 0178 / PR #364 (merged)
 
 > [LLP 0302](./0302-grep-search-integration-divergences.decision.md) recorded
@@ -69,6 +70,11 @@ the shared module even though the code does not.
 
 ## The memory bound needs the reader, not only the split {#memory-bound}
 
+> **Extended-by:** [LLP 0304 #indexed-tier-residency](./0304-grep-search-round-4-corrections.decision.md#indexed-tier-residency).
+> The bound below holds on the scan tier. On the indexed tier `parquetFind`
+> wraps the buffer in hyparquet's memoizing `cachedAsyncBuffer`, so the raw
+> residency there is the union of the candidate ranges, not one row group.
+
 The brute scan was changed to read one row group at a time, which bounds the
 DECODED rows. It does not bound the raw bytes: the cache's own
 `resolver.reader` is `fs.readFileSync` of the whole file, so a 128 MiB
@@ -91,7 +97,7 @@ about is the source.
 LLP 0302 `#build-site` budgeted the build pass by handing it the maintenance
 tick's own deadline. That bounds the tick but not the **walk**: partitions are
 visited neediest-first
-([LLP 0199 #neediest-first](./0199-maintenance-budget.decision.md#neediest-first)),
+([LLP 0199 #neediest-first](./0199-maintenance-compaction-convergence.decision.md#neediest-first)),
 so the busiest grep partition is visited first, arrives at a freshly compacted
 generation with zero coverage, and can spend the tick's whole remaining tail
 indexing it. Every partition behind it then gets no snapshot expiry and no
@@ -116,6 +122,11 @@ Two reporting rules fall out of the same pass:
   generation to rediscover there is nothing to do.
 
 ## Publish scratch is swept, past a grace window {#scratch-sweep}
+
+> **Extended-by:** [LLP 0304 #scratch-sweep-site](./0304-grep-search-round-4-corrections.decision.md#scratch-sweep-site).
+> The sweep belongs to the maintenance caller, not to the build pass: gated on
+> missing coverage it never ran again once the crashed build's sidecar was
+> republished, which happens inside the grace window.
 
 The sidecar publish is write-then-rename and its failure path unlinks its own
 scratch, but a SIGKILL between the two (a shut-down daemon, an OOM kill) leaves
@@ -167,6 +178,11 @@ into the killable worker-thread seam the index build already uses. Neither is a
 line in a verb, which is why neither was written speculatively here.
 
 ## What this does not settle {#residuals}
+
+> **Extended-by:** [LLP 0304 #residuals](./0304-grep-search-round-4-corrections.decision.md#residuals).
+> The dereferenced-data-file entry below is corrected there: the
+> all-quarantined short-circuit does not cover it, so it still costs a full
+> metadata load per tick rather than a directory read.
 
 - **The server's `exhausted`.** `#completeness-signals` aligns the client with
   the field's documented meaning. Whether the server's own computation agrees

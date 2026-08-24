@@ -182,7 +182,10 @@ cannot select a day: one not shaped `YYYY-MM-DD`, or a `--from` later than the
 `--to`. Both would otherwise prune every file and render an empty answer that
 reads like "nothing is recorded". A pattern the search cannot use is a usage
 error too: an invalid regular expression under `--regex`, or one longer than
-1024 characters. Search or output failures return `1`.
+1024 characters. Those day and pattern checks are local: `--remote` hands the
+request to the server, which applies its own argument rules and its own codes
+(the flag-shape and `--limit` checks still run locally, before the request is
+sent). Search or output failures return `1`.
 
 ### `hyp query schema`
 

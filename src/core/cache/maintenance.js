@@ -18,7 +18,7 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
-import { buildSidecarsForTable } from '../search/sidecar_build.js'
+import { buildSidecarsForTable, sweepIndexScratch } from '../search/sidecar_build.js'
 import { GREP_DATASET, sidecarPathFor } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
@@ -118,6 +118,16 @@ const COMPACTION_WRITER_GENERATION = 2
  * and starve every partition behind it. LLP 0199's neediest-first walk puts
  * the busiest partition first, which is exactly the one with the most to
  * index, so the tail is what it would take.
+ *
+ * The deadline this makes is ABSOLUTE and measured from the tick's start
+ * (`startMs + budgetMs * share`), not from each partition's own arrival, so
+ * it is one window near the front of the tick rather than an allowance
+ * handed out per partition. A grep partition the walk reaches after that
+ * window has closed still indexes its first missing file (the
+ * always-attempt-one guarantee in `buildSidecarsForTable`) and defers the
+ * rest to a later tick; the loop's own budget break above is what bounds
+ * the total. Reading this as a per-partition allowance would be reading a
+ * larger bound than the code holds, in the safe direction.
  */
 const GREP_INDEX_TICK_SHARE = 0.25
 
@@ -284,6 +294,17 @@ export async function maintainCache(opts) {
       try {
         const cursorAfter = readCursorSync(part.path)
         const liveDir = path.join(part.path, generationLayout(cursorAfter).liveDir)
+        // Before the coverage gate, and outside it. A build killed between
+        // its write and its rename leaves the sidecar unpublished, so the
+        // NEXT tick rebuilds it and coverage goes complete again - inside
+        // the sweep's own grace window, and therefore before the abandoned
+        // scratch is old enough to reclaim. Behind the gate the sweep would
+        // then never run again for that generation and the leak would last
+        // its whole life, which is the opposite of what the grace window is
+        // for. Costs one `readdir` of a directory `countIndexCoverage` reads
+        // anyway.
+        // @ref LLP 0304#scratch-sweep-site [implements]: the sweep is not gated on missing coverage, because a republished sidecar is what hides the scratch
+        sweepIndexScratch(liveDir)
         const coverage = countIndexCoverage(liveDir)
         if (coverage.indexed < coverage.indexable) {
           await withSpan(
