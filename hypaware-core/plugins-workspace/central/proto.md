@@ -145,16 +145,22 @@ Registration is expected to be idempotent: the client announces an eligible
 dataset once per sink instance, before that dataset's first ingest chunk, and
 a daemon restart (or a second concurrent tick) may announce it again.
 
+On the first successful registration for a local partition with no forward
+watermark, the client records the partition's current sequence high-water and
+sends none of its existing rows. Later rows use the ordinary incremental path.
+The four legacy signals keep their existing full first-export behavior.
+
 Response 2xx: registered. Any other status throws, which fails that
 partition for the driver's outbox retry, so the dataset re-announces on
 the next tick; the dataset is not marked registered until a call
 succeeds. A `401` refreshes the JWT once and retries, exactly as ingest
 does.
 
-> **Server status:** unverified from this repo. If the deployed server
-> does not serve this route, every non-legacy dataset PUTs and fails on
-> each tick and its rows never drain. That is visible only as a repeated
-> `central.forward.failed` warn naming the PUT URL.
+> **Server status:** this route is the fleet server's accepted catalog
+> protocol (server LLP 0001 / 0004) and was exercised against the deployed
+> Hyperparam server on 2026-08-24 with `claude_telemetry_events`. An older
+> server that does not serve it causes the partition to remain retryable and
+> emits `central.forward.failed` naming the PUT URL; no rows are POSTed.
 
 ### POST `/v1/ingest/{signal}`
 

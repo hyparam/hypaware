@@ -5,7 +5,7 @@
 **Systems:** Plugins, Query, Sources
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Extended-by:** LLP 0278 (the row shape gains a `cwd` column, so the export and query seams can withhold `local-only` rows)
+**Extended-by:** LLP 0278 (the row shape gains a `cwd` column, so the export and query seams can withhold `local-only` rows); LLP 0305 (eligible open datasets register centrally and begin at a fresh local high-water)
 **Related:** LLP 0012, LLP 0014, LLP 0015, LLP 0016, LLP 0030, LLP 0262 (the
 RFC this decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257
 

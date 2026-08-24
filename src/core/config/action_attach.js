@@ -204,10 +204,15 @@ export function createAttachHandler(opts = {}) {
       // @ref LLP 0086#endpoint-aware-markers [implements]: perform() records the endpoint on the done marker so drift is representable
       /** @type {JsonObject} */
       const detail = { endpoint }
+      // Claude's adapter has exactly one successful attach mode. Record that
+      // invariant from the requested client, not from best-effort stdout, so a
+      // parse miss cannot leave the new marker stale and re-run attach forever.
+      // @ref LLP 0262#migration [implements]: a successful Claude attach settles the proxy-to-OTEL migration even when its report payload is unavailable
+      if (client === 'claude') detail.mode = 'otel'
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
-        if (typeof parsed.mode === 'string') detail.mode = parsed.mode
+        if (client !== 'claude' && typeof parsed.mode === 'string') detail.mode = parsed.mode
       }
       // The undo record for the copies: reverse() removes exactly these paths,
       // so a user's own `hyp skills install` (which records no marker) survives
@@ -592,8 +597,8 @@ function captureStream() {
  * (`{ status, action, client, dry_run, settings_path?, port?, changed?,
  * prev_value? }`). Tolerant: trims, and on a parse miss falls back to the last
  * non-empty line (in case prose leaked onto stdout). Returns `undefined` when
- * nothing parses to an object so the caller records `done` without detail
- * rather than re-running a successful attach.
+ * nothing parses to an object. The caller still records every freshness key it
+ * owns independently of the payload, so a successful attach settles.
  *
  * @param {string} stdout
  * @returns {Record<string, unknown> | undefined}

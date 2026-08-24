@@ -24,11 +24,12 @@ function makeLog() {
  * is a small distinct row per index.
  *
  * @param {string} tablePath
- * @param {number} count
+ * @param {number | (() => number)} count
  * @param {(i: number) => Record<string, unknown>} [rowFactory]
  */
 function makeStorage(tablePath, count, rowFactory) {
   const factory = rowFactory ?? ((i) => ({ message_id: `m${i}`, content_text: `row ${i}` }))
+  const currentCount = () => typeof count === 'function' ? count() : count
   let flushes = 0
   return {
     cacheRoot: '/cache',
@@ -39,7 +40,7 @@ function makeStorage(tablePath, count, rowFactory) {
     async flushTable(_p) { flushes += 1 },
     /** @param {string} _p */
     async *readRows(_p) {
-      for (let i = 0; i < count; i += 1) {
+      for (let i = 0; i < currentCount(); i += 1) {
         yield factory(i)
       }
     },
@@ -52,7 +53,7 @@ function makeStorage(tablePath, count, rowFactory) {
      */
     async *readRowsSince(_p, opts) {
       const since = opts?.since ? BigInt(opts.since.seq) : 0n
-      for (let i = 0; i < count; i += 1) {
+      for (let i = 0; i < currentCount(); i += 1) {
         const seq = BigInt(i + 1)
         if (seq <= since) continue
         yield { row: factory(i), after: { v: 1, seq: seq.toString() } }
@@ -176,7 +177,7 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
 
 /**
  * @param {{
- *   count: number,
+ *   count: number | (() => number),
  *   responder?: (c: any) => (number | { status: number, retryAfter?: number }),
  *   rowFactory?: (i: number) => Record<string, unknown>,
  *   signal?: string | null,
@@ -211,6 +212,12 @@ function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleep
 }
 
 const batch = { partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE }] }
+const ZERO_WATERMARK = {
+  v: /** @type {const} */ (1),
+  continuation: { v: /** @type {const} */ (1), seq: '0' },
+  exportedRowCount: 0,
+  updatedAt: '2026-06-25T00:00:00.000Z',
+}
 
 test('forward sink chunks a large partition into bounded POSTs', async () => {
   const { sink, calls } = buildSink({ count: 12_000 })
@@ -288,7 +295,7 @@ test('byte-identical chunks get distinct batch-ids (no ledger collision)', async
 })
 
 test('a dataset with no sourceSignal registers and forwards under its dataset name', async () => {
-  const { sink, calls } = buildSink({ count: 10, signal: null })
+  const { sink, calls } = buildSink({ count: 10, signal: null, watermark: ZERO_WATERMARK })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(result.status, 'exported')
   assert.equal(calls.length, 2)
@@ -308,7 +315,11 @@ test('a dataset with no sourceSignal registers and forwards under its dataset na
 })
 
 test('claude telemetry registers its schema before forwarding under its dataset name', async () => {
-  const { sink, calls } = buildSink({ count: 10, signal: 'claude_telemetry' })
+  const { sink, calls } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    watermark: ZERO_WATERMARK,
+  })
   const result = await sink.exportBatch(
     /** @type {any} */ ({
       partitions: [{ dataset: 'claude_telemetry_events', tablePath: TABLE }],
@@ -345,11 +356,79 @@ test('a dataset schema announces once per sink instance, not once per tick', asy
   assert.deepEqual(calls.filter((c) => c.method === 'PUT').length, 1)
 })
 
+test('a newly forwardable open dataset starts after its existing local history', async () => {
+  let count = 10
+  const { sink, calls, watermarks, log } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+  })
+
+  const first = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(first.status, 'exported')
+  assert.deepEqual(calls.map((c) => c.method), ['PUT'])
+  assert.equal(watermarks.record?.continuation.seq, '10')
+  assert.equal(watermarks.record?.exportedRowCount, 0)
+  assert.equal(
+    log.rows.find((r) => r.message === 'central.forward.initial_history_skipped')?.fields.skipped_row_count,
+    10
+  )
+
+  count = 12
+  const second = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(second.status, 'exported')
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'POST'])
+  assert.deepEqual(calls[1].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+  assert.equal(watermarks.record?.continuation.seq, '12')
+  assert.equal(watermarks.record?.exportedRowCount, 2)
+})
+
+test('overlapping first ticks share one open-dataset history baseline', async () => {
+  const { sink, calls, watermarks, log } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+  })
+
+  const [first, second] = await Promise.all([
+    sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({})),
+    sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({})),
+  ])
+
+  assert.equal(first.status, 'exported')
+  assert.equal(second.status, 'exported')
+  assert.equal(watermarks.record?.continuation.seq, '10')
+  assert.equal(
+    log.rows.filter((r) => r.message === 'central.forward.initial_history_skipped').length,
+    1
+  )
+  assert.equal(calls.filter((c) => c.method === 'PUT').length, 1)
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
+})
+
+test('a missing open-dataset partition does not register a remote dataset', async () => {
+  const { sink, calls, watermarks } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+  })
+
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({
+      partitions: [{ dataset: 'claude_telemetry_events', tablePath: '/cache/missing' }],
+    }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  assert.equal(calls.length, 0)
+  assert.equal(watermarks.record, null)
+})
+
 test('a rejected schema announce fails the partition and never reaches ingest', async () => {
   let putStatus = 500
   const { sink, calls } = buildSink({
     count: 10,
     signal: 'claude_telemetry',
+    watermark: ZERO_WATERMARK,
     responder: (c) => (c.method === 'PUT' ? putStatus : 202),
   })
 
@@ -369,6 +448,23 @@ test('a rejected schema announce fails the partition and never reaches ingest', 
   assert.equal(ok.status, 'exported')
   assert.equal(calls.filter((c) => c.method === 'PUT').length, 2)
   assert.equal(calls.filter((c) => c.method === 'POST').length, 1)
+})
+
+test('a schema announce 401 refreshes once and retries the same registration', async () => {
+  let putCalls = 0
+  const { sink, calls, identityClient } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    watermark: ZERO_WATERMARK,
+    responder: (c) => c.method === 'PUT' && ++putCalls === 1 ? 401 : 202,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.equal(identityClient.refreshes, 1)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
+  assert.deepEqual(calls[0].lines, calls[1].lines)
 })
 
 test('an unresolvable dataset fails only its own partition', async () => {
