@@ -11,6 +11,7 @@ import { urlToPath } from '../../src/core/cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../../src/core/cache/iceberg/store.js'
 import { cacheStatus, maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
+import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { executeGrepSearch } from '../../src/core/search/grep_service.js'
 import { sidecarPathFor } from '../../src/core/search/searchable_columns.js'
@@ -335,4 +336,113 @@ test('a retired generation dies whole, sidecars included', async () => {
   await fs.writeFile(path.join(compactedDir, '.retired'), new Date(0).toISOString())
   await maintainCache({ cacheRoot })
   assert.equal(fsSync.existsSync(compactedDir), false, 'the retired generation and its sidecars are gone')
+})
+
+test('an abandoned publish scratch is reclaimed, and a live one is left alone', async () => {
+  // The publish is write-then-rename and the failure path unlinks its own
+  // scratch, but a SIGKILL between the two leaks an index-sized file that
+  // no counter bills and no pass removed: `countDataFiles` skips it for
+  // want of a `.parquet` suffix and `measureDataDir` skips its bytes, so
+  // it grew the cache invisibly until the generation retired, once per
+  // crash because the scratch token is random.
+  const { tableDir } = await makeCache([[OLD]])
+  const dataDir = path.join(tableDir(), 'data')
+  const [file] = await listLiveDataFiles(tableDir())
+  const sidecar = sidecarPathFor(urlToPath(file.filePath))
+  const stale = `${sidecar}.aaaaaaaa-dead.tmp`
+  const live = `${sidecar}.bbbbbbbb-live.tmp`
+  await fs.writeFile(stale, Buffer.alloc(64))
+  await fs.writeFile(live, Buffer.alloc(64))
+  // Two hours back, past the grace window a running build can occupy.
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+  await fs.utimes(stale, old, old)
+
+  await buildSidecarsForTable({ tableDir: tableDir(), log: quietLog })
+  assert.equal(fsSync.existsSync(stale), false, 'the abandoned scratch is gone')
+  assert.equal(fsSync.existsSync(live), true, 'a scratch young enough to be in flight is untouched')
+  assert.ok(fsSync.readdirSync(dataDir).some((n) => n.endsWith('.index.parquet')), 'and the pass still built')
+})
+
+test('a quarantined file is reported as quarantined, not as a fresh failure every tick', async () => {
+  // `sidecarsFailed = failed + quarantined` folded a file SKIPPED without a
+  // build into the count of work that failed, so a partition holding one
+  // poisoned file reported a new failure on every later tick. The pass also
+  // has to stop paying a metadata load per tick to rediscover it: the
+  // caller's gate counts files, and a quarantined file keeps coverage
+  // permanently short.
+  const { tableDir } = await makeCache([[OLD]])
+  const quarantine = createIndexQuarantine({ maxAttempts: 1 })
+  const first = await buildSidecarsForTable({
+    tableDir: tableDir(), quarantine, worker: failingWorker(), log: quietLog,
+  })
+  assert.equal(first.failed, 1)
+  assert.equal(first.quarantined, 0, 'the attempt that spent the budget is a failure, not a skip')
+
+  const later = await buildSidecarsForTable({
+    tableDir: tableDir(), quarantine, worker: failingWorker(), log: quietLog,
+  })
+  assert.equal(later.failed, 0, 'nothing was attempted')
+  assert.equal(later.quarantined, 1)
+  assert.equal(later.built, 0)
+})
+
+test('retention purges rows without orphaning a sidecar, and the stale index cannot resurrect them', async () => {
+  // LLP 0265 T6 asked for a test that retention and the orphan sweep delete
+  // sidecars with their files. Retirement is pinned above; this is the
+  // retention half. On the grep dataset retention is row-level (the schema
+  // carries `date`), so the file and its sidecar both SURVIVE and the
+  // property that matters is the one a stale index could break.
+  const { cacheRoot, storage, tableDir } = await makeCache([[OLD], [NEW]])
+  await maintainCache({ cacheRoot, force: true })
+  const indexedBefore = await listLiveDataFiles(tableDir())
+  for (const file of indexedBefore) {
+    assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))), 'the fixture starts fully indexed')
+  }
+
+  // 90 days after 2026-08-12 lands the cutoff exactly on NEW's day, so OLD
+  // expires and NEW does not.
+  const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } })
+  const result = await enforcer.tick({ now: new Date('2026-11-10T00:00:00Z') })
+  const purged = result.sourceTableResults.find((r) => r.dataset === DATASET)
+  assert.ok(purged)
+  assert.equal(purged.rowsDeleted, 1, 'exactly the row past the window')
+
+  for (const file of await listLiveDataFiles(tableDir())) {
+    assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))),
+      'a row-level purge leaves every live file indexed; no sidecar is orphaned')
+  }
+  const res = await executeGrepSearch({ storage, query: 'needle', limit: 10, includeLocalOnly: true })
+  assert.ok(res.indexedFiles >= 1, 'the search still runs on the indexed tier')
+  assert.deepEqual(res.hits.map((h) => h.sessionId), ['s2'], 'the purged row does not come back through its index')
+})
+
+test('retention that reclaims a whole partition takes its sidecars with it', async () => {
+  // The other retention path: a table whose schema carries no timestamp
+  // column at all is evicted by directory mtime, recursively. Sidecars live
+  // inside `data/`, so they die with their files and nothing sweeps them
+  // separately - the no-GC-code guarantee, on the second of the two paths
+  // LLP 0265 T6 names.
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sidecar-ret-'))
+  /** @type {ColumnSpec[]} */
+  const untimed = [
+    { name: 'session_id', type: 'STRING', nullable: false },
+    { name: 'content_text', type: 'STRING', nullable: true },
+    { name: 'part_id', type: 'STRING', nullable: false },
+  ]
+  const declaration = {
+    source: { columns: ['session_id'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: /** @type {const} */ ('identity'), required: true }] },
+  }
+  await appendRowsToSourceTable(cacheRoot, DATASET, ['source=test'], untimed,
+    [{ session_id: 's1', content_text: 'needle', part_id: 'p1' }], { declaration })
+  const partitionDir = path.join(cacheRoot, 'datasets', DATASET, 'source=test')
+  const dir = resolveIcebergDir(partitionDir)
+  const built = await buildSidecarsForTable({ tableDir: dir, log: quietLog })
+  assert.equal(built.built, 1)
+  const [file] = await listLiveDataFiles(dir)
+  assert.ok(fsSync.existsSync(sidecarPathFor(urlToPath(file.filePath))))
+
+  const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 1 } })
+  await enforcer.tick({ now: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) })
+  assert.equal(fsSync.existsSync(partitionDir), false, 'the partition and every sidecar inside it are gone')
 })

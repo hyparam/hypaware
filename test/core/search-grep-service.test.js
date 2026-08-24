@@ -168,7 +168,12 @@ test('scan tier: the limit truncates to the newest matches', async () => {
   assert.equal(res.hits.length, 1)
   assert.equal(res.hits[0].date, '2026-08-12', 'the newest match survives truncation')
   assert.equal(res.truncated, true)
-  assert.equal(res.exhausted, false)
+  // Exhausted, because the walk covered everything that could have changed
+  // the answer: the day-descending break fires only once the buffer holds
+  // hits strictly newer than every file left, which is a proof, not a
+  // surrender. Reporting it as unexhausted made the verb's "results may be
+  // incomplete" line the answer to an ordinary capped search.
+  assert.equal(res.exhausted, true)
 })
 
 test('the limit keeps the newest matches inside one file, not the first ones walked', async () => {
@@ -185,7 +190,46 @@ test('the limit keeps the newest matches inside one file, not the first ones wal
   const capped = await grep(storage, { limit: 3 })
   assert.deepEqual(capped.hits.map((h) => h.messageId), newest, 'the newest three survive the limit')
   assert.equal(capped.truncated, true)
-  assert.equal(capped.exhausted, false)
+  assert.equal(capped.exhausted, true, 'one file, read whole: the limit cut the answer, the walk did not')
+})
+
+test('truncation and interruption are two facts, and a search can carry both', async () => {
+  // `exhausted: exhausted && !truncated` collapsed them, so a search that
+  // filled its limit AND stopped early reported only "raise --limit" -
+  // advice that cannot reach the files the walk never opened. The newest
+  // file alone overfills a limit of 1, and the abort is observed at the
+  // next file boundary, where `throwIfAborted` runs ahead of the
+  // day-descending break: so the walk really does leave a file unread.
+  const controller = new AbortController()
+  // One session and one day, so the identity partition puts both rows in
+  // ONE data file: the file has to overfill the limit by itself for the
+  // abort at the next boundary to leave a genuinely unread file behind.
+  const newest = [
+    mkRow({ date: '2026-08-13', session_id: 'a', cwd: '/home/rows', content_text: 'needle one' }),
+    mkRow({ date: '2026-08-13', session_id: 'a', cwd: '/home/rows', content_text: 'needle two' }),
+  ]
+  const older = [mkRow({ date: '2026-08-10', session_id: 'c', cwd: '/home/rows', content_text: 'needle three' })]
+  const { storage } = await makeCache([newest, older])
+  /** @type {UsagePolicyResolver} */
+  const resolver = {
+    // The visibility predicate runs per matched row, which makes it the one
+    // deterministic place to land an abort mid-walk: it fires inside the
+    // first file, and the walk observes it at the next file boundary.
+    resolve: (cwd) => {
+      if (cwd === '/home/rows') controller.abort()
+      return { class: 'full', governedBy: null, declared: null }
+    },
+    isIgnored: () => false,
+  }
+  const res = await grep(storage, {
+    limit: 1,
+    includeLocalOnly: false,
+    callerCwd: '/home/caller',
+    usagePolicyResolver: resolver,
+    signal: controller.signal,
+  })
+  assert.equal(res.truncated, true, 'the first file alone overfilled the limit')
+  assert.equal(res.exhausted, false, 'and the abort left files unread')
 })
 
 test('a chain id alone scopes the walk, with no session id beside it', async () => {

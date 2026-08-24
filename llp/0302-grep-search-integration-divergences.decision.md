@@ -6,6 +6,7 @@
 **Author:** neutral
 **Date:** 2026-08-24
 **Extends:** LLP 0264 (#visibility, #lifecycle), LLP 0265 (T6)
+**Extended-by:** [LLP 0303](./0303-grep-search-round-3-corrections.decision.md) (#build-site is budgeted by a share of the tick rather than its tail, and sweeps its own publish scratch; #usage-exit reaches the query refusals the shared matcher raises; most of #residuals is closed)
 **Related:** LLP 0104 (position deletes), LLP 0105 (local-only visibility), LLP 0199 (the compaction baseline gate), LLP 0217 (the effectiveness verdict), LLP 0220 (a partition's error ends that partition), LLP 0293 (#one-contract: exit 2 is the usage code)
 
 > [LLP 0264](./0264-grep-search-mirrors-the-server.decision.md) is Accepted and
@@ -122,6 +123,13 @@ repeating.
 The `hyp query status` line says "maintenance indexes them", not "compaction
 indexes them", for the same reason.
 
+**Extended-by:** [LLP 0303 #build-share](./0303-grep-search-round-3-corrections.decision.md#build-share).
+Handing the pass the tick's own deadline bounds the tick but not the walk: the
+neediest-first order puts the partition with the most to index first, so the
+pass could spend the tail and starve every partition behind it. It is capped at
+a share of the tick per partition now, and it sweeps abandoned publish scratch
+([#scratch-sweep](./0303-grep-search-round-3-corrections.decision.md#scratch-sweep)).
+
 ## An argument rule the schema cannot state still exits 2 {#usage-exit}
 
 [LLP 0293 #one-contract](./0293-core-command-argument-validation.decision.md#one-contract)
@@ -154,6 +162,12 @@ costs nothing, since both are the tool's error text. This is available to every
 verb, not only to grep; it is the seam LLP 0293 D1 needs wherever a rule
 outgrows the schema.
 
+**Extended-by:** [LLP 0303 #query-refusal-exit](./0303-grep-search-round-3-corrections.decision.md#query-refusal-exit).
+An invalid `--regex` pattern and an over-length query are the same kind of
+caller mistake and still exited 1, because they are refused inside the shared
+matcher, which must not import a CLI error class. The shared module raises a
+refusal KIND (`GrepQueryError`) and each surface maps it to its own code.
+
 The same rule reaches the one argument the schema CAN state and was not
 stating. `limit` was declared a bare `number`, and the operation then rewrote
 anything unusable to the default, so `--limit 0`, `--limit -5` and
@@ -166,6 +180,10 @@ than refuses, because the help text promises a capped answer and "raise
 --limit" is advice a caller already at the ceiling cannot follow.
 
 ## What this does not settle {#residuals}
+
+> Superseded in part by
+> [LLP 0303 #residuals](./0303-grep-search-round-3-corrections.decision.md#residuals),
+> which closes the T6 test and narrows the rest.
 
 - **The T6 test that was promised.** LLP 0265 T6 asks for a test pinning that
   "orphan sweep and retention delete sidecars with their files". Retirement is

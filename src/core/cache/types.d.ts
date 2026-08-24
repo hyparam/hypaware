@@ -311,8 +311,15 @@ export interface MaintenancePartitionReport {
   compactedBytesWritten?: number
   /** Grep sidecars built for the live generation; absent when the build pass did not run. */
   sidecarsBuilt?: number
-  /** Files whose sidecar build failed or is quarantined; the scan tier serves them. */
+  /** Files whose sidecar build failed on THIS pass; the scan tier serves them. */
   sidecarsFailed?: number
+  /**
+   * Files skipped without a build because the per-file attempt budget is
+   * spent. Separate from `sidecarsFailed`, which counts work this pass
+   * actually attempted: a quarantined file costs nothing and would
+   * otherwise report a fresh failure on every later tick.
+   */
+  sidecarsQuarantined?: number
   /**
    * Files still missing a sidecar when the tick's budget ran out. They are
    * built by a later tick: the pass is resumable because sidecar existence

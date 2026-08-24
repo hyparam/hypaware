@@ -112,8 +112,14 @@ function constantSet(columns) {
  * missing and silently yields a wrong or empty hit.
  *
  * - `date`: the from/to window predicate, and the hit's own day.
- * - `received_at`: the tier exclusion, the rule that keeps a row held by
- *   two tiers at once from being counted twice.
+ * - `received_at`: the SERVER's tier exclusion, the rule that keeps a row
+ *   its cache and its archive both hold from being counted twice. The
+ *   client has no such rule (a row lives in exactly one data file, and one
+ *   file takes exactly one tier) and its `ai_gateway_messages` carries no
+ *   such column at all, so on this side the name is inert and the read
+ *   below simply skips it. It is listed because this constant is shared:
+ *   dropping it would starve the server's own exclusion, which is a wrong
+ *   answer rather than a slower one.
  * - `part_id`, `message_id`, `message_created_at`: the hit's locator
  *   fields, and the sort key plus tiebreak that order the answer.
  *

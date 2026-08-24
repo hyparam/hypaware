@@ -236,6 +236,46 @@ test('an interrupted walk reports the interruption, not an empty machine', async
   assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
 })
 
+test('a truncated AND interrupted search prints both notices, not the louder one', () => {
+  // They mean different things and the skill doc teaches them as such: a
+  // wider limit reaches the matches the limit cut, and nothing reaches the
+  // files an aborted walk never opened. Rendering them as if-else let the
+  // truncation line hide the one the caller cannot act on any other way.
+  const both = queryGrepVerb.render(
+    { hits: [], truncated: true, exhausted: false, indexedFiles: 2, scannedFiles: 1 },
+    /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(both.stderr ?? '', /more matches exist beyond the limit/)
+  assert.match(both.stderr ?? '', /stopped before covering every file/)
+  // And an ordinary capped search still says one thing, because the service
+  // reports `exhausted` for an abort only.
+  const capped = queryGrepVerb.render(
+    { hits: [], truncated: true, exhausted: true, indexedFiles: 2, scannedFiles: 1 },
+    /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.doesNotMatch(capped.stderr ?? '', /stopped before covering every file/)
+})
+
+test('a pattern the search cannot use is a usage refusal, not a failed search', async () => {
+  // Same class as the day flags: the caller typed it wrong. It exits 1
+  // only because the refusal is raised three modules down in the shared
+  // matcher, and a script that retries on 1 and reports on 2 answers a
+  // typo with a retry loop that can never succeed.
+  const { ctx, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  assert.equal(await cmd.run(['(', '--regex'], ctx), 2)
+  assert.match(err.join(''), /not a valid regular expression/)
+  assert.match(err.join(''), /^usage: /m)
+
+  const { ctx: ctx2, err: err2 } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  assert.equal(await cmd.run(['x'.repeat(2000)], ctx2), 2)
+  assert.match(err2.join(''), /at most 1024 characters/)
+
+  // A search that really fails is still 1: the two codes have to stay apart.
+  const { ctx: ctx3 } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+  ctx3.storage.discoverCachePartitions = () => Promise.reject(new Error('cache is busy'))
+  assert.equal(await cmd.run(['needle'], ctx3), 1)
+})
+
 test('zero hits over a searched cache stays quiet', async () => {
   const { ctx, err } = await makeCtx([[mkRow({ content_text: 'nothing to see' })]])
   const code = await cmd.run(['needle'], ctx)

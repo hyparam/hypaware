@@ -33,9 +33,21 @@ export interface GrepSearchHit {
 }
 
 /**
+ * Two INDEPENDENT completeness facts, never one collapsed into the other.
+ *
  * `truncated`: the limit cut the answer (more matches exist; narrow with
- * `from`/`to` or a tighter query). `exhausted`: every candidate file was
- * walked to completion.
+ * `from`/`to` or a tighter query). `exhausted`: the walk covered
+ * everything that could have changed the answer, so what came back is what
+ * a complete search would have returned for this limit.
+ *
+ * A search can be both truncated and unexhausted, and the two then call for
+ * different things: a wider limit reaches the matches the limit cut, and
+ * nothing reaches the files an aborted walk never opened. A consumer that
+ * reads only one of them tells its caller the wrong half.
+ *
+ * A walk that stops early having PROVED the remainder cannot enter the
+ * answer (the client's day-descending break) is exhausted: no file it
+ * skipped could have displaced a returned hit.
  */
 export interface GrepSearchResult {
   hits: GrepSearchHit[]

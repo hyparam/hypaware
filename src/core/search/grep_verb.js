@@ -3,6 +3,10 @@
 import { VerbUsageError } from '../cli/verb_errors.js'
 import { buildQuerySqlOutput } from '../query/format.js'
 import { renderLocalOnlyNotice } from '../query/verb.js'
+// The matcher module is pulled in for its refusal kind alone, and imports
+// nothing beyond the allowlist below, so the boot-path deferral that keeps
+// hypgrep and the Iceberg store out of `hyp --help` is untouched.
+import { GrepQueryError } from './matcher.js'
 import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
 
 /**
@@ -59,6 +63,7 @@ export const queryGrepVerb = {
         description: 'Substring to find (case-insensitive), or a regex pattern with regex: true',
         greedy: true,
       },
+      // @ref LLP 0303#regex-reachability [constrained-by]: local regex stays ungated while the client's only tool transport is stdio; an HTTP one has to gate it
       regex: {
         type: 'boolean',
         description:
@@ -122,20 +127,33 @@ export const queryGrepVerb = {
     if (from !== undefined && to !== undefined && from > to) {
       throw new VerbUsageError(`--from ${from} is after --to ${to}, so the window selects no days`)
     }
-    const result = await executeGrepSearch({
-      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
-      query: String(params.query ?? ''),
-      regex: params.regex === true,
-      sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
-      chainId: typeof params.chain_id === 'string' ? params.chain_id : undefined,
-      from,
-      to,
-      limit,
-      refresh: ctx.refresh,
-      // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
-      callerCwd: ctx.callerCwd,
-      includeLocalOnly: params['include-local-only'] === true,
-    })
+    let result
+    try {
+      result = await executeGrepSearch({
+        storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+        query: String(params.query ?? ''),
+        regex: params.regex === true,
+        sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
+        chainId: typeof params.chain_id === 'string' ? params.chain_id : undefined,
+        from,
+        to,
+        limit,
+        refresh: ctx.refresh,
+        // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
+        callerCwd: ctx.callerCwd,
+        includeLocalOnly: params['include-local-only'] === true,
+      })
+    } catch (err) {
+      // `hyp query grep '(' --regex` is a typo, not a failed search, and it
+      // reached the caller as exit 1 because the refusal is raised three
+      // modules down in the shared matcher. Translating at this boundary is
+      // what keeps that module free of the CLI: the matcher names the kind,
+      // the verb names the exit code, and the same refusal can mean 400 on
+      // a serving surface that never heard of `VerbUsageError`.
+      // @ref LLP 0303#query-refusal-exit [implements]: the shared module's refusal becomes this surface's usage error at the surface, not inside it
+      if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
+      throw err
+    }
     // The clamp's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
@@ -164,13 +182,22 @@ export const queryGrepVerb = {
     let stderr = (r.freshnessMessages ?? []).map((m) => `${m}\n`).join('')
     stderr += renderLocalOnlyNotice(r.localOnly)
     // The two completeness signals, on stderr so stdout stays a valid
-    // render: the limit cut the answer (narrow or raise --limit), or the
-    // walk stopped early (an abort or server deadline mid-search).
+    // render: the limit cut the answer (narrow or raise --limit), and/or
+    // the walk stopped early (an abort or server deadline mid-search).
+    //
+    // BOTH, not one or the other. They are independent facts and the
+    // shipped skill doc teaches them as meaning different things, so a
+    // search that filled its limit AND aborted must say so twice: "raise
+    // --limit" alone points at a lever that cannot reach the files the
+    // walk never opened. The service reports `exhausted` for an abort
+    // only, so an ordinary capped search still prints one line.
+    // @ref LLP 0303#completeness-signals [implements]: each notice reports its own fact, so neither can hide the other
     if (r.truncated === true) {
       stderr += r.limitCeilingReached === true
         ? `grep: more matches exist beyond the ${MAX_LIMIT}-hit ceiling - narrow with --from/--to or --session-id\n`
         : 'grep: more matches exist beyond the limit - narrow with --from/--to or --session-id, or raise --limit\n'
-    } else if (r.exhausted === false) {
+    }
+    if (r.exhausted === false) {
       stderr += 'grep: the search stopped before covering every file; results may be incomplete\n'
     }
     // Zero hits over zero files is not the answer the summary's coverage

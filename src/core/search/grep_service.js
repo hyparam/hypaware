@@ -1,8 +1,6 @@
 // @ts-check
 
-import fs from 'node:fs'
-
-import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
 import { parquetFind } from 'hypgrep'
 
 import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
@@ -19,7 +17,7 @@ import {
   resolveCallerClass,
 } from '../query/visibility.js'
 import { LocalOnlyListUnreadableError } from '../usage-policy/local_only.js'
-import { cellText, compileMatcher, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
+import { cellText, compileMatcher, GrepQueryError, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
 import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from './searchable_columns.js'
 
 /**
@@ -30,11 +28,17 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * blocks, the shared matcher confirms), a file without one is brute-scanned.
  * Both tiers read under the narrow `SCAN_COLUMNS` projection, so the index
  * changes which rows are decoded and never how wide. Files are processed
- * strictly sequentially and each is read one ROW GROUP at a time, so the
- * request's memory bound is one row group plus, on the indexed tier, its
- * index; never a whole 128 MiB data file and never a day's worth. No sidecar
- * anywhere (the tree before T6 of LLP 0265 runs) means every file takes the
- * scan tier: slower, never wrong.
+ * strictly sequentially and each is read one ROW GROUP at a time, over a
+ * file-handle-backed `AsyncBuffer` that fetches only the byte ranges the
+ * projection needs. Both halves are load-bearing for the memory bound: the
+ * row-group split bounds the DECODED rows, and the handle-backed buffer
+ * bounds the RAW bytes. The cache's own `resolver.reader` cannot do the
+ * second (it is `readFileSync` of the whole file, which would leave a
+ * 128 MiB `target_file_bytes` data file resident behind a walk that reads
+ * it a row group at a time, and would block the loop for the read). So the
+ * request's memory bound really is one row group plus, on the indexed tier,
+ * its index. No sidecar anywhere (the tree before T6 of LLP 0265 runs) means
+ * every file takes the scan tier: slower, never wrong.
  *
  * Unlike the server there is no cross-tier day exclusion: a client row lives
  * in exactly one data file, and each file is served by exactly one tier, so
@@ -115,7 +119,7 @@ export async function executeGrepSearch(args) {
   // cache; a negative one reaches the result trim and throws a bare
   // `RangeError: Invalid array length` from deep inside the service.
   if (!Number.isSafeInteger(limit) || limit <= 0) {
-    throw new Error('limit must be a positive integer')
+    throw new GrepQueryError('limit must be a positive integer')
   }
   // Collect one past the limit: the overflow hit is the proof that
   // `truncated` is true, and is never returned.
@@ -180,7 +184,13 @@ export async function executeGrepSearch(args) {
       /** @type {Set<string>} */
       const settlePaths = new Set()
       try {
-        for (const tablePath of await discoverSpoolTables(storage.cacheRoot)) {
+        // Scoped to this dataset: the walk recurses into every generation's
+        // `data/` directory, so an unscoped one would readdir the traces,
+        // logs and metrics trees on every search to find the one dataset
+        // grep covers. The dataset name IS the directory name under
+        // `datasets/` (`cacheTablePath`), so the filter below is now a
+        // cheap re-assertion rather than the thing doing the narrowing.
+        for (const tablePath of await discoverSpoolTables(storage.cacheRoot, { datasets: [DATASET] })) {
           if (datasetForTablePath(storage.cacheRoot, tablePath) === DATASET) settlePaths.add(tablePath)
         }
       } catch {
@@ -232,7 +242,16 @@ export async function executeGrepSearch(args) {
       const { resolver: io } = await createLocalIcebergIO()
       /** @type {GrepSearchHit[]} */
       const hits = []
-      let exhausted = true
+      /**
+       * Did an abort cut the walk short? This, and not the day-descending
+       * early break below, is what `exhausted` reports. The break stops the
+       * walk only once it has PROVED that nothing left can enter the answer,
+       * so the answer it produced is the answer a full walk would have
+       * produced; an abort's is not. Collapsing the two would fire the
+       * verb's "results may be incomplete" notice on every ordinary capped
+       * search, which is the one place it must not.
+       */
+      let interrupted = false
       let indexedFiles = 0
       let scannedFiles = 0
 
@@ -329,7 +348,14 @@ export async function executeGrepSearch(args) {
             query: matcher.hypQuery,
             url: file.filePath,
             indexFile,
-            asyncBufferFactory: async ({ url }) => await io.reader(url),
+            // hypgrep opens the SOURCE data file through this factory and
+            // wraps it in its own `cachedAsyncBuffer`, so a handle-backed
+            // buffer gives the indexed tier the same raw-byte bound the
+            // scan tier gets below: a candidate range fetches the byte
+            // ranges its row group needs, not the whole file. The sidecar
+            // is deliberately NOT read this way (see `searchFile`).
+            // @ref LLP 0303#memory-bound [implements]: the row-group split bounds decoded rows, the handle-backed buffer bounds raw bytes
+            asyncBufferFactory: async ({ url }) => await asyncBufferFromFile(urlToPath(url)),
             columns: SCAN_COLUMNS,
             rowFilter: accept,
             signal,
@@ -405,20 +431,28 @@ export async function executeGrepSearch(args) {
         const sidecarUrl = sidecarPathFor(file.filePath)
         /** @type {Awaited<ReturnType<typeof io.reader>> | null} */
         let indexFile = null
-        if (fs.existsSync(urlToPath(sidecarUrl))) {
-          try {
-            indexFile = await io.reader(sidecarUrl)
-          } catch (err) {
-            // Every reader failure degrades, not only the delete race: an
-            // unreadable sidecar is an unindexed file, and an unindexed
-            // file is the scan tier's, never the caller's error.
-            if (isAbort(err, signal)) throw err
-            indexFile = null
-          }
+        try {
+          // No `existsSync` probe ahead of this: a missing sidecar throws
+          // ENOENT from the open, which is the same degrade this catch
+          // already performs for every other reader failure, so the probe
+          // only added a synchronous stat per data file to an otherwise
+          // fully async walk. Degrading on ANY failure, not only the delete
+          // race, is the rule: an unreadable sidecar is an unindexed file,
+          // and an unindexed file is the scan tier's problem, never the
+          // caller's error.
+          //
+          // The sidecar alone stays on the cache's resident reader. It is
+          // the pruning structure, read in many small random ranges by
+          // `queryIndex`, and a fraction of the data file it indexes; the
+          // 128 MiB file the memory bound is about is the source, and that
+          // one is handle-backed on both tiers.
+          indexFile = await io.reader(sidecarUrl)
+        } catch (err) {
+          if (isAbort(err, signal)) throw err
+          indexFile = null
         }
         if (indexFile && await searchIndexed(file, indexFile, sidecarUrl)) return
-        scannedFiles += 1
-        const sourceFile = await io.reader(file.filePath)
+        const sourceFile = await asyncBufferFromFile(urlToPath(file.filePath))
         // One ROW GROUP at a time, not the whole file. A compacted data
         // file runs to `target_file_bytes` (128 MiB by default) and the
         // projection's bulk column is `content_text`, so materializing it
@@ -428,6 +462,15 @@ export async function executeGrepSearch(args) {
         // SQL seam streams (`scanRowsFromTable`). The abort checks below
         // could not fire during that decode either, so the deadline did
         // not bound the step that dominates the wall clock.
+        //
+        // Splitting the DECODE is only half of it: over the cache's own
+        // `resolver.reader` every slice comes out of a buffer that
+        // `readFileSync` already filled with the whole file, so the raw
+        // bytes stayed resident however finely the decode was cut, and the
+        // read itself blocked the loop. `asyncBufferFromFile` above reads
+        // per slice instead, so the projection's own byte ranges are all
+        // that is ever fetched: strictly less IO than the whole file, and
+        // none of it synchronous.
         //
         // The row group is the unit rather than a fixed row count for a
         // reason: without the offset index hyparquet fetches and decodes a
@@ -465,6 +508,14 @@ export async function executeGrepSearch(args) {
           }
           groupStart += groupRows
         }
+        // Counted here, not before the read, so the two tier counters mean
+        // the same thing: `indexedFiles` counts a file the indexed tier
+        // served WHOLE (its abort path commits its buffer without
+        // counting), and an abort mid-scan throws out of the loop above
+        // before this line. A counter that included interrupted files on
+        // one tier and not the other made the pair unusable for exactly
+        // the comparison it exists for.
+        scannedFiles += 1
       }
 
       try {
@@ -478,10 +529,11 @@ export async function executeGrepSearch(args) {
             // walk can displace one and the walk stops. A same-day file (or
             // one whose day would not decode) is still read, because its
             // rows can outrank a kept hit.
-            if (file.day !== null && file.day < hits[hits.length - 1].date) {
-              exhausted = false
-              break
-            }
+            // Not an interruption: the proof above is why `exhausted`
+            // stays true here. The caller still learns the answer was cut,
+            // through `truncated`, which is the fact carrying the advice
+            // that can act on it (narrow the window, or raise the limit).
+            if (file.day !== null && file.day < hits[hits.length - 1].date) break
           }
           if (file.day !== null
             && ((rowFrom !== undefined && file.day < rowFrom) || (rowTo !== undefined && file.day > rowTo))) {
@@ -493,7 +545,7 @@ export async function executeGrepSearch(args) {
         // The caller aborting mid-walk keeps what was found: a partial
         // answer marked not exhausted, never an error.
         if (!isAbort(err, signal)) throw err
-        exhausted = false
+        interrupted = true
       }
 
       trimHits()
@@ -505,6 +557,7 @@ export async function executeGrepSearch(args) {
       span.setAttribute('scanned_file_count', scannedFiles)
       span.setAttribute('hit_count', hits.length)
       span.setAttribute('truncated', truncated)
+      span.setAttribute('interrupted', interrupted)
       span.setAttribute('caller_usage_class', localOnly.callerClass)
       span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
       // Counts only, never content or raw paths, matching the SQL seam's
@@ -521,7 +574,15 @@ export async function executeGrepSearch(args) {
       return {
         hits,
         truncated,
-        exhausted: exhausted && !truncated,
+        // Independent of `truncated`, deliberately. Folding truncation in
+        // here (`exhausted && !truncated`) made one field carry two facts
+        // the shipped skill doc teaches as separate, and a search that BOTH
+        // filled its limit AND aborted mid-walk then reported only "raise
+        // --limit": advice that cannot recover the files the walk never
+        // reached. An MCP caller reading `exhausted` lost the same
+        // distinction.
+        // @ref LLP 0303#completeness-signals [implements]: truncation and walk completion are two facts, reported as two
+        exhausted: !interrupted,
         localOnly,
         freshnessMessages,
         indexedFiles,

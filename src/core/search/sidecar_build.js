@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
+import path from 'node:path'
 
 import { urlToPath } from '../cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../cache/iceberg/store.js'
@@ -73,6 +74,97 @@ import { sidecarPathFor } from './searchable_columns.js'
 const MAX_INDEX_ATTEMPTS = 3
 
 /**
+ * How long an abandoned publish scratch file is left alone before the pass
+ * reclaims it. The publish is write-then-rename, and the failure path
+ * unlinks its own scratch, but a SIGKILL between the two (a shut-down
+ * daemon, an OOM kill) leaves an index-sized file behind. Nothing else
+ * would ever remove it: the scratch name is outside `.parquet` precisely so
+ * it joins no data-file count, which also means `measureDataDir` does not
+ * bill its bytes and `hyp cache status` under-reports the partition, and
+ * the random token means each crash leaks a NEW file rather than reusing
+ * one. So the pass sweeps them, but only past a grace window: a build takes
+ * seconds, and a second writer over the same cache (the daemon's tick and a
+ * hand-run `hyp`) must never have its in-flight scratch pulled out from
+ * under it.
+ *
+ * @ref LLP 0303#scratch-sweep [implements]: nothing else bills or removes an abandoned scratch, so the pass that writes them reclaims them
+ */
+const SCRATCH_GRACE_MS = 60 * 60 * 1000
+
+/**
+ * The data files in this directory, split into indexed, missing, and of the
+ * missing, still buildable. A pure directory read and deliberately a
+ * SUPERSET of the live file set: a dereferenced file still on disk counts
+ * as missing, which at worst costs the pass one metadata load. `null` for
+ * an unreadable directory, which is not proof of no work.
+ *
+ * A path form this function and `urlToPath` spell differently would make
+ * the quarantine lookup miss and count the file buildable, which is again
+ * the safe direction: the full pass runs and re-derives the same answer.
+ *
+ * @param {string} dataDir
+ * @param {ReturnType<typeof createIndexQuarantine>} quarantine
+ * @returns {{ present: number, missing: number, buildable: number } | null}
+ */
+function scanForBuildable(dataDir, quarantine) {
+  /** @type {Set<string>} */
+  let names
+  try {
+    names = new Set(fs.readdirSync(dataDir))
+  } catch {
+    return null
+  }
+  const out = { present: 0, missing: 0, buildable: 0 }
+  for (const name of names) {
+    if (!name.endsWith('.parquet')) continue
+    if (name.endsWith('.index.parquet') || name.endsWith('-deletes.parquet')) continue
+    if (names.has(sidecarPathFor(name))) {
+      out.present += 1
+      continue
+    }
+    out.missing += 1
+    if (!quarantine.isQuarantined(path.join(dataDir, name))) out.buildable += 1
+  }
+  return out
+}
+
+/**
+ * Remove publish scratch files old enough that no live build can own them.
+ * Synchronous and best effort: it runs once per pass over a directory the
+ * pass is about to read anyway, and a scratch that races the unlink is one
+ * a crash would have left for the next tick regardless.
+ *
+ * @param {string} dataDir
+ * @param {{ warn(msg: string, fields?: object): void }} logger
+ * @returns {void}
+ */
+function sweepStaleScratch(dataDir, logger) {
+  const cutoff = Date.now() - SCRATCH_GRACE_MS
+  /** @type {string[]} */
+  let names
+  try {
+    names = fs.readdirSync(dataDir)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (!name.endsWith('.tmp') || !name.includes('.index.parquet')) continue
+    const full = path.join(dataDir, name)
+    try {
+      if (fs.statSync(full).mtimeMs > cutoff) continue
+      fs.rmSync(full, { force: true })
+    } catch {
+      continue
+    }
+    logger.warn('grep_index.scratch_swept', {
+      [Attr.COMPONENT]: 'cache',
+      [Attr.OPERATION]: 'maintenance.grep_index',
+      scratch_file: full,
+    })
+  }
+}
+
+/**
  * @param {{ maxAttempts?: number }} [args]
  */
 export function createIndexQuarantine({ maxAttempts = MAX_INDEX_ATTEMPTS } = {}) {
@@ -129,6 +221,26 @@ const processQuarantine = createIndexQuarantine()
 export async function buildSidecarsForTable({ tableDir, quarantine = processQuarantine, worker, deadlineMs, log }) {
   const logger = log ?? getLogger('cache')
   const report = { built: 0, present: 0, failed: 0, quarantined: 0, deferred: 0 }
+  const dataDir = path.join(tableDir, 'data')
+  sweepStaleScratch(dataDir, logger)
+  // Ahead of `listLiveDataFiles`, which is a metadata plus manifest load.
+  // A file that needs a build is always ON DISK in this directory, so
+  // "every missing sidecar is quarantined" can never hide a build the pass
+  // would have made, and it is the one answer the caller's coverage gate
+  // cannot give: that gate counts files, and a quarantined file keeps
+  // coverage permanently short, so without this a single poisoned file
+  // bought a metadata load every tick for the life of its generation just
+  // to rediscover there was nothing to do.
+  //
+  // Only the all-quarantined case short-circuits. Complete coverage runs
+  // the full pass, because there the metadata load is what makes `present`
+  // a count of LIVE files rather than of whatever is still on disk.
+  const scan = scanForBuildable(dataDir, quarantine)
+  if (scan && scan.missing > 0 && scan.buildable === 0) {
+    report.present = scan.present
+    report.quarantined = scan.missing
+    return report
+  }
   const files = await listLiveDataFiles(tableDir)
   if (files.length === 0) return report
   const ownWorker = worker ?? createIndexWorker({ log: logger })

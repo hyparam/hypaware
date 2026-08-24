@@ -6,6 +6,31 @@ import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
  * @import { GrepSearchMatcher } from '../../../src/core/search/types.js'
  */
 
+/**
+ * The query itself is unusable: empty, past the length cap, or a regex the
+ * engine will not compile. A distinct kind rather than a bare `Error`
+ * because every one of these is the CALLER's argument mistake, and the
+ * serving surfaces need to say so in their own vocabulary: the CLI maps it
+ * to the usage exit code (2, not the 1 that means the search itself
+ * failed), and an HTTP surface to 400 rather than 500.
+ *
+ * It lives HERE, in the module both repositories share, for the reason the
+ * matcher does: which refusals belong to the caller is part of what "the
+ * same query means the same thing on every tier" has to cover. It carries
+ * no CLI dependency, so the shared module stays importable by a server
+ * that maps it somewhere else entirely.
+ *
+ * @ref LLP 0264#shared [implements]: the shared module owns the refusal kinds too, not only the match rule
+ * @ref LLP 0303#query-refusal-exit [implements]: an unusable query is a usage refusal at every surface, so it needs a kind the shared module can raise
+ */
+export class GrepQueryError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message)
+    this.name = 'GrepQueryError'
+  }
+}
+
 /** Per matched column, the snippet window before the first match. */
 export const SNIPPET_BEFORE = 80
 /** Per matched column, the snippet window after the first match. */
@@ -19,6 +44,8 @@ export const MAX_MATCH_COLUMNS = 3
  * it deliberately does NOT claim to make regex mode safe from
  * catastrophic backtracking, which V8 cannot interrupt (no deadline and
  * no abort signal can stop a regex that is already running).
+ *
+ * @ref LLP 0303#regex-reachability [constrained-by]: ungated locally because the client's only tool transport is stdio, which is the caller's own trust; the change that lands an HTTP one is the change that must gate it
  */
 export const MAX_QUERY_LENGTH = 1024
 
@@ -52,7 +79,7 @@ function compileRegex(query) {
     return new RegExp(query, 'i')
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
-    throw new Error(`query is not a valid regular expression: ${detail}`)
+    throw new GrepQueryError(`query is not a valid regular expression: ${detail}`)
   }
 }
 
@@ -87,10 +114,10 @@ function compileRegex(query) {
  */
 export function compileMatcher(query, regex) {
   if (typeof query !== 'string' || query.length === 0) {
-    throw new Error('query must be a non-empty string')
+    throw new GrepQueryError('query must be a non-empty string')
   }
   if (query.length > MAX_QUERY_LENGTH) {
-    throw new Error(`query must be at most ${MAX_QUERY_LENGTH} characters`)
+    throw new GrepQueryError(`query must be at most ${MAX_QUERY_LENGTH} characters`)
   }
   const re = regex ? compileRegex(query) : new RegExp(escapeLiteral(query), 'i')
   // A cell the row predicate accepted through another column still has to

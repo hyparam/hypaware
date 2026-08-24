@@ -111,6 +111,17 @@ const ORPHAN_GRACE_MS = 60 * 60 * 1000
 const COMPACTION_WRITER_GENERATION = 2
 
 /**
+ * The most of one maintenance tick's budget the grep sidecar build may
+ * spend on any one partition. Indexing is seconds of CPU per file and the
+ * pass runs inside the per-partition loop, so without a share of its own it
+ * would spend the tick's whole remaining tail on the first grep partition
+ * and starve every partition behind it. LLP 0199's neediest-first walk puts
+ * the busiest partition first, which is exactly the one with the most to
+ * index, so the tail is what it would take.
+ */
+const GREP_INDEX_TICK_SHARE = 0.25
+
+/**
  * @param {Partial<MaintenanceConfig> | undefined} config
  * @returns {MaintenanceConfig}
  */
@@ -284,11 +295,37 @@ export async function maintainCache(opts) {
               status: 'ok',
             },
             async (span) => {
-              // An absent `budgetMs` is `Infinity`, which makes the
-              // deadline unreachable rather than needing a second shape.
-              const built = await buildSidecarsForTable({ tableDir: liveDir, deadlineMs: startMs + budgetMs })
+              // A SHARE of the tick, never its tail. Handing the pass the
+              // tick's own deadline let it run until the tick was spent,
+              // and the partition walk is neediest-first, so the busiest
+              // grep partition comes first, arrives at a freshly compacted
+              // generation with zero coverage, and spends the rest of the
+              // tick indexing it. Every partition behind it - the other
+              // sources, and logs/traces/metrics - then got no snapshot
+              // expiry and no compaction, that tick and every tick after,
+              // because the busy partition keeps taking writes. Nothing
+              // else in the loop has that shape: compaction is gated on a
+              // due verdict, so a healthy partition costs nearly nothing.
+              //
+              // A fraction bounds the damage without stalling coverage:
+              // the pass still always attempts its first missing file (see
+              // `buildSidecarsForTable`), so a partition indexes at least
+              // one file per tick even on an already-spent budget, and an
+              // absent `budgetMs` is `Infinity`, which makes the deadline
+              // unreachable rather than needing a second shape.
+              // @ref LLP 0199#neediest-first [constrained-by]: the walk postpones the healthiest partitions, so per-partition work appended to the loop must not be able to consume the tick
+              // @ref LLP 0303#build-share [implements]: a share of the tick per partition, never its tail
+              const built = await buildSidecarsForTable({
+                tableDir: liveDir,
+                deadlineMs: startMs + budgetMs * GREP_INDEX_TICK_SHARE,
+              })
               report.sidecarsBuilt = built.built
-              report.sidecarsFailed = built.failed + built.quarantined
+              // `failed` only: `quarantined` counts files SKIPPED without a
+              // build, so folding them in made a partition holding one
+              // poisoned file report a fresh failure on every later tick
+              // when nothing was attempted at all.
+              report.sidecarsFailed = built.failed
+              report.sidecarsQuarantined = built.quarantined
               report.sidecarsDeferred = built.deferred
               span.setAttribute('sidecars_built', built.built)
               span.setAttribute('sidecars_present', built.present)

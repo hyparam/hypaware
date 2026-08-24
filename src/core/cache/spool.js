@@ -498,14 +498,29 @@ async function readLastFlushAt(tablePath) {
 }
 
 /**
+ * Every table under the cache that carries a spool directory, found by
+ * walking the tree rather than by asking the registry, so a label table
+ * nothing has declared yet is still flushed.
+ *
+ * `datasets` narrows the walk to those dataset directories. The walk
+ * recurses into each generation's `data/` directory, which on a mature
+ * cache holds thousands of entries, so the unscoped form costs a readdir of
+ * every dataset's files. That is the right price for a background sweep
+ * (`flushAll`, storage bootstrap) which has to reach every table anyway,
+ * and the wrong one for a per-query caller: `hyp query grep` settles one
+ * dataset's spool and would otherwise readdir the traces, logs and metrics
+ * trees on every search to find it.
+ *
  * @param {string} cacheRoot
+ * @param {{ datasets?: string[] }} [opts]
  * @returns {Promise<string[]>}
  */
-export async function discoverSpoolTables(cacheRoot) {
+export async function discoverSpoolTables(cacheRoot, opts = {}) {
   /** @type {string[]} */
   const tables = []
   const root = path.join(cacheRoot, 'datasets')
-  await walk(root)
+  const roots = opts.datasets ? opts.datasets.map((name) => path.join(root, name)) : [root]
+  for (const dir of roots) await walk(dir)
   return tables
 
   /** @param {string} dir */

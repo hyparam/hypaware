@@ -180,8 +180,9 @@ hyp query grep "connection refused" --from 2026-08-01 --format json
 An unknown flag returns a usage error, and so does any `--from`/`--to` that
 cannot select a day: one not shaped `YYYY-MM-DD`, or a `--from` later than the
 `--to`. Both would otherwise prune every file and render an empty answer that
-reads like "nothing is recorded". An invalid regular expression and search or
-output failures return `1`.
+reads like "nothing is recorded". A pattern the search cannot use is a usage
+error too: an invalid regular expression under `--regex`, or one longer than
+1024 characters. Search or output failures return `1`.
 
 ### `hyp query schema`
 
