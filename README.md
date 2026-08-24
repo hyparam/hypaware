@@ -568,6 +568,7 @@ User-facing guides live under [`docs/`](./docs/):
 - [`docs/CLI.md`](./docs/CLI.md): install, operate, upgrade, and recover HypAware with the task-oriented CLI
 - [`docs/CLI_REFERENCE.md`](./docs/CLI_REFERENCE.md): complete syntax and behavior for every visible CLI command
 - [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
+- [`docs/HEADLESS.md`](./docs/HEADLESS.md): headless deploys on CI runners and servers with a pre-minted token
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
 - [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp dev plugin new` / `hyp dev plugin doctor`)
 - [`docs/ACCEPTANCE.md`](./docs/ACCEPTANCE.md): opt-in, manual pre-release checks that need a real client (e.g. Codex Desktop)
