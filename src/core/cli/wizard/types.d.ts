@@ -98,13 +98,21 @@ export interface RunWizardSyncScopeOptions {
    */
   lockedHidden?: number
   /**
-   * How many picked rows the display filter removed from `candidates`,
+   * The picked rows the display filter removed from `candidates`, by id,
    * read for the same reason as `lockedHidden`: a carried hidden row
    * (LLP 0202 #carry-through) is composed into the config and syncs
    * unless an opt-out entry says otherwise, so the lane may not claim
    * nothing syncs while one stands - even though it may not name it.
+   *
+   * Ids rather than `lockedHidden`'s count (LLP 0289 #ask-the-store):
+   * "unless an opt-out entry says otherwise" is a question only the
+   * policy store can answer, and only about a named source. The lane puts
+   * them to the store and never to the screen. The locked list needs no
+   * such channel: an org row always syncs (LLP 0188 #locked) and the
+   * export seam drops opt-out entries for central-classified sources, so
+   * its count already decides its sentence.
    */
-  candidatesHidden?: number
+  candidatesHiddenIds?: string[]
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**

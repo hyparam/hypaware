@@ -90,6 +90,14 @@ filter ("hiding is a display filter, never a catalog deletion").
 > The split below covers the branches where `candidates` is empty *and* the
 > locked list is. A fifth case - a visible org row standing beside a hidden
 > pick - narrows the fleet sentence to the rows the fleet owns.
+>
+> **Extended-by: [LLP 0289 §ask-the-store](./0289-sync-lane-asks-the-store-about-hidden-picks.decision.md#ask-the-store).**
+> The hidden *picks* cross as ids rather than a count, so the third
+> sentence below can be checked against the client-sync store the export
+> seam reads: a hidden pick with a standing `local-only` entry does not
+> ship, and the branch reads the fourth sentence instead. The hidden
+> *locked* rows keep their count, which the paragraph on `lockedHidden`
+> and `candidatesHidden` at the end of this section predates.
 
 `runWizardSyncScope` short-circuits when there are no candidates, printing
 *"Everything you picked is managed by your fleet and always syncs"* over the

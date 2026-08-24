@@ -31,6 +31,17 @@ summary.
 
 ## The visible org row is not a licence to speak for the rest {#visible-org-row}
 
+> **Extended-by: [LLP 0289 §ask-the-store](./0289-sync-lane-asks-the-store-about-hidden-picks.decision.md#ask-the-store).**
+> The branch below carries two claims, and only one of them is the policy
+> store's to answer. Whether the machine's own capture *ships* is: the
+> field becomes `candidatesHiddenIds`, and the second line prints only when
+> at least one hidden pick has no standing `local-only` entry - the same
+> question its no-locked sibling asks, so the two branches agree about what
+> leaves the machine. Whether the fleet *owns* that row is not: an opt-out
+> entry does not make a carried pick the fleet's, so the narrowed fleet
+> sentence still fires on such a row existing, exactly as settled here. The
+> rows are still never named.
+
 `runWizardSyncScope`'s no-candidates branch, with a visible locked row,
 prints *"Everything you picked is managed by your fleet and always syncs"*
 over the org rows. `candidatesHidden > 0` says a carried hidden row
