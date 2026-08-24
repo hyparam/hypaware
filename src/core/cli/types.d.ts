@@ -70,6 +70,7 @@ export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Prom
 export type PickerSource =
   | 'claude'
   | 'codex'
+  | 'opencode'
   | 'claude-desktop'
   | 'openclaw'
   | 'hermes'

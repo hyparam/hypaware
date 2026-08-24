@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/opencode",
+  "version": "1.0.0",
+  "description": "First-party OpenCode adapter for CLI and Desktop. Installs a HypAware-owned global JavaScript plugin for live SDK snapshots and imports bounded exact-session exports without routing model traffic through a gateway.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": ["network", "spawn_process", "read_home", "write_home", "read_state", "write_state"],
+  "contributes": {
+    "client": {
+      "name": "opencode",
+      "skill_dir": ".config/opencode/skills",
+      "attach_probe": {
+        "format": "managed_file",
+        "settings_file": ".config/opencode/plugins/hypaware.js",
+        "marker_text": "// HYPWARE_OPENCODE_PLUGIN v1"
+      },
+      "launch": { "bin": "opencode", "args": ["run", "{prompt}"], "label": "OpenCode" }
+    },
+    "picker": [
+      {
+        "name": "opencode",
+        "label": "OpenCode",
+        "summary": "Records OpenCode conversations from CLI and Desktop using a local plugin, with bounded history recovery.",
+        "detect": { "settings_file": ".config/opencode/opencode.json" },
+        "compose": { "plugin": { "name": "@hypaware/opencode" } }
+      }
+    ],
+    "sources": [{ "name": "opencode" }],
+    "commands": [
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)" },
+      { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
+      { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+    ],
+    "config_sections": [{ "section": "opencode", "summary": "OpenCode listener, attach, and bounded backfill settings." }]
+  }
+}

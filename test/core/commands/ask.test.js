@@ -80,11 +80,11 @@ test('askableClients falls back to launchable clients only when the probe throws
   const clients = await askableClients(ctx, {
     collectStatus: async () => { throw new Error('settings file unreadable') },
   })
-  // The fallback is the real bundled-plugin launchable set (claude, codex
-  // both carry a `launch` block; claude-desktop and openclaw do not), so
+  // The fallback is the real bundled-plugin launchable set (claude, codex,
+  // and opencode carry a `launch` block; claude-desktop and openclaw do not), so
   // this also pins that the fallback is non-empty and never invents a
   // client the catalog does not know about.
-  assert.deepEqual([...clients].sort(), ['claude', 'codex'])
+  assert.deepEqual([...clients].sort(), ['claude', 'codex', 'opencode'])
 })
 
 /* ---------------------------- exit-code contract ---------------------------- */

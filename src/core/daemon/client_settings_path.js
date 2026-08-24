@@ -88,6 +88,29 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
       { code: 'settings_file_absolute' }
     )
   }
+  // OpenCode follows the XDG config contract and does not define
+  // OPENCODE_HOME. Its manifest paths are written in their default
+  // home-relative spelling so the existing picker schema can represent them;
+  // relocate only the `.config/opencode` prefix when XDG_CONFIG_HOME is set.
+  // @ref LLP 0306#managed-plugin-file [implements]: honor upstream's XDG
+  //   config root without inventing OPENCODE_HOME behavior
+  if (clientName === 'opencode') {
+    const xdgConfig = env?.XDG_CONFIG_HOME
+    const parts = settingsFile.split('/')
+    if (
+      typeof xdgConfig === 'string' && xdgConfig.length > 0 &&
+      parts[0] === '.config' && parts[1] === 'opencode'
+    ) {
+      return withinBase(
+        clientName,
+        settingsFile,
+        xdgConfig,
+        path.join(xdgConfig, 'opencode', ...parts.slice(2)),
+        field
+      )
+    }
+    return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...parts), field)
+  }
   const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {

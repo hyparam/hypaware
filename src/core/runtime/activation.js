@@ -6,6 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger } from '../observability/index.js'
 import { createConfigRegistry } from '../config/schema.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
+import { createClientRegistry } from '../registry/clients.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createQueryRegistry } from '../registry/datasets.js'
 import { createVerbRegistry } from '../registry/verbs.js'
@@ -19,7 +20,7 @@ import { localOnlyListPath } from '../usage-policy/local_only.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
@@ -44,6 +45,7 @@ import { isSafeContributionName } from './contribution_names.js'
  *   sinkRegistry?: ReturnType<typeof createSinkRegistry>,
  *   backfillRegistry?: BackfillRegistry,
  *   backfillMaterializerRegistry?: BackfillMaterializerRegistry,
+ *   clientRegistry?: ClientRegistry,
  *   storage?: ExtendedQueryStorageService,
  *   cacheRoot?: string,
  *   configControl?: ConfigControlFacade,
@@ -94,6 +96,7 @@ export function createKernelRuntime(opts = {}) {
     initPresets: createInitPresetRegistry(),
     backfills: opts.backfillRegistry ?? createBackfillRegistry(),
     backfillMaterializers: opts.backfillMaterializerRegistry ?? createBackfillMaterializerRegistry(),
+    clients: opts.clientRegistry ?? createClientRegistry(),
     activationContexts: new Map(),
   }
 }
@@ -150,6 +153,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     initPresets: runtime.initPresets,
     backfills: runtime.backfills,
     backfillMaterializers: runtime.backfillMaterializers,
+    clients: runtime.clients,
     // @ref LLP 0025#apply-engine-is-kernel-surface [implements]: plugins reach the apply engine only through this narrow facade; absent outside the daemon
     ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
     /**
