@@ -87,7 +87,7 @@ async function compactFixture(root) {
     : {
         // The daemon threads the gateway's re-settle hook through maintenance.
         // An identity hook is enough to exercise the core retention shape;
-        // pre-LLP-0300 compactGeneration held every fallback until scan end.
+        // pre-LLP-0301 compactGeneration held every fallback until scan end.
         storage: /** @type {any} */ ({}),
         getSettleHook: () => async (rows) => rows,
       }

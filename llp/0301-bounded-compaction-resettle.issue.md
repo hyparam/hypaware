@@ -7,6 +7,9 @@
 **Date:** 2026-08-24
 **Related:** LLP 0027, LLP 0199, LLP 0209, LLP 0217, LLP 0220
 
+> @ref LLP 0027#re-settle-sweep [constrained-by]: preserve conservative re-settlement and native-twin collapse
+> @ref LLP 0209#decision [constrained-by]: reuse the compactor's existing in-memory byte bound without coupling it to file size
+
 > The re-settle sweep must preserve cross-scan twin detection without holding
 > every fallback gateway row in memory. It first discovers native identity
 > keys through a narrow projection, then settles fallback rows in byte-bounded

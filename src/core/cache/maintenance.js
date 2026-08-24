@@ -12,7 +12,7 @@ import {
 
 import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
 import { inferColumnType } from './migrate.js'
-import { discoverCachePartitions, readCursorSync, tryReadCursorSync, writeCursor } from './partition.js'
+import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
@@ -486,7 +486,16 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         /** @type {Awaited<ReturnType<typeof compactGeneration>>} */
         let result
         try {
-          result = await compactGeneration(r.path, layout, cfg, settle, tableInfo)
+          result = await withPartitionMutationLock(r.path, async () => {
+            // Flushes may have appended after the due check and metadata load.
+            // Re-derive the live generation only after acquiring the same lock
+            // the append path holds through its cursor update.
+            const lockedCursor = readCursorSync(r.path)
+            const lockedLayout = generationLayout(lockedCursor)
+            const lockedLiveDir = path.join(r.path, lockedLayout.liveDir)
+            const lockedTableInfo = await loadCompactionTableInfo(lockedLiveDir)
+            return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo)
+          })
         } catch (err) {
           // @ref LLP 0217#retry-on-writer-change [implements]: the attempt
           // spends the generation's retry, success or not. The rewrite
@@ -755,7 +764,7 @@ function estimateValueBytes(value) {
  * @param {Record<string, unknown>} row
  * @returns {number}
  */
-function estimateRowBytes(row) {
+export function estimateRowBytes(row) {
   let total = 0
   for (const value of Object.values(row)) total += estimateValueBytes(value)
   return total
@@ -835,7 +844,8 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   // byte-bounded batches used by parquet output.
   // @ref LLP 0301#bounded-resettle [implements]: retain identity keys across
   // the generation, never the full fallback rows.
-  const emittedPartIds = settle ? await scanNativePartIds(oldDir) : null
+  const scanOpts = tableInfo?.metadata ? { metadata: tableInfo.metadata } : undefined
+  const emittedPartIds = settle ? await scanNativePartIds(oldDir, tableInfo?.metadata) : null
   /** @type {Record<string, unknown>[]} */
   let fallbackBatch = []
   let fallbackBatchBytes = 0
@@ -891,7 +901,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
   /** @type {Awaited<ReturnType<StreamingTableAppend['close']>> | null} */
   let streamed = null
   try {
-    for await (const row of scanRowsFromTable(oldDir)) {
+    for await (const row of scanRowsFromTable(oldDir, undefined, scanOpts)) {
       if (!columns) {
         columns = Object.keys(row).map((name) => ({
           name,
@@ -903,8 +913,18 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
       // The narrow first pass already found native twins that appear later in
       // scan order, so this pass only needs to retain one bounded settle batch.
       if (settle && isGatewayFallbackRow(row)) {
+        const rowBytes = estimateRowBytes(row)
+        // Flush before crossing the cap. A single row can itself exceed the
+        // configured budget; that unavoidable singleton is flushed
+        // immediately instead of being combined with another row.
+        if (
+          fallbackBatch.length > 0 &&
+          (fallbackBatch.length >= COMPACT_BATCH_SIZE || fallbackBatchBytes + rowBytes > maxBatchBytes)
+        ) {
+          await flushFallbackBatch()
+        }
         fallbackBatch.push(row)
-        fallbackBatchBytes += estimateRowBytes(row)
+        fallbackBatchBytes += rowBytes
         if (fallbackBatch.length >= COMPACT_BATCH_SIZE || fallbackBatchBytes >= maxBatchBytes) {
           await flushFallbackBatch()
         }
@@ -984,13 +1004,15 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
  * @ref LLP 0301#bounded-resettle [implements]: a narrow identity pass makes
  * later fallback batches independent of scan order.
  * @param {string} tableDir
+ * @param {TableMetadata | undefined} metadata
  * @returns {Promise<Set<string>>}
  */
-async function scanNativePartIds(tableDir) {
+async function scanNativePartIds(tableDir, metadata) {
   const partIds = new Set()
   for await (const row of scanRowsFromTable(
     tableDir,
-    ['attributes', 'part_id', 'message_id', 'part_index']
+    ['attributes', 'part_id', 'message_id', 'part_index'],
+    metadata ? { metadata } : undefined
   )) {
     if (isGatewayFallbackRow(row)) continue
     const key = rowPartId(row)
