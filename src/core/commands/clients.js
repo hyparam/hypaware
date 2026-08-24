@@ -368,15 +368,20 @@ async function runClientLifecycle(action, argv, ctx) {
               ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
               : { attached: false, settingsPath: undefined, port: undefined }
 
-            // "Already attached" now means attached AT THE LIVE PORT: validate
-            // the recorded port against the live one rather than trusting marker
-            // existence (#277). When no live endpoint is discoverable (daemon
-            // not running) keep the pre-#277 behavior - a present marker is a
-            // no-op success, an absent one the actionable error.
+            // "Already attached" means attached at the live port and, for
+            // Claude, in the adapter's current OTEL mode. A proxy marker at the
+            // same gateway port must still reach client.attach(), which owns
+            // the proxy-to-OTEL migration. When no live endpoint is discoverable
+            // (daemon not running) keep the pre-#277 behavior for every mode: a
+            // present marker is a no-op success, an absent one the actionable
+            // error.
             // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
+            // @ref LLP 0262#migration [implements]: a proxy-attached Claude is stale even when its gateway port is current
             const livePort = portFromEndpoint(liveEndpoint)
+            const modeCurrent = name !== 'claude' || liveEndpoint === undefined || probe.mode === 'otel'
             const alreadyCurrent =
               probe.attached === true &&
+              modeCurrent &&
               (liveEndpoint === undefined ||
                 (probe.port !== undefined && probe.port === livePort))
             if (alreadyCurrent) {

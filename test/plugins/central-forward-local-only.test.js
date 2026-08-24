@@ -107,6 +107,7 @@ function makeSink({ storage, watermarks, responder }) {
     query: /** @type {any} */ ({ getDataset: () => ({ sourceSignal: 'logs' }) }),
     storage: /** @type {any} */ (storage),
     watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ ({ async read() { return null }, async write() { throw new Error('unused') } }),
     log: /** @type {any} */ (log),
     fetchFn,
     sleepFn: async () => {},

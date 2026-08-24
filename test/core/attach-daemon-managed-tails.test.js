@@ -99,8 +99,9 @@ function writeLocalConfig(home) {
  *
  * @param {string} home
  * @param {number} port
+ * @param {'otel' | 'proxy'} [mode]
  */
-function seedDaemonManagedAttach(home, port) {
+function seedDaemonManagedAttach(home, port, mode = 'otel') {
   const runDir = path.join(stateRoot(home), 'run')
   mkdirSync(runDir, { recursive: true })
   writeFileSync(
@@ -130,7 +131,7 @@ function seedDaemonManagedAttach(home, port) {
   mkdirSync(path.join(home, '.claude'), { recursive: true })
   writeFileSync(
     path.join(home, '.claude', 'settings.json'),
-    JSON.stringify({ _hypaware: { version: '2.0.0', port } })
+    JSON.stringify({ _hypaware: { version: '2.0.0', port, mode } })
   )
 }
 
@@ -308,6 +309,19 @@ test('an explicit attach on a daemon-managed install re-arms a refused marker', 
       undefined,
       'the explicit re-run is the only re-arm a refused marker gets, and this is the install shape it is run on'
     )
+  })
+})
+
+test('an explicit attach does not short-circuit a proxy marker at the live port', async () => {
+  await withTempHome(async (home) => {
+    writeLocalConfig(home)
+    seedDaemonManagedAttach(home, 55555, 'proxy')
+
+    const { ctx, stdout, stderr, attachCalls } = makeDaemonManagedCtx({ home, preEnabled: true })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.doesNotMatch(stdout.text(), /already attached/)
+    assert.deepEqual(attachCalls, ['claude'], 'the adapter gets the proxy-to-otel migration call')
   })
 })
 
