@@ -44,6 +44,9 @@ test('watchControlRequests dispatches a stop request and consumes the file', asy
   const watcher = watchControlRequests(stateRoot, {
     onStop: () => { stops += 1 },
     onReload: () => assert.fail('reload dispatched for a stop request'),
+    // Fast poll: the suite must not depend on fs.watch delivery, which can
+    // drop events under load, and the POSIX backstop default is slow.
+    pollIntervalMs: 50,
   })
   try {
     writeControlRequest(stateRoot, 'stop')
@@ -61,6 +64,7 @@ test('watchControlRequests dispatches a reload request and consumes the file', a
   const watcher = watchControlRequests(stateRoot, {
     onStop: () => assert.fail('stop dispatched for a reload request'),
     onReload: () => { reloads += 1 },
+    pollIntervalMs: 50,
   })
   try {
     writeControlRequest(stateRoot, 'reload')
@@ -83,11 +87,43 @@ test('when stop and reload are both pending, stop wins and both are consumed', a
   const watcher = watchControlRequests(stateRoot, {
     onStop: () => { stops += 1 },
     onReload: () => assert.fail('reload dispatched although stop was pending'),
+    pollIntervalMs: 50,
   })
   try {
+    // The install-time scan is deferred: the daemon stores the returned
+    // handle to close the channel during shutdown, so a dispatch before the
+    // return would run shutdown against a watcher it cannot see.
+    assert.equal(stops, 0, 'no dispatch before the handle is returned')
     await waitFor(() => stops === 1, 'stop dispatch')
     assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), false)
     assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'reload')), false)
+  } finally {
+    watcher.close()
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+// One request file failing to unlink must never swallow the other's
+// dispatch: reload.request exists as a directory here, so consuming it
+// throws (EPERM/EISDIR, standing in for the win32 EPERM/EBUSY the module
+// documents), and the stop must still dispatch.
+test('a stop request still dispatches when consuming the reload file fails', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-consume-fail-'))
+  let stops = 0
+  /** @type {string[]} */
+  const warnings = []
+  fsSync.mkdirSync(controlRequestPath(stateRoot, 'reload'), { recursive: true })
+  const watcher = watchControlRequests(stateRoot, {
+    onStop: () => { stops += 1 },
+    onReload: () => assert.fail('reload dispatched for an unconsumable file'),
+    log: { warn: (event) => { warnings.push(event) } },
+    pollIntervalMs: 50,
+  })
+  try {
+    writeControlRequest(stateRoot, 'stop')
+    await waitFor(() => stops === 1, 'stop dispatch despite reload consume failure')
+    assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), false)
+    assert.ok(warnings.includes('daemon.control_scan_failed'))
   } finally {
     watcher.close()
     await fs.rm(stateRoot, { recursive: true, force: true })

@@ -985,11 +985,21 @@ export async function runDaemon(opts = {}) {
   // whole shutdown path) and a harmless second door on POSIX. Dispatches
   // into the same shutdown/reload the signal handlers call.
   // @ref LLP 0300#file-channel [implements]: the watcher is the signal handlers' transport-agnostic twin
-  controlWatcher = watchControlRequests(stateRoot, {
-    onStop: () => { void shutdown('control') },
-    onReload: () => { void reload() },
-    log: fileLog,
-  })
+  // Best-effort like the boot-time clear above: a squatting file or a
+  // foreign-owned directory at run/control must not take down a daemon whose
+  // sources are already running and whose PID file is on disk. Signals still
+  // stop it everywhere but win32.
+  try {
+    controlWatcher = watchControlRequests(stateRoot, {
+      onStop: () => { void shutdown('control') },
+      onReload: () => { void reload() },
+      log: fileLog,
+    })
+  } catch (err) {
+    fileLog.warn('daemon.control_watch_install_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   if (pendingRestart) {
     void shutdown('restart')

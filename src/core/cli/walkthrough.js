@@ -1616,7 +1616,12 @@ export async function runPickerFinale(args) {
   // it unset and the line is not printed.
   // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
   if (args.progress) stdout.write(`${args.progress}\n`)
-  const homeDir = env.HOME ?? os.homedir()
+  // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
+  // whole finale keys on - the materialize/prune guards, the attach probe,
+  // and the conditional homeDir spreads below all read it as "write
+  // nothing". Same seam as attachedAssetOptions in action_attach.js;
+  // LLP 0300's homedir fallback is for read-side resolution, not here.
+  const homeDir = env.HOME ?? ''
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 
   // The attach/start cutoff: backfill imports history strictly before

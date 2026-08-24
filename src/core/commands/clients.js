@@ -2347,11 +2347,9 @@ export async function runSkillsInstall(argv, ctx) {
     return 2
   }
 
-  const homeDir = ctx.env.HOME ?? process.env.HOME ?? os.homedir()
-  if (!homeDir) {
-    ctx.stderr.write('error: no home directory could be resolved; cannot resolve skill install paths\n')
-    return 1
-  }
+  // An explicit install command resolves a real home rather than staying
+  // inert: the user asked for the write. `||` so '' is never a home.
+  const homeDir = ctx.env.HOME || process.env.HOME || os.homedir()
 
   const descriptors = await buildClientDescriptorMap(ctx)
   const { installed } = await materializeClientAssets({

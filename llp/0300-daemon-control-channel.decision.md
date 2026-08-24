@@ -84,7 +84,9 @@ verbs. The daemon watches the directory (`fs.watch` for low latency, with a
 polling interval always running underneath it: a watch event can be dropped
 or delayed, a win32 unlink can fail transiently while the writer still holds
 the handle, and a missed stop request would leave a win32 daemon
-unstoppable), consumes a request by deleting
+unstoppable; the poll is fast on win32 where the channel is the only stop
+transport and slow elsewhere, where signals are primary and the poll is only
+a backstop), consumes a request by deleting
 its file, then dispatches into the same `shutdown()` / `reload()` the signal
 handlers call. The watcher is installed on every platform: it is the only
 transport on win32 and a harmless second door elsewhere.

@@ -38,6 +38,24 @@ export function controlRequestPath(stateRoot, kind) {
 }
 
 /**
+ * Create the control directory owner-only. `mkdirSync`'s `mode` applies only
+ * to directories it creates, so a directory that already exists at a looser
+ * mode (an older build created it under the umask) is tightened explicitly.
+ * The chmod is best-effort: a directory this user cannot chmod is one the
+ * channel cannot use anyway, and the failure surfaces at the write.
+ *
+ * @param {string} dir
+ */
+function ensureControlDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    fs.chmodSync(dir, 0o700)
+  } catch {
+    // best-effort, see above
+  }
+}
+
+/**
  * Ask the daemon watching `stateRoot` to stop or reload. The file content is
  * for a human debugging a stuck request; the watcher keys on the filename
  * alone. Creating the directory is part of the write: the requester may run
@@ -51,7 +69,7 @@ export function writeControlRequest(stateRoot, kind) {
   // 0700, not the umask: the trust argument above is "writing here requires
   // owning the state dir", so the directory must not pick up group write
   // from a permissive umask (same shape as the config-control dir).
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  ensureControlDir(path.dirname(file))
   fs.writeFileSync(file, JSON.stringify({ requestedAt: new Date().toISOString(), pid: process.pid }))
 }
 
@@ -79,9 +97,9 @@ export function clearControlRequests(stateRoot) {
  * Watch the control directory and dispatch consumed requests. Uses
  * `fs.watch` (non-persistent, so the watcher never holds the process open)
  * for low latency, with a polling interval always running underneath it as
- * the delivery guarantee (both timers unref'd). Scans once immediately after
- * installing, so a request written between the caller's boot-time clear and
- * this install is not lost.
+ * the delivery guarantee (both timers unref'd). Scans once on a microtask
+ * right after installing, so a request written between the caller's
+ * boot-time clear and this install is not lost.
  *
  * Consumption order: a request file is deleted *before* its handler runs, so
  * a handler that stops the watcher (stop does) can never re-observe the
@@ -100,19 +118,33 @@ export function clearControlRequests(stateRoot) {
  */
 export function watchControlRequests(stateRoot, handlers) {
   const dir = controlDirPath(stateRoot)
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  ensureControlDir(dir)
   let closed = false
   let scanning = false
   let rescan = false
 
-  /** @param {'stop'|'reload'} kind */
+  /**
+   * Delete one request file. `'consumed'` earns a dispatch, `'absent'` is
+   * the steady state, and `'failed'` (win32 EPERM/EBUSY while the writer
+   * still holds the handle) leaves the file for the poller's next pass.
+   * Each consume swallows its own error so one file's failure can never
+   * discard the sibling's dispatch: a stop that was already unlinked has no
+   * file left for a retry to find.
+   *
+   * @param {'stop'|'reload'} kind
+   * @returns {'consumed'|'absent'|'failed'}
+   */
   function consume(kind) {
     try {
       fs.unlinkSync(path.join(dir, REQUEST_FILES[kind]))
-      return true
+      return 'consumed'
     } catch (err) {
-      if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return false
-      throw err
+      if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 'absent'
+      handlers.log?.warn('daemon.control_scan_failed', {
+        request: REQUEST_FILES[kind],
+        message: err instanceof Error ? err.message : String(err),
+      })
+      return 'failed'
     }
   }
 
@@ -128,19 +160,16 @@ export function watchControlRequests(stateRoot, handlers) {
         rescan = false
         const stop = consume('stop')
         const reload = consume('reload')
-        if (stop) {
+        if (stop === 'consumed') {
           handlers.onStop()
-        } else if (reload) {
+        } else if (stop === 'failed') {
+          // Stop is still pending on disk, so dispatching a reload consumed
+          // above would be work thrown away; the poller retries the stop on
+          // its next pass.
+        } else if (reload === 'consumed') {
           handlers.onReload()
         }
       } while (rescan && !closed)
-    } catch (err) {
-      handlers.log?.warn('daemon.control_scan_failed', {
-        message: err instanceof Error ? err.message : String(err),
-      })
-      // No rescheduling needed: the poller below rescans on its interval, so
-      // a transient failure (win32 unlink returns EPERM/EBUSY while the
-      // writer still holds the handle) retries until the file is gone.
     } finally {
       scanning = false
     }
@@ -155,8 +184,12 @@ export function watchControlRequests(stateRoot, handlers) {
   // holds the handle), and fs.watch fires no further event for a file that
   // already exists - and a missed stop request leaves a win32 daemon
   // permanently unreachable by `hyp daemon stop`. fs.watch is the
-  // low-latency path; the poller is the correctness path.
-  const poller = setInterval(() => scan(), handlers.pollIntervalMs ?? 1000)
+  // low-latency path; the poller is the correctness path. It runs fast only
+  // on win32, where the channel is the sole stop transport; elsewhere
+  // signals are primary and the backstop can be slow, so an idle daemon is
+  // not woken every second for nothing.
+  const pollMs = handlers.pollIntervalMs ?? (process.platform === 'win32' ? 1_000 : 10_000)
+  const poller = setInterval(() => scan(), pollMs)
   if (typeof poller.unref === 'function') poller.unref()
 
   try {
@@ -177,7 +210,13 @@ export function watchControlRequests(stateRoot, handlers) {
     })
   }
 
-  scan()
+  // Deferred, not synchronous: a request already on disk would otherwise
+  // dispatch into the caller before this function returns its handle. The
+  // daemon stores the handle to close the channel at the top of shutdown, so
+  // a synchronous onStop would run shutdown's front half against a watcher
+  // it cannot see, leaving the watch and the poller armed for the whole
+  // stop. The microtask still runs before any I/O, so nothing is lost.
+  queueMicrotask(() => scan())
 
   return {
     close() {
