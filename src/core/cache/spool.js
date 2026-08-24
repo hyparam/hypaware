@@ -9,6 +9,7 @@ import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheSpool, FlushResult } from '../../../src/core/cache/types.js'
  */
@@ -90,12 +91,49 @@ export function createCacheSpool(args) {
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
         await fs.mkdir(dir, { recursive: true })
-        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a')
+        // Opened `a+` rather than `a`: writes still append, and the read
+        // side is what lets a failed append verify the tail is its own
+        // bytes before truncating them (see `discardTail`).
+        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a+')
+        // An append either lands in the spool or it does not, and the
+        // outcome says which. Callers read a rejection as "nothing landed"
+        // and re-derive what to write from the spool - `dedupeStoredPartIds`
+        // in the AI gateway's exchange writer rescans the committed
+        // partitions plus the spool on every call - so the spool has to
+        // tell the truth about what is in it. A rejection that left a torn
+        // record behind is the expensive half: the remnant carries no
+        // newline, so it swallows the NEXT record into one malformed line
+        // the flush reader drops. A rejection over a durable record is the
+        // other half, reporting landed rows as lost for a fault that cost
+        // nothing. Both are handled here rather than by asking every caller
+        // to reason about which syscall failed (issues #879, #924).
         try {
-          await handle.writeFile(line, 'utf8')
-          await handle.sync()
+          const startSize = (await handle.stat()).size
+          try {
+            await handle.writeFile(line, 'utf8')
+            await handle.sync()
+          } catch (err) {
+            // `writeFile` can fail with a prefix of the line already in the
+            // file; that remnant has no trailing newline, so leaving it
+            // would also swallow the NEXT record into one malformed line.
+            const retained = await discardTail(handle, startSize, line)
+            // The rollback can find the whole line already written and be
+            // refused the truncate that would take it back: an fsync and an
+            // ftruncate can fail on the same device. The record is complete
+            // and newline-terminated, so the next flush commits it, and
+            // rejecting here would tell the caller to replay rows that
+            // landed, which is the double commit this path exists to
+            // prevent. Same reasoning as the close failure below: an error
+            // that cannot un-write the record does not decide the outcome.
+            if (!retained) throw err
+          }
         } finally {
-          await handle.close()
+          // Past the sync the record is durable, and closing the handle
+          // cannot un-write it. A close failure is a descriptor problem
+          // with nothing the caller can do about it, so it never decides
+          // the outcome: on the failure path above the original error
+          // stays the one that propagates.
+          await handle.close().catch(() => undefined)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
@@ -289,6 +327,66 @@ function* rowsFromSpoolLine(line) {
     if (row && typeof row === 'object' && !Array.isArray(row)) {
       yield /** @type {Record<string, unknown>} */ (row)
     }
+  }
+}
+
+/**
+ * Roll a failed append off the tail of the active spool file, so a
+ * rejected `append` really does mean "the record is not in the spool".
+ *
+ * The tail is compared byte for byte against the line this append tried
+ * to write, and only an exact prefix match is truncated. `append` holds
+ * the per-table write lock, so nothing in THIS process can have appended
+ * behind us, but nothing locks `active.jsonl` across processes: two `hyp`
+ * runs can share one table's spool. A size ceiling alone would not catch
+ * that, because a small concurrent record fits inside the bytes this
+ * append could have produced; comparing the content does, and discarding
+ * another writer's durable rows to tidy up ours would be the worse trade.
+ *
+ * The content check narrows the cross-process hazard, it does not close
+ * it: reading the tail and truncating it are two syscalls, so a foreign
+ * record appended in between still sits inside the range this truncate
+ * drops, and a torn prefix that lands BEFORE a foreign line takes that
+ * line down with it whatever the rollback does. Closing those needs an
+ * advisory lock over `active.jsonl`, which the spool does not have.
+ *
+ * Best effort past that: the device that just refused a write or an fsync
+ * may refuse the truncate too. When it does a torn remnant gets a closing
+ * newline instead, which is the difference between this failed append
+ * costing its own rows and costing the next record as well.
+ *
+ * @param {FileHandle} handle
+ * @param {number} startSize
+ * @param {string} line
+ * @returns {Promise<boolean>} true when the rollback left the whole record
+ *   in the spool intact, so a later flush will commit it and the append
+ *   must not be reported as failed
+ */
+async function discardTail(handle, startSize, line) {
+  try {
+    const { size } = await handle.stat()
+    const written = size - startSize
+    const expected = Buffer.from(line, 'utf8')
+    if (written <= 0 || written > expected.length) return false
+    const tail = Buffer.alloc(written)
+    const { bytesRead } = await handle.read(tail, 0, written, startSize)
+    if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return false
+    try {
+      await handle.truncate(startSize)
+    } catch {
+      // A whole line is already terminated and already committable: there
+      // is nothing to repair, and nothing for the caller to replay.
+      if (written === expected.length) return true
+      // Terminate the remnant so the flush reader drops that line alone
+      // instead of concatenating it with whatever is appended next.
+      await handle.writeFile('\n', 'utf8')
+      return false
+    }
+    await handle.sync()
+    return false
+  } catch {
+    /* the write path is already failing; the tail stays as it is */
+    return false
   }
 }
 

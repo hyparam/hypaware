@@ -9,7 +9,7 @@ export const SCHEMA_VERSION = 7
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
- * @import { RegisteredProjector } from './types.js'
+ * @import { RegisteredProjector, ThreadChain } from './types.js'
  */
 
 const DATASET_NAME = 'ai_gateway_messages'
@@ -186,9 +186,14 @@ export function createAiGatewayMessageProjector(opts) {
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
+     * @param {{ journal?: (() => void)[] }} [projectOpts] Pass a `journal`
+     *   array to have every dedupe-state mutation this projection makes
+     *   record its undo, so a caller whose append fails can hand it to
+     *   `rollbackAiGatewayStateJournal` instead of leaving the shared state
+     *   claiming rows that never landed.
      * @returns {Promise<Record<string, unknown>[]>}
      */
-    async projectExchange(exchange) {
+    async projectExchange(exchange, projectOpts = {}) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
       const projection = await dispatchProjector(projectors, input, log, isSessionIgnored)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
@@ -246,6 +251,7 @@ export function createAiGatewayMessageProjector(opts) {
         gatewayAttributes: buildGatewayAttributes(input),
         tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
         state,
+        ...(projectOpts.journal ? { journal: projectOpts.journal } : {}),
       })
     },
   }
@@ -605,7 +611,7 @@ function canScanCommittedRows(storage) {
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
-  /** @type {Map<string, { seen: Set<string>, last: string | undefined }>} */
+  /** @type {Map<string, ThreadChain>} */
   const messageIdsByConversation = new Map()
   /** @type {Map<string, string>} */
   const conversationStartedAt = new Map()
@@ -633,13 +639,13 @@ export function createAiGatewayConversationState() {
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {string} threadScope
  * @param {string | undefined} agentId
- * @returns {{ seen: Set<string>, last: string | undefined }}
+ * @returns {ThreadChain}
  */
 function threadMessageIds(state, threadScope, agentId) {
   const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
   let chain = state.messageIdsByConversation.get(key)
   if (!chain) {
-    chain = { seen: new Set(), last: undefined }
+    chain = { seen: new Set(), last: undefined, replayLinks: new Map() }
     state.messageIdsByConversation.set(key, chain)
   }
   return chain
@@ -666,17 +672,26 @@ function threadMessageIds(state, threadScope, agentId) {
  * caller. Live capture passes one persistent state per listener;
  * backfill passes a fresh state per conversation item (the default).
  *
+ * Expansion MUTATES `state` (the dedup set and the per-thread chain) as it
+ * builds rows, but the append that makes those rows real happens after this
+ * returns. Pass `journal` and every such mutation records its undo, so a
+ * caller whose append failed can call `rollbackAiGatewayStateJournal` and
+ * leave the shared state describing what actually landed rather than what
+ * was merely attempted (issue #879).
+ *
  * @param {AiGatewayProjectedExchange} projection
  * @param {{
  *   gatewayId?: string,
  *   gatewayAttributes?: Record<string, unknown>,
  *   tsStart?: string,
  *   state?: ReturnType<typeof createAiGatewayConversationState>,
+ *   journal?: (() => void)[],
  * }} [opts]
  * @returns {Record<string, unknown>[]}
  */
 export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   const gatewayId = opts.gatewayId || 'hypaware-local'
+  const journal = opts.journal
   const state = opts.state ?? createAiGatewayConversationState()
   const gatewayAttributes = opts.gatewayAttributes ?? {}
   const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
@@ -734,11 +749,20 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       lastMessageId: chain.last,
     })
 
+    // A message a rollback un-marked but could NOT unchain (a later
+    // exchange had already chained past it) keeps the predecessor it was
+    // first projected with: this re-projection has to rebuild the row the
+    // failed append never wrote, not hang the thread's earlier turns off
+    // whatever tail has since been chained on. Issue #879. Only the
+    // gateway-derived link is restored, because a projector-supplied
+    // `previous_message_id` already replays identically.
+    const buriedLink = chain.replayLinks.get(identity.messageId)
+    if (buriedLink && !Array.isArray(message.previous_message_id)) {
+      identity.previousMessageId = buriedLink
+    }
+
     if (state.seenMessages.has(identity.messageId)) {
-      if (!chain.seen.has(identity.messageId)) {
-        chain.seen.add(identity.messageId)
-        chain.last = identity.messageId
-      }
+      chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
       continue
     }
 
@@ -771,14 +795,92 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       rows.push(stripToSchema(row))
     }
 
+    // Journaled, not merely applied: this is the mutation that makes a
+    // re-delivery of the same batch project zero rows, so a caller whose
+    // append then fails has to be able to take it back (issue #879).
     state.seenMessages.add(identity.messageId)
-    if (!chain.seen.has(identity.messageId)) {
-      chain.seen.add(identity.messageId)
-      chain.last = identity.messageId
-    }
+    journal?.push(() => { state.seenMessages.delete(identity.messageId) })
+    chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
   }
 
   return rows
+}
+
+/**
+ * Record one message in its thread chain (membership plus the
+ * `previous_message_id` tail), pushing the undo onto `journal` when the
+ * caller asked for one.
+ *
+ * The chain undo has TWO shapes, because one conversation state is shared by
+ * every in-flight exchange of a listener (the proxy fires
+ * `onExchangeFinished` into an unserialized pending set, and
+ * `projectExchange` awaits before it expands), so a later exchange can have
+ * chained further turns onto the same thread by the time a rollback runs:
+ *
+ *  - Still the tail (the sequential case, and the last-in-first-out order
+ *    this journal replays in): unchain it. The re-projection re-walks the
+ *    thread and rebuilds the identical link.
+ *  - No longer the tail: leave `chain.seen` and `chain.last` alone and
+ *    record the link this message HAD in `chain.replayLinks`. Unchaining a
+ *    buried message would strand the turns chained after it, which stay in
+ *    `chain.seen` so nothing re-chains them, settling the tail before them
+ *    and making every later row's `previous_message_id` skip a turn. But
+ *    leaving it at that is not enough either: the re-projection would emit
+ *    the buried message hanging off the CURRENT tail, so the thread's
+ *    opening turns would claim to follow turns that actually follow them
+ *    (a forward link, and a cycle once the later turn already links back to
+ *    this one). The replay link is what keeps both properties.
+ *
+ * `chain.replayLinks` entries are deliberately not consumed on read: a
+ * second failed attempt has to replay the same link, and they are bounded by
+ * `chain.seen`, which is already one entry per message.
+ *
+ * @param {ThreadChain} chain
+ * @param {string} messageId
+ * @param {string[]} previousMessageId The link this message was projected
+ *   with, restored verbatim if a rollback cannot unchain it.
+ * @param {(() => void)[] | undefined} journal
+ * @returns {void}
+ */
+function chainMessageId(chain, messageId, previousMessageId, journal) {
+  if (chain.seen.has(messageId)) return
+  const previousLast = chain.last
+  chain.seen.add(messageId)
+  chain.last = messageId
+  journal?.push(() => {
+    if (chain.last !== messageId) {
+      chain.replayLinks.set(messageId, previousMessageId)
+      return
+    }
+    chain.seen.delete(messageId)
+    chain.last = previousLast
+  })
+}
+
+/**
+ * Undo, newest first, every state mutation a journaled row expansion made,
+ * then empty the journal so it cannot be replayed.
+ *
+ * The dedup set and the thread chain are process-lifetime state shared by
+ * every live producer of `ai_gateway_messages`, and expansion commits to
+ * them before the rows reach storage. Without this, one failed
+ * `appendRows` makes that batch permanently unwritable: the producer's
+ * retry re-projects the same messages, every one of them is now "seen",
+ * and the call returns `rowsWritten: 0` as though there had been nothing
+ * to write - a silent loss, not an error. Rolling back is the cheap
+ * direction of the trade, because re-projecting a row that DID land is
+ * caught by the `part_id` dedupe, while a row wrongly marked seen is gone
+ * until transcript backfill finds it.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: the dataset's `part_id`
+ *   dedupe absorbs a row projected twice, which is what makes rolling the
+ *   seen-set back safe
+ * @param {(() => void)[]} journal
+ * @returns {void}
+ */
+export function rollbackAiGatewayStateJournal(journal) {
+  for (let i = journal.length - 1; i >= 0; i--) journal[i]()
+  journal.length = 0
 }
 
 /**

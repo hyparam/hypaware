@@ -1,7 +1,7 @@
 // @ts-check
 
 import { requireConfirmation } from '../cli/confirm.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
@@ -56,7 +56,7 @@ export async function runSync(argv, ctx) {
       },
       positional: ['instance'],
     },
-    { aliases: { '-y': '--yes' } }
+    { ...STRICT_SHORT_FLAGS, aliases: { '-y': '--yes' } }
   )
   if ('help' in parsed) {
     ctx.stdout.write(`${USAGE}\n`)
@@ -140,8 +140,9 @@ export async function runSync(argv, ctx) {
     ctx,
     yes,
     question: deadline !== null
-      ? 'Send now and end the review window? [y/N] '
-      : `Send now to ${describeScope(destinations)}? [y/N] `,
+      ? 'Send now and end the review window? [Y/n] '
+      : `Send now to ${describeScope(destinations)}? [Y/n] `,
+    defaultYes: true,
   })
   if (outcome === 'no-tty') {
     ctx.stderr.write(
@@ -381,7 +382,7 @@ function renderFirstSyncWarning(deadlineMs) {
     `  Your review window runs until ${formatFirstSyncDeadline(deadlineMs)}.\n` +
     '  Syncing now ends it early and sends your backfilled history.\n' +
     '  What has been sent cannot be un-sent. To exclude a folder first:\n' +
-    '    hyp policy set <path> local-only\n'
+    '    hyp privacy set <path> local-only\n'
   )
 }
 

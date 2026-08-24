@@ -1,11 +1,11 @@
 // @ts-check
 
 /**
- * The proxy-to-otel migration `hyp attach claude` performs on a machine that
+ * The proxy-to-otel migration `hyp client attach claude` performs on a machine that
  * is still proxy-attached (LLP 0262 #migration): the settings write flips the
  * marker and releases the proxy keys through the ordinary mode-switch rule,
  * the launchd environment is unwound, and the CA trust is OFFERED as
- * `hyp detach claude --purge` but never taken. These tests drive the real
+ * `hyp client detach claude --purge` but never taken. These tests drive the real
  * adapter (through `activate()`), the way an attach reaches it in production;
  * the writer-level key release itself is pinned by
  * claude-settings-otel-attach.test.js.
@@ -237,7 +237,7 @@ test('hyp attach claude migrates a proxy attach: marker flips, proxy keys releas
   const out = buf.text()
   assert.match(out, /Migrated from proxy attach/)
   assert.match(out, /keep proxying until they restart/)
-  assert.match(out, /hyp detach claude --purge/)
+  assert.match(out, /hyp client detach claude --purge/)
   await fsp.access(ca.certPath)
 
   // The launchd unwind ran through the real seam. Under the test runner the
@@ -319,6 +319,20 @@ test('a floor refusal leaves the proxy attach untouched and unwinds nothing', as
   assert.doesNotMatch(buf.text(), /launchd/)
 })
 
+test('dry-run performs the same version-floor preflight as a real attach', async (t) => {
+  const r = await rig({ claudeVersion: '2.1.100' })
+  t.after(() => r.cleanup())
+  const before = await r.raw()
+  const buf = makeBuf()
+
+  await assert.rejects(
+    () => r.gateway.client.attach({ endpoint: ENDPOINT, stdout: buf, stderr: buf, dryRun: true }),
+    /claude update/
+  )
+  assert.equal(await r.raw(), before)
+  assert.equal(buf.text(), '')
+})
+
 test('a re-attach after the migration is routine: no migration notes, no offer', async (t) => {
   const r = await rig()
   t.after(() => r.cleanup())
@@ -331,7 +345,7 @@ test('a re-attach after the migration is routine: no migration notes, no offer',
   const second = makeBuf()
   await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: second, stderr: second })
   assert.doesNotMatch(second.text(), /Migrated from proxy attach/)
-  assert.doesNotMatch(second.text(), /hyp detach claude --purge/)
+  assert.doesNotMatch(second.text(), /hyp client detach claude --purge/)
   assert.doesNotMatch(second.text(), /launchd/)
   assert.equal((await r.read())._hypaware.mode, 'otel')
 })

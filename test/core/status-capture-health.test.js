@@ -355,7 +355,7 @@ test('transcripts running hours past the last event degrade overall through an e
     assert.equal(diag.severity, 'error')
     assert.match(diag.message, /not being captured/)
     assert.ok(diag.repair.some((r) => r.includes('hyp daemon restart')))
-    assert.ok(diag.repair.some((r) => r.includes('hyp attach --client claude')))
+    assert.ok(diag.repair.some((r) => r.includes('hyp client attach claude')))
     assert.equal(report.overall, 'degraded')
 
     const stdout = buffer()

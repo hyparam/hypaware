@@ -35,6 +35,12 @@ const SELF_MARKER_KEY = 'hypaware.self'
  * nothing. An exporter we cannot fix from our side must not be able to
  * fail the request.
  *
+ * The group's decoded resource attributes ride along on every event it
+ * produced, because some of what a row needs is reported once per export
+ * rather than per record: Claude Code 2.1.235 stamps its version on the
+ * resource as `service.version` and no longer sends `app.version` on the
+ * events at all.
+ *
  * @ref LLP 0257#registration [implements]: the shared server carries the
  *   transport; payload interpretation is claude-owned, including the
  *   self-telemetry loop guard
@@ -51,7 +57,8 @@ export function flattenClaudeTelemetryEvents(data) {
   for (const groupValue of groups) {
     const group = asObject(groupValue)
     if (!group) continue
-    if (resourceHasSelfMarker(group.resource)) continue
+    const resource = decodeAttributes(asObject(group.resource)?.attributes)
+    if (hasSelfMarker(resource)) continue
     const scopes = Array.isArray(group.scopeLogs) ? group.scopeLogs : []
     for (const scopeValue of scopes) {
       const scopeLog = asObject(scopeValue)
@@ -60,7 +67,7 @@ export function flattenClaudeTelemetryEvents(data) {
       if (!scopeName || !scopeName.startsWith(CLAUDE_EVENT_SCOPE_PREFIX)) continue
       const records = Array.isArray(scopeLog.logRecords) ? scopeLog.logRecords : []
       for (const recordValue of records) {
-        const event = eventFromRecord(recordValue)
+        const event = eventFromRecord(recordValue, resource)
         if (event) events.push(event)
       }
     }
@@ -96,7 +103,8 @@ export function flattenClaudeTelemetryMetrics(data) {
   for (const groupValue of groups) {
     const group = asObject(groupValue)
     if (!group) continue
-    if (resourceHasSelfMarker(group.resource)) continue
+    const resource = decodeAttributes(asObject(group.resource)?.attributes)
+    if (hasSelfMarker(resource)) continue
     const scopes = Array.isArray(group.scopeMetrics) ? group.scopeMetrics : []
     for (const scopeValue of scopes) {
       const scopeMetric = asObject(scopeValue)
@@ -111,7 +119,7 @@ export function flattenClaudeTelemetryMetrics(data) {
         if (!name) continue
         const unit = stringOf(metric.unit)
         for (const pointValue of metricDataPoints(metric)) {
-          const event = eventFromDataPoint(name, unit, pointValue)
+          const event = eventFromDataPoint(name, unit, pointValue, resource)
           if (event) events.push(event)
         }
       }
@@ -125,9 +133,10 @@ export function flattenClaudeTelemetryMetrics(data) {
  * @param {string} name
  * @param {string | undefined} unit
  * @param {unknown} value one OTLP `NumberDataPoint`
+ * @param {Record<string, unknown>} resource the group's decoded resource attributes
  * @returns {ClaudeTelemetryEvent | undefined}
  */
-function eventFromDataPoint(name, unit, value) {
+function eventFromDataPoint(name, unit, value, resource) {
   const point = asObject(value)
   if (!point) return undefined
   const attributes = decodeAttributes(point.attributes)
@@ -142,6 +151,7 @@ function eventFromDataPoint(name, unit, value) {
     name,
     attributes,
     ...(timestamp ? { timestamp } : {}),
+    ...(hasKeys(resource) ? { resource } : {}),
   }
 }
 
@@ -164,9 +174,10 @@ function metricDataPoints(metric) {
 
 /**
  * @param {unknown} value
+ * @param {Record<string, unknown>} resource the group's decoded resource attributes
  * @returns {ClaudeTelemetryEvent | undefined}
  */
-function eventFromRecord(value) {
+function eventFromRecord(value, resource) {
   const record = asObject(value)
   if (!record) return undefined
   const attributes = decodeAttributes(record.attributes)
@@ -181,6 +192,7 @@ function eventFromRecord(value) {
     attributes,
     ...(timestamp ? { timestamp } : {}),
     ...(sequence !== undefined ? { sequence } : {}),
+    ...(hasKeys(resource) ? { resource } : {}),
   }
 }
 
@@ -231,13 +243,20 @@ function decodeAnyValue(value) {
 }
 
 /**
- * @param {unknown} resource
+ * @param {Record<string, unknown>} resource decoded resource attributes
  * @returns {boolean}
  */
-function resourceHasSelfMarker(resource) {
-  const attrs = decodeAttributes(asObject(resource)?.attributes)
-  const marker = attrs[SELF_MARKER_KEY]
+function hasSelfMarker(resource) {
+  const marker = resource[SELF_MARKER_KEY]
   return marker === true || marker === 'true'
+}
+
+/**
+ * @param {Record<string, unknown>} value
+ * @returns {boolean}
+ */
+function hasKeys(value) {
+  return Object.keys(value).length > 0
 }
 
 /**

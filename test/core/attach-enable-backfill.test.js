@@ -176,7 +176,7 @@ function makeCtx({ home, answers, backfillProvider }) {
   // backfill offer.
   const stderrBuf = makeBuf({
     onWrite: (chunk) => {
-      if (String(chunk).includes('Switch this install to proxy mode now? [y/N] ')) {
+      if (String(chunk).includes('Switch this install to proxy mode now? [Y/n] ')) {
         stdin.stream.write('n\n')
       }
     },

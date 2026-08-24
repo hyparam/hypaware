@@ -267,9 +267,13 @@ function str(v, field) {
  * string) would make every forwarded message a fresh refresh that re-stores the
  * same bad value and never self-corrects. Fail loudly at parse time instead.
  *
+ * Exported because every identity response carries this field in the same
+ * shape, including `/mint`'s (LLP 0298 D3 calls it the sibling of `/token`),
+ * so no caller should re-decide what an `expires_at` looks like.
+ *
  * @param {unknown} v @param {string} field @returns {string}
  */
-function expiryTimestamp(v, field) {
+export function expiryTimestamp(v, field) {
   if (typeof v === 'number') {
     if (!Number.isFinite(v) || v <= 0) {
       throw new Error(`identity response field '${field}' is not a valid timestamp`)

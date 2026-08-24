@@ -1,6 +1,6 @@
 ---
 name: hypaware-privacy
-description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first fleet sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync" or "what will ship to the server". Covers this machine's local cache only, not rows already forwarded to a remote server.
+description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync" or "what will ship to the server". Covers this machine's local cache only, not rows already forwarded to a remote server.
 ---
 
 # HypAware privacy review: audit what was captured, decide what leaves
@@ -168,7 +168,7 @@ The picker this skill replaces failed because it surveyed a cache the backfill w
 
 ```bash
 hyp status --json          # daemon running? enrolled (a central sink present)?
-hyp query status           # cache state and last refresh
+hyp cache status           # cache state and last refresh
 ```
 
 Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~30-60s). If the per-directory `rows` counts are still climbing, backfill is still landing: **warn the user and offer to wait** until counts stabilize before proposing any markings. Surveying mid-backfill risks marking against an incomplete picture. There is no deadline pressure here: on an enrolled machine the first-sync hold gives hours, and on an unenrolled one nothing is waiting to leave. Note that an enrolled user can also end that window early at any time with `hyp sync` (it prints what would leave and asks first), so if they say they are in a hurry, finishing the review is what unblocks them, not waiting.
@@ -205,9 +205,9 @@ WHERE cwd = '<dir>' ORDER BY date DESC LIMIT 40" --format json --output /tmp/sam
 
 Before you propose or apply **anything**, explain the classes in plain language, including what the org can and cannot see in each case:
 
-- **ignore** (`hyp policy set <dir> ignore`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
-- **local-only** (`hyp policy set <dir> local-only`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
-- **sync** (`hyp policy set <dir> sync`): the explicit "this ships" choice - forwarded to the org server like the default. Marking it `sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
+- **ignore** (`hyp privacy set <dir> ignore`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
+- **local-only** (`hyp privacy set <dir> local-only`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
+- **sync** (`hyp privacy set <dir> sync`): the explicit "this ships" choice - forwarded to the org server like the default. Marking it `sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
 
 Name the trade honestly: `local-only` keeps your history usable locally; `ignore` is stronger (nothing is even recorded once marked) but you lose local queryability too.
 
@@ -230,27 +230,27 @@ sessions separately only when a directory is otherwise fine but one session is n
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
 
 ```bash
-hyp policy set <dir> ignore      # class: ignore  (stop recording this dir)
-hyp policy set <dir> local-only  # class: local-only (record here, never forward)
-hyp policy set <dir> sync        # class: sync (explicit "this ships")
-hyp policy show <dir>            # report the governing source + class, and residual cached rows; never writes
-hyp policy unset <dir> [class]   # remove markings (class-neutral by default; a trailing class scopes it)
+hyp privacy set <dir> ignore      # class: ignore  (stop recording this dir)
+hyp privacy set <dir> local-only  # class: local-only (record here, never forward)
+hyp privacy set <dir> sync        # class: sync (explicit "this ships")
+hyp privacy show <dir>            # report the governing source + class, and residual cached rows; never writes
+hyp privacy unset <dir> [class]   # remove markings (class-neutral by default; a trailing class scopes it)
 ```
 
-`hyp policy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
+`hyp privacy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
-**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts the server); confirm each purge on its own.
+**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts the server); confirm each purge on its own.
 
 ```bash
-hyp purge <dir>              # delete cached rows for a directory subtree
-hyp purge --session <id>     # delete all cached rows for one session (cheapest: session is the partition key)
-hyp purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
+hyp privacy purge <dir>              # delete cached rows for a directory subtree
+hyp privacy purge --session <id>     # delete all cached rows for one session (cheapest: session is the partition key)
+hyp privacy purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
 ```
 
-Purge prompts for confirmation on a TTY; it errors on a bare `hyp purge` with no target. Sequencing matters: **mark the directory `ignore` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
+Purge prompts for confirmation on a TTY; it errors on a bare `hyp privacy purge` with no target. Sequencing matters: **mark the directory `ignore` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
 
 ```bash
-hyp policy set <dir> ignore && hyp purge <dir>
+hyp privacy set <dir> ignore && hyp privacy purge <dir>
 ```
 
 ## After the review
@@ -259,4 +259,4 @@ hyp policy set <dir> ignore && hyp purge <dir>
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
-- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp policy folders ask` turns that on and `hyp policy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.
+- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp privacy folders ask` turns that on and `hyp privacy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.

@@ -1,8 +1,7 @@
-import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ParquetWriter } from 'hyparquet-writer'
 import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
-import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
 // Partitioning declaration promoted to a neutral core home
 // (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
@@ -120,6 +119,21 @@ export interface PendingInfo {
 }
 
 export interface CacheSpool {
+  /**
+   * Write one batch into the table's spool, to be committed by a later
+   * `flushTable`. All-or-nothing as far as the caller is concerned: it
+   * resolves once the record is in the spool, and rejects when the record
+   * is not there and no flush will find it. That is what lets a caller
+   * treat a rejection as "nothing landed" and replay the rows without
+   * writing them twice.
+   *
+   * The rollback behind that is best effort, so the guarantee is not
+   * absolute: a torn write whose tail cannot be read back, and a spool
+   * file another process appended to between this append's size probe and
+   * its rollback, can both reject with bytes still in the file. A caller
+   * that must not double-write under a failing device or a shared spool
+   * still needs its own identity check.
+   */
   append(
     tablePath: string,
     columns: readonly ColumnSpec[],
@@ -433,7 +447,7 @@ export interface SourceWithholdResolver {
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
-  dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
+  dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>

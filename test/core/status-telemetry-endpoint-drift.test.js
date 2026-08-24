@@ -150,7 +150,7 @@ test('a client exporting to the port the listener vacated is a warning naming bo
     assert.equal(stale.severity, 'warning')
     assert.match(stale.message, /port 4319/)
     assert.match(stale.message, /port 54321/)
-    assert.ok(stale.repair.includes('hyp attach --client claude'))
+    assert.ok(stale.repair.includes('hyp client attach claude'))
     // Non-degrading, like every other attach-drift warning.
     assert.equal(report.overall, 'healthy')
 

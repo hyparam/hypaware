@@ -291,7 +291,7 @@ async function seedClientSyncStoreBestEffort(ctx, stateDir) {
     await seedClientSyncStoreIfAbsent({ stateDir })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`warning: could not stamp the client-sync store (${detail}); locally added clients will start local-only until 'hyp policy client <name> sync'\n`)
+    ctx.stderr.write(`warning: could not stamp the client-sync store (${detail}); locally added clients will start local-only until 'hyp privacy client <name> sync'\n`)
   }
 }
 
@@ -521,7 +521,7 @@ export async function runLeave(argv, ctx) {
             // remove, so removal is refused (LLP 0138 #marker-undo) - but the
             // marker is the only thing on disk naming those copies, so print
             // them before it goes.
-            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp detach ${name}' to revert)\n`)
+            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp client detach ${name}' to revert)\n`)
             if (installedAssets.length > 0) {
               ctx.stdout.write(`  it had installed ${installedAssets.length} file(s), left in place - remove them by hand if you want them gone:\n`)
               for (const dest of installedAssets) ctx.stdout.write(`    ${dest}\n`)
@@ -557,7 +557,7 @@ export async function runLeave(argv, ctx) {
             failures += 1
             const message = err instanceof Error ? err.message : String(err)
             ctx.stderr.write(`hyp leave: detach '${name}' failed: ${message}\n`)
-            ctx.stderr.write(`  run 'hyp detach ${name}' to finish reversing it\n`)
+            ctx.stderr.write(`  run 'hyp client detach ${name}' to finish reversing it\n`)
           }
         }
       }

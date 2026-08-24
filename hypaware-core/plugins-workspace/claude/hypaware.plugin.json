@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude",
   "version": "2.0.0",
-  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships the hypaware-query, hypaware-reference, and hypaware-privacy skills.",
+  "description": "Anthropic Claude Code client adapter for HypAware. Receives Claude Code OTEL events and raw body files through a local telemetry listener, projects exchanges through the AI gateway capability, writes session-context records into plugin state, and ships the hypaware-query, hypaware-reference, and hypaware-privacy skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -21,6 +21,10 @@
     }
   },
   "contributes": {
+    "commands": [
+      { "name": "claude-hook session-context", "summary": "Internal Claude Code hook: appends session context to the state file", "hidden": true },
+      { "name": "claude-hook classify-cwd", "summary": "Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine", "hidden": true }
+    ],
     "sources": [{ "name": "claude-telemetry" }],
     "datasets": [
       {
@@ -42,7 +46,6 @@
         "dir": ".claude/projects",
         "file_suffix": ".jsonl"
       },
-      "required_upstreams": ["anthropic"],
       "transcript_entrypoints": ["cli", "sdk-cli"],
       "launch": { "bin": "claude", "args": ["{prompt}"], "label": "Claude Code" }
     },
@@ -50,13 +53,11 @@
       {
         "name": "claude",
         "label": "Claude Code",
-        "summary": "Records your Claude Code conversations (CLI and SDK, including OpenClaw's claude-cli backend). Setup attaches Claude Code, starts a local gateway listener, and adds query skills.",
+        "summary": "Records your Claude Code conversations (CLI and SDK, including OpenClaw's claude-cli backend). Setup attaches Claude Code, starts its local telemetry listener, and adds query skills.",
         "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
-          "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
-          "requires_gateway": true,
-          "gateway_proxy_mode": true,
-          "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
+          "plugin": { "name": "@hypaware/claude" },
+          "requires_gateway": true
         }
       }
     ],

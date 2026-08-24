@@ -1,16 +1,21 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { asyncRow, collect, executeSql, parseSql } from 'squirreling'
+import { appendRowsToTable, dataSourceForTable, deleteMatchingRows } from '../../src/core/cache/iceberg/store.js'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
 import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { AsyncCells, AsyncDataSource, ExprNode, IdentifierNode, ScanColumnResults, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { AsyncCells, AsyncDataSource, ExprNode, Field, ScanOptions, ScanRequest, SqlPrimitive } from 'squirreling'
+ * @import { IdentifierNode, ScanColumnResults } from 'squirreling/src/types.js'
  */
 
 /**
@@ -20,7 +25,7 @@ import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
  *
  * @param {Record<string, SqlPrimitive>[]} rows
  * @param {ScanOptions[]} seenOptions
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 function fakeSource(rows, seenOptions) {
   const columns = Object.keys(rows[0] ?? {})
@@ -54,6 +59,13 @@ test('unionSources unions columns and sums numRows', () => {
   assert.equal(union.numRows, 3)
 })
 
+test('unionSources leaves numRows unknown when any partition count is unknown', () => {
+  const known = fakeSource([{ a: 1 }], [])
+  const unknown = fakeSource([{ a: 2 }], [])
+  unknown.numRows = undefined
+  assert.equal(unionSources([known, unknown]).numRows, undefined)
+})
+
 test('unionSources does not forward limit/offset to sub-sources', async () => {
   /** @type {ScanOptions[]} */
   const seen = []
@@ -81,6 +93,244 @@ test('unionSources does not forward limit/offset to sub-sources', async () => {
   for (const options of seen) {
     assert.equal(options.limit, undefined, 'limit not pushed into sub-source')
     assert.equal(options.offset, undefined, 'offset not pushed into sub-source')
+  }
+})
+
+/**
+ * A native-batch source whose legacy row scan throws, so a successful query
+ * proves every wrapper stayed on prepareScan. Each instance may use different
+ * field ids, matching separately-created Iceberg tables.
+ *
+ * @param {Field[]} fields
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {ScanRequest[]} seen
+ * @returns {ScannableDataSource}
+ */
+function preparedSource(fields, rows, seen) {
+  const columns = fields.map((field) => field.name)
+  return {
+    columns,
+    numRows: rows.length,
+    schema: { fields },
+    scan() {
+      throw new Error('legacy row scan should not run')
+    },
+    prepareScan(request) {
+      seen.push(request)
+      const requestedFields = request.columns.map((demand) => {
+        const field = fields.find((candidate) => candidate.id === demand.field)
+        if (!field) throw new Error(`unknown test field ${demand.field}`)
+        return field
+      })
+      return {
+        schema: { fields: requestedFields },
+        residual: { filter: request.filter },
+        properties: { maxRows: rows.length },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: rows.length },
+            columns: requestedFields.map((field) => ({
+              type: 'values',
+              values: rows.map((row) => row[field.name]),
+              length: rows.length,
+            })),
+          }
+        },
+      }
+    },
+  }
+}
+
+/**
+ * A prepared source with a working row scan and configurable negotiation.
+ * Its native batches throw so a successful query proves the union selected
+ * the row fallback.
+ *
+ * @param {Field[]} fields
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {{ appliesFilter?: boolean, mismatchesEmptySchema?: boolean }} [options]
+ * @returns {ScannableDataSource}
+ */
+function fallbackPreparedSource(fields, rows, options = {}) {
+  const source = fakeSource(rows, [])
+  source.schema = { fields }
+  source.prepareScan = (request) => {
+    const requestedFields = request.columns.map((demand) => {
+      const field = fields.find((candidate) => candidate.id === demand.field)
+      if (!field) throw new Error(`unknown test field ${demand.field}`)
+      return field
+    })
+    return {
+      schema: { fields: options.mismatchesEmptySchema && request.columns.length === 0 ? fields : requestedFields },
+      residual: { filter: options.appliesFilter ? undefined : request.filter },
+      properties: {},
+      async *batches() {
+        throw new Error('native batches should not run after incompatible negotiation')
+      },
+    }
+  }
+  return source
+}
+
+// @ref LLP 0294#partition-union [tests]: field ids are local to each table, filters may prune each child, and ranges belong to the concatenated stream
+test('unionSources concatenates prepared batches, remaps field ids, and keeps range hints global', async () => {
+  /** @type {ScanRequest[]} */
+  const seenA = []
+  /** @type {ScanRequest[]} */
+  const seenB = []
+  /** @type {Field[]} */
+  const fieldsA = [
+    { id: 1, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 2, name: 'v', dataType: { type: 'number' }, nullable: false },
+  ]
+  /** @type {Field[]} */
+  const fieldsB = [
+    { id: 101, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 102, name: 'v', dataType: { type: 'number' }, nullable: false },
+  ]
+  const union = unionSources([
+    preparedSource(fieldsA, [{ k: 'x', v: 1 }, { k: 'y', v: 2 }], seenA),
+    preparedSource(fieldsB, [{ k: 'x', v: 3 }, { k: 'x', v: 4 }], seenB),
+  ])
+
+  assert.ok(union.schema)
+  assert.equal(typeof union.prepareScan, 'function')
+  const rows = await collect(executeSql({
+    tables: { t: union },
+    query: "SELECT v FROM t WHERE k = 'x' LIMIT 2 OFFSET 1",
+  }))
+  assert.deepEqual(rows, [{ v: 3 }, { v: 4 }])
+  for (const request of [...seenA, ...seenB]) {
+    assert.ok(request.filter, 'filter is forwarded for per-table pruning')
+    assert.equal(request.limit, undefined, 'limit remains global')
+    assert.equal(request.offset, undefined, 'offset remains global')
+  }
+  assert.deepEqual(seenA[0].columns.map((demand) => demand.field), [2, 1])
+  assert.deepEqual(seenB[0].columns.map((demand) => demand.field), [102, 101])
+})
+
+test('unionSources declines prepared batches when partition schemas drift', () => {
+  const seen = []
+  const older = preparedSource([
+    { id: 1, name: 'id', dataType: { type: 'number' }, nullable: false },
+  ], [{ id: 1 }], seen)
+  const newer = preparedSource([
+    { id: 1, name: 'id', dataType: { type: 'number' }, nullable: false },
+    { id: 2, name: 'extra', dataType: { type: 'string' }, nullable: true },
+  ], [{ id: 2, extra: 'x' }], seen)
+  const union = unionSources([older, newer])
+  assert.equal(union.schema, undefined)
+  assert.equal(union.prepareScan, undefined, 'row padding remains authoritative for drifted schemas')
+})
+
+test('unionSources falls back to rows when prepared children report different filter residuals', async () => {
+  /** @type {Field[]} */
+  const fields = [
+    { id: 1, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 2, name: 'v', dataType: { type: 'number' }, nullable: false },
+  ]
+  const union = unionSources([
+    fallbackPreparedSource(fields, [{ k: 'x', v: 1 }, { k: 'y', v: 2 }]),
+    fallbackPreparedSource(fields, [{ k: 'x', v: 3 }], { appliesFilter: true }),
+  ])
+  const rows = await collect(executeSql({
+    tables: { t: union },
+    query: "SELECT v FROM t WHERE k = 'x'",
+  }))
+  assert.deepEqual(rows, [{ v: 1 }, { v: 3 }])
+})
+
+test('unionSources row fallback preserves counts with an empty prepared projection', async () => {
+  /** @type {Field[]} */
+  const fields = [{ id: 1, name: 'v', dataType: { type: 'number' }, nullable: false }]
+  const first = fallbackPreparedSource(fields, [{ v: 1 }, { v: 2 }])
+  const second = fallbackPreparedSource(fields, [{ v: 3 }], { mismatchesEmptySchema: true })
+  first.numRows = undefined
+  const rows = await collect(executeSql({ tables: { t: unionSources([first, second]) }, query: 'SELECT COUNT(*) AS n FROM t' }))
+  assert.deepEqual(rows, [{ n: 3 }])
+})
+
+test('unionSources treats equivalent data types as compatible regardless of object key order', () => {
+  /** @type {Field[]} */
+  const fieldsA = [{
+    id: 1,
+    name: 'values',
+    dataType: { type: 'array', items: { type: 'string' } },
+    nullable: false,
+  }]
+  /** @type {Field[]} */
+  const fieldsB = [{
+    id: 2,
+    name: 'values',
+    dataType: { items: { type: 'string' }, type: 'array' },
+    nullable: false,
+  }]
+  const union = unionSources([
+    preparedSource(fieldsA, [{ values: ['a'] }], []),
+    preparedSource(fieldsB, [{ values: ['b'] }], []),
+  ])
+  assert.equal(typeof union.prepareScan, 'function')
+})
+
+// `hyp purge` deletes cache rows with Iceberg position deletes rather than
+// rewriting files, so every read path has to apply the delete map or a purged
+// row comes back. The prepared union is a NEW read path around that guarantee:
+// the older row/scanColumn coverage in purge-command.test.js cannot see it,
+// and a wrong answer here is silent (a resurrected row, not an error).
+// @ref LLP 0104 [tests]: a position-deleted row stays deleted on the native batch route, not just the row route
+// @ref LLP 0294#partition-union [tests]: deletes, residual filter, COUNT, and the global range all agree with the row path over real Iceberg partitions
+test('purged rows stay purged through the prepared union over real Iceberg partitions', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-union-purge-'))
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'v', type: 'STRING', nullable: true },
+    ]
+    const first = path.join(cacheRoot, 'part-a')
+    const second = path.join(cacheRoot, 'part-b')
+    // Purge the LEADING row of the first file: a delete applied against
+    // filtered rather than physical ordinals would drop `id = 2` instead.
+    await appendRowsToTable(first, columns, [
+      { id: 1, v: 'secret' },
+      { id: 2, v: 'keep' },
+      { id: 3, v: 'keep' },
+    ])
+    await appendRowsToTable(second, columns, [
+      { id: 4, v: 'keep' },
+      { id: 5, v: 'secret' },
+    ])
+    for (const table of [first, second]) {
+      await deleteMatchingRows(table, (row) => row.v === 'secret', { columns: ['v'] })
+    }
+
+    const sources = []
+    for (const table of [first, second]) {
+      const source = await dataSourceForTable(table)
+      assert.ok(source, 'the purged table still reads')
+      assert.equal(typeof source.prepareScan, 'function', 'icebird offers native batches')
+      sources.push(source)
+    }
+    const union = unionSources(sources)
+    assert.equal(typeof union.prepareScan, 'function', 'aligned partitions expose one prepared union')
+    // icebird cannot count a snapshot carrying position deletes, and one
+    // unknown child must not let the union report a short total.
+    assert.equal(union.numRows, undefined)
+
+    /** @param {string} query */
+    const run = (query) => collect(executeSql({ tables: { t: union }, query }))
+    assert.deepEqual(
+      (await run('SELECT id FROM t ORDER BY id')).map((row) => Number(row.id)),
+      [2, 3, 4]
+    )
+    assert.deepEqual(await run("SELECT id FROM t WHERE v = 'secret'"), [])
+    assert.deepEqual(await run('SELECT COUNT(*) AS n FROM t'), [{ n: 3 }])
+    assert.deepEqual(
+      (await run('SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 1')).map((row) => Number(row.id)),
+      [3, 4]
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
 
@@ -135,7 +385,7 @@ const PARQUET_PARTITION_COLUMNS = [
  * test below exercises actual hyparquet reads and pushdown, not a fake source.
  *
  * @param {Record<string, SqlPrimitive>[]} rows
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeParquetPartition(rows) {
   return parquetSourceFromRows(PARQUET_PARTITION_COLUMNS, rows, { rowGroupSize: 2 })
@@ -235,10 +485,10 @@ test('unionSources tolerates a scan with no options', async () => {
  * flags) to a fake source, honoring its own limit/offset. Exercises the
  * union's normalization shim for pre-0.15 plugin sources.
  *
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {Record<string, SqlPrimitive>[]} rows
  * @param {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} seenColumnScans
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 function withFakeScanColumn(source, rows, seenColumnScans) {
   source.scanColumn = ({ column, where, limit, offset }) => ({
@@ -257,10 +507,10 @@ function withFakeScanColumn(source, rows, seenColumnScans) {
  * applies an equality `where` like the icebird source does, reporting
  * `appliedWhere` honestly.
  *
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {Record<string, SqlPrimitive>[]} rows
  * @param {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} seenColumnScans
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 function withFlaggedScanColumn(source, rows, seenColumnScans) {
   source.scanColumn = ({ column, where, limit, offset }) => {
@@ -452,7 +702,7 @@ const DRIFT_BASE_COLUMNS = [
  * Two real parquet partitions with additive drift: `extra` exists only in the
  * newer one, the shape a cache takes on the day a dataset gains a column.
  *
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function driftedUnion() {
   const older = await parquetSourceFromRows(DRIFT_BASE_COLUMNS, [
@@ -547,7 +797,7 @@ test('a partition whose rows carry no resolved map reads the same, because the u
    *
    * @param {string[]} columns
    * @param {Record<string, SqlPrimitive>[]} rows
-   * @returns {AsyncDataSource}
+   * @returns {ScannableDataSource}
    */
   function unresolvedSource(columns, rows) {
     return {

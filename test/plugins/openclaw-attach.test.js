@@ -165,7 +165,7 @@ test('attach refuses without writing when a provider key already exists (R2)', a
         new RegExp(`models\\.providers\\.${existingKey} already exists`)
       )
       // The reason has to be actionable, not just a diagnosis.
-      assert.match(outcome.status === 'refused' ? outcome.reason : '', /hyp detach --client openclaw/)
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /hyp client detach openclaw/)
       // The user-facing surface is unchanged by the outcome split: a refusal
       // still prints as "did not apply", exactly as a hard failure does.
       assert.match(stdout, /did not apply/)

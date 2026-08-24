@@ -20,8 +20,11 @@
  * stream's own `readableEnded`, for a stream that was already spent when
  * the interface was built. Readline registers its `end` listener at
  * construction, so the second case never emits `close` at all and a
- * `close`-only guard still hangs on it. Both resolve `null`, which callers
- * read as the empty line - the answer a bare enter would have given.
+ * `close`-only guard still hangs on it. Both resolve `null`, which is a
+ * distinct value from the empty line and not a synonym for it: most
+ * callers read it as the bare enter they would have got anyway, but a
+ * caller whose default would *proceed* must tell the two apart (LLP 0299
+ * #eof-declines), so this never collapses them on their behalf.
  *
  * Neither settlement may outrun an answer that did arrive, and both can:
  * `close` fires synchronously, while `rl.question` hands its answer back

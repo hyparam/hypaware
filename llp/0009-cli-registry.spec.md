@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0003, LLP 0015
+**Extended-by:** LLP 0267 (#d1: top-level help reads the manifest while group help reads the registry, so the two are compared rather than assumed to agree), LLP 0293 (a registration's `usage` line and its parser are one declaration, and every visible core command refuses input it does not know with exit 2)
 
 > Command registration, dispatch, and help. Decomposed from
 > `hypaware-design.md` (CLI Registry).
@@ -18,6 +19,13 @@
 > verb to a remote MCP tool; being core-defined, it does not violate
 > [no cross-plugin option injection](#no-cross-plugin-option-injection). `hyp mcp`
 > (serve) is a core command.
+
+> **Extended by [LLP 0268](./0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).**
+> A manifest-declared command may be an internal mechanism rather than CLI
+> surface. 0268 replaces the mechanism the discovery section below names
+> (omit the command from `contributes.commands`) with a `hidden: true` flag
+> on the declaration, which keeps it out of help without losing the
+> declaration the dispatch-miss path reads.
 
 ## Core owns dispatch
 

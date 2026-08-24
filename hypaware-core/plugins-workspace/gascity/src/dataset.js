@@ -6,9 +6,8 @@ import { discoverCachePartitions } from '../../../../src/core/cache/partition.js
 import { unionSources, emptySource } from 'hypaware/core/query'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
- * @import { AsyncDataSource } from 'squirreling'
  */
 
 export const DATASET_NAME = 'gascity_messages'
@@ -112,6 +111,7 @@ export async function refreshPartition(_partition) {
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
+ * @returns {Promise<ScannableDataSource>}
  */
 export async function createDataSource(partitions, ctx) {
   const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
@@ -125,7 +125,7 @@ export async function createDataSource(partitions, ctx) {
   }
   for (const p of fresh) tablePaths.add(p.path)
 
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)

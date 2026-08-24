@@ -8,7 +8,9 @@
 **Related:** LLP 0049, LLP 0066, LLP 0085, LLP 0103, LLP 0262 (the RFC this
 decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257, LLP 0258
 **Extended-by:** LLP 0263 (#byte-cap is also enforced by the client hook, so
-the bound holds while the daemon is down)
+the bound holds while the daemon is down), LLP 0287 (#delete-on-drop is
+applied by the Claude OTEL listener to an `undetermined` verdict too, which is
+none of the three drops this names; open, nothing settled until that issue is)
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB
@@ -60,6 +62,12 @@ bodies instead of leaving them unread.** Skipping would leave the content of
 exactly the sessions the user asked us not to keep sitting in our own
 directory until a cap evicted it. Deletion is what makes the opt-out mean what
 it says.
+
+**Extended-by:** [LLP 0287](./0287-undetermined-deletes-bodies-unread.issue.md)
+(Draft, open): the Claude telemetry listener runs this same deletion for an
+`undetermined` verdict, which is none of the three drops named above. That
+issue states the asymmetry and the options; the scope of this section is
+unchanged until it is settled.
 
 ### Purge and detach sweep the spool {#purge-and-detach-sweep}
 

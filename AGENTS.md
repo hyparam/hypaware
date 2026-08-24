@@ -5,6 +5,24 @@ HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
 repo; do not assume its tests, package scripts, or agent notes are available
 unless a task explicitly provides that context.
 
+## Adding things
+
+Make the smallest change that fixes the problem. When a bigger change looks
+right, land the small one and defer the rest. File a GitHub issue autonomously
+only when the follow-up is concrete, consequential, and clearly outside the
+current task. Do not file issues for speculative improvements, minor cleanup,
+or observations that are adequately captured in the PR description.
+
+- **No new runtime dependencies.** Use the standard library and the code already
+  here. If nothing here can do the job, keep the fix small and apply the same
+  follow-up threshold above.
+- **Do not invent columns, config keys, or schema fields.** Reuse or derive.
+  Add one only when the task calls for it, and a rejected one stays rejected.
+- **Reuse before you add** a file, helper, wrapper, or abstraction, unless the
+  existing one is the wrong home for it.
+- **Stop when tests pass.** Note unasked-for docs, cleanups, or adjacent fixes
+  in the PR description; do not land them.
+
 ## Design docs (LLP)
 
 Design rationale lives in numbered **LLP documents** under `llp/`, following
@@ -12,6 +30,9 @@ Linked Literate Programming. Start at [`llp/0000-hypaware.explainer.md`](llp/000
 for the subsystem map, and [LLP 0002](llp/0002-v1-scope.decision.md) for what
 actually shipped in V1.
 
+- **Most changes need no LLP.** Bug fixes, null handling, tests, renames,
+  behavior-preserving refactors, and version bumps get none. Write one when a
+  real design decision is made or changed, not as a record of a fix.
 - **Read before you change.** Before modifying a subsystem, read the LLP tagged
   with its `Systems` value (e.g. `Sources`, `Sinks`, `Plugins`, `Config`).
 - **Annotate non-obvious decisions.** When you implement or change code that
@@ -37,6 +58,14 @@ actually shipped in V1.
   rationale-order view; `/llp-create <title>` scaffolds a new doc; `/llp-list`
   surveys the corpus; `/llp-grill` stress-tests a plan against the LLP corpus
   before you write code.
+- **A new number comes from `node scripts/llp-numbers.js next`**, after a
+  `git fetch --prune`. Numbers are minted on every branch at once, so the tree
+  you have checked out is not the corpus: three branches each read
+  `max(llp/) + 1` and each got the same answer (issue #907). The same script
+  gates it: `check` in the `cross-branch-numbers` CI job, which fetches every
+  branch first, and in `npm test` wherever the clone carries them (a shallow or
+  single-branch checkout skips it and says so). `survey` shows every collision
+  across every ref.
 
 ## Code Style
 

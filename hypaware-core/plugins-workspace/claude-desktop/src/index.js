@@ -42,8 +42,13 @@ export const configSection = {
  * findings in LLP 0133 identify the managed-preferences plist
  * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
  * real local surface, so the manifest also declares `contributes.client`
- * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130) for the
- * `hyp init` wizard's `needs_setup` row. This does not reinstate generic
+ * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130). That
+ * picker row is `hidden` (LLP 0297): onboarding never offers Claude Desktop,
+ * because every route to a working Desktop capture runs through the sudo'd
+ * plist write below, and a wizard checkbox is the wrong place to ask for it.
+ * The row survives hidden so `hyp init --source claude-desktop`, the
+ * reconfigure read-back, and the dataset-owner map keep working. This does
+ * not reinstate generic
  * attach-on-join (LLP 0044): the plugin registers no runtime `ctx.clients`
  * adapter, so the generic reconciler's `desired()` (`action_attach.js`) stays
  * inert for `claude-desktop` and the plist is placed only via the explicit
@@ -79,22 +84,28 @@ export async function activate(ctx) {
   const stateDir = ctx.paths.stateDir
 
   ctx.commands.register({
-    name: 'claude-desktop profile',
+    name: 'client claude-desktop profile',
+    aliases: ['claude-desktop profile'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Render the managed 3P-inference profile for Claude Desktop',
-    usage: 'hyp claude-desktop profile [--plist] [--out <path>]',
+    usage: 'hyp client claude-desktop profile [--plist] [--out <path>]',
     help: 'Prints the managed third-party-inference payload (JSON by default, a managed-preferences '
       + 'plist dict with --plist) for MDM distribution. The payload carries no secret: it references '
-      + "the credential wrapper by absolute path. Run 'hyp claude-desktop install-helper' first so the "
+      + "the credential wrapper by absolute path. Run 'hyp client claude-desktop install-helper' first so the "
       + 'wrapper exists on disk.',
     run: async (argv, cmdCtx) => runProfile(argv, cmdCtx, sectionConfig, credential, stateDir),
   })
 
   ctx.commands.register({
-    name: 'claude-desktop install-helper',
+    name: 'client claude-desktop install-helper',
+    aliases: ['claude-desktop install-helper'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Write the no-arg credential wrapper the Desktop profile points at',
-    usage: 'hyp claude-desktop install-helper [--path <path>]',
+    usage: 'hyp client claude-desktop install-helper [--path <path>]',
     help: 'Generates the executable wrapper that runs `hyp claude-account credential` with no '
       + 'arguments (Desktop runs the helper with no argv). Writes it under the plugin state dir by '
       + 'default, marked executable, outside any TCC-protected directory.',
@@ -102,10 +113,21 @@ export async function activate(ctx) {
   })
 
   ctx.commands.register({
-    name: 'claude-desktop status',
+    name: 'client claude-desktop status',
+    aliases: ['claude-desktop status'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Show the resolved Desktop profile inputs (endpoint, mode, helper)',
-    usage: 'hyp claude-desktop status',
+    usage: 'hyp client claude-desktop status',
+    help: 'Prints what the profile WOULD be built from: the gateway endpoint, the credential mode '
+      + 'and auth scheme, the wrapper path and whether it exists on disk, the advertised models, and '
+      + 'the target bundle id. It reads config and disk only, changes nothing, and works on a non-Mac '
+      + "admin box. It carries no secret: for sign-in state run 'hyp client claude-account status', "
+      + "and for whether the install actually took, run 'hyp client claude-desktop verify' - this command answers "
+      + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
+      + 'credential wrapper is missing, and when the inputs do not resolve at all - an ephemeral '
+      + "gateway listen (':0') has no stable port for a profile to point at.",
     run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
   })
 
@@ -115,10 +137,13 @@ export async function activate(ctx) {
   // src/verify.js; this registration just wires the resolved inputs
   // (sectionConfig, the credential capability, stateDir) through.
   ctx.commands.register({
-    name: 'claude-desktop install',
+    name: 'client claude-desktop install',
+    aliases: ['claude-desktop install'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt',
-    usage: 'hyp claude-desktop install [--yes] [--print-commands]',
+    usage: 'hyp client claude-desktop install [--yes] [--print-commands]',
     help: 'Explains what it will change and asks once, defaulting to yes and naming the browser '
       + 'sign-in a yes may launch (LLP 0139#informed-consent as amended): unlike Claude Code and '
       + 'Codex, Desktop cannot present its own credential through a third-party '
@@ -135,10 +160,13 @@ export async function activate(ctx) {
   })
 
   ctx.commands.register({
-    name: 'claude-desktop verify',
+    name: 'client claude-desktop verify',
+    aliases: ['claude-desktop verify'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
-    usage: 'hyp claude-desktop verify',
+    usage: 'hyp client claude-desktop verify',
     help: 'Checks the automatic half (managed plist present and up to date, dialog residue cleared) '
       + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
       + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
@@ -206,7 +234,7 @@ async function runProfile(argv, cmdCtx, sectionConfig, credential, stateDir) {
     if (!fs.existsSync(inputs.helperPath)) {
       cmdCtx.stderr.write(
         `claude-desktop profile: warning: credential wrapper ${inputs.helperPath} does not exist yet; `
-        + "run 'hyp claude-desktop install-helper'\n",
+        + "run 'hyp client claude-desktop install-helper'\n",
       )
     }
     const profile = buildManagedProfile(inputs)
@@ -242,7 +270,7 @@ async function runStatus(cmdCtx, sectionConfig, credential, stateDir) {
     cmdCtx.stdout.write(`helper: ${inputs.helperPath} (${helperExists ? 'installed' : 'NOT installed'})\n`)
     cmdCtx.stdout.write(`models: ${inputs.models.join(', ')}\n`)
     cmdCtx.stdout.write(`bundle id: ${inputs.bundleId}\n`)
-    cmdCtx.stdout.write("credential state: see 'hyp claude-account status'\n")
+    cmdCtx.stdout.write("credential state: see 'hyp client claude-account status'\n")
     return helperExists ? 0 : 1
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop status: ${err instanceof Error ? err.message : String(err)}\n`)

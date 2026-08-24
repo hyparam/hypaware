@@ -3,7 +3,8 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 
 /**
@@ -21,11 +22,9 @@ import { useColor } from '../cli/stdio.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const dataset = argv[0]
-  if (!dataset) {
-    ctx.stderr.write('usage: hyp query schema <dataset>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
   return withSpan(
     'query.resolve_tables',
     {
@@ -49,10 +48,40 @@ export async function runQuerySchema(argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * Report this machine's local cache. There is no remote form: the server
+ * owns its own registration state and never exposes it through this
+ * command, so `--remote` is refused rather than ignored.
+ *
+ * The refusal matters more here than it does for `--refresh`. A rejected
+ * refresh is obvious (nothing happened), but a silently-ignored `--remote`
+ * on `status` prints a plausible, server-shaped inventory of the *wrong*
+ * host, with nothing on stderr and a zero exit. Callers asking "what does
+ * the server have" have been observed to read the local answer as the
+ * server's and carry on.
+ *
+ * @ref LLP 0273#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
+ * @ref LLP 0273#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runQueryStatus(_argv, ctx) {
+export async function runQueryStatus(argv, ctx) {
+  if (argv.some((arg) => arg === '--remote' || arg.startsWith('--remote='))) {
+    ctx.stderr.write(
+      "hyp cache status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
+    )
+    ctx.stderr.write(
+      "  to see what a remote host holds, probe it: hyp query sql 'select 1 from <dataset> limit 1' --remote <target>\n"
+    )
+    return 2
+  }
+  // Everything else goes through the shared codec, for the same reason the
+  // spelled-out `--remote` is refused above: `status` takes no arguments, so
+  // anything else here is a near miss (`--remot prod`, `-r prod`,
+  // `--format json`, a bare `prod`) that a silent ignore would answer with
+  // the same well-formed local inventory the refusal exists to withhold.
+  // @ref LLP 0273#asymmetry [implements]: a wrong-host answer is self-consistent, so a mistyped flag has to fail loudly too
+  const parsed = parseCoreCommandArgv('cache status', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
@@ -175,7 +204,7 @@ export async function runQueryOverview(argv, ctx) {
     // "no AI client is set up yet".
     ctx.stderr.write(
       'hyp query overview: nothing has been recorded yet - no AI client is connected.\n' +
-      '  Run `hyp init` to start capturing Claude or Codex sessions.\n'
+      '  Run `hyp setup` to start capturing Claude or Codex sessions.\n'
     )
     return 1
   }
@@ -238,7 +267,9 @@ export async function runQueryOverview(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryRefresh(argv, ctx) {
-  const target = argv[0]
+  const parsed = parseCoreCommandArgv('cache refresh', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const target = /** @type {string | undefined} */ (parsed.params.dataset)
   const datasets = ctx.query.listDatasets()
   const filtered = target ? datasets.filter((d) => d.name === target) : datasets
   if (target && filtered.length === 0) {
@@ -391,7 +422,7 @@ const QUERY_MAINTAIN_SCHEMA = {
  * @returns {{ error: string } | { dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }}
  */
 function parseQueryMaintainArgv(argv) {
-  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA)
+  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: QUERY_MAINTAIN_USAGE }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ dataset?: string, 'dry-run': boolean, force: boolean, 'compact-only': boolean, 'expire-only': boolean }} */ (parsed.params)

@@ -17,6 +17,16 @@ import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
+/**
+ * A data source that retains Squirreling's row interface. Hypaware's storage,
+ * union, visibility, and legacy parquet adapters all guarantee this stronger
+ * shape even when they also expose prepared native batches.
+ */
+export type ScannableDataSource = AsyncDataSource & {
+  columns: string[]
+  scan(options: ScanOptions): ScanResults
+}
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 
@@ -431,8 +441,31 @@ export type PickerDetectProbe =
 
 export interface PluginCommandManifest {
   name: string
+  /** Help presentation category, mirrored onto the runtime registration. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Compatibility spellings used for inactive-plugin ownership checks. */
+  aliases?: string[]
   summary?: string
   usage?: string
+  /**
+   * True when the command is an internal mechanism rather than CLI
+   * surface: it keeps dispatching, and it keeps its manifest entry, but
+   * it is absent from `hyp --help` and from its group's help. For a
+   * command whose caller is a program (a credential-helper wrapper, an
+   * in-process orchestration step), not a person (LLP 0268).
+   *
+   * Declaring it hidden rather than deleting the entry is deliberate,
+   * the same display-filter-not-catalog-deletion rule LLP 0202 set for
+   * hidden picker rows: the declaration is what lets the dispatch-miss
+   * path name the owning plugin ("unavailable", not "unknown",
+   * LLP 0153) and what the manifest/registration parity tests compare.
+   *
+   * The runtime registration must set `CommandRegistration.hidden` to
+   * match; the manifest field governs pre-boot help, the registration
+   * field governs post-boot group help.
+   */
+  hidden?: boolean
 }
 
 export interface PluginConfigSectionManifest {
@@ -904,6 +937,21 @@ export interface CommandRegistry {
    * cannot shadow a command or show up as its own subcommand.
    */
   registerGroup(group: CommandGroupRegistration): void
+  /**
+   * Release a registered command name, along with every alias pointing at
+   * it. Accepts whatever `get` accepts (primary name or alias), is
+   * idempotent, and is a no-op on an unknown name. Exists so a retracted
+   * verb can give back the CLI surface its registration claimed.
+   *
+   * Optional on purpose. The kernel accepts an injected command registry,
+   * and `VerbRegistry.unregister` feature-detects this member before
+   * calling it, so a registry that predates the affordance is tolerated
+   * rather than fatal. Typing it required would narrow that check to
+   * always-true for anyone compiling against these declarations and
+   * invite its removal, which is what turns an older kernel into a boot
+   * failure. `createCommandRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): CommandRegistration | undefined
   getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
@@ -922,6 +970,14 @@ export interface CommandGroupRegistration {
 export interface CommandRegistration {
   name: string
   plugin?: PluginName
+  /** Help presentation category used to organize the command surface. */
+  category?: string
+  /** Intended help audience. Machine commands are hidden contracts. */
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Plugin activation policy selected after semantic command resolution. */
+  bootProfile?: 'config' | 'all-available' | 'none'
+  /** True for a help-only namespace command created by core. */
+  group?: boolean
   summary: string
   usage: string
   /**
@@ -930,7 +986,15 @@ export interface CommandRegistration {
    * summary stays one line for command listings.
    */
   help?: string
+  /** Compatibility spellings. Indexed for dispatch and omitted from help. */
   aliases?: string[]
+  /**
+   * True when the command is an internal mechanism, not CLI surface:
+   * it still dispatches, but core drops it from top-level help and
+   * from its group table. A plugin command that sets this must also
+   * set `hidden` on its manifest entry, which is what governs the
+   * pre-boot help rendered before any plugin is loaded (LLP 0268).
+   */
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
@@ -1353,7 +1417,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
 }
 
 // =============================================================================
@@ -1386,7 +1450,7 @@ export interface DatasetRegistration {
   localOnlyContentColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
   /**
    * Optional flush-time settlement pass. The kernel calls this once per
    * flush batch (before partition write) with the batch's rows; the
@@ -1673,6 +1737,11 @@ export interface VerbRenderResult {
 export interface VerbRegistration {
   /** CLI command name, e.g. `'graph neighbors'`. */
   name: string
+  /** CLI-only compatibility spellings. The MCP tool name is unchanged. */
+  aliases?: string[]
+  /** CLI help metadata. Does not affect MCP exposure or auth. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
   plugin?: PluginName
@@ -1702,6 +1771,25 @@ export interface VerbRegistration {
 
 export interface VerbRegistry {
   register(verb: VerbRegistration): void
+  /**
+   * Release a claimed verb name: the name map, the tool map, and the CLI
+   * command projected from a verb under that name (and only that one; a
+   * plugin's own same-named command survives). By-name, idempotent, and a
+   * no-op on an unknown name.
+   *
+   * This is what lets a host displace a kernel-shipped verb with its own
+   * implementation of the same tool: it takes the name back, then
+   * registers. Callers should re-check `getByTool` afterwards rather than
+   * trust the removal, since registering into a still-held tool slot
+   * throws (LLP 0264 §verb).
+   *
+   * Optional on purpose: plugins declare a kernel semver *range*, so a
+   * plugin built against these declarations can be loaded by a kernel
+   * that predates this member. Feature-detect it (`typeof
+   * verbs.unregister === 'function'`) rather than assume it. The kernel's
+   * own `createVerbRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): VerbRegistration | undefined
   getByTool(tool: string): VerbRegistration | undefined
   list(): VerbRegistration[]
@@ -2658,4 +2746,3 @@ export interface BackfillMaterializeContext {
   /** Stable run id propagated from the CLI runner. */
   devRunId?: string
 }
-

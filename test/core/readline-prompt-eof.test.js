@@ -154,6 +154,46 @@ test('askYesNo declines on a stdin that was already spent', async () => {
   assert.equal(await settles(answered, 'askYesNo on a spent stdin'), false)
 })
 
+// @ref LLP 0299#eof-declines [tests]: a spent stdin declines a `[Y/n]` confirm rather than taking the yes it printed
+test('askYesNo declines at EOF even when the default is yes', async () => {
+  const stdin = new PassThrough()
+  const stderr = makeBuf()
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin, stderr }),
+    'Send now and end the review window? [Y/n] ',
+    { defaultYes: true }
+  )
+  stdin.end()
+
+  // A bare enter takes the printed yes; a terminal that dropped is not a
+  // bare enter, and the verb behind this one releases the first-sync hold.
+  assert.equal(await settles(answered, 'askYesNo at EOF with defaultYes'), false)
+  assert.match(stderr.text(), /\[Y\/n\] $/)
+})
+
+test('askYesNo declines on a spent stdin even when the default is yes', async () => {
+  const stdin = await spentStdin()
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin, stderr: makeBuf() }),
+    'Send now? [Y/n] ',
+    { defaultYes: true }
+  )
+
+  assert.equal(await settles(answered, 'askYesNo on a spent stdin with defaultYes'), false)
+})
+
+test('askYesNo takes a bare enter as the yes it printed', async () => {
+  const stdin = new PassThrough()
+  const answered = askYesNo(
+    /** @type {any} */ ({ stdin, stderr: makeBuf() }),
+    'Send now? [Y/n] ',
+    { defaultYes: true }
+  )
+  stdin.write('\n')
+
+  assert.equal(await settles(answered, 'askYesNo on a bare enter'), true)
+})
+
 test('askYesNo still honours an explicit yes', async () => {
   const stdin = new PassThrough()
   const answered = askYesNo(

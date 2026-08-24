@@ -2,6 +2,8 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
@@ -406,6 +408,8 @@ test('a gateway whose upstreams all compile reports no drop and logs nothing', a
  * @param {Record<string, unknown>} config
  * @param {{ level: string, event: string, attrs: any }[]} [logged]
  */
+let fakeCtxSequence = 0
+
 function fakeCtx(config, logged) {
   /** @param {string} level */
   const record = (level) => (/** @type {string} */ event, /** @type {any} */ attrs) => {
@@ -413,6 +417,12 @@ function fakeCtx(config, logged) {
   }
   return /** @type {any} */ ({
     config,
+    // Never inspect the developer machine's real CA. A real proxy attach there
+    // correctly turns an otherwise idle source into a tunnel-only listener.
+    env: {
+      HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence}`),
+      HYP_HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence++}`),
+    },
     storage: {
       cacheTablePath(dataset, partitions) {
         return [dataset, ...(partitions ?? [])].join('/')
@@ -453,4 +463,93 @@ async function startEchoUpstream(body) {
 async function fetchText(url) {
   const res = await fetch(url)
   return { status: res.status, text: await res.text() }
+}
+
+/**
+ * The rollback added for issue #879 has to stay behind the append. The
+ * listener's catch also covers the bookkeeping that runs AFTER the write
+ * (entrypoint activity, counters, the `aigw.exchange` log), and this path
+ * has no `part_id` dedupe in front of `appendRows`, so un-marking messages
+ * that landed makes the conversation's next replay commit a second copy of
+ * every one of them.
+ */
+test('a failure after the append does not roll the dedupe back onto rows that landed', async () => {
+  const upstream = await startEchoUpstream('ok')
+  const state = createGatewayState()
+  state.projectors.push(/** @type {any} */ ({
+    name: 'stub',
+    match: () => true,
+    project: () => ({
+      provider: 'anthropic',
+      session_id: 'sess-post-append',
+      conversation_id: 'conv-post-append',
+      client_name: 'claude',
+      conversation_source: 'claude_code',
+      messages: [
+        { role: 'user', content: 'hello', message_id: 'uuid-user', provider_uuid: 'uuid-user' },
+        { role: 'assistant', content: 'hi', message_id: 'uuid-asst', provider_uuid: 'uuid-asst' },
+      ],
+    }),
+    _seq: 0,
+  }))
+
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  const ctx = /** @type {any} */ ({
+    config: {
+      listen: '127.0.0.1:0',
+      upstreams: [{ name: 'anthropic', base_url: upstream.url, path_prefix: '/v1/messages', provider: 'anthropic' }],
+    },
+    storage: {
+      /** @param {string} dataset @param {string[]} [partitions] */
+      cacheTablePath: (dataset, partitions) => [dataset, ...(partitions ?? [])].join('/'),
+      /** @param {string} _p @param {unknown} _c @param {Record<string, unknown>[]} rows */
+      async appendRows(_p, _c, rows) { appended.push(...rows) },
+    },
+    log: {
+      debug() {},
+      // Stands in for anything after the append that can throw.
+      /** @param {string} event */
+      info(event) { if (event === 'aigw.exchange') throw new Error('log sink exploded') },
+      warn() {},
+      error() {},
+    },
+  })
+
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    const url = `http://${status.details.host}:${status.details.port}/v1/messages`
+    const send = () => fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
+    }).then((r) => r.text())
+
+    await send()
+    await settleFinalizers()
+    assert.deepEqual(appended.map((r) => r.part_id), ['uuid-user#0', 'uuid-asst#0'])
+
+    // The conversation replays its earlier messages on the next exchange.
+    await send()
+    await settleFinalizers()
+    assert.deepEqual(
+      appended.map((r) => r.part_id),
+      ['uuid-user#0', 'uuid-asst#0'],
+      'the replay writes nothing: the rows that landed are still marked seen',
+    )
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+/**
+ * The proxy answers the client before its exchange finalizer resolves, so a
+ * test that asserts on written rows has to let the microtask/IO queue drain.
+ */
+async function settleFinalizers() {
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }

@@ -21,9 +21,11 @@
  *   beat `gascity` when both are registered.
  *
  * @returns {CommandRegistry & {
- *   match: (argv: string[]) => { command: CommandRegistration, prefixLength: number, rest: string[] } | undefined,
+ *   match: (argv: string[]) => { command: CommandRegistration, invokedName: string, prefixLength: number, rest: string[] } | undefined,
  *   has: (name: string) => boolean,
  *   size: () => number,
+ *   unregister: (name: string) => void,
+ *   listGroups: () => CommandGroupRegistration[],
  * }}
  * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */
@@ -52,6 +54,25 @@ export function createCommandRegistry() {
     if (typeof command.run !== 'function') {
       throw new TypeError(`CommandRegistry.register: '${command.name}' missing run()`)
     }
+    // Fill the common metadata at the registry boundary so third-party
+    // commands participate without boilerplate. Canonical registrations can
+    // override every field; aliases always inherit this one semantic record.
+    // @ref LLP 0248#semantic-boot [implements]: category, audience, and boot policy live on the canonical registry entry
+    command.category ??= command.plugin ? 'additional' : command.name.split(' ')[0]
+    command.audience ??= command.hidden
+      ? 'machine'
+      : command.category === 'additional'
+        ? 'operator'
+        : command.category === 'dev'
+          ? 'developer'
+          : 'everyday'
+    command.bootProfile ??= 'config'
+    if (command.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(command.audience)) {
+      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid audience '${command.audience}'`)
+    }
+    if (command.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(command.bootProfile)) {
+      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid bootProfile '${command.bootProfile}'`)
+    }
     if (byName.has(command.name) || aliasIndex.has(command.name)) {
       throw new Error(`CommandRegistry.register: duplicate command name '${command.name}'`)
     }
@@ -73,6 +94,30 @@ export function createCommandRegistry() {
     if (byName.has(name)) return byName.get(name)
     const aliased = aliasIndex.get(name)
     return aliased ? byName.get(aliased) : undefined
+  }
+
+  /**
+   * Release a registered command name. Accepts whatever `get` accepts
+   * (the primary name or one of its aliases) and removes the command
+   * along with **every** alias pointing at it: an alias left behind
+   * would keep the name unclaimable and route argv at a command that is
+   * no longer registered.
+   *
+   * By-name, idempotent, and total on an unknown name, because the one
+   * caller that needs it is `VerbRegistry.unregister` retracting the CLI
+   * command a verb projected, and that call must never be the thing that
+   * takes daemon boot down.
+   *
+   * @param {string} name
+   * @ref LLP 0264#verb [implements]: a verb name claimed on two surfaces has to be releasable on both
+   */
+  function unregister(name) {
+    const primary = byName.has(name) ? name : aliasIndex.get(name)
+    if (primary === undefined || !byName.has(primary)) return
+    byName.delete(primary)
+    for (const [alias, target] of aliasIndex) {
+      if (target === primary) aliasIndex.delete(alias)
+    }
   }
 
   /**
@@ -111,6 +156,17 @@ export function createCommandRegistry() {
     return groups.get(name)
   }
 
+  /**
+   * Every registered group description, sorted. Group metadata is not in
+   * `list()` (a description is not a command), so without this the only way
+   * to see what a plugin described is to already know the name. The agreement
+   * check between a manifest and what `activate()` registers needs the set,
+   * not a lookup.
+   */
+  function listGroups() {
+    return Array.from(groups.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  }
+
   function list() {
     return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
@@ -134,7 +190,7 @@ export function createCommandRegistry() {
    */
   function match(argv) {
     if (!Array.isArray(argv) || argv.length === 0) return undefined
-    /** @type {{ command: CommandRegistration, prefixLength: number, rest: string[] } | undefined} */
+    /** @type {{ command: CommandRegistration, invokedName: string, prefixLength: number, rest: string[] } | undefined} */
     let best
     let prefix = ''
     for (let i = 0; i < argv.length; i += 1) {
@@ -145,6 +201,7 @@ export function createCommandRegistry() {
       if (command) {
         best = {
           command,
+          invokedName: prefix,
           prefixLength: i + 1,
           rest: argv.slice(i + 1),
         }
@@ -153,5 +210,5 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, registerGroup, get, getGroup, list, has, size, match }
+  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
 }

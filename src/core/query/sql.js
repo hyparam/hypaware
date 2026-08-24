@@ -8,6 +8,7 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 import { normalizeScanColumn } from './scan-column.js'
+import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
   callerSeesEverything,
   defaultQueryVisibilityResolver,
@@ -16,11 +17,11 @@ import {
 } from './visibility.js'
 
 /**
- * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncDataSource } from 'squirreling'
+ * @import { AsyncBatch, AsyncDataSource, ColumnResult, ColumnVector, PrepareScan } from 'squirreling'
  */
 
 /**
@@ -136,6 +137,30 @@ function resolveForcedGc() {
 }
 
 /**
+ * A source's logical column names. Squirreling widened `AsyncDataSource` so a
+ * prepared-only source may carry `schema` instead of `columns`; the kernel
+ * therefore derives the names the way the engine's own `dataSourceColumns`
+ * does. That helper is internal to squirreling and not exported, so the rule
+ * lives here once rather than at each of the three sites that need it.
+ *
+ * The precedence is the engine's, not the convenient one: when a source offers
+ * both `prepareScan` and `schema`, squirreling plans from the schema and never
+ * reads the `columns` such a source may also advertise. Preferring `columns`
+ * here would evaluate the local-only gate below against a list the engine
+ * ignores, so a content column present only in `schema` would slip the gate.
+ * Reading the authoritative list can only widen the set of sources that get
+ * wrapped, which is the fail-closed direction.
+ *
+ * @ref LLP 0294#transparent-wrappers [implements]: a prepared-only source is addressed by schema, not by an advertised column list
+ * @param {AsyncDataSource} source
+ * @returns {string[]}
+ */
+function sourceColumnNames(source) {
+  if (source.prepareScan && source.schema) return source.schema.fields.map((field) => field.name)
+  return source.columns ?? []
+}
+
+/**
  * Decorate a data source so its scans enforce the query's heap budget
  * INLINE, from within the row loop itself. A timer-based watchdog alone is
  * not enough: a query whose reads resolve without real I/O (warm cache,
@@ -150,12 +175,26 @@ function resolveForcedGc() {
  * @returns {AsyncDataSource}
  */
 function withHeapBudget(source, guard) {
+  if (!source.scan) {
+    const schema = /** @type {NonNullable<AsyncDataSource['schema']>} */ (source.schema)
+    const prepareScan = /** @type {NonNullable<AsyncDataSource['prepareScan']>} */ (source.prepareScan)
+    /** @type {AsyncDataSource} */
+    const bounded = {
+      numRows: source.numRows,
+      columns: sourceColumnNames(source),
+      schema,
+      prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
+    }
+    forwardBudgetedScanColumn(bounded, source, guard)
+    return bounded
+  }
+  const scan = source.scan
   /** @type {AsyncDataSource} */
   const bounded = {
     numRows: source.numRows,
-    columns: source.columns,
+    columns: sourceColumnNames(source),
     scan(options) {
-      const inner = source.scan(options)
+      const inner = scan.call(source, options)
       return {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: inner.appliedLimitOffset,
@@ -172,24 +211,112 @@ function withHeapBudget(source, guard) {
       }
     },
   }
-  if (typeof source.scanColumn === 'function') {
-    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-    // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
-    bounded.scanColumn = (options) => {
-      const inner = normalizeScanColumn(scanColumn(options), options)
-      return {
-        appliedWhere: inner.appliedWhere,
-        appliedLimitOffset: inner.appliedLimitOffset,
-        async *chunks() {
-          for await (const chunk of inner.chunks()) {
-            guard.check('column_chunk')
-            yield chunk
-          }
-        },
-      }
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    bounded.schema = source.schema
+    bounded.prepareScan = budgetedPrepareScan((request) => prepareScan.call(source, request), guard)
+  }
+  forwardBudgetedScanColumn(bounded, source, guard)
+  return bounded
+}
+
+/**
+ * Forward a column stream with its negotiation flags intact and sample each
+ * materialized chunk.
+ *
+ * @param {AsyncDataSource} bounded
+ * @param {AsyncDataSource} source
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {void}
+ */
+function forwardBudgetedScanColumn(bounded, source, guard) {
+  if (typeof source.scanColumn !== 'function') return
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+  // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
+  bounded.scanColumn = (options) => {
+    const inner = normalizeScanColumn(scanColumn.call(source, options), options)
+    return {
+      appliedWhere: inner.appliedWhere,
+      appliedLimitOffset: inner.appliedLimitOffset,
+      async *chunks() {
+        for await (const chunk of inner.chunks()) {
+          guard.check('column_chunk')
+          yield chunk
+        }
+      },
     }
   }
-  return bounded
+}
+
+/**
+ * Preserve a prepared source through the heap-budget decoration. Direct
+ * vectors are sampled after batch production; deferred vectors are sampled
+ * immediately after their lazy read resolves.
+ *
+ * @param {PrepareScan} prepareScan
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {PrepareScan}
+ */
+function budgetedPrepareScan(prepareScan, guard) {
+  return function prepareWithBudget(request) {
+    const inner = prepareScan(request)
+    return {
+      schema: inner.schema,
+      residual: inner.residual,
+      properties: inner.properties,
+      async *batches(options = {}) {
+        for await (const batch of inner.batches(options)) {
+          guard.check('native_batch')
+          yield budgetedBatch(batch, guard)
+        }
+      },
+    }
+  }
+}
+
+/**
+ * Sample the budget after a deferred column materializes, WITHOUT converting a
+ * synchronous read into a promise. `ReadColumn` returns `ColumnVector |
+ * Promise<ColumnVector>`, and squirreling keeps whole expression and projection
+ * batches off the promise machinery when every column result resolves inline
+ * (`resolveColumnResults`). An `async read` would hand it a thenable every
+ * time and reintroduce exactly the per-batch microtask this path exists to
+ * remove.
+ *
+ * @param {AsyncBatch} batch
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {AsyncBatch}
+ */
+function budgetedBatch(batch, guard) {
+  return {
+    selection: batch.selection,
+    columns: batch.columns.map((column) => {
+      if (!('read' in column)) return column
+      const read = column.read
+      return {
+        ...column,
+        read(request) {
+          const result = read.call(column, request)
+          if (!isThenable(result)) {
+            guard.check('native_batch')
+            return result
+          }
+          return result.then((vector) => {
+            guard.check('native_batch')
+            return vector
+          })
+        },
+      }
+    }),
+  }
+}
+
+/**
+ * @param {ColumnResult} value
+ * @returns {value is Promise<ColumnVector>}
+ */
+function isThenable(value) {
+  return typeof (/** @type {{ then?: unknown }} */ (value))?.then === 'function'
 }
 
 /**
@@ -249,6 +376,13 @@ export async function executeQuerySql(args) {
         // already points at the real problem (syntax error, unknown function,
         // non-SELECT statement). Surface it verbatim rather than wrapping it.
         const statement = parseSql({ query: trimmed })
+
+        // SQL types a character literal by the operand it is compared
+        // against; neither squirreling nor the pushdown converter does, so a
+        // string bound on a TIMESTAMP column matched nothing at all until the
+        // literal is typed here, before either sees it (issue #860).
+        // @ref LLP 0272 [implements]: the one shared read path types string literals against the column's declared type
+        coerceTimestampLiterals(statement, registry)
 
         const tableNames = uniqueStrings(extractTables(statement))
         span.setAttribute('table_count', tableNames.length)
@@ -319,14 +453,18 @@ export async function executeQuerySql(args) {
           let table = source
           if (!includeLocalOnly) {
             const contentColumns = dataset.localOnlyContentColumns ?? []
-            const governable = source.columns.includes('cwd') ||
-              contentColumns.some((c) => source.columns.includes(c))
+            const sourceColumns = sourceColumnNames(source)
+            const governable = sourceColumns.includes('cwd') ||
+              contentColumns.some((c) => sourceColumns.includes(c))
             if (governable) {
               const vis = getVisibility()
               localOnly.callerClass = vis.callerClass
               if (!callerSeesEverything(vis.callerRank)) {
+                if (!source.scan || !source.columns) {
+                  throw new Error(`Dataset "${name}" must provide columns and scan() to enforce local-only visibility`)
+                }
                 localOnly.filtered = true
-                table = withLocalOnlyVisibility(source, {
+                table = withLocalOnlyVisibility(/** @type {ScannableDataSource} */ (source), {
                   resolver: vis.resolver,
                   callerRank: vis.callerRank,
                   contentColumns,
@@ -431,7 +569,9 @@ export async function executeQuerySql(args) {
         }
 
         try {
-          const results = squirrelExecuteSql({ tables, query: trimmed, signal: controller.signal })
+          // The rewritten statement, not the original text: re-parsing here
+          // would throw the literal typing above away.
+          const results = squirrelExecuteSql({ tables, query: statement, signal: controller.signal })
           const rows = await collect(results)
           // Terminal budget check: the inline guard only samples every
           // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the

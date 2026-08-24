@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { parseListen } from './config.js'
 import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
@@ -167,6 +168,20 @@ export function interceptsHost(upstreams, host, port = 443) {
   // The hostname is lower-cased because a client may send any case and
   // `baseUrl.hostname` is already normalised.
   const wanted = host.toLowerCase()
+  // An IP-literal authority is never intercepted, however the routing table
+  // reads. The local CA can only mint `dNSName` leaves, which a client that
+  // connected to an IP does not match against, so terminating such a tunnel
+  // ends in a leaf mint that refuses the host - after the `200 Connection
+  // Established` has already gone out, which kills the client's egress rather
+  // than only its capture. `prepareInterception` drops an IP-literal upstream
+  // from the CA host list, but the compiled routing table still carries it (it
+  // is a real upstream in reverse-proxy mode), so the decision has to be made
+  // here as well. This is what makes that skip's promise true: such an upstream
+  // is tunnelled blind and unrecorded, exactly as an unconfigured host is. It
+  // also covers an install upgraded from a build that did mint the IP into its
+  // CA, where the host set alone would still say yes.
+  // @ref LLP 0275#ip-literals-are-refused [implements]: an IP-literal CONNECT is tunnelled, never terminated
+  if (isIpLiteralHost(wanted)) return false
   return upstreams.some((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
 }
 
@@ -191,8 +206,8 @@ function upstreamPortOf(upstream) {
  * both more accurate and the only way to forward a request whose path no
  * preset claims.
  *
- * Host AND port, matching {@link interceptsHost} exactly. The two have to agree
- * or the port check there is defeated: `interceptsHost` decides *whether* to
+ * Host AND port, on the same key {@link interceptsHost} uses. The two have to
+ * agree on the key or the port check there is defeated: `interceptsHost` decides *whether* to
  * decrypt on the full authority, and this decides *where the decrypted request
  * then goes*. With two upstreams naming the same host on different ports (an
  * ordinary `upstreams` config, even though no shipping preset does it), a
@@ -203,6 +218,13 @@ function upstreamPortOf(upstream) {
  * `interceptsHost` already matched, so an exact host+port entry exists. The
  * absolute-form caller has no such guarantee: there a miss is expected, and it
  * means the named host is refused (LLP 0247 #refuse-hosts-nobody-registered).
+ *
+ * `interceptsHost` is strictly the narrower predicate, not the identical one:
+ * it additionally refuses an IP-literal authority, which cannot be terminated
+ * (LLP 0275#ip-literals-are-refused). That direction is the one the argument
+ * above needs, and the difference must not be copied here - an IP-literal
+ * upstream is still routable and still recorded on the absolute-form door,
+ * where no certificate is involved.
  *
  * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
  * @param {CompiledUpstream[]} upstreams

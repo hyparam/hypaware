@@ -194,6 +194,16 @@ ctx.commands.register({
 })
 ```
 
+Every declared command is public CLI surface: it appears in `hyp --help` and
+in its group's subcommand table, and a visible diagnostic should carry a
+`help` string explaining what its output means. A command whose caller is a
+program rather than a person (a wrapper script, an orchestration step another
+command drives) is an *internal mechanism*: keep the manifest entry, so a
+dispatch miss can still name the owning plugin, and set `hidden: true` on
+**both** the manifest entry and the `register` call. The manifest flag governs
+the help rendered before boot; the registration flag governs group help after
+it. See [LLP 0268](../llp/0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).
+
 ### Skills
 
 Materialize a skill into client skill directories. Declare
@@ -228,7 +238,7 @@ Only clients whose manifest declares `contributes.client.agent_dir`
 receive agents; a target without one is skipped.
 
 Skills and agents are both **client assets** and share one install path
-(LLP 0138): attaching a client materializes them, and `hyp skills
+(LLP 0138): attaching a client materializes them, and `hyp client skills
 install` re-copies both on demand. There is no separate `agents`
 command.
 
@@ -346,7 +356,9 @@ and how to fix it:
 | `activate_missing` | The entrypoint exports no `activate` function | Add `export async function activate(ctx) { ... }` |
 | `activate_threw` | `activate(ctx)` threw during the dry run | Only register in `activate()`; defer work to `start()`/`create()` |
 | `contribution_not_registered` | Manifest declares something `activate()` never registered | Add the matching `ctx.<registry>.register(...)` call |
-| `contribution_undeclared` (warn) | `activate()` registered something the manifest doesn't declare | Add it to `contributes.*` so it appears in help/discovery |
+| `contribution_undeclared` (warn) | `activate()` registered something the manifest doesn't declare | Add it to `contributes.*` so discovery and inactive-command ownership stay complete |
+| `command_help_drift` | A declared command's manifest summary or `hidden` visibility differs from its registration. An entry with no `summary` at all counts: top-level help then lists the command blank | Make the summary and visibility agree on both sides |
+| `command_help_drift` (warn) | `ctx.commands.registerGroup` describes a group the manifest declares no command under | Declare the group's subcommands, or drop the `registerGroup` call |
 | `capability_unresolved` | A required capability has no provider, or none in the required version range | Install a provider matching the range, widen the range, or drop the requirement |
 | `capability_unprovided` (warn) | Manifest says it provides a capability `activate()` never provided | Call `ctx.provideCapability(...)` |
 

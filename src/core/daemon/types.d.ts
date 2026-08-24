@@ -66,6 +66,70 @@ export interface SinkSnapshot {
   nextScheduledAt?: string
 }
 
+/**
+ * Why a maintenance tick deliberately left a partition fragmented instead
+ * of rewriting it (LLP 0228#reason-ids-are-span-attribute-names). The ids
+ * are the `maintenance.partition` span's attribute names verbatim, which
+ * are themselves named after the `MaintenancePartitionReport` fields, so
+ * one spelling covers the trace, the status file, `hyp status`, and the
+ * daemon log.
+ *
+ * - `compaction_ineffective`: this writer already rewrote the partition and
+ *   reproduced the same file count (LLP 0217#record-effectiveness).
+ * - `compaction_attempt_failed`: the one retry the writer generation owed it
+ *   was spent by a rewrite that threw (LLP 0218#report-the-spent-attempt).
+ *
+ * Convergence (LLP 0199#baseline-gate) is not on this list: it is the
+ * healthy majority of a cache, not a partition left fragmented.
+ */
+export type MaintenanceSkipReason = 'compaction_ineffective' | 'compaction_attempt_failed'
+
+/** One partition the last maintenance tick left fragmented, and why. */
+export interface MaintenanceSkippedPartition {
+  dataset: string
+  /** Partition tuple as `k=v/k=v`, or `all` for an unpartitioned dataset. */
+  partition: string
+  reason: MaintenanceSkipReason
+  /**
+   * The data-file count the recorded rewrite ran over, not the live one
+   * (LLP 0217). Set for `compaction_ineffective` when the cursor records it.
+   */
+  dataFiles?: number
+  /**
+   * ISO time the spent attempt failed, as the cursor records it. Set for
+   * `compaction_attempt_failed`.
+   */
+  failedAt?: string
+}
+
+/**
+ * What the daemon's last completed maintenance tick left alone, summarized
+ * for a standing surface (LLP 0228). Overwritten whole by every tick,
+ * including one that skipped nothing: a skip reason is a state the tick
+ * re-derives from the partition cursor, so only the newest tick's answer is
+ * current, and a partition that thaws drops off by itself
+ * (LLP 0228#last-tick-only).
+ *
+ * Absent means no tick has reported (a daemon that has not reached one, or
+ * maintenance disabled), which is not the same as "nothing is frozen".
+ */
+export interface MaintenanceSkipSnapshot {
+  /** ISO time of the tick this snapshot describes. */
+  tickAt: string
+  /** Partitions the tick actually visited (a budget can cut the walk short). */
+  partitionsVisited: number
+  /** Partitions skipped for a stated reason, all reasons summed. */
+  skippedTotal: number
+  /** How many partitions each reason accounts for. Zero keys are kept. */
+  reasons: Record<MaintenanceSkipReason, number>
+  /**
+   * The worst of them by name, in walk order (LLP 0199#neediest-first, so
+   * descending live data-file count), capped at
+   * `MAX_SKIPPED_PARTITIONS_REPORTED`. `skippedTotal` is the true count.
+   */
+  partitions: MaintenanceSkippedPartition[]
+}
+
 export interface DaemonStatus {
   state: DaemonState
   pid: number
@@ -85,6 +149,11 @@ export interface DaemonStatus {
   configPath?: string
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
+  /**
+   * What the last completed cache-maintenance tick left fragmented, and why
+   * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
+   */
+  maintenance?: MaintenanceSkipSnapshot
   warnings?: string[]
 }
 
@@ -99,6 +168,7 @@ export type StatusDiagnosticKind =
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
+  | 'client_telemetry_env_override'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
@@ -107,6 +177,7 @@ export type StatusDiagnosticKind =
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
+  | 'maintenance_partitions_skipped'
   | 'capture_gap'
 
 /**
@@ -310,16 +381,49 @@ export interface ServiceState {
 export interface ProxyTrustReport {
   /** SHA-256 fingerprint of the CA on disk, colon-separated uppercase hex. */
   caFingerprint: string
+  /**
+   * The CA's permitted `dNSName` subtrees: every host this grant lets the CA
+   * vouch for, which is the full provider set and not the subset this install
+   * captures (LLP 0238#full-provider-constraints). Empty only for a
+   * certificate carrying no dNSName constraints at all. Passed through
+   * `displayableCaHosts`, because the bytes come from the certificate on disk
+   * rather than from us (LLP 0225): entries are sanitized, and a list longer
+   * than any real CA's ends in a `(+N more ...)` entry rather than being
+   * silently shortened.
+   */
+  hosts: string[]
   /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
   trusted: boolean | null
   /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
   launchdEnvSet: boolean | null
+  /**
+   * Whether an enabled gateway entry in the effective config still carries
+   * `proxy_mode: true`, or null when the config could not be read at all.
+   * The two probes above cannot tell a CA in live use from residue an old
+   * proxy attach left behind, and the advice differs completely: a
+   * proxy-mode gateway re-mints this CA on every start and terminates TLS
+   * with it, so purging it breaks capture rather than tidying it up. Null is
+   * "cannot tell", which a consumer must not read as "proxy_mode is off".
+   */
+  proxyModeConfigured: boolean | null
 }
 
 export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether anything on this machine records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to a config existing only
+   * because a writer that never asked one created it. True when the local
+   * layer records a pick answer, or when the central layer carries capture of
+   * its own (the fleet having answered on the machine's behalf); the bare
+   * `@hypaware/central` enrollment seed is not such an answer.
+   * `hyp remote add` and the enrolling `hyp remote login` before the first
+   * `hyp init` leave `configExists` true and this false; that pair is what the
+   * returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
@@ -404,6 +508,15 @@ export interface HypAwareStatusReport {
    * and reads no cache, so this is the only place the answer can come from.
    */
   recentEntrypoints: RecentEntrypoint[]
+  /**
+   * What the daemon's last cache-maintenance tick deliberately left
+   * fragmented (LLP 0228). Read from `status.json`, like
+   * `recentEntrypoints`: the daemon runs the hourly walk, and `hyp status`
+   * activates no plugins and reads no cache, so re-deriving this would mean
+   * running a second walk from a status command. Null when no daemon has
+   * reported a tick for this state root.
+   */
+  maintenance: MaintenanceSkipSnapshot | null
   /**
    * Capture health for every otel-attached client (LLP 0257#status-and-health,
    * the RFC 0262 open-question-1 duty): last event seen on the telemetry path

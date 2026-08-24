@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { askYesNo } from './confirm.js'
+import { parseCoreCommandArgv } from './command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
@@ -20,7 +21,7 @@ import {
   resolveAccessJwt,
 } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
-import { positionals, valueFlag } from './remote_commands.js'
+import { positionals } from './remote_commands.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -72,9 +73,13 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
  * @returns {Promise<number>}
  */
 export async function runReportRender(argv, ctx) {
+  const parsed = parseCoreCommandArgv('report render', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { renderReports, discoverReports } = await import('../reports/render.js')
 
-  const dir = path.resolve(positionals(argv, VALUE_FLAGS)[0] ?? path.join(os.homedir(), 'hypaware-reports'))
+  const dir = path.resolve(
+    /** @type {string | undefined} */ (parsed.params.dir) ?? path.join(os.homedir(), 'hypaware-reports')
+  )
 
   /** @type {Stats} */
   let stat
@@ -101,7 +106,7 @@ export async function runReportRender(argv, ctx) {
   }
 
   try {
-    const result = renderReports({ dir, refreshAssets: !argv.includes('--no-refresh-assets') })
+    const result = renderReports({ dir, refreshAssets: parsed.params['no-refresh-assets'] !== true })
     ctx.stdout.write(`Built html/ : ${result.reports} report(s) into html/<slug>/ (index + sections + assets)\n`)
     return 0
   } catch (err) {
@@ -120,9 +125,15 @@ export async function runReportRender(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportPublish(argv, ctx) {
-  const source = positionals(argv, VALUE_FLAGS)[0]
-  const kind = valueFlag(argv, '--kind').value
-  const period = valueFlag(argv, '--period').value
+  const gate = parseCoreCommandArgv('report publish', argv, ctx)
+  if (!gate.ok) return gate.code
+  // As in `report list` and `report delete`: read what the gate parsed, not
+  // argv. `valueFlag()` drops a value whose first character is `-`, so reading
+  // `--title` from argv published `--title '-Q3 rollup'` with no title at all,
+  // exit 0 - a token the gate had just blessed, silently discarded.
+  const source = /** @type {string | undefined} */ (gate.params.source)
+  const kind = /** @type {string | undefined} */ (gate.params.kind)
+  const period = /** @type {string | undefined} */ (gate.params.period)
   // @ref LLP 0155#period-explicit [constrained-by]: period is the coverage window only the generator knows; never default it from the current date
   if (!source || !kind || !period) {
     ctx.stderr.write('usage: hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]\n')
@@ -175,17 +186,17 @@ export async function runReportPublish(argv, ctx) {
     body = await fs.readFile(source)
   }
 
-  const resolved = resolveReportsTarget(argv, ctx, 'report publish')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report publish')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
-  const title = valueFlag(argv, '--title').value
+  const title = /** @type {string | undefined} */ (gate.params.title)
   const url = new URL(resolved.endpoint)
   url.searchParams.set('kind', kind)
   url.searchParams.set('period', period)
   if (title) url.searchParams.set('title', title)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report publish' }, (token) =>
     fetch(url, {
@@ -229,17 +240,22 @@ export async function runReportPublish(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportList(argv, ctx) {
-  const resolved = resolveReportsTarget(argv, ctx, 'report list')
+  const gate = parseCoreCommandArgv('report list', argv, ctx)
+  if (!gate.ok) return gate.code
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
   const url = new URL(resolved.endpoint)
+  // Same reason `--json` below reads the gate: `valueFlag()` drops a value
+  // whose first character is `-`, so `--limit -5` used to list with the
+  // server's default and exit 0 instead of refusing the token.
   for (const flag of ['kind', 'period', 'limit', 'before']) {
-    const value = valueFlag(argv, `--${flag}`).value
-    if (value !== undefined) url.searchParams.set(flag, value)
+    const value = gate.params[flag]
+    if (value !== undefined) url.searchParams.set(flag, String(value))
   }
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report list' }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
@@ -255,7 +271,9 @@ export async function runReportList(argv, ctx) {
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
-  if (argv.includes('--json')) {
+  // Read the mode the gate parsed, not argv: the codec also accepts
+  // `--json=true`, and a token it blessed must not be dropped downstream.
+  if (gate.params.json === true) {
     ctx.stdout.write(JSON.stringify(reports, null, 2) + '\n')
     return 0
   }
@@ -279,17 +297,19 @@ export async function runReportList(argv, ctx) {
  * @returns {Promise<number>}
  */
 export async function runReportGet(argv, ctx) {
+  const gate = parseCoreCommandArgv('report get', argv, ctx)
+  if (!gate.ok) return gate.code
   const [kind, period, id, ...fileSegments] = positionals(argv, VALUE_FLAGS)
   if (!kind || !period || !id) {
     ctx.stderr.write('usage: hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]\n')
     return 2
   }
-  const outputArg = valueFlag(argv, '--output')
-  if (outputArg.present && !outputArg.value) {
-    ctx.stderr.write('hyp report get: --output expects a file path\n')
-    return 2
-  }
-  const resolved = resolveReportsTarget(argv, ctx, 'report get')
+  // The last raw-argv read in this file, for the same reason as the rest:
+  // `valueFlag()` takes the FIRST occurrence while the codec keeps the LAST,
+  // so `--output a --output b` validated b and wrote the bytes to a, exit 0.
+  // The gate refuses `--output` with no value before this line runs.
+  const output = /** @type {string | undefined} */ (gate.params.output)
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report get')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -298,7 +318,7 @@ export async function runReportGet(argv, ctx) {
   // segment, never the separators.
   const suffix = fileSegments.flatMap((s) => s.split('/')).map(encodeURIComponent).join('/')
   const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}/${suffix}`)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report get' }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
@@ -313,14 +333,14 @@ export async function runReportGet(argv, ctx) {
     return 1
   }
   const bytes = Buffer.from(await response.arrayBuffer())
-  if (outputArg.value) {
+  if (output) {
     try {
-      await fs.writeFile(outputArg.value, bytes)
+      await fs.writeFile(output, bytes)
     } catch (err) {
       ctx.stderr.write(`hyp report get: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
-    ctx.stderr.write(`saved ${bytes.length} bytes to ${outputArg.value}\n`)
+    ctx.stderr.write(`saved ${bytes.length} bytes to ${output}\n`)
     return 0
   }
   // Artifacts can be binary (images, fonts); the kernel WriteStream type is
@@ -342,17 +362,21 @@ export async function runReportGet(argv, ctx) {
  * @ref LLP 0155#delete-confirm [implements]: org-wide destructive verb confirms like purge, not like remote remove
  */
 export async function runReportDelete(argv, ctx) {
+  const gate = parseCoreCommandArgv('report delete', argv, ctx)
+  if (!gate.ok) return gate.code
   const [kind, period, id] = positionals(argv, VALUE_FLAGS)
   if (!kind || !period || !id) {
     ctx.stderr.write('usage: hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]\n')
     return 2
   }
-  const resolved = resolveReportsTarget(argv, ctx, 'report delete')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report delete')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
-  if (!argv.includes('--yes')) {
+  // As in `report list`: the gate accepts `--yes=true`, so reading argv
+  // directly would refuse a confirmation the validator just accepted.
+  if (gate.params.yes !== true) {
     const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
     if (!stdin || !stdin.isTTY) {
       ctx.stderr.write('error: refusing to delete without confirmation - pass --yes to delete non-interactively\n')
@@ -368,7 +392,7 @@ export async function runReportDelete(argv, ctx) {
     }
   }
   const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}`)
-  applyOrgParam(argv, url)
+  applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report delete' }, (token) =>
     fetch(url, { method: 'DELETE', headers: { authorization: `Bearer ${token}` } })
@@ -394,18 +418,25 @@ export async function runReportDelete(argv, ctx) {
  * built-in). Reports are server-only, so unlike queries there is no local
  * fallback to select away from.
  *
- * @param {string[]} argv
+ * Reads the gate's parsed params, never argv, for the reason `applyOrgParam()`
+ * does: `valueFlag()` takes the FIRST occurrence while the codec keeps the
+ * LAST, so `--remote a --remote b` validated 'b' and then sent the request,
+ * with b's credential resolved, to a. The target picks the *server*, so on
+ * `report delete` that is a destructive call against a scope the gate never
+ * blessed. The old `present && !value` guard is not lost: the gate refuses
+ * `--remote` with no value ahead of this function, and a dash-leading target
+ * now reaches the registry lookup and gets named in the refusal.
+ *
+ * @param {Record<string, unknown>} params the gate's parsed params
  * @param {CommandRunContext} ctx
  * @param {string} cmd for error prefixes, e.g. `report list`
  * @returns {{ target: string, endpoint: string, identityBase: string | undefined } | { error: string }}
  * @ref LLP 0155#target [implements]: target defaults like bare --remote; the endpoint derives from the one registered URL
+ * @ref LLP 0293#one-contract [implements]: a token the gate validated is the token the command acts on
  */
-function resolveReportsTarget(argv, ctx, cmd) {
-  const remoteArg = valueFlag(argv, '--remote')
-  if (remoteArg.present && !remoteArg.value) {
-    return { error: `hyp ${cmd}: --remote expects a target name (omit it to use the default target)` }
-  }
-  const target = remoteArg.value ?? effectiveDefaultRemote(ctx.config)
+function resolveReportsTarget(params, ctx, cmd) {
+  const remote = params.remote
+  const target = remote !== undefined ? String(remote) : effectiveDefaultRemote(ctx.config)
   const entry = effectiveRemotes(ctx.config)[target]
   if (!entry) {
     return { error: `hyp ${cmd}: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'` }
@@ -423,13 +454,19 @@ function resolveReportsTarget(argv, ctx, cmd) {
  * which must name its org explicitly; a scoped credential pins its own org
  * and a mismatching param is a server-side 403, never a merge.
  *
- * @param {string[]} argv
+ * Reads the gate's parsed params, never argv: `valueFlag()` drops a value whose
+ * first character is `-` and takes the FIRST occurrence, while the codec
+ * validates the LAST. So `--org -acme` was blessed and then sent as no org at
+ * all (exit 0, nothing on stderr), and `--org a --org b` validated 'b' and sent
+ * 'a'. Same class as the `--title` and `--limit` drops above.
+ *
+ * @param {Record<string, unknown>} params the gate's parsed params
  * @param {URL} url
  */
-function applyOrgParam(argv, url) {
-  const org = valueFlag(argv, '--org')
+function applyOrgParam(params, url) {
   // `--org=''` is the admin single-org form, so presence matters, not truthiness.
-  if (org.present && org.value !== undefined) url.searchParams.set('org', org.value)
+  const org = params.org
+  if (org !== undefined) url.searchParams.set('org', String(org))
 }
 
 /**
@@ -564,4 +601,3 @@ async function fileExists(p) {
     return false
   }
 }
-

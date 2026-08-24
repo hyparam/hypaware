@@ -74,11 +74,11 @@ export async function runVerify(argv, cmdCtx, opts) {
     `managed plist: ${
       !result.plistPresent ? `MISSING (${plistPath})`
         : result.plistUpToDate ? 'present, up to date'
-          : 'present, STALE (re-run "hyp claude-desktop install")'
+          : 'present, STALE (re-run "hyp client claude-desktop install")'
     }\n`,
   )
   cmdCtx.stdout.write(
-    `dialog residue: ${result.residueCleared ? 'clear' : 'PRESENT (re-run "hyp claude-desktop install" to back it up and clear it)'}\n`,
+    `dialog residue: ${result.residueCleared ? 'clear' : 'PRESENT (re-run "hyp client claude-desktop install" to back it up and clear it)'}\n`,
   )
 
   cmdCtx.stdout.write('\nin-app check (not verified automatically, LLP 0131#verify-is-a-hint):\n')
@@ -93,11 +93,11 @@ export async function runVerify(argv, cmdCtx, opts) {
   cmdCtx.stdout.write(
     "  3. Confirm capture: run 'hyp status' and look for entrypoint 'local-agent' "
     + "(older builds: 'claude-desktop-3p') under 'recent clients'. The rows themselves "
-    + "are in ai_gateway_messages (query via 'hyp query' or 'hyp mcp').\n",
+    + "are in ai_gateway_messages (query via 'hyp query' or 'hyp mcp serve').\n",
   )
 
   if (!result.ok) {
-    cmdCtx.stdout.write('\nautomatic checks incomplete; run \'hyp claude-desktop install\' to finish\n')
+    cmdCtx.stdout.write('\nautomatic checks incomplete; run \'hyp client claude-desktop install\' to finish\n')
     return 1
   }
   return 0

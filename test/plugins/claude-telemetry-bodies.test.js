@@ -160,11 +160,17 @@ test('an unparseable body is deleted immediately and counted', async () => {
   await assert.rejects(fsp.stat(file))
 })
 
-test('deleteSpooledBodies removes projected files and tolerates absence', async () => {
+// Tolerates absence, but does not COUNT it: `fs.rm(..., { force: true })`
+// succeeds on a path that is not there, so counting its return reported every
+// already-evicted ref as one more deletion in `bodies_deleted` and
+// `bodies_dropped`. The byte total is the drop arm's, which deletes unread and
+// so has no other way to bring `spool_bytes` down.
+test('deleteSpooledBodies counts what it actually removed, and its bytes', async () => {
   const dir = await tmpSpool()
   const file = await writeBody(dir, 'done.json', {})
-  const deleted = await deleteSpooledBodies([file, path.join(dir, 'never-existed.json')])
-  assert.equal(deleted, 2)
+  const size = (await fsp.stat(file)).size
+  const removed = await deleteSpooledBodies([file, path.join(dir, 'never-existed.json')])
+  assert.deepEqual(removed, { deleted: 1, bytesRemoved: size })
   await assert.rejects(fsp.stat(file))
 })
 
@@ -182,8 +188,11 @@ test('deleteSpooledBodiesForEvents removes a dropped session\'s bodies without r
     evt('api_request_body', { body_ref: reqFile, request_id: REQUEST_ID }),
     evt('api_response_body', { body_ref: respFile, request_id: REQUEST_ID }),
   ]
+  const reqSize = (await fsp.stat(reqFile)).size
+  const respSize = (await fsp.stat(respFile)).size
   const removal = await deleteSpooledBodiesForEvents(events, { spoolDir: dir })
   assert.equal(removal.deleted, 2)
+  assert.equal(removal.bytesRemoved, reqSize + respSize)
   assert.deepEqual(removal.refused, [])
   await assert.rejects(fsp.stat(reqFile))
   await assert.rejects(fsp.stat(respFile))

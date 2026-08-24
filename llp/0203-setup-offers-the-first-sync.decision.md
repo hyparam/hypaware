@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Sinks, Usage-Policy
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
-**Related:** LLP 0101 (#no-release: the release verb this offers), LLP 0100 (R1/R2: the announced deadline and the one permitted early tick), LLP 0198 (#first-ask: the closing question this sits in front of), LLP 0135 (#privacy: the narration this acts on)
+**Related:** LLP 0101 (#no-release: the release verb this offers), LLP 0100 (R1/R2: the announced deadline and the one permitted early tick), LLP 0198 (#onboarding-list: the closing question list this sits in front of), LLP 0135 (#privacy: the narration this acts on)
 
 > An enrolled attended `hyp init` now **asks** whether to send now or wait
 > out the first-sync review window, and starts a real `hyp sync` for the
@@ -25,14 +25,13 @@ seen enough*", and minted `hyp sync` as the way to say it.
 
 The amendment stopped one step short. The wizard's privacy narration names
 the verb in its fifth and sixth lines - "To send it sooner, run `hyp sync`" -
-and then setup moves straight on to the first ask
-([LLP 0198](./0198-setup-ends-on-a-question.decision.md)), which may spawn a
-client and take the terminal for good. The user who has no privacy concern
-and wants their history on the server tonight has to notice a sentence in a
-six-line block, remember a command, and find a terminal that setup is in the
-process of giving away. That is the same activation gap 0198 was written
-about, one screen earlier: the information was already there, and the action
-was not.
+and then setup moves straight on to its closing question list
+([LLP 0198](./0198-setup-ends-on-a-question.decision.md)) and exits. The user
+who has no privacy concern and wants their history on the server tonight has
+to notice a sentence in a six-line block, remember a command, and come back to
+it after setup has already ended. That is the same activation gap 0198 was
+written about, one screen earlier: the information was already there, and the
+action was not.
 
 The population this matters for is not hypothetical. The review window
 defaults to hours precisely because a careful reviewer needs them; a user who
@@ -44,29 +43,38 @@ experiences the window as the product not working yet.
 <a id="offer"></a>**Setup asks, after it narrates.** On an attended,
 non-cancelled, non-dry-run install that enrolled *and* carries a live hold,
 the wizard renders a two-row question between the privacy narration and the
-first ask:
+closing question list:
 
-- **Wait until `<deadline>`** - "Nothing leaves this machine before then."
 - **Send now** - "Runs `hyp sync`: it lists every destination and asks
   before sending."
+- **Wait until `<deadline>`** - "Nothing leaves this machine before then."
 
-Waiting is first and is the default, so a stray enter chooses the reversible
-answer. This is the polarity the overwrite confirm and `hyp sync`'s own
-prompt already use, and it is the only defensible one here: the unwanted
-outcome of a mis-keyed wait is a few hours' latency, and the unwanted outcome
-of a mis-keyed send cannot be walked back.
+Sending is first and is the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md): confirms
+default yes unless a bare enter would destroy data, and sending is not
+destruction). The user enrolled to sync, so a bare enter takes the path they
+signed up for; waiting stays one arrow away, and `hyp sync`'s own confirm
+still stands between this answer and anything leaving the machine.
 
-The position is not negotiable. The narration keeps its place as the last
+A bare enter, and nothing else: the default here *acts*, so the question
+names waiting as its `eofValue`
+([LLP 0299 §eof-declines](./0299-confirm-prompts-default-to-yes.decision.md#eof-declines)).
+The child's confirm does not cover this case on its own, because it inherits
+the terminal rather than the stream, and a ctrl+D on a real tty is a keypress
+rather than a spent stream: it would ask again rather than decline, and a
+terminal that gave up would end on a sync it started.
+
+The narration keeps its place as the last
 thing HypAware *says* about privacy
 ([LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy)),
 because a question about sending is only answerable by someone who has just
-been told what sending means. The first ask keeps its place as the last thing
-on screen ([LLP 0198 #first-ask](./0198-setup-ends-on-a-question.decision.md#first-ask)):
-it may take the terminal permanently, so nothing that needs the terminal may
-follow it.
+been told what sending means. The question list keeps its place as the last thing
+on screen ([LLP 0198 #onboarding-list](./0198-setup-ends-on-a-question.decision.md#onboarding-list)):
+it is output rather than a prompt, and a prompt placed after it would arrive
+under a block the reader has already started scrolling past.
 
-The step never fails a finished install, on the same terms as the first look
-and the first ask: every durable action succeeded minutes earlier, so a
+The step never fails a finished install, on the same terms as the first look:
+every durable action succeeded minutes earlier, so a
 cancelled prompt, a failed spawn, or an unforeseen throw degrades to the wait
 the user already had.
 
@@ -97,9 +105,11 @@ the misleading artifact R2 requires the plan to prevent, and the same reason
 
 So the step spawns `bin/hypaware.js sync` with `process.execPath` and
 `stdio: 'inherit'`. The child boots from the config setup just wrote and sees
-the real sink set. Inheriting the terminal is safe for the reason 0198
-established for the client launch: the wizard's own prompt has resolved, so
-raw mode and the cursor are restored before the child draws anything.
+the real sink set. Inheriting the terminal is safe for the reason
+[LLP 0198 #real-launch](./0198-setup-ends-on-a-question.decision.md#real-launch)
+establishes for `hyp ask`'s own spawn: the wizard's own prompt has resolved, so
+raw mode and the cursor are restored before the child draws anything. This step
+is now the only place onboarding hands the terminal to a child at all.
 
 <a id="read-back"></a>**Whether it sent is read from the marker, never
 inferred from the exit code.** `hyp sync` exits 0 both when it releases and
@@ -122,10 +132,13 @@ be corrected later.
   it buys that by asking for consent on a screen that cannot show the
   destinations. The whole reason the release is `hyp sync`-shaped is the
   plan.
-- **Frame the question the way the first ask is framed
+- **Frame the question the way `hyp ask`'s menu is framed
   ([LLP 0198 #frame](./0198-setup-ends-on-a-question.decision.md#frame)).**
-  Rejected for now: the frame marks *the exit door*, and two framed blocks in
-  a row would make neither one the thing still waiting for a keypress.
+  Rejected: the frame is not a wizard idiom. It marks the interactive menu of
+  an explicit command against that same command's plain printed output, and
+  onboarding draws no framed block at all. This question arrives on a screen of
+  its own like every other wizard prompt, where a border separates it from
+  nothing.
 - **Offer it on the abort path too** (`narrateEnrolledAbort`). Rejected: an
   abort means "get me out", not "ask me differently"
   ([LLP 0190 #abort-narration](./0190-wizard-defaults-gate.decision.md#abort-narration)),

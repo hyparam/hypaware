@@ -72,7 +72,7 @@ export function buildConsentExplanation(args) {
     'The credential never leaves this machine and is never written into the profile '
     + `or into recorded rows. To undo it later, remove ${args.plistPath} (needs `
     + "sudo) - that is the file that points Claude Desktop here - and run "
-    + "'hyp claude-account logout'.",
+    + "'hyp client claude-account logout'.",
   )
   return lines.join('\n')
 }
@@ -126,7 +126,7 @@ export async function confirmProceed(cmdCtx, { mayNeedSignIn }) {
               ? 'Opens the Claude sign-in in your browser if you are not signed in yet, then runs the steps above.'
               : 'Runs the steps listed above.',
           },
-          { value: 'no', label: 'Skip for now', summary: 'Changes nothing. Re-run hyp claude-desktop install any time.' },
+          { value: 'no', label: 'Skip for now', summary: 'Changes nothing. Re-run hyp client claude-desktop install any time.' },
         ],
         default: 'yes',
         clearOnResolve: true,

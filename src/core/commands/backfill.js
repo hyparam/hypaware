@@ -2,7 +2,8 @@
 
 import { randomUUID } from 'node:crypto'
 import fsp from 'node:fs/promises'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -149,7 +150,9 @@ export async function runBackfill(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runBackfillList(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('client history providers', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const providers = ctx.backfills.list()
   if (json) {
     ctx.stdout.write(
@@ -1008,7 +1011,7 @@ export function parseRunArgv(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['providers'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]' }
   }
@@ -1067,7 +1070,7 @@ export function parsePlanArgv(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['providers'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
   }

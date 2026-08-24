@@ -136,9 +136,12 @@ export function parseControlFlags(argv) {
  *
  * @param {VerbInputSchema} inputSchema
  * @param {string[]} argv
+ * @param {{ strictShortFlags?: boolean }} [opts] when `strictShortFlags`, a
+ *   single-dash token no alias expanded is an unknown flag rather than a
+ *   positional value
  * @returns {{ ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
-export function argvToParams(inputSchema, argv) {
+export function argvToParams(inputSchema, argv, opts = {}) {
   const props = inputSchema.properties ?? {}
   /** @type {Record<string, unknown>} */
   const params = {}
@@ -148,6 +151,14 @@ export function argvToParams(inputSchema, argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token.startsWith('--')) {
+      // Only `--` tokens read as flags here, so a misspelled short flag
+      // otherwise binds as a positional value: `hyp query refresh -f` means
+      // the dataset named '-f'. Verbs keep the lenient reading (a greedy SQL
+      // string carries '-1' and friends); the core command set opts in.
+      // @ref LLP 0293#one-contract [implements]: an unknown short flag refuses like an unknown long one instead of becoming a value
+      if (opts.strictShortFlags && token.length > 1 && token.startsWith('-')) {
+        return { ok: false, error: `unknown flag ${token}` }
+      }
       positionals.push(token)
       continue
     }
@@ -193,11 +204,36 @@ export function argvToParams(inputSchema, argv) {
 
   applyDefaults(props, params)
 
-  const missing = requiredMissing(inputSchema, params)
+  // On a command line an empty argument is an unset shell variable, not a
+  // value: `hyp remote add "$NAME" "$URL"` with NAME unset must not register a
+  // remote called ''. The hand-written `if (!name)` guards this schema replaced
+  // refused it; `required` alone tests only `!== undefined`, so it did not.
+  // The MCP path below keeps the plain test: there a JSON `""` is explicit.
+  // @ref LLP 0293#one-contract [implements]: an empty required positional is unusable input, so it is a usage error like any other
+  const missing = requiredMissing(inputSchema, params, true)
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
   return { ok: true, params }
 }
+
+/**
+ * The parse options a core command that binds a positional passes to
+ * {@link parseCommandArgv}. Spread it (`{ ...STRICT_SHORT_FLAGS, aliases }`)
+ * where the command also declares aliases.
+ *
+ * Only `--` tokens read as flags, so without this a misspelled short flag
+ * binds as the positional's *value*: `hyp policy show -Z` reported on a
+ * directory named `-Z` and exited 0, and `hyp sink maintain -Z` looked up a
+ * sink named `-Z` and exited 1. Commands that reach `parseCoreCommandArgv()`
+ * get the rule from there; the ones that call this function directly opt in
+ * here, one call site at a time, because each site owes a look at whether a
+ * legitimate value of its positional can start with a dash. The verb family
+ * never opts in: a greedy SQL positional carries tokens like `-1`.
+ *
+ * @type {{ strictShortFlags: true }}
+ * @ref LLP 0293#one-contract [implements]: D1's short-flag rule reaches the commands that parse through the codec directly, not only the ones in the table
+ */
+export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
 
 /**
  * Parse a core command's argv against a verb-style input schema. The
@@ -213,14 +249,16 @@ export function argvToParams(inputSchema, argv) {
  *
  * @param {string[]} argv
  * @param {VerbInputSchema} inputSchema
- * @param {{ aliases?: Record<string, string> }} [opts] argv token aliases, e.g. `{ '-y': '--yes' }`
+ * @param {{ aliases?: Record<string, string>, strictShortFlags?: boolean }} [opts] argv token
+ *   aliases, e.g. `{ '-y': '--yes' }`, and whether an unaliased single-dash token
+ *   refuses instead of binding as a positional value
  * @returns {{ help: true } | { ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
   const expanded = argv.map((token) => aliases[token] ?? token)
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
-  return argvToParams(inputSchema, expanded)
+  return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
 
 /**
@@ -446,11 +484,15 @@ function applyDefaults(props, params) {
 /**
  * @param {VerbInputSchema} inputSchema
  * @param {Record<string, unknown>} params
+ * @param {boolean} [emptyStringIsMissing] argv only: an empty token is an unset
+ *   shell variable, not a value
  * @returns {string | undefined}
  */
-function requiredMissing(inputSchema, params) {
+function requiredMissing(inputSchema, params, emptyStringIsMissing = false) {
   for (const name of inputSchema.required ?? []) {
-    if (params[name] === undefined) return name
+    const value = params[name]
+    if (value === undefined) return name
+    if (emptyStringIsMissing && value === '') return name
   }
   return undefined
 }

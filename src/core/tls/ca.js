@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import tls from 'node:tls'
 
-import { atomicWriteFile, errCode } from 'hypaware/core/util'
+import { atomicWriteFile, errCode, sanitizeLabel } from 'hypaware/core/util'
 import { generateKeyPair, mintCertificate, readNameConstraints } from './x509.js'
 
 /**
@@ -236,12 +236,17 @@ async function loadLocalCa(paths, hosts, now) {
   if (Number.isNaN(notAfter.getTime())) return undefined
   if (notAfter.getTime() - now.getTime() < CA_RENEW_WITHIN_DAYS * 86_400_000) return undefined
 
-  // The stored constraint set must be exactly the hosts asked for. Callers
-  // now always ask for the full provider list (LLP 0238), so a mismatch means
-  // a CA minted under the old routing-table rule - regenerate it once and the
-  // new trust grant covers every provider from then on.
+  // The stored constraint set must *cover* the hosts asked for, not equal them.
+  // Only widening needs a new CA; narrowing does not, and requiring equality
+  // meant an install that had once configured an upstream outside the static
+  // provider list silently re-minted the moment that upstream was removed from
+  // config - stranding the one keychain trust grant the user gave by password
+  // dialog, which is the entire reason the CA is long-lived, and failing every
+  // proxied handshake until they re-attach and re-approve. A CA minted under
+  // the old routing-table rule is still a strict subset of the full provider
+  // list callers now ask for, so it still regenerates once (LLP 0238).
+  // @ref LLP 0275#stored-superset-is-reusable [implements]
   const permitted = permittedHosts(cert)
-  if (permitted.length !== hosts.length) return undefined
   for (const host of hosts) {
     if (!permitted.includes(host)) return undefined
   }
@@ -373,6 +378,50 @@ export async function readLocalCaInfo({ stateRoot }) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * How many permitted subtrees any surface will name before it stops listing
+ * and starts counting. Our own mint produces one entry per provider host, so
+ * the bound is never reached by a certificate this build wrote; it exists for
+ * the certificate it did not.
+ */
+const MAX_NAMED_CA_HOSTS = 24
+
+/**
+ * `LocalCaInfo.hosts` made safe to put in front of a person.
+ *
+ * The entries are the only part of a read-back CA that is bytes off disk
+ * rather than a string this build wrote: a `dNSName` is an IA5String, and
+ * `readNameConstraints` hands back whatever the DER held, decoded as latin1,
+ * with no charset, length or count check anywhere on the way. Our own mint
+ * refuses a non-printable host (`assertAsciiHost`), so reaching one takes a
+ * foreign or damaged certificate at the CA path - which is exactly the case
+ * both callers already have an arm for, so it is reachable by construction.
+ * All three of the ways such a value is hostile are answered here, at the one
+ * point the hosts leave this module for a terminal: control and invisible
+ * bytes and unbounded length (`sanitizeLabel`), and unbounded count (the
+ * bound below).
+ *
+ * Strip rather than escape, and nothing is silently dropped. LLP 0225#scope
+ * leaves `hyp status` and the attach adapters to make that argument for
+ * themselves, and here it is: these are label-plane values, so the shortest
+ * safe answer is to drop the bytes - but both callers exist to state how wide
+ * a trust grant is, and a short list understates it. So an entry that
+ * sanitizes away is still named as an entry, and a truncated list says how
+ * much it left out.
+ *
+ * @ref LLP 0225#scope [implements]: the per-surface strip-versus-escape argument 0225 leaves to hyp status and the attach adapters
+ * @param {string[]} hosts
+ * @returns {string[]}
+ */
+export function displayableCaHosts(hosts) {
+  const named = hosts
+    .slice(0, MAX_NAMED_CA_HOSTS)
+    .map((host) => sanitizeLabel(host) ?? '(unprintable dNSName)')
+  const omitted = hosts.length - named.length
+  if (omitted > 0) named.push(`(+${omitted} more dNSName constraints)`)
+  return named
 }
 
 /**

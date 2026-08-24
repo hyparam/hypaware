@@ -50,11 +50,15 @@ function memorySource(rows, opts = {}) {
   return source
 }
 
-/** @param {AsyncDataSource} source */
-function registryFor(source) {
+/**
+ * @param {AsyncDataSource} source
+ * @param {{ localOnlyContentColumns?: string[] }} [extras]
+ */
+function registryFor(source, extras = {}) {
   const dataset = {
     discoverPartitions: async () => [],
     createDataSource: async () => source,
+    ...extras,
   }
   return /** @type {any} */ ({ getDataset: () => dataset, listDatasets: () => [] })
 }
@@ -165,6 +169,199 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   })
   assert.equal(result.rows[0].n, 7)
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
+})
+
+test('the budget decoration preserves the scan receiver', async () => {
+  const source = memorySource([{ a: 1 }])
+  const scan = /** @type {NonNullable<AsyncDataSource['scan']>} */ (source.scan)
+  source.scan = function scanWithReceiver(options) {
+    assert.equal(this, source)
+    return scan.call(source, options)
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT a FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.deepEqual(result.rows, [{ a: 1 }])
+})
+
+// @ref LLP 0294#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
+test('the prepared native-batch path stays lit through the budget decoration', async () => {
+  let preparedCalls = 0
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false }],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    numRows: 4,
+    schema,
+    scan() {
+      throw new Error('legacy row scan should not run')
+    },
+    prepareScan(request) {
+      preparedCalls++
+      assert.deepEqual(request.columns.map((demand) => demand.field), [7])
+      return {
+        schema,
+        residual: {},
+        properties: { exactRows: 4, maxRows: 4 },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: 4 },
+            columns: [{ type: 'typed', values: new Float64Array([4, 3, 2, 1]), length: 4 }],
+          }
+        },
+      }
+    },
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT MIN(a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 1)
+  assert.equal(preparedCalls, 1)
+})
+
+test('a prepared-only source keeps its scanColumn fast path through the budget decoration', async () => {
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+  }
+  /** @type {string[]} */
+  const scanColumnCalls = []
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    schema,
+    prepareScan() {
+      throw new Error('prepared scan should not replace the column fast path')
+    },
+    scanColumn({ column }) {
+      scanColumnCalls.push(column)
+      return {
+        appliedWhere: true,
+        appliedLimitOffset: true,
+        async *chunks() {
+          yield ['x', 'y', 'x']
+        },
+      }
+    },
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT COUNT(DISTINCT a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 2)
+  assert.deepEqual(scanColumnCalls, ['a'])
+})
+
+test('the native budget guard samples a lazy column immediately after materialization', async () => {
+  const rowCount = 200_000
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+  }
+  let readCalls = 0
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    schema,
+    prepareScan() {
+      return {
+        schema,
+        residual: {},
+        properties: { exactRows: rowCount, maxRows: rowCount },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: rowCount },
+            columns: [{
+              async read() {
+                readCalls++
+                return {
+                  type: 'values',
+                  values: Array.from({ length: rowCount }, (_, i) => `retained-${i}-${'x'.repeat(100)}`),
+                  length: rowCount,
+                }
+              },
+            }],
+          }
+        },
+      }
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT MIN(a) AS n FROM t',
+      registry: registryFor(source),
+      storage,
+      maxHeapBytes: 8 * 1024 * 1024,
+    }),
+    (err) => {
+      assert.ok(err instanceof QueryExecutionBudgetError)
+      assert.equal(err.diagnostics?.site, 'native_batch')
+      return true
+    }
+  )
+  assert.equal(readCalls, 1)
+})
+
+test('a governable prepared-only source refuses restricted visibility without a row scan', async () => {
+  const schema = {
+    fields: [{ id: 7, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true }],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['content'],
+    schema,
+    prepareScan() {
+      throw new Error('privacy refusal must happen before the prepared scan')
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT content FROM t',
+      registry: registryFor(source, { localOnlyContentColumns: ['content'] }),
+      storage,
+    }),
+    {
+      message: 'Dataset "t" must provide columns and scan() to enforce local-only visibility',
+    }
+  )
+})
+
+// Squirreling plans a prepared source from its `schema` and never reads the
+// `columns` such a source may also advertise, so the local-only gate has to
+// read the schema too. A gate that trusted `columns` would see no content
+// column here and hand the caller the prepared scan unfiltered.
+// @ref LLP 0105 [tests]: the visibility gate is decided on the column list the engine actually plans from
+test('the local-only gate reads a prepared source schema, not its narrower columns list', async () => {
+  const schema = {
+    fields: [
+      { id: 1, name: 'id', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false },
+      { id: 2, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true },
+    ],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    // Deliberately narrower than `schema`: the engine ignores this list.
+    columns: ['id'],
+    schema,
+    prepareScan() {
+      throw new Error('privacy refusal must happen before the prepared scan')
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT content FROM t',
+      registry: registryFor(source, { localOnlyContentColumns: ['content'] }),
+      storage,
+    }),
+    {
+      message: 'Dataset "t" must provide columns and scan() to enforce local-only visibility',
+    }
+  )
 })
 
 test('transient scan garbage does not trip the budget; only retained growth refuses', async () => {

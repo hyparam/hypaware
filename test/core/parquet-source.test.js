@@ -13,8 +13,8 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 import { asyncBufferFromBytes, parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, SelectStatement } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ExprNode, SelectStatement } from 'squirreling/src/types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */
@@ -58,7 +58,7 @@ const NULLABLE_ROWS = [
  * Build an in-memory parquet file from ROWS with a small row-group size
  * so the scan exercises multi-row-group iteration (2 + 2 + 1).
  *
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeSource() {
   return parquetSourceFromRows(COLUMNS, ROWS, { rowGroupSize: 2 })
@@ -86,7 +86,7 @@ const TIMESTAMP_ROWS = [
 ]
 
 /**
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeTimestampSource() {
   const columnData = rowsToColumnSources(TIMESTAMP_COLUMNS, TIMESTAMP_ROWS)
@@ -99,7 +99,7 @@ async function makeTimestampSource() {
 /**
  * Same, over `NULLABLE_ROWS`.
  *
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeNullableSource() {
   return parquetSourceFromRows(NULLABLE_COLUMNS, NULLABLE_ROWS, { rowGroupSize: 2 })
@@ -115,7 +115,7 @@ function whereOf(sql) {
 }
 
 /**
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {string} query
  */
 async function run(source, query) {

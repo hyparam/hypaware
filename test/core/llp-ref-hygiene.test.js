@@ -12,8 +12,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { trackedFiles } from '../helpers/tracked_files.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const LLP_DIR = path.join(REPO_ROOT, 'llp')
@@ -297,14 +297,6 @@ function extractRefs(relPath, text) {
 }
 
 /**
- * @returns {string[]} repo-relative paths of the tracked files worth scanning
- */
-function trackedFiles() {
-  const out = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
-  return out.split('\0').filter(f => f !== '' && SCANNED_EXTENSIONS.has(path.extname(f)))
-}
-
-/**
  * @returns {Map<string, { file: string, anchors: Set<string> }[]>} LLP number to its claimants
  */
 function llpIndex() {
@@ -333,7 +325,7 @@ function llpIndex() {
   return index
 }
 
-const REFS = trackedFiles().flatMap(f => extractRefs(f, fs.readFileSync(path.join(REPO_ROOT, f), 'utf8')))
+const REFS = trackedFiles(REPO_ROOT, SCANNED_EXTENSIONS).flatMap(f => extractRefs(f, fs.readFileSync(path.join(REPO_ROOT, f), 'utf8')))
 const INDEX = llpIndex()
 
 test('the scan finds the corpus and its annotations', () => {
@@ -530,7 +522,7 @@ test('a marker shown as documentation or as a code sample does not activate it',
 test('suppression is confined to the syntax documentation and every region closes', () => {
   /** @type {string[]} */
   const offenders = []
-  for (const file of trackedFiles()) {
+  for (const file of trackedFiles(REPO_ROOT, SCANNED_EXTENSIONS)) {
     const lines = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').split('\n')
     let openedAt = 0
     markersFor(file, lines).forEach((marker, index) => {

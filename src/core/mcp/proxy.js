@@ -34,7 +34,7 @@ export async function runMcpProxy({ target, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}
   const entry = remotes[target]
   if (!entry) {
-    ctx.stderr.write(`hyp mcp: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'\n`)
+    ctx.stderr.write(`hyp mcp serve: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'\n`)
     return 2
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -52,16 +52,16 @@ export async function runMcpProxy({ target, ctx }) {
   try {
     const probe = await resolveToken({ target, env: ctx.env, stateDir })
     if (!probe.ok) {
-      ctx.stderr.write(`hyp mcp: ${probe.error}\n`)
+      ctx.stderr.write(`hyp mcp serve: ${probe.error}\n`)
       return 2
     }
   } catch (err) {
-    ctx.stderr.write(`hyp mcp: ${describeRefreshError(err, target).message}\n`)
+    ctx.stderr.write(`hyp mcp serve: ${describeRefreshError(err, target).message}\n`)
     return 2
   }
   const fetchImpl = /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   if (typeof fetchImpl !== 'function') {
-    ctx.stderr.write(`hyp mcp: ${NO_FETCH_MESSAGE} for the proxy\n`)
+    ctx.stderr.write(`hyp mcp serve: ${NO_FETCH_MESSAGE} for the proxy\n`)
     return 1
   }
 
