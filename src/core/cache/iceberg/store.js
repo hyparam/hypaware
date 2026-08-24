@@ -468,7 +468,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * raises.
  *
  * @param {string} tablePath
- * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, recordCount: number, deletedPositions: Set<bigint> | undefined }[]>}
+ * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]>}
  */
 export async function listLiveDataFiles(tablePath) {
   if (!tableExists(tablePath)) return []
@@ -479,7 +479,7 @@ export async function listLiveDataFiles(tablePath) {
   const dataFileMap = await findDataFileEntries(metadata, resolver)
   if (dataFileMap.size === 0) return []
   const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
-  /** @type {{ filePath: string, partition: Record<string, unknown>, recordCount: number, deletedPositions: Set<bigint> | undefined }[]} */
+  /** @type {{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]} */
   const out = []
   for (const [filePath, { partition, entry }] of dataFileMap) {
     const file = entry.data_file
@@ -487,7 +487,6 @@ export async function listLiveDataFiles(tablePath) {
     out.push({
       filePath,
       partition,
-      recordCount: Number(file.record_count ?? 0),
       deletedPositions: deleted.get(filePath),
     })
   }

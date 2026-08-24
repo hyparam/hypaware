@@ -18,6 +18,7 @@ import {
   defaultQueryVisibilityResolver,
   resolveCallerClass,
 } from '../query/visibility.js'
+import { LocalOnlyListUnreadableError } from '../usage-policy/local_only.js'
 import { cellText, compileMatcher, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
 import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from './searchable_columns.js'
 
@@ -26,8 +27,9 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * server's `src/search/grep-search.js` tier for tier. One walk over the
  * cache's live data files, newest message-day first; a file with a hypgrep
  * sidecar is searched through `parquetFind` (the index proposes candidate
- * blocks, the shared matcher confirms), a file without one is brute-scanned
- * under the narrow `SCAN_COLUMNS` projection. Files are processed strictly
+ * blocks, the shared matcher confirms), a file without one is brute-scanned.
+ * Both tiers read under the narrow `SCAN_COLUMNS` projection, so the index
+ * changes which rows are decoded and never how wide. Files are processed strictly
  * sequentially, so the request's memory bound is one data file plus its
  * index, never a day's worth. No sidecar anywhere (the tree before T6 of
  * LLP 0265 runs) means every file takes the scan tier: slower, never wrong.
@@ -308,11 +310,25 @@ export async function executeGrepSearch(args) {
           // budget would keep that file's oldest matches rather than its
           // newest. `found` is trimmed in sort order instead, which is what
           // actually bounds the memory here.
+          // `columns` rides through `parquetFind` into its own
+          // `parquetReadObjects` call, so the same narrow projection bounds
+          // BOTH tiers. Without it the indexed tier decodes every column of
+          // every candidate range, `system_text` and `raw_frame` included,
+          // and a candidate range is a whole coalesced run of blocks capped
+          // only at row-group boundaries: an indexed file could decode more
+          // bytes than the brute scan reads for the same file, which is the
+          // one cost this tier exists to remove (LLP 0264 #shared, and the
+          // 90.8% measurement `SCAN_COLUMNS` cites). Safe because every
+          // reader downstream of here - `accept`, the `withheld` predicate's
+          // `cwd`, and `toHit`'s locators - names only columns inside the
+          // projection, and hyparquet ignores a projected name the file
+          // lacks, exactly as the scan tier already relies on.
           const rows = parquetFind({
             query: matcher.hypQuery,
             url: file.filePath,
             indexFile,
             asyncBufferFactory: async ({ url }) => await io.reader(url),
+            columns: SCAN_COLUMNS,
             rowFilter: accept,
             signal,
           })
@@ -340,6 +356,17 @@ export async function executeGrepSearch(args) {
             localOnly.withheldRows += withheldHere
             throw err
           }
+          // A corrupt machine-local list is the other failure this block can
+          // see, because the `withheld` predicate runs inside the loop above:
+          // `resolver.resolve` throws `LocalOnlyListUnreadableError`, which
+          // the SQL wrapper and `cwdWithheldFromCaller` both let propagate so
+          // the read fails loudly rather than resolving to "nothing withheld"
+          // (LLP 0080 #fail-safe). Degrading it here would blame a sidecar
+          // that is fine, advise deleting it, re-read every candidate file
+          // from scratch on the scan tier, and only then raise the identical
+          // error. Index state is never a correctness input; this is not
+          // index state.
+          if (err instanceof LocalOnlyListUnreadableError) throw err
           // Both files are named, because the read that failed spans both:
           // `parquetFind` opens the source data file through the same
           // factory as the sidecar and runs the row filter per row, so a

@@ -96,15 +96,16 @@ function constantSet(columns) {
 }
 
 /**
- * The columns a brute scan has to decode: the searchable set plus every
- * column the scan's own readers consult. A brute scan reads a whole
+ * The columns EITHER tier has to decode. A brute scan reads a whole
  * parquet file with no index to prune it, so without this list it
  * decodes `system_text` and the other bulk machinery columns only to
  * ignore them. Server LLP 0157 measured `system_text` alone at 90.8% of
  * decoded index-build text, which is why "every string column" is
- * refuted by production measurement. The indexed path is unaffected:
- * hypgrep's `parquetFind` reads whole candidate rows and this list does
- * not reach it.
+ * refuted by production measurement. The indexed tier passes the same
+ * list down: `parquetFind` forwards `columns` into its own read of each
+ * candidate range, and a range is a whole coalesced run of blocks capped
+ * only at row-group boundaries, so an unprojected indexed read can decode
+ * more bytes than the brute scan it exists to beat.
  *
  * The extras beyond `SEARCHABLE_COLUMNS` are derived from the readers,
  * not guessed, because a starved column throws nothing: it reads as
