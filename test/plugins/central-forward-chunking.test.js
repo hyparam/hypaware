@@ -401,6 +401,26 @@ test('an unresolvable dataset fails only its own partition', async () => {
   assert.deepEqual(calls.map((c) => c.url), ['http://server:8740/v1/ingest/logs'])
 })
 
+test('an open dataset with local-only content columns is not forwarded', async () => {
+  const query = makeQuery(null)
+  const { sink, calls } = buildSink({
+    count: 10,
+    query: {
+      getDataset(name) {
+        return { ...query.getDataset(name), localOnlyContentColumns: ['content_text'] }
+      },
+    },
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.partitionsExported, 0)
+  assert.deepEqual(result.retryPartitions, batch.partitions)
+  assert.match(result.error ?? '', /declares local-only content columns/)
+  assert.equal(calls.length, 0)
+})
+
 // Mirrors MAX_CHUNK_BYTES in sink.js; the byte budget is otherwise
 // module-internal.
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024

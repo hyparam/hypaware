@@ -33,11 +33,11 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 /**
  * Build the `forward` Sink. The sink's `exportBatch` forwards each
- * driver partition independently: it resolves the partition's ingest
- * signal (via the dataset's `sourceSignal`, defaulting to the dataset
- * name), streams the partition's rows as NDJSON in bounded chunks, and
- * POSTs each chunk to `/v1/ingest/{signal}`. One POST carries one
- * signal. Auth comes from the supplied IdentityClient.
+ * driver partition independently. Legacy datasets resolve their fixed ingest
+ * signal from `sourceSignal`; eligible open datasets register their schema and
+ * ingest under the dataset name. Each partition's rows stream as NDJSON in
+ * bounded chunks to `/v1/ingest/{signal}`. One POST carries one signal. Auth
+ * comes from the supplied IdentityClient.
  *
  * The kernel's sink driver owns retry-via-outbox; this sink reports
  * `failed` / `retryPartitions` on transport failure and the driver
@@ -166,9 +166,10 @@ export function createForwardSink(args) {
 
 /**
  * Resolve the wire target for a partition. The four legacy signals keep their
- * stable `/v1/ingest/{signal}` paths. Every other dataset uses the open-dataset
- * protocol: announce its schema, then POST under the dataset name so the
- * server's catalog can resolve it.
+ * stable `/v1/ingest/{signal}` paths. Every other eligible dataset uses the
+ * open-dataset protocol: announce its schema, then POST under the dataset name
+ * so the server's catalog can resolve it. A dataset declaring local-only
+ * content columns cannot safely use this raw-row protocol and is rejected.
  *
  * @param {QueryRegistry} query
  * @param {QueryPartition} partition
@@ -181,6 +182,12 @@ function forwardingTarget(query, partition) {
   }
   const signal = dataset.sourceSignal ?? partition.dataset
   if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
+  // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced derived content cannot leave through a raw-row export path that has no column-suppression seam.
+  if ((dataset.localOnlyContentColumns?.length ?? 0) > 0) {
+    throw new Error(
+      `central.forward: dataset '${partition.dataset}' declares local-only content columns and cannot be forwarded`
+    )
+  }
   return { ingestName: partition.dataset, registration: dataset }
 }
 

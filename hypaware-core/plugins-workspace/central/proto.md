@@ -136,9 +136,14 @@ catalog can resolve rows POSTed under that name. Body is JSON:
 dataset declares them. `{dataset}` is URL-escaped, and the ingest POST
 below escapes it identically, so the two calls always name one resource.
 
-Registration is expected to be idempotent: the client announces a dataset
-once per sink instance, before that dataset's first ingest chunk, and a
-daemon restart (or a second concurrent tick) may announce it again.
+Datasets declaring `localOnlyContentColumns` are not eligible for this raw-row
+protocol: those columns may contain local-only content without per-row `cwd`
+provenance, and registration cannot make the server enforce the machine's
+local usage policy. The client rejects such a dataset before either request.
+
+Registration is expected to be idempotent: the client announces an eligible
+dataset once per sink instance, before that dataset's first ingest chunk, and
+a daemon restart (or a second concurrent tick) may announce it again.
 
 Response 2xx: registered. Any other status throws, which fails that
 partition for the driver's outbox retry, so the dataset re-announces on
@@ -162,10 +167,11 @@ bounded chunks: one POST per chunk (see "Batch boundaries").
 
 - the four **legacy signals** keep their fixed paths, chosen by the
   dataset's declared `sourceSignal`;
-- every **other** dataset ingests under its own dataset name, after its
-  schema is registered by the `PUT` above. Its `sourceSignal`, if it
-  declares one, travels in the registration body and does **not** select
-  the path.
+- every **other eligible** dataset ingests under its own dataset name, after
+  its schema is registered by the `PUT` above. Its `sourceSignal`, if it
+  declares one, travels in the registration body and does **not** select the
+  path. Datasets declaring `localOnlyContentColumns` are ineligible as
+  described above.
 
 | Signal    | Source                                            |
 |-----------|---------------------------------------------------|
