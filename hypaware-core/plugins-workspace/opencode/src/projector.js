@@ -60,11 +60,26 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
   }
 }
 
-/** @param {Record<string, unknown>} info @param {unknown[]} parts @param {number} index */
+/**
+ * An OpenCode assistant message MUTATES under a stable id: its text streams in
+ * and its tool parts settle after the id already exists. The shared
+ * projected-exchange writer dedupes at MESSAGE grain (`state.seenMessages`), so
+ * the first snapshot that projects an in-flight message freezes it: a later
+ * snapshot of the same id writes nothing, and neither does the recovery lane,
+ * whose seed reads the same committed message ids. Waiting for a terminal
+ * assistant message is the message-grain form of the part-grain rule below, and
+ * for the same reason: whatever lands first wins forever, so it must be the
+ * complete one. A user message is terminal the moment it exists.
+ *
+ * @param {Record<string, unknown>} info @param {unknown[]} parts @param {number} index
+ * @ref LLP 0306#recovery-lane [implements]: an unsettled turn is not persisted,
+ *   because the append-only dedupe would keep its final state from landing
+ */
 function projectMessage(info, parts, index) {
   const role = stringValue(info.role) ?? stringValue(info.type)
   const id = stringValue(info.id)
   if (!role || !id) return undefined
+  if (role === 'assistant' && !isSettledAssistantMessage(info)) return undefined
   /** @type {JsonObject[]} */
   const content = []
   for (const rawPart of parts) {
@@ -94,6 +109,19 @@ function projectMessage(info, parts, index) {
   if (usage) message.attributes = { usage }
   if (isPlainObject(info.error)) message.raw_frame = { error: jsonObject(info.error) }
   return message
+}
+
+/**
+ * The three ways OpenCode reports that an assistant turn will not change again:
+ * `time.completed` on a normal finish, `finish` alongside it, and `error` for an
+ * aborted or failed turn. Any one of them settles the message.
+ *
+ * @param {Record<string, unknown>} info
+ */
+function isSettledAssistantMessage(info) {
+  if (readTime(info.time, 'completed') !== undefined) return true
+  if (stringValue(info.finish)) return true
+  return isPlainObject(info.error)
 }
 
 /** @param {Record<string, unknown>} part @returns {JsonObject | undefined} */

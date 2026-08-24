@@ -105,8 +105,19 @@ async function* runBackfill(deps) {
       })
       continue
     }
+    // On the exact-id path `item.directory` is never populated, so this is the
+    // only place the policy is consulted for those sessions. Report the drop
+    // the same way the pre-export check does, or a `.hypignore` session is
+    // silently absent from the run report rather than visibly withheld.
     const policy = deps.resolver.resolve(cwd)
-    if (policy.class === 'ignore') continue
+    if (policy.class === 'ignore') {
+      yield /** @type {BackfillEvent} */ ({
+        type: 'event',
+        event: 'usage_policy_drop',
+        attributes: { session_id: item.id, class: 'ignore' },
+      })
+      continue
+    }
     const projection = projectOpenCodeSnapshot(exported, {
       entrypoint: 'unknown',
       entrypointSource: 'historical-export',

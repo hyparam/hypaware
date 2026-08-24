@@ -92,6 +92,13 @@ export async function activate(ctx) {
             endpoint,
           }
           if (attachCtx.json) attachCtx.stdout.write(JSON.stringify(payload) + '\n')
+          // A dry run reports `changed: true` for work it deliberately did not
+          // do, so the human line must not claim an install or ask for a
+          // restart that nothing needs.
+          else if (attachCtx.dryRun === true) attachCtx.stdout.write(
+            `${result.changed ? 'Would install' : 'OpenCode plugin already current at'} ${result.settingsPath}. ` +
+            'Dry run: nothing was written.\n'
+          )
           else attachCtx.stdout.write(
             `${result.changed ? 'Installed' : 'OpenCode plugin already current at'} ${result.settingsPath}. ` +
             'Restart OpenCode to load it.\n'

@@ -44,7 +44,11 @@ function snapshot(id, directory, entrypoint = 'cli') {
           parentID: `${id}-user`,
           providerID: 'openai',
           modelID: 'gpt-5.6-luna',
-          time: { created: Date.parse('2026-08-24T10:00:02.000Z') },
+          finish: 'stop',
+          time: {
+            created: Date.parse('2026-08-24T10:00:02.000Z'),
+            completed: Date.parse('2026-08-24T10:00:04.000Z'),
+          },
         },
         parts: [
           { id: `${id}-text`, type: 'text', text: 'Reading it.' },
@@ -205,6 +209,78 @@ test('OpenCode listener reports malformed snapshot errors without exposing reque
     const failure = listener.logs.find((entry) => entry.event === 'opencode.snapshot.failed')
     assert.equal(failure?.fields?.error_kind, 'snapshot_receive_failed')
     assert.equal(JSON.stringify(failure).includes('{not-json'), false)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+test('a turn observed mid-stream lands once, complete, when the assistant message settles', async () => {
+  const listener = await startListener()
+  const cwd = path.join(listener.root, 'streaming')
+  await fs.mkdir(cwd, { recursive: true })
+  const id = 'ses_stream'
+  /** @param {boolean} settled */
+  const turn = (settled) => ({
+    session: { id, directory: cwd, version: '1.18.22', time: { created: 1 } },
+    messages: [
+      {
+        info: { id: `${id}-user`, role: 'user', time: { created: 2 } },
+        parts: [{ id: `${id}-user-part`, type: 'text', text: 'Read notes.txt' }],
+      },
+      {
+        info: {
+          id: `${id}-assistant`,
+          role: 'assistant',
+          parentID: `${id}-user`,
+          providerID: 'openai',
+          modelID: 'gpt-5.6-luna',
+          time: settled ? { created: 3, completed: 9 } : { created: 3 },
+          ...(settled ? { finish: 'stop' } : {}),
+        },
+        parts: [
+          {
+            id: `${id}-text`,
+            type: 'text',
+            text: settled ? 'I read it: the notes say hello.' : 'I read',
+          },
+          {
+            id: `${id}-tool`,
+            type: 'tool',
+            callID: `${id}-call`,
+            tool: 'read',
+            state: settled
+              ? { status: 'completed', input: { path: 'notes.txt' }, output: 'hello' }
+              : { status: 'running', input: { path: 'notes.txt' } },
+          },
+        ],
+      },
+    ],
+    entrypoint: 'cli',
+    entrypoint_source: 'plugin-process',
+  })
+
+  try {
+    // Mid-stream: only the user message is settled, so only it is persisted.
+    // Writing the assistant message here would freeze its streaming prefix -
+    // the shared writer dedupes at message grain, so nothing could replace it.
+    const midTurn = await listener.post(turn(false))
+    assert.equal(midTurn.status, 200)
+    assert.deepEqual(await midTurn.json(), { status: 'ok', rowsWritten: 1, rowsSkipped: 0 })
+
+    const settled = await listener.post(turn(true))
+    assert.equal(settled.status, 200)
+    assert.deepEqual(await settled.json(), { status: 'ok', rowsWritten: 2, rowsSkipped: 0 })
+
+    const replay = await listener.post(turn(true))
+    assert.deepEqual(await replay.json(), { status: 'ok', rowsWritten: 0, rowsSkipped: 0 })
+
+    const rows = listener.storage.appended
+    assert.equal(rows.length, 3)
+    const text = rows.find((row) => row.part_id === `${id}-text`)
+    assert.equal(text?.content_text, 'I read it: the notes say hello.')
+    const tool = rows.find((row) => row.part_id === `${id}-tool`)
+    assert.equal(tool?.tool_name, 'read')
+    assert.equal(tool?.tool_call_id, `${id}-call`)
   } finally {
     await listener.cleanup()
   }

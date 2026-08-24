@@ -272,6 +272,13 @@ consume paid tokens. Do not delete any OpenCode session during this procedure.
    tool-call IDs in the release notes so the recovery comparison can use exact
    values rather than row position.
 
+   Also compare each assistant `content_text` against what the frontend
+   displayed. It must be the whole final answer, not a streaming prefix. A
+   message is captured once it settles precisely because the append-only dedupe
+   is at message grain: whichever version lands first is the one kept forever,
+   so a truncated row here is a capture defect, not a display difference, and no
+   later snapshot or import can repair it.
+
 5. Prove export/recovery convergence with a tight time cursor. First save exact
    exports for the two IDs and note the current durable counts. Then import only
    the short interval containing these turns twice.
@@ -288,8 +295,13 @@ consume paid tokens. Do not delete any OpenCode session during this procedure.
      --since '<UTC timestamp immediately before step 3>' \
      --until '<UTC timestamp immediately after step 3>' --json
    hyp client history import opencode \
-     --since '<same UTC timestamp>' --until '<same UTC timestamp>' --json
+     --since '<the same timestamp used for --since above>' \
+     --until '<the same timestamp used for --until above>' --json
    ```
+
+   The second run must repeat the first run's interval exactly. A narrower or
+   zero-width window selects nothing, so it would report zero new rows without
+   ever re-exporting the sessions the dedupe is being tested on.
 
    Pass condition: each import reports only sessions inside the requested
    interval; the provider lists metadata within that cursor and invokes

@@ -5,6 +5,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import http from 'node:http'
+import { pathToFileURL } from 'node:url'
 
 import {
   OPENCODE_PLUGIN_MARKER,
@@ -164,3 +166,80 @@ test('detach retains a user replacement after the ownership marker is removed', 
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('the installed plugin reads the session through the SDK route contract and reports only complete snapshots', async () => {
+  const home = await stageHome()
+  const received = []
+  const server = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"status":"ok"}')
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const port = /** @type {any} */ (server.address()).port
+  try {
+    const installed = await attachOpenCodePlugin({
+      endpoint: `http://127.0.0.1:${port}`,
+      version: '1.0.0',
+      env: { HOME: home },
+      homeDir: home,
+    })
+    const module = await import(pathToFileURL(installed.settingsPath).href)
+
+    // The generated OpenCode SDK client takes route parameters under `path`.
+    // A bare `{ sessionID }` leaves `/session/{id}` unsubstituted, so the
+    // server 500s and every snapshot carries an error envelope instead of a
+    // session. Assert the call shape, not just that a call happened.
+    const calls = []
+    /** @param {unknown} data */
+    const ok = (data) => ({ data, request: {}, response: {} })
+    /** @type {any} */
+    const client = {
+      session: {
+        async get(args) {
+          calls.push(['get', args])
+          return ok({ id: 'ses_1', directory: '/work/probe', time: { created: 1 } })
+        },
+        async messages(args) {
+          calls.push(['messages', args])
+          return ok([])
+        },
+      },
+    }
+    const hooks = await module.HypAware({ client, directory: '/work/probe', worktree: '/work/probe', project: { id: 'proj' } })
+    hooks.event({ event: { type: 'message.part.updated', properties: { part: { sessionID: 'ses_1', id: 'part_1' } } } })
+    await waitFor(() => received.length === 1)
+
+    assert.deepEqual(calls, [
+      ['get', { path: { id: 'ses_1' } }],
+      ['messages', { path: { id: 'ses_1' } }],
+    ])
+    assert.equal(received[0].url, '/snapshot')
+    assert.equal(received[0].body.session.id, 'ses_1')
+    assert.equal(received[0].body.trigger, 'message.part.updated')
+
+    // A failed SDK read is not a snapshot: shipping the error envelope would
+    // reach the listener as a session with no directory and be miscounted as a
+    // missing cwd rather than a failed read.
+    client.session.get = async () => ({ error: { name: 'UnknownError' }, request: {}, response: {} })
+    hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    assert.equal(received.length, 1)
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/** @param {() => boolean} predicate */
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for the plugin to post a snapshot')
+}
