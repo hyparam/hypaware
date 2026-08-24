@@ -179,9 +179,23 @@ test('a limit above the ceiling clamps to it instead of dropping below the defau
   assert.equal(err.join(''), '', 'a clamped limit still covered every match, so nothing is truncated')
 })
 
-test('an unusable limit falls back to the default instead of failing', async () => {
+test('a limit the flag cannot use is refused, not quietly replaced', async () => {
+  // Silently rewriting 0 to the default answered a request for FEWER rows
+  // with 50 of them and exit 0: the same forged answer `dayBound` refuses,
+  // reached through the numeric flag. The schema is also what an MCP caller
+  // validates against, so `limit: 0` over the wire got 50 rows too.
+  for (const bad of ['0', '-5', '2.5']) {
+    const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
+    const code = await cmd.run(['needle', '--limit', bad], ctx)
+    assert.equal(code, 2, `--limit ${bad} is a usage error`)
+    assert.match(err.join(''), /--limit expects a positive integer/)
+    assert.equal(out.join(''), '')
+  }
+})
+
+test('an absent limit still takes the default', async () => {
   const { ctx, out } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
-  const code = await cmd.run(['needle', '--limit', '0'], ctx)
+  const code = await cmd.run(['needle'], ctx)
   assert.equal(code, 0)
   assert.match(out.join(''), /needle a/)
 })

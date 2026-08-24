@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 
-import { parquetReadObjects } from 'hyparquet'
+import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
 import { parquetFind } from 'hypgrep'
 
 import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
@@ -29,10 +29,12 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * sidecar is searched through `parquetFind` (the index proposes candidate
  * blocks, the shared matcher confirms), a file without one is brute-scanned.
  * Both tiers read under the narrow `SCAN_COLUMNS` projection, so the index
- * changes which rows are decoded and never how wide. Files are processed strictly
- * sequentially, so the request's memory bound is one data file plus its
- * index, never a day's worth. No sidecar anywhere (the tree before T6 of
- * LLP 0265 runs) means every file takes the scan tier: slower, never wrong.
+ * changes which rows are decoded and never how wide. Files are processed
+ * strictly sequentially and each is read one ROW GROUP at a time, so the
+ * request's memory bound is one row group plus, on the indexed tier, its
+ * index; never a whole 128 MiB data file and never a day's worth. No sidecar
+ * anywhere (the tree before T6 of LLP 0265 runs) means every file takes the
+ * scan tier: slower, never wrong.
  *
  * Unlike the server there is no cross-tier day exclusion: a client row lives
  * in exactly one data file, and each file is served by exactly one tier, so
@@ -417,17 +419,51 @@ export async function executeGrepSearch(args) {
         if (indexFile && await searchIndexed(file, indexFile, sidecarUrl)) return
         scannedFiles += 1
         const sourceFile = await io.reader(file.filePath)
-        const rows = await parquetReadObjects({ file: sourceFile, columns: SCAN_COLUMNS })
-        for (let i = 0; i < rows.length; i++) {
-          if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
-          if (file.deletedPositions?.has(BigInt(i))) continue
-          const row = rows[i]
-          if (!accept(row)) continue
-          if (withheld?.(row)) {
-            localOnly.withheldRows += 1
-            continue
+        // One ROW GROUP at a time, not the whole file. A compacted data
+        // file runs to `target_file_bytes` (128 MiB by default) and the
+        // projection's bulk column is `content_text`, so materializing it
+        // whole decodes hundreds of MB of JS strings before a single row
+        // is tested: `hyp query grep` could then exhaust the heap where
+        // `hyp query sql` over the same partition does not, because the
+        // SQL seam streams (`scanRowsFromTable`). The abort checks below
+        // could not fire during that decode either, so the deadline did
+        // not bound the step that dominates the wall clock.
+        //
+        // The row group is the unit rather than a fixed row count for a
+        // reason: without the offset index hyparquet fetches and decodes a
+        // whole column chunk to serve any row inside it, so an arbitrary
+        // split would re-decode the same chunk once per slice and cost
+        // more than it saved. Group-aligned slices read each chunk exactly
+        // once, so the total decode is unchanged and only the peak drops.
+        // A single-row-group file therefore reads exactly as it did.
+        const metadata = await parquetMetadataAsync(sourceFile)
+        let groupStart = 0
+        for (const group of metadata.row_groups) {
+          const groupRows = Number(group.num_rows)
+          if (groupRows <= 0) continue
+          signal?.throwIfAborted()
+          const rows = await parquetReadObjects({
+            file: sourceFile,
+            metadata,
+            columns: SCAN_COLUMNS,
+            rowStart: groupStart,
+            rowEnd: groupStart + groupRows,
+          })
+          for (let i = 0; i < rows.length; i++) {
+            if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
+            // Delete positions are file-absolute, so the group's own
+            // offset has to ride the lookup; a group-relative index would
+            // resurrect purged rows in every group after the first.
+            if (file.deletedPositions?.has(BigInt(groupStart + i))) continue
+            const row = rows[i]
+            if (!accept(row)) continue
+            if (withheld?.(row)) {
+              localOnly.withheldRows += 1
+              continue
+            }
+            collect(row)
           }
-          collect(row)
+          groupStart += groupRows
         }
       }
 

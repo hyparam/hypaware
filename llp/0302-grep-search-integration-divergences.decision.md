@@ -154,6 +154,17 @@ costs nothing, since both are the tool's error text. This is available to every
 verb, not only to grep; it is the seam LLP 0293 D1 needs wherever a rule
 outgrows the schema.
 
+The same rule reaches the one argument the schema CAN state and was not
+stating. `limit` was declared a bare `number`, and the operation then rewrote
+anything unusable to the default, so `--limit 0`, `--limit -5` and
+`--limit 2.5` all returned 50 rows and exit 0: a request for FEWER rows
+answered with more of them, and the same silent substitution over MCP, where
+this schema is what a caller validates against. It is `{ type: 'integer',
+minimum: 1 }` now, which the codec already turns into a named refusal. The
+ceiling stays out of the schema on purpose: above it the flag clamps rather
+than refuses, because the help text promises a capped answer and "raise
+--limit" is advice a caller already at the ceiling cannot follow.
+
 ## What this does not settle {#residuals}
 
 - **The T6 test that was promised.** LLP 0265 T6 asks for a test pinning that
