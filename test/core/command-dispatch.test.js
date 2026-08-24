@@ -524,10 +524,15 @@ test('group with an unknown subcommand reports it and exits 2', async () => {
 })
 
 test('top-level help renders journey sections and a compact operations list', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-'))
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['--help'], { stdout, stderr })
+  const code = await dispatch(['--help'], {
+    stdout,
+    stderr,
+    env: { ...process.env, HYP_HOME: hypHome },
+  })
 
   assert.equal(code, 0)
   const out = stdout.text()
