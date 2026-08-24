@@ -210,6 +210,18 @@ test('zero hits over zero searched files says so instead of passing for a full s
   assert.match(err.join(''), /no ai_gateway_messages data files were searched/)
 })
 
+test('an interrupted walk reports the interruption, not an empty machine', async () => {
+  // An abort before the first file is served whole leaves both file
+  // counters at zero over a cache full of data, so the "searched nothing"
+  // notice would tell the caller the exact opposite of what happened.
+  const stopped = queryGrepVerb.render(
+    { hits: [], truncated: false, exhausted: false, indexedFiles: 0, scannedFiles: 0 },
+    /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(stopped.stderr ?? '', /stopped before covering every file/)
+  assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
+})
+
 test('zero hits over a searched cache stays quiet', async () => {
   const { ctx, err } = await makeCtx([[mkRow({ content_text: 'nothing to see' })]])
   const code = await cmd.run(['needle'], ctx)

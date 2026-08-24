@@ -157,7 +157,16 @@ export const queryGrepVerb = {
     // surface an agent sees only the rows. The file counts are the local
     // service's own; a server result carries none, so this stays quiet on
     // `--remote`.
-    if (hits.length === 0 && r.indexedFiles === 0 && r.scannedFiles === 0) {
+    //
+    // Only for a walk that finished. An abort landing before the first file
+    // was served whole leaves both counters at zero over a cache full of
+    // data (the indexed tier deliberately does not count an interrupted
+    // file), and "nothing is recorded on this machine yet" is then the one
+    // wrong thing to tell the caller. `exhausted === false` is exactly that
+    // case here: with no hits the budget break cannot have fired, so the
+    // only other way to leave the walk early is the abort the notice above
+    // already reported.
+    if (hits.length === 0 && r.exhausted !== false && r.indexedFiles === 0 && r.scannedFiles === 0) {
       stderr += 'grep: no ai_gateway_messages data files were searched - nothing is recorded on this machine yet, ' +
         'or --from/--to excluded every file\n'
     }
