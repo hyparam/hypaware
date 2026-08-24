@@ -136,7 +136,7 @@ function makeIdentity() {
  * a 429/503. Default 202. The response exposes a real `headers.get` so
  * the sink's header read is exercised.
  *
- * @param {(call: { url: string, method: string, batchId: string | undefined, lines: string[] }) => (number | { status: number, retryAfter?: number })} [responder]
+ * @param {(call: { url: string, method: string, batchId: string | undefined, lines: string[] }) => (number | { status: number, retryAfter?: number } | Promise<number | { status: number, retryAfter?: number }>)} [responder]
  */
 function makeFetch(responder) {
   /** @type {Array<{ url: string, method: string, batchId: string | undefined, lines: string[], rowCount: number }>} */
@@ -157,7 +157,7 @@ function makeFetch(responder) {
       rowCount: lines.length,
     }
     calls.push(call)
-    const result = responder ? responder(call) : 202
+    const result = responder ? await responder(call) : 202
     const status = typeof result === 'number' ? result : result.status
     const retryAfter = typeof result === 'object' ? result.retryAfter : undefined
     return /** @type {any} */ ({
@@ -178,15 +178,16 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
 /**
  * @param {{
  *   count: number | (() => number),
- *   responder?: (c: any) => (number | { status: number, retryAfter?: number }),
+ *   responder?: (c: any) => (number | { status: number, retryAfter?: number } | Promise<number | { status: number, retryAfter?: number }>),
  *   rowFactory?: (i: number) => Record<string, unknown>,
  *   signal?: string | null,
  *   query?: { getDataset: (name: string) => unknown },
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   watermark?: { v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null,
+ *   nowFn?: () => number,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, nowFn }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
@@ -207,6 +208,7 @@ function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleep
     log: /** @type {any} */ (log),
     fetchFn: fn,
     sleepFn: sleepFn ?? recordingSleep,
+    nowFn,
   })
   return { sink, calls, storage, identityClient, log, sleeps, drains, watermarks }
 }
@@ -382,6 +384,43 @@ test('a newly forwardable open dataset starts after its existing local history',
   assert.equal(watermarks.record?.exportedRowCount, 2)
 })
 
+test('an open-dataset baseline failure never falls back to historical ingest', async () => {
+  const { sink, calls, watermarks } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+  })
+  watermarks.write = async () => { throw new Error('watermark disk unavailable') }
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'failed')
+  assert.match(result.error ?? '', /watermark disk unavailable/)
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
+  // The baseline now precedes registration, so a local state failure makes no
+  // remote call at all and the partition can retry without duplicate history.
+  assert.equal(calls.filter((c) => c.method === 'PUT').length, 0)
+})
+
+test('an open-dataset registration outage does not move the local rollout baseline', async () => {
+  let count = 10
+  let putStatus = 500
+  const { sink, calls, watermarks } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    responder: (c) => (c.method === 'PUT' ? putStatus : 202),
+  })
+
+  const failed = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(failed.status, 'failed')
+  assert.equal(watermarks.record?.continuation.seq, '10')
+
+  count = 12
+  putStatus = 202
+  const retried = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(retried.status, 'exported')
+  assert.deepEqual(calls.filter((c) => c.method === 'POST')[0].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+})
+
 test('overlapping first ticks share one open-dataset history baseline', async () => {
   const { sink, calls, watermarks, log } = buildSink({
     count: 10,
@@ -402,6 +441,39 @@ test('overlapping first ticks share one open-dataset history baseline', async ()
   )
   assert.equal(calls.filter((c) => c.method === 'PUT').length, 1)
   assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
+})
+
+test('overlapping ticks serialize one partition export', async () => {
+  /** @type {() => void} */
+  let releasePost = () => {}
+  const postGate = new Promise((resolve) => { releasePost = () => resolve(undefined) })
+  /** @type {() => void} */
+  let postStartedResolve = () => {}
+  const postStarted = new Promise((resolve) => { postStartedResolve = () => resolve(undefined) })
+  const { sink, calls, watermarks } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    watermark: ZERO_WATERMARK,
+    responder: async (call) => {
+      if (call.method === 'POST') {
+        postStartedResolve()
+        await postGate
+      }
+      return 202
+    },
+  })
+
+  const first = sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  await postStarted
+  const second = sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  releasePost()
+  const results = await Promise.all([first, second])
+
+  assert.deepEqual(results.map((r) => r.status), ['exported', 'exported'])
+  assert.equal(calls.filter((c) => c.method === 'PUT').length, 1)
+  assert.equal(calls.filter((c) => c.method === 'POST').length, 1)
+  assert.equal(watermarks.writes.length, 1)
+  assert.equal(watermarks.record?.continuation.seq, '10')
 })
 
 test('a missing open-dataset partition does not register a remote dataset', async () => {
@@ -467,6 +539,33 @@ test('a schema announce 401 refreshes once and retries the same registration', a
   assert.deepEqual(calls[0].lines, calls[1].lines)
 })
 
+test('an older server holds an open dataset locally and re-probes slowly', async () => {
+  let count = 10
+  let now = 0
+  let supportsRegistration = false
+  const { sink, calls } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    responder: (c) => c.method === 'PUT' && !supportsRegistration ? 404 : 202,
+  })
+
+  const first = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(first.status, 'exported')
+  assert.deepEqual(calls.map((c) => c.method), ['PUT'])
+
+  count = 12
+  now = 60_000
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(calls.map((c) => c.method), ['PUT'])
+
+  supportsRegistration = true
+  now = 5 * 60_000 + 1
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
+  assert.deepEqual(calls[2].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+})
+
 test('an unresolvable dataset fails only its own partition', async () => {
   // The per-partition isolation the sink documents: resolving the wire target
   // can throw, and a throw that escapes `exportBatch` costs the whole batch
@@ -514,6 +613,27 @@ test('an open dataset with local-only content columns is not forwarded', async (
   assert.equal(result.partitionsExported, 0)
   assert.deepEqual(result.retryPartitions, batch.partitions)
   assert.match(result.error ?? '', /declares local-only content columns/)
+  assert.equal(calls.length, 0)
+})
+
+test('an open dataset cannot claim a reserved legacy ingest path', async () => {
+  const query = {
+    getDataset: () => ({
+      name: 'proxy',
+      plugin: '@hypaware/test',
+      schema: { columns: [] },
+      sourceSignal: 'custom',
+    }),
+  }
+  const { sink, calls } = buildSink({ count: 10, query })
+
+  const result = await sink.exportBatch(
+    /** @type {any} */ ({ partitions: [{ dataset: 'proxy', tablePath: TABLE }] }),
+    /** @type {any} */ ({})
+  )
+
+  assert.equal(result.status, 'failed')
+  assert.match(result.error ?? '', /reserved by a legacy ingest path/)
   assert.equal(calls.length, 0)
 })
 

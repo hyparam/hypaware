@@ -145,22 +145,26 @@ Registration is expected to be idempotent: the client announces an eligible
 dataset once per sink instance, before that dataset's first ingest chunk, and
 a daemon restart (or a second concurrent tick) may announce it again.
 
-On the first successful registration for a local partition with no forward
+Before the first registration attempt for a local partition with no forward
 watermark, the client records the partition's current sequence high-water and
-sends none of its existing rows. Later rows use the ordinary incremental path.
-The four legacy signals keep their existing full first-export behavior.
+sends none of its existing rows. Establishing that boundary locally first means
+a registration outage cannot absorb later rows into a delayed baseline. A
+baseline failure fails the partition closed: it never falls through to the
+legacy full-history scan. Later rows use the ordinary incremental path. The four
+legacy signals keep their existing full first-export behavior.
 
-Response 2xx: registered. Any other status throws, which fails that
-partition for the driver's outbox retry, so the dataset re-announces on
-the next tick; the dataset is not marked registered until a call
-succeeds. A `401` refreshes the JWT once and retries, exactly as ingest
-does.
+Response 2xx: registered. A `404` or `405` means the server predates this
+additive route: the client holds the dataset locally, logs once, and re-probes
+after five minutes instead of creating an outbox entry every tick. Any other
+status throws, which fails that partition for the driver's outbox retry; the
+dataset is not marked registered until a call succeeds. A `401` refreshes the
+JWT once and retries, exactly as ingest does.
 
 > **Server status:** this route is the fleet server's accepted catalog
 > protocol (server LLP 0001 / 0004) and was exercised against the deployed
 > Hyperparam server on 2026-08-24 with `claude_telemetry_events`. An older
-> server that does not serve it causes the partition to remain retryable and
-> emits `central.forward.failed` naming the PUT URL; no rows are POSTed.
+> server that does not serve it holds the partition locally and emits
+> `central.forward.dataset_unsupported`; no rows are POSTed.
 
 ### POST `/v1/ingest/{signal}`
 
@@ -177,7 +181,9 @@ bounded chunks: one POST per chunk (see "Batch boundaries").
   its schema is registered by the `PUT` above. Its `sourceSignal`, if it
   declares one, travels in the registration body and does **not** select the
   path. Datasets declaring `localOnlyContentColumns` are ineligible as
-  described above.
+  described above. The names `logs`, `traces`, `metrics`, and `proxy` are
+  reserved by the server's legacy path mapping and cannot be used by an open
+  dataset.
 
 | Signal    | Source                                            |
 |-----------|---------------------------------------------------|

@@ -31,6 +31,11 @@ const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 const MAX_CHUNK_ROWS = 5000
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
+// An older server answers the additive registration route with 404/405. Hold
+// the dataset locally and probe infrequently so normal client-before-server
+// version skew does not create an outbox and warning every sink tick.
+const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
+
 /**
  * Build the `forward` Sink. The sink's `exportBatch` forwards each
  * driver partition independently. Legacy datasets resolve their fixed ingest
@@ -52,6 +57,7 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   nowFn?: () => number,
  * }} args
  * @returns {Sink}
  */
@@ -60,11 +66,16 @@ export function createForwardSink(args) {
   const fetchFn = args.fetchFn ?? fetch
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
+  const nowFn = args.nowFn ?? Date.now
   const registeredDatasets = new Set()
   /** @type {Map<string, Promise<void>>} */
   const datasetRegistrations = new Map()
+  /** @type {Map<string, number>} */
+  const unsupportedDatasetsUntil = new Map()
   /** @type {Map<string, Promise<SinkContinuation>>} */
   const initialHistoryBaselines = new Map()
+  /** @type {Map<string, Promise<number>>} */
+  const partitionExports = new Map()
 
   // Aborts an in-flight backpressure wait when the sink is closed, so a
   // chunk paused on `Retry-After` cannot wedge daemon shutdown.
@@ -102,16 +113,31 @@ export function createForwardSink(args) {
         /** @type {{ ingestName: string, registration?: DatasetRegistration } | undefined} */
         let target
         try {
-          target = forwardingTarget(query, partition)
-          bytesWritten += await forwardPartition({
-            partition, signal: target.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
+          const resolved = forwardingTarget(query, partition)
+          target = resolved
+          // Scheduled ticks may overlap. Serialize one logical partition so two
+          // scans cannot POST the same suffix concurrently or race a later
+          // watermark backward over an earlier write.
+          // @ref LLP 0040#watermark-contract [constrained-by]: a partition has one ordered ship-then-advance sequence even when daemon ticks overlap.
+          const exportKey = partition.tablePath ?? `${partition.dataset}:${JSON.stringify(partition.partition ?? {})}`
+          const previous = partitionExports.get(exportKey) ?? Promise.resolve(0)
+          const pending = previous.catch(() => 0).then(() => forwardPartition({
+            partition, signal: resolved.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
             abortSignal: abortController.signal, sleepFn,
-            registration: target.registration,
+            registration: resolved.registration,
             registeredDatasets,
             datasetRegistrations,
-            skipInitialHistory: target.registration !== undefined,
+            unsupportedDatasetsUntil,
+            nowFn,
+            skipInitialHistory: resolved.registration !== undefined,
             initialHistoryBaselines,
-          })
+          }))
+          partitionExports.set(exportKey, pending)
+          try {
+            bytesWritten += await pending
+          } finally {
+            if (partitionExports.get(exportKey) === pending) partitionExports.delete(exportKey)
+          }
           partitionsExported += 1
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -189,6 +215,11 @@ function forwardingTarget(query, partition) {
       `central.forward: dataset '${partition.dataset}' declares local-only content columns and cannot be forwarded`
     )
   }
+  if (KNOWN_SIGNALS.has(partition.dataset)) {
+    throw new Error(
+      `central.forward: open dataset name '${partition.dataset}' is reserved by a legacy ingest path`
+    )
+  }
   return { ingestName: partition.dataset, registration: dataset }
 }
 
@@ -232,30 +263,20 @@ function forwardingTarget(query, partition) {
  *   registration?: DatasetRegistration,
  *   registeredDatasets: Set<string>,
  *   datasetRegistrations: Map<string, Promise<void>>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
+ *   nowFn: () => number,
  *   skipInitialHistory: boolean,
  *   initialHistoryBaselines: Map<string, Promise<SinkContinuation>>,
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, skipInitialHistory, initialHistoryBaselines }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, skipInitialHistory, initialHistoryBaselines }) {
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
   }
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
-
-  if (registration) {
-    await ensureDatasetRegistered({
-      centralUrl: config.url,
-      dataset: registration,
-      registeredDatasets,
-      datasetRegistrations,
-      identityClient,
-      fetchFn,
-      log,
-    })
-  }
 
   // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
   /** @type {SinkContinuation | undefined} */
@@ -289,6 +310,17 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       since = await baseline
     }
   } catch (err) {
+    // A newly eligible open dataset must never turn an initialization failure
+    // into the legacy full-scan fallback. Keep the partition retryable until
+    // its start-now watermark is durable; otherwise a disk/read error here
+    // replays exactly the history LLP 0305 excludes.
+    if (skipInitialHistory) {
+      log.warn('central.forward.initial_history_baseline_failed', {
+        hyp_dataset: partition.dataset,
+        message: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
     // An underivable key or unreadable watermark must not wedge the sink:
     // fall back to a full scan (the server ledger dedupes the redelivery)
     // and skip watermark writes for this partition this tick.
@@ -299,6 +331,25 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       hyp_dataset: partition.dataset,
       message: err instanceof Error ? err.message : String(err),
     })
+  }
+
+  // Establish the local start-now boundary before the remote capability
+  // handshake. If registration is temporarily unavailable, rows arriving
+  // after this durable baseline remain pending and forward on the retry rather
+  // than being absorbed into a later baseline.
+  if (registration) {
+    const supported = await ensureDatasetRegistered({
+      centralUrl: config.url,
+      dataset: registration,
+      registeredDatasets,
+      datasetRegistrations,
+      unsupportedDatasetsUntil,
+      identityClient,
+      fetchFn,
+      log,
+      nowFn,
+    })
+    if (!supported) return 0
   }
 
   let bytesWritten = 0
@@ -666,18 +717,31 @@ async function postNdjson(args) {
  *   dataset: DatasetRegistration,
  *   registeredDatasets: Set<string>,
  *   datasetRegistrations: Map<string, Promise<void>>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
  *   identityClient: IdentityClient,
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
+ *   nowFn: () => number,
  * }} args
+ * @returns {Promise<boolean>}
  */
 async function ensureDatasetRegistered(args) {
-  const { centralUrl, dataset, registeredDatasets, datasetRegistrations, identityClient, fetchFn, log } = args
-  if (registeredDatasets.has(dataset.name)) return
+  const { centralUrl, dataset, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn } = args
+  if (registeredDatasets.has(dataset.name)) return true
+  if ((unsupportedDatasetsUntil.get(dataset.name) ?? 0) > nowFn()) return false
 
   let pending = datasetRegistrations.get(dataset.name)
   if (!pending) {
-    pending = registerDataset({ centralUrl, dataset, registeredDatasets, identityClient, fetchFn, log })
+    pending = registerDataset({
+      centralUrl,
+      dataset,
+      registeredDatasets,
+      unsupportedDatasetsUntil,
+      identityClient,
+      fetchFn,
+      log,
+      nowFn,
+    })
       .catch((err) => {
         datasetRegistrations.delete(dataset.name)
         throw err
@@ -685,6 +749,11 @@ async function ensureDatasetRegistered(args) {
     datasetRegistrations.set(dataset.name, pending)
   }
   await pending
+  const supported = registeredDatasets.has(dataset.name)
+  if (!supported && datasetRegistrations.get(dataset.name) === pending) {
+    datasetRegistrations.delete(dataset.name)
+  }
+  return supported
 }
 
 /**
@@ -692,13 +761,15 @@ async function ensureDatasetRegistered(args) {
  *   centralUrl: string,
  *   dataset: DatasetRegistration,
  *   registeredDatasets: Set<string>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
  *   identityClient: IdentityClient,
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
+ *   nowFn: () => number,
  * }} args
  */
 async function registerDataset(args) {
-  const { centralUrl, dataset, registeredDatasets, identityClient, fetchFn, log } = args
+  const { centralUrl, dataset, registeredDatasets, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn } = args
 
   const body = {
     schema: dataset.schema,
@@ -723,10 +794,21 @@ async function registerDataset(args) {
     await identityClient.refresh()
     response = await send(await identityClient.getCurrentJwt())
   }
+  if (response.status === 404 || response.status === 405) {
+    await discardBody(response)
+    unsupportedDatasetsUntil.set(dataset.name, nowFn() + DATASET_REGISTRATION_REPROBE_MS)
+    log.warn('central.forward.dataset_unsupported', {
+      hyp_dataset: dataset.name,
+      http_status: response.status,
+      reprobe_after_ms: DATASET_REGISTRATION_REPROBE_MS,
+    })
+    return
+  }
   if (!response.ok) {
     const detail = await readErrorDetail(response)
     throw new Error(`central.forward PUT ${url} failed: ${detail}`)
   }
+  unsupportedDatasetsUntil.delete(dataset.name)
   registeredDatasets.add(dataset.name)
   log.info('central.forward.dataset_registered', {
     hyp_dataset: dataset.name,
