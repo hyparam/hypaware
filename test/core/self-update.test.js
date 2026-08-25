@@ -108,6 +108,27 @@ test('a registry override npm could never speak is not trusted onto a loopback h
   )
 })
 
+test('a trusted override comes back normalized, not echoed', () => {
+  // `new URL` accepts shapes the old `/^https?:\/\//` guard rejected, and
+  // returning one verbatim builds a probe address that can only fail.
+  // What comes back has to be a URL `fetch` will actually take.
+  assert.equal(resolveRegistryUrl({ npm_config_registry: 'https:evil' }), 'https://evil')
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'HTTPS://NPM.corp.example' }),
+    'https://npm.corp.example'
+  )
+  // Normalization is not a way into the loopback set: it runs on the
+  // parsed hostname, so every spelling that reaches 127.0.0.1 was already
+  // on this machine, and one that only looks like it is still refused.
+  for (const spelling of ['http://127.1', 'http://0x7f.0.0.1', 'http://2130706433']) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: spelling }), 'http://127.0.0.1')
+  }
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://evil.example#.localhost' }),
+    'https://registry.npmjs.org'
+  )
+})
+
 test('dropping an untrusted registry override is logged, not silent', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-log-'))
   try {
@@ -904,10 +925,13 @@ test('an ignored registry override cannot steer the install either', async () =>
     }
     const probe = fetchStub('1.1.0')
     // npm reads `npm_config_registry` from the environment as happily as
-    // the probe did. Refusing to believe the override for the version
-    // check and then handing it to `npm install -g` would pull the tarball
-    // from the very host the probe rejected, and would install a version
-    // that host may not even carry.
+    // the probe did, so handing the raw environment to `npm install -g`
+    // would pull the tarball from the very host the probe rejected. But
+    // the answer is not to pin the child to the public registry either:
+    // an org whose override names an internal mirror publishes its own
+    // build there, and a pinned install would silently swap it for the
+    // public one. Not knowing where the bytes belong means not
+    // installing.
     const applied = await runSelfUpdatePass({
       stateRoot: dir,
       env: { npm_config_registry: 'http://npm.corp.example' },
@@ -915,11 +939,18 @@ test('an ignored registry override cannot steer the install either', async () =>
       runner,
       fetchImpl: probe.impl,
     })
-    assert.equal(applied.action, 'updated')
-    assert.ok(envs.length > 0)
-    for (const env of envs) {
-      assert.equal(env?.npm_config_registry, 'https://registry.npmjs.org')
-    }
+    assert.equal(applied.action, 'checked')
+    assert.equal(applied.reason, 'registry_untrusted')
+    assert.equal(applied.latest, '1.1.0')
+    // No npm child ran at all, so nothing was fetched from anywhere.
+    assert.deepEqual(envs, [])
+    // And the refusal is sticky state, not only a log line: an install
+    // that can no longer update itself says so in `hyp status`.
+    assert.equal(readSelfUpdateState(dir).error, 'registry_untrusted')
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? '',
+      /degraded \(registry_untrusted\)/
+    )
 
     // With no override in the environment the env is passed through
     // untouched, so an `.npmrc`-configured private registry keeps serving
@@ -1047,47 +1078,124 @@ test('npm reads the registry override case-insensitively, and so does the guard'
     }
 
     // Untrusted under the uppercase spelling: probed at the default, and
-    // no spelling of the override survives into the install child.
+    // the apply is refused rather than run against a registry the
+    // operator never named. A guard blind to the spelling would instead
+    // see no override, install, and let npm read the plaintext host.
     const upper = await pass({ NPM_CONFIG_REGISTRY: 'http://npm.corp.example' })
-    assert.equal(upper.result.action, 'updated')
+    assert.equal(upper.result.action, 'checked')
+    assert.equal(upper.result.reason, 'registry_untrusted')
     assert.ok(upper.urls[0]?.startsWith('https://registry.npmjs.org/'))
-    assert.ok(upper.envs.length > 0)
-    for (const env of upper.envs) {
-      const spellings = Object.keys(env ?? {}).filter((k) => /^npm_config_registry$/i.test(k))
-      assert.deepEqual(spellings, ['npm_config_registry'])
-      assert.equal(env?.npm_config_registry, 'https://registry.npmjs.org')
-    }
+    assert.deepEqual(upper.envs, [])
 
-    // Trusted under the uppercase spelling: honored by the probe, which
-    // is what keeps the pin from stealing a legitimate private registry
-    // away from an operator who happens to shout the variable name.
+    // Trusted under the uppercase spelling: honored by the probe and
+    // installed from, which is what keeps the refusal from stranding an
+    // operator who happens to shout the variable name.
     const trusted = await pass({ NPM_CONFIG_REGISTRY: 'https://npm.corp.example' })
+    assert.equal(trusted.result.action, 'updated')
     assert.ok(trusted.urls[0]?.startsWith('https://npm.corp.example/'))
+    assert.ok(trusted.envs.length > 0)
     for (const env of trusted.envs) {
       assert.equal(env?.NPM_CONFIG_REGISTRY, 'https://npm.corp.example')
-      assert.equal(Object.prototype.hasOwnProperty.call(env ?? {}, 'npm_config_registry'), false)
     }
 
     // Two spellings disagreeing have no precedence npm defines, so
-    // neither is believed and the child is pinned to what was probed.
+    // neither is believed and nothing is installed.
     const conflict = await pass({
       npm_config_registry: 'https://npm.corp.example',
       NPM_CONFIG_REGISTRY: 'http://evil.example',
     })
+    assert.equal(conflict.result.reason, 'registry_untrusted')
     assert.ok(conflict.urls[0]?.startsWith('https://registry.npmjs.org/'))
-    for (const env of conflict.envs) {
-      const spellings = Object.keys(env ?? {}).filter((k) => /^npm_config_registry$/i.test(k))
-      assert.deepEqual(spellings, ['npm_config_registry'])
-      assert.equal(env?.npm_config_registry, 'https://registry.npmjs.org')
-    }
+    assert.deepEqual(conflict.envs, [])
 
     // An override set to empty is not an override: npm skips it, so
-    // nothing is dropped and nothing is pinned.
+    // nothing is dropped and the update goes through untouched.
     const empty = await pass({ npm_config_registry: '' })
+    assert.equal(empty.result.action, 'updated')
     assert.ok(empty.urls[0]?.startsWith('https://registry.npmjs.org/'))
     for (const env of empty.envs) {
       assert.equal(env?.npm_config_registry, '')
     }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('going offline does not silence an apply failure that was already speaking', async () => {
+  // A failed apply is sticky: an EACCES global prefix, a refused
+  // registry. It does not heal by itself and it was already rendering a
+  // degraded line. The offline reprieve is for a probe failure, and a
+  // probe failure overwriting `error` would inherit that reprieve for
+  // the sticky failure too, taking a permanently broken updater off the
+  // status line for a week - the one case LLP 0309#cli-surface most
+  // wants heard.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-sticky-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {CommandRunner} */
+    const failingInstall = async (cmd, args) => {
+      if (args[0] === 'config') {
+        return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'EACCES' }
+    }
+    const start = new Date('2026-01-01T00:00:00.000Z')
+    await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner: failingInstall,
+      fetchImpl: fetchStub('1.1.0').impl,
+      now: () => start,
+    })
+    assert.equal(readSelfUpdateState(dir).error, 'apply_failed: npm_install_failed')
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {}, now: () => start }).line ?? '',
+      /degraded \(apply_failed/
+    )
+
+    // Now the machine goes offline. The probe failure is real, but it
+    // does not get to speak over a failure that is still outstanding.
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const later = new Date(start.getTime() + 60 * 60 * 1000)
+    await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner: failingInstall,
+      fetchImpl: offline,
+      force: true,
+      now: () => later,
+    })
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.error, 'apply_failed: npm_install_failed')
+    assert.equal(state.error_since, undefined)
+    assert.equal(state.checked_at, later.toISOString())
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {}, now: () => later }).line ?? '',
+      /degraded \(apply_failed/
+    )
+
+    // A probe that comes back clears the sticky error and the apply is
+    // retried, so nothing here makes a real failure permanent.
+    const healed = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-sticky-heal-'))
+    await fsp.writeFile(
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+    )
+    const { runner: workingInstall } = await fakeGlobalInstall(dir)
+    const result = await runSelfUpdatePass({
+      stateRoot: healed,
+      env: {},
+      packageRoot,
+      runner: workingInstall,
+      fetchImpl: fetchStub('1.1.0').impl,
+      now: () => later,
+    })
+    assert.equal(result.action, 'updated')
+    assert.equal(readSelfUpdateState(healed).error, undefined)
+    await fsp.rm(healed, { recursive: true, force: true })
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

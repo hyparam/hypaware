@@ -77,6 +77,21 @@ export async function runUpdate(argv, ctx) {
     ctx.stderr.write('hyp update: could not reach the npm registry; try again later\n')
     return 1
   }
+  // Not an install failure: the updater declined to install at all,
+  // because npm_config_registry names somewhere it will not fetch a
+  // tarball from and installing from anywhere else would swap this
+  // package's supply out from under whoever configured that registry.
+  // The generic branch below would blame the install and tell the
+  // operator to rerun npm by hand with the same variable still set.
+  if (result.reason === 'registry_untrusted') {
+    ctx.stderr.write(
+      `hyp update: ${result.latest ?? 'an update'} is available, but npm_config_registry points at ` +
+      'a registry this updater will not install from (plain http off this machine), and it will ' +
+      'not silently install from a different one instead.\n' +
+      "  set it to an https URL, or configure the registry in .npmrc, then run 'hyp update' again\n"
+    )
+    return 1
+  }
   if (result.reason === 'checkout' || result.reason === 'npx') {
     const how = result.reason === 'checkout' ? 'a source checkout' : 'an npx cache'
     ctx.stderr.write(

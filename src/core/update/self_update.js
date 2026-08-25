@@ -279,27 +279,6 @@ export function resolveRegistryUrl(env) {
 }
 
 /**
- * The environment for the install child with every spelling of the
- * registry override replaced by the registry actually probed. Setting
- * the lowercase name alone would not do: npm reads the uppercase one
- * too, and with both present neither wins by rule.
- *
- * @param {NodeJS.ProcessEnv} env
- * @param {string} registryUrl
- * @returns {NodeJS.ProcessEnv}
- */
-function pinRegistryEnv(env, registryUrl) {
-  /** @type {NodeJS.ProcessEnv} */
-  const next = {}
-  for (const [key, value] of Object.entries(env)) {
-    if (/^npm_config_registry$/i.test(key)) continue
-    next[key] = value
-  }
-  next.npm_config_registry = registryUrl
-  return next
-}
-
-/**
  * Scheme and host of a registry URL, for logs. Deliberately drops the
  * path, the query and above all the userinfo: a registry URL is a normal
  * place for an operator to keep a token.
@@ -693,10 +672,18 @@ export async function runSelfUpdatePass(opts = {}) {
       const since = typeof state.error_since === 'string' && state.error
         ? state.error_since
         : new Date(nowMs).toISOString()
+      // A failure that is not a probe failure is sticky: a global prefix
+      // this user cannot write, a refused registry. It was already
+      // speaking in the status line, and it does not heal by itself.
+      // Overwriting it with a transient probe failure would hand a
+      // permanently broken updater the offline reprieve and silence it
+      // for a week, which is the one case #cli-surface most wants heard.
+      // The probe failure still reaches the log; the next successful
+      // probe clears the sticky error and the apply is retried.
+      const sticky = typeof state.error === 'string' && !state.error.startsWith('probe_failed')
       writeSelfUpdateState(stateRoot, {
         checked_at: new Date(nowMs).toISOString(),
-        error: `probe_failed: ${message}`,
-        error_since: since,
+        ...(sticky ? {} : { error: `probe_failed: ${message}`, error_since: since }),
       })
       log('self_update.probe_failed', { error_kind: 'probe_failed', detail: message })
       return { action: 'checked', reason: 'probe_failed' }
@@ -714,6 +701,30 @@ export async function runSelfUpdatePass(opts = {}) {
     if (!available) return { action: 'checked', latest }
     if (provenance !== 'global-candidate') {
       return { action: 'checked', reason: provenance, latest }
+    }
+    // A dropped override means this pass cannot say where the bytes
+    // should come from, so it does not install at all.
+    //
+    // Pinning the child to the probed registry instead looks like the
+    // conservative move and is the opposite of one. An org whose
+    // `npm_config_registry` names an internal mirror over plain http
+    // (an Artifactory on a VPN is the ordinary shape) publishes its own
+    // build of this package there; probing the public registry then
+    // finds a higher `latest` and the pinned install silently replaces
+    // the internal build with a public one nobody chose. That is a
+    // cross-registry package swap performed unattended - the supply-chain
+    // direction this guard exists to prevent, not one it is licensed to
+    // take. The version answer is safe to take from the public registry
+    // because it only decides what status reports; where the bytes come
+    // from is a different question, and the honest answer here is that
+    // the updater does not know.
+    if (registryOverrideIgnored) {
+      writeSelfUpdateState(stateRoot, { error: 'registry_untrusted' })
+      log('self_update.apply_refused', {
+        error_kind: 'registry_untrusted',
+        latest_version: latest,
+      })
+      return { action: 'checked', reason: 'registry_untrusted', latest }
     }
 
     // Single-flight across processes, not just within one: the daemon's
@@ -733,16 +744,13 @@ export async function runSelfUpdatePass(opts = {}) {
         name: identity.name,
         version: latest,
         packageRoot: opts.packageRoot,
-        // npm reads the registry override from the environment too, so an
-        // override this probe refused to believe would still steer the
-        // install: the version came from the public registry and the
-        // tarball from the plaintext host the probe just rejected. Pin
-        // the child to the registry actually probed, clearing every
-        // spelling npm would read. An env with no override, or one whose
-        // override was trusted and honored, is passed through untouched,
-        // so an `.npmrc`-configured private registry keeps serving the
-        // install as it always has.
-        env: registryOverrideIgnored ? pinRegistryEnv(env, registryUrl) : env,
+        // Untouched: the only override that reaches here is one the probe
+        // believed, so npm resolving the tarball through it is the same
+        // answer this pass already used for the version. An untrusted one
+        // never reaches here at all (the refusal above), and an env with
+        // no override leaves an `.npmrc`-configured private registry
+        // serving the install exactly as it always has.
+        env,
         runner: opts.runner,
       })
     } finally {
