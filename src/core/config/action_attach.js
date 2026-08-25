@@ -275,7 +275,21 @@ export function createAttachHandler(opts = {}) {
      * marker recording no mode at all) is stale, and re-performing it is the
      * migration itself: `attach()` releases the proxy keys and writes the OTEL
      * block. It self-heals the same way the other two do, because `perform()`
-     * records the mode the adapter reports.
+     * records `mode: 'otel'` on every successful claude attach, from the
+     * requested client rather than from the adapter's best-effort payload, so a
+     * report that fails to parse cannot leave the fresh marker stale.
+     *
+     * One population this does NOT settle: a machine whose Claude Code is below
+     * the LLP 0258 version floor. Its marker is stale on every pass, `perform()`
+     * refuses (`VERSION_FLOOR`), and a `refused` marker short-circuits
+     * unconditionally (LLP 0186), so it stays refused until an explicit
+     * `hyp attach claude` even after the user upgrades. That is LLP 0186's named
+     * auto-re-arm gap, now reachable by more machines than before.
+     *
+     * **A client that declares `requiresEndpoint: false`** attaches by writing
+     * a managed file rather than by pointing at a bound port, so the endpoint
+     * key above does not apply and is skipped for it: its marker stays current
+     * across a gateway rebind, and the asset set is the only key left.
      *
      * @param {ActionMarker} marker
      * @param {DesiredAction} action
@@ -284,6 +298,7 @@ export function createAttachHandler(opts = {}) {
      * @ref LLP 0086#re-attach-on-drift [implements]: a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
+     * @ref LLP 0306#endpoint-free-clients [implements]: an endpoint-free client's marker is not staled by a port that moved
      */
     isCurrent(marker, action, ctx) {
       const client = attachActionClient(action)

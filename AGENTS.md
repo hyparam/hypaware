@@ -262,6 +262,7 @@ hyp smoke source_optout_export_withhold
 hyp smoke opencode_capture
 hyp smoke otel_loopback_capture
 hyp smoke local_parquet_export
+hyp smoke query_grep_roundtrip
 hyp smoke status_diagnostics
 ```
 

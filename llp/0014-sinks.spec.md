@@ -7,7 +7,7 @@
 **Date:** 2026-06-01
 **Related:** LLP 0010, LLP 0013, LLP 0025
 
-**Extended-by:** LLP 0305 (eligible open datasets use catalog registration and begin at a fresh local high-water)
+**Extended-by:** LLP 0305 (eligible open datasets use catalog registration and begin at a fresh local high-water); LLP 0307 (durable dataset rollout distinguishes existing partitions from future ones)
 
 > Export targets and the export driver. Decomposed from `hypaware-design.md`
 > (Sinks).

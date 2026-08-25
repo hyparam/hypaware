@@ -3,6 +3,23 @@
  * and `--remote` answer in the same shape (LLP 0264 #shared).
  */
 
+/**
+ * The caller-supplied search parameters, identical on every serving
+ * surface: `hyp query grep` locally, the `grep_search` MCP tool, and the
+ * same tool spoken to a server through `--remote`. Server-side wrappers
+ * extend this with their own routing fields (`org`); those never ride
+ * the wire from a client.
+ */
+export interface GrepSearchParams {
+  query: string
+  regex?: boolean
+  sessionId?: string
+  chainId?: string
+  from?: string
+  to?: string
+  limit: number
+}
+
 /** One matching message row, projected to locators plus bounded snippets. */
 export interface GrepSearchHit {
   date: string
@@ -16,9 +33,21 @@ export interface GrepSearchHit {
 }
 
 /**
+ * Two INDEPENDENT completeness facts, never one collapsed into the other.
+ *
  * `truncated`: the limit cut the answer (more matches exist; narrow with
- * `from`/`to` or a tighter query). `exhausted`: every candidate file was
- * walked to completion.
+ * `from`/`to` or a tighter query). `exhausted`: the walk covered
+ * everything that could have changed the answer, so what came back is what
+ * a complete search would have returned for this limit.
+ *
+ * A search can be both truncated and unexhausted, and the two then call for
+ * different things: a wider limit reaches the matches the limit cut, and
+ * nothing reaches the files an aborted walk never opened. A consumer that
+ * reads only one of them tells its caller the wrong half.
+ *
+ * A walk that stops early having PROVED the remainder cannot enter the
+ * answer (the client's day-descending break) is exhausted: no file it
+ * skipped could have displaced a returned hit.
  */
 export interface GrepSearchResult {
   hits: GrepSearchHit[]
@@ -30,9 +59,9 @@ export interface GrepSearchResult {
  * A compiled grep query: `hypQuery` feeds hypgrep's index pruning,
  * `test`/`locate` run per cell (locate finds the snippet window),
  * `rowTest` is the whole-row predicate the scan paths share. The cell
- * entry points take `unknown` because a searchable cell is not always
- * text: `tool_args` decodes to an object, and every one of them renders
- * it the same way, so a cell `rowTest` accepted cannot then miss here.
+ * entry points take `unknown` because a row cell is not always text, and
+ * every one of them renders it the same way, so a cell `rowTest` accepted
+ * cannot then miss here.
  */
 export interface GrepSearchMatcher {
   hypQuery: string | RegExp

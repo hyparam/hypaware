@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
+import { VerbUsageError } from './verb_errors.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration, VerbRenderResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -130,6 +131,17 @@ export async function runVerbCommand(verb, argv, ctx) {
       result = await verb.operation(parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
     } catch (err) {
       ctx.stderr.write(`hyp ${verb.name}: ${err instanceof Error ? err.message : String(err)}\n`)
+      // An operation refusing its own arguments exits like the codec's own
+      // refusal above, usage line included. Only a schema of independent
+      // properties fits in `inputSchema`, so the rules it cannot state
+      // (a cross-field window, a value shape with no schema word) are
+      // checked in the operation; without this branch they would exit 1
+      // and read to a script as "the work failed", not "you typed it wrong".
+      // @ref LLP 0302#usage-exit [implements]: the operation's own argument refusal reaches the caller as a usage error
+      if (err instanceof VerbUsageError) {
+        ctx.stderr.write(`usage: ${usageForVerb(verb.name, verb.inputSchema)}\n`)
+        return 2
+      }
       return 1
     }
   }

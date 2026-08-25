@@ -145,6 +145,48 @@ hyp query sql "select count(*) as rows from ai_gateway_messages"
 Invalid or non-read-only SQL returns a usage error. Query, remote, or output
 failures return `1`.
 
+### `hyp query grep`
+
+```text
+hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+```
+
+Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
+case-insensitive substring by default, or a regular expression with `--regex`.
+Hits arrive newest first, one row per matched column, each carrying
+`session_id`, `message_id`, and `part_id` locators you can pivot into
+`hyp query sql`. The default limit is `50` and the ceiling is `1000`: a larger
+value clamps to the ceiling, and a value the flag cannot use at all (`0`,
+negative, fractional) is a usage error rather than a quiet 50.
+
+Only these columns are searched: `content_text`, `tool_name`, `session_id`,
+`conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`. Zero
+hits is not evidence the text is absent from `system_text`, `tools`,
+`tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
+
+Data files the daemon has indexed at maintenance are served through hypgrep
+sidecar indexes and the rest are scanned, so coverage affects speed and never
+correctness.
+`hyp cache status` prints the index coverage. Local-only rows are withheld with
+a count on stderr, exactly as in SQL, and `--include-local-only` is the same
+informed-consent override. `--remote TARGET` runs the same search on a server,
+which enforces its own visibility: `--regex` is operator-only there, and
+`--include-local-only` is rejected.
+
+```sh
+hyp query grep "connection refused" --from 2026-08-01 --format json
+```
+
+An unknown flag returns a usage error, and so does any `--from`/`--to` that
+cannot select a day: one not shaped `YYYY-MM-DD`, or a `--from` later than the
+`--to`. Both would otherwise prune every file and render an empty answer that
+reads like "nothing is recorded". A pattern the search cannot use is a usage
+error too: an invalid regular expression under `--regex`, or one longer than
+1024 characters. Those day and pattern checks are local: `--remote` hands the
+request to the server, which applies its own argument rules and its own codes
+(the flag-shape and `--limit` checks still run locally, before the request is
+sent). Search or output failures return `1`.
+
 ### `hyp query schema`
 
 ```text

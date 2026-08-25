@@ -70,7 +70,17 @@ const storage = /** @type {any} */ ({
 
 test('a query whose heap growth exceeds the execution budget refuses with the typed error', async () => {
   // More rows than the inline check stride, so the guard samples mid-scan.
-  const rows = Array.from({ length: 6000 }, (_, i) => ({ a: `value-${i}` }))
+  // The confirm-with-gc step (LLP 0097#confirm-with-gc) means a crossing
+  // only refuses once it survives a forced full GC, so the retained rows
+  // here have to be large enough to swamp the ambient baseline noise from
+  // that same forced GC (observed on Node 24: tens of KB to a few MB of
+  // heapUsed drift between baseline and check, unrelated to this query, and
+  // large enough on some runs to hide a small genuine retention entirely).
+  // Short values (`value-0`..`value-5999`) retain only a few hundred KB and
+  // were lost in that noise often enough to flake; padding each value keeps
+  // the genuine retained growth an order of magnitude above the noise floor
+  // so the crossing is confirmed regardless of GC timing.
+  const rows = Array.from({ length: 20000 }, (_, i) => ({ a: `value-${i}-${'x'.repeat(1000)}` }))
   await assert.rejects(
     executeQuerySql({
       query: 'SELECT a FROM t ORDER BY a',

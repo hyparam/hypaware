@@ -5,6 +5,7 @@
 **Systems:** Query, Cache, CLI, MCP
 **Author:** Brendan / Claude
 **Date:** 2026-08-18
+**Extended-by:** LLP 0302 (#build-site: T6's build site and gate as shipped; #residuals records the T6 test still owed)
 **Related:** LLP 0264 (the decision this executes), LLP 0105 (the visibility wrapper T4 reuses), LLP 0222 (the hyparquet floor T1 must hold), LLP 0034 (the verb surface T5 lands on), LLP 0209 (the compaction pass T6 hooks); hypaware-server LLP 0178 / PR #364 (the server half, already open and inert)
 
 > Turns [LLP 0264](./0264-grep-search-mirrors-the-server.decision.md) into
@@ -124,6 +125,13 @@ cache under the narrow projection (T4 measures it, T6 is sized by it).
   the marker, no ledger; a test pins that orphan sweep and retention
   delete sidecars with their files, and that an unindexed or quarantined
   file is served by the scan tier. Complexity 3.
+
+  **Extended-by:** [LLP 0302 #build-site](./0302-grep-search-integration-divergences.decision.md#build-site).
+  As shipped the pass hangs off `maintainCache`'s partition loop rather than
+  `compactGeneration`, and its gate is missing coverage under the tick's
+  budget rather than a committed rewrite, because the compaction-only gate
+  never indexes a partition already at the compaction floor. The retention
+  half of the test above is still owed; see #residuals there.
 
 ### Wave 5 (deps `[T5, T6]`)
 
