@@ -42,31 +42,37 @@ export function createCommandRegistry() {
     if (!command || typeof command !== 'object') {
       throw new TypeError('CommandRegistry.register: command must be an object')
     }
-    if (typeof command.name !== 'string' || command.name.length === 0) {
+    // Copy first, then check the copy. A caller's registration is an input,
+    // not the registry's storage: the defaulting below has to land somewhere
+    // the caller does not own, so a plugin can pass a frozen module-level
+    // constant and a registration this function goes on to reject comes back
+    // exactly as it arrived.
+    //
+    // Validating the argument and storing the copy would let the two
+    // disagree, because a spread copies own enumerable properties and nothing
+    // else: a class instance whose `run()` lives on its prototype passed the
+    // shape check here and stored a record with no `run` at all, which
+    // surfaces as a TypeError inside dispatch rather than as the boundary
+    // error this function exists to raise. Everything below reads `record`
+    // for that reason, the shape checks included.
+    /** @type {CommandRegistration} */
+    const record = { ...command }
+    if (typeof record.name !== 'string' || record.name.length === 0) {
       throw new TypeError('CommandRegistry.register: command.name must be a non-empty string')
     }
-    if (typeof command.summary !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing summary`)
+    if (typeof record.summary !== 'string') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing summary`)
     }
-    if (typeof command.usage !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing usage`)
+    if (typeof record.usage !== 'string') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing usage`)
     }
-    if (typeof command.run !== 'function') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing run()`)
+    if (typeof record.run !== 'function') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing run()`)
     }
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
-    //
-    // The defaulting writes into a copy, never into the argument. A caller's
-    // registration is an input, not the registry's storage: a plugin is free
-    // to pass a frozen module-level constant (mutating it would throw a
-    // TypeError out of the defaulting, before any registry rule ran), and a
-    // registration this function goes on to *reject* below has to leave the
-    // caller's object exactly as it arrived.
     // @ref LLP 0248#semantic-boot [implements]: category, audience, and boot policy live on the canonical registry entry
-    /** @type {CommandRegistration} */
-    const record = { ...command }
     record.category ??= record.plugin ? 'additional' : record.name.split(' ')[0]
     record.audience ??= record.hidden
       ? 'machine'

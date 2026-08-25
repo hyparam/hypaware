@@ -25,10 +25,17 @@ import { VerbUsageError } from './verb_errors.js'
  * The mark is a property rather than a `WeakSet` membership because the
  * command registry stores a copy of the registration it is handed, so the
  * object `unregister` later reads is never the one `verbToCommand`
- * returned. A module-private symbol is no more forgeable than the set was
- * (nothing outside this file can name it), it is enumerable so an object
- * spread carries it onto the stored record, and being a symbol it stays out
- * of `Object.keys`, JSON, and the declared `CommandRegistration` shape.
+ * returned. It is a symbol so it stays out of `Object.keys`, JSON, and the
+ * declared `CommandRegistration` shape, and it is enumerable so an object
+ * spread carries it onto the stored record.
+ *
+ * Enumerable is also what makes it copyable: unlike the `WeakSet`, which
+ * nothing outside this file could add to, this mark can be lifted off any
+ * projected command with `Object.getOwnPropertySymbols` and stamped onto
+ * another object. That is accepted, not overlooked. The mark separates a
+ * projection from a plugin command that happens to share the name, and the
+ * only thing forging it buys a plugin is having its own command retracted
+ * when that verb name is released. There is no privilege here to steal.
  */
 const VERB_PROJECTION = Symbol('hypaware.verbProjection')
 

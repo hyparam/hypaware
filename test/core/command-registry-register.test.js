@@ -104,3 +104,45 @@ test('a verb projection is still recognizable after the registry copies it', () 
   commands.register(makeCommand())
   assert.equal(isVerbProjection(commands.get('demo')), false)
 })
+
+// The copy is `{ ...command }`, which carries own enumerable properties and
+// nothing else, so the object the checks above run on has to *be* the record.
+// Checking the argument and storing the copy let a class instance pass (its
+// `run()` is on the prototype) and then store a record with no `run` at all,
+// which only surfaced as a TypeError inside dispatch, long after the boundary
+// that should have refused it.
+test('the shape checks run on the stored record, not on the argument', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'prototyped'
+      this.summary = 'run() lives on the prototype'
+      this.usage = 'hyp prototyped'
+    }
+    async run() {
+      return 0
+    }
+  }
+  assert.throws(() => commands.register(/** @type {any} */ (new Prototyped())), /'prototyped' missing run\(\)/)
+  assert.equal(commands.get('prototyped'), undefined)
+})
+
+// Same rule from the other side: whatever the checks accepted is what dispatch
+// gets, so a getter that answers differently on a second read cannot slip a
+// different `run` past them.
+test('the run() the checks accepted is the run() the registry stores', () => {
+  const commands = createCommandRegistry()
+  const accepted = async () => 0
+  let reads = 0
+  const shifty = {
+    name: 'shifty',
+    summary: 'a moving target',
+    usage: 'hyp shifty',
+    get run() {
+      reads += 1
+      return reads === 1 ? accepted : undefined
+    },
+  }
+  commands.register(/** @type {any} */ (shifty))
+  assert.equal(commands.get('shifty')?.run, accepted)
+})

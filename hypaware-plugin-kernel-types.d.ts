@@ -934,6 +934,10 @@ export interface CommandRegistry {
    * call rejects comes back exactly as it was passed, and editing the
    * object afterwards does not reach what `get`/`list` return. Function
    * members (`run`) are shared with the copy, not cloned.
+   *
+   * The copy is own enumerable properties only, and the shape checks run
+   * on it, so a registration whose members live on a prototype (a class
+   * instance) is rejected here rather than stored half-formed.
    */
   register(command: CommandRegistration): void
   /**
