@@ -206,8 +206,14 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   // False once any partition's cursor could not be established, so a precise
   // "captured since <t>" is never claimed over an incomplete survey.
   let resumeComplete = true
+  // The survey ran out of wall clock, rather than failing on one partition. The
+  // two are different disclosures and must not be conflated: a spent budget
+  // leaves every later partition unsurveyed, so the row pass has nothing left to
+  // count from, while one partition whose cursor will not resolve costs only
+  // itself.
+  let budgetSpent = false
   for (const partition of discovered.partitions) {
-    if (now() > deadline) { resumeComplete = false; break }
+    if (now() > deadline) { resumeComplete = false; budgetSpent = true; break }
     const tablePath = /** @type {string} */ (partition.tablePath)
     try {
       const record = await watermarks.read(watermarks.keyFor(storage.cacheRoot, tablePath))
@@ -218,7 +224,12 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
         anyFromBeginning = true
       } else {
         const at = Date.parse(record.updatedAt)
-        if (Number.isFinite(at) && (oldestResumeMs === null || at < oldestResumeMs)) oldestResumeMs = at
+        // A cursor whose timestamp will not parse bounds nothing. Passing over
+        // it silently would leave the *other* partitions' oldest cursor standing
+        // as the destination's whole range, understating the reach for exactly
+        // the reason an unsurveyed partition would.
+        if (!Number.isFinite(at)) resumeComplete = false
+        else if (oldestResumeMs === null || at < oldestResumeMs) oldestResumeMs = at
       }
     } catch {
       resumeComplete = false
@@ -231,9 +242,13 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   let scanned = 0
   let read = 0
   let failed = 0
-  // A partition pass 1 never surveyed is a partition pass 2 cannot count, so
-  // the total is a floor from the outset.
-  let truncated = records.size < discovered.partitions.length
+  // Only a spent budget starts pass 2 already truncated: pass 1 stopped where it
+  // stopped, so nothing past that point has a cursor to count from. A partition
+  // that failed pass 1 on its own is charged to `failed` below instead, which
+  // keeps the rest of the count as an honestly labelled floor rather than
+  // discarding a whole destination's answer and blaming a budget that was never
+  // spent.
+  let truncated = budgetSpent
 
   for (const partition of discovered.partitions) {
     // Checked before the partition as well as inside it, so a destination that

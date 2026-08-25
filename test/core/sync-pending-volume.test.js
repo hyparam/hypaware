@@ -455,3 +455,102 @@ test('a destination whose whole pending range is withheld never renders "at leas
   assert.match(stdout.text, /pending volume not fully counted/)
   assert.match(stdout.text, /6 rows withheld by policy \(not sent\)/)
 })
+
+test('one partition whose cursor cannot be derived costs that partition, not the whole count', async () => {
+  const hypHome = await makeHome('badcursor')
+  const cache = cacheRoot(hypHome)
+  const countable = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=claude')
+  // A partition whose table path is not under the cache datasets root: deriving
+  // a watermark key for it throws, so its cursor never resolves. That is one
+  // partition's problem. Throwing the *other* partition's ten counted rows away
+  // and blaming a scan budget that was never spent tells the person at the
+  // prompt two untrue things at once.
+  const stray = path.join(hypHome, 'elsewhere', 'ai_gateway_messages', 'source=codex')
+  const storage = {
+    cacheRoot: cache,
+    tableExists: () => true,
+    hasPendingSync: () => false,
+    async *readRowsSince(/** @type {string} */ p) {
+      const total = p === countable ? 10 : 5
+      for (let seq = 1; seq <= total; seq += 1) yield { row: { seq }, after: { v: 1, seq: String(seq) } }
+    },
+  }
+  const query = {
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => [
+        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: countable },
+        { dataset: 'ai_gateway_messages', partition: { source: 'codex' }, tablePath: stray },
+      ],
+    }],
+  }
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'the readable partition still yields a floor')
+  assert.equal(volume.rows, 10)
+  assert.equal(volume.reason, 'part of the cache could not be read')
+  assert.notEqual(volume.reason, 'the count hit its scan budget')
+})
+
+test('a cursor whose timestamp will not parse never lets another partition stand as the range', async () => {
+  const hypHome = await makeHome('badstamp')
+  const cache = cacheRoot(hypHome)
+  const recent = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=claude')
+  const undated = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=codex')
+  const dir = path.join(
+    stateDir(hypHome), 'plugins', '@hypaware/central', 'sink-instances', 'central',
+    'watermarks', 'ai_gateway_messages'
+  )
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(
+    path.join(dir, 'source=claude.json'),
+    JSON.stringify({ v: 1, continuation: { v: 1, seq: '5' }, exportedRowCount: 5, updatedAt: '2026-08-24T23:00:00.000Z' })
+  )
+  // A valid cursor with no readable timestamp. It bounds nothing, so the recent
+  // partition's cursor must not stand in for the destination's whole range: the
+  // undated partition may reach much further back, and understating the reach
+  // is the one direction this disclosure must never be wrong in.
+  await fs.writeFile(
+    path.join(dir, 'source=codex.json'),
+    JSON.stringify({ v: 1, continuation: { v: 1, seq: '2' }, exportedRowCount: 2 })
+  )
+  const storage = {
+    cacheRoot: cache,
+    tableExists: () => true,
+    hasPendingSync: () => false,
+    async *readRowsSince(/** @type {string} */ _p, /** @type {any} */ opts = {}) {
+      const since = opts.since ? Number(opts.since.seq) : 0
+      for (let seq = 1; seq <= 10; seq += 1) {
+        if (seq > since) yield { row: { seq }, after: { v: 1, seq: String(seq) } }
+      }
+    },
+  }
+  const query = {
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => [
+        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: recent },
+        { dataset: 'ai_gateway_messages', partition: { source: 'codex' }, tablePath: undated },
+      ],
+    }],
+  }
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.rows, 13)
+  assert.equal(volume.resume.kind, 'unknown')
+  assert.notEqual(volume.resume.kind, 'since')
+})
