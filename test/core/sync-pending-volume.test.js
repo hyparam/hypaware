@@ -1,0 +1,347 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { PassThrough } from 'node:stream'
+
+import { runSync } from '../../src/core/commands/sync.js'
+import { previewPendingRows } from '../../src/core/sinks/pending.js'
+
+// `hyp sync`'s plan is the consent surface: it is where a person decides
+// whether to let captured data leave the machine. Naming the destinations
+// without naming the volume made every machine's plan look the same, so the
+// prompt could not answer the first question a careful operator asks - how
+// much, and how far back.
+//
+// The load-bearing claims:
+//   1. The plan states pending rows and the resume point, per destination.
+//   2. Withheld rows are stated on their own line, never folded into the
+//      pending count and never silently dropped from the summary.
+//   3. A machine with no backlog renders differently from one with a backlog,
+//      and a rewound watermark changes what the plan says.
+//   4. A count that is a floor says "at least"; a count that could not be
+//      taken says "unknown". Neither is ever rendered as zero.
+// @ref LLP 0101#no-release [tests]: the "prints what would leave" half, in rows
+// @ref LLP 0070#incremental [tests]: withheld rows are disclosed apart from the payload rows
+
+const CACHE_SUBDIR = 'cache'
+
+/** @param {string} prefix */
+async function makeHome(prefix) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hyp-syncvol-${prefix}-`))
+  await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+  return hypHome
+}
+
+/** @param {string} hypHome */
+function stateDir(hypHome) {
+  return path.join(hypHome, 'hypaware')
+}
+
+/** @param {string} hypHome */
+function cacheRoot(hypHome) {
+  return path.join(hypHome, CACHE_SUBDIR)
+}
+
+/** @param {string} hypHome */
+function tablePathFor(hypHome) {
+  return path.join(cacheRoot(hypHome), 'datasets', 'ai_gateway_messages', 'source=claude')
+}
+
+/**
+ * Write a watermark file at the layout the sink plugins actually use, spelled
+ * out here rather than derived from the kernel helper: a preview that read the
+ * wrong file would report a backlog of zero on a machine that has one, and a
+ * test that reuses the helper could not catch that.
+ *
+ * @param {{ hypHome: string, plugin: string, instance: string, seq: string, updatedAt: string }} args
+ */
+async function writeWatermark({ hypHome, plugin, instance, seq, updatedAt }) {
+  const file = path.join(
+    stateDir(hypHome),
+    'plugins',
+    plugin,
+    'sink-instances',
+    instance,
+    'watermarks',
+    'ai_gateway_messages',
+    'source=claude.json'
+  )
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(
+    file,
+    JSON.stringify({ v: 1, continuation: { v: 1, seq }, exportedRowCount: Number(seq), updatedAt })
+  )
+}
+
+function captureStream() {
+  let buf = ''
+  return {
+    write(/** @type {string} */ chunk) { buf += String(chunk); return true },
+    get text() { return buf },
+  }
+}
+
+/**
+ * @param {string} instanceName
+ * @param {Record<string, unknown>} config
+ * @param {string} [plugin]
+ */
+function fakeSink(instanceName, config, plugin = '@hypaware/fake') {
+  return {
+    instanceName,
+    plugin,
+    kind: 'blob',
+    config,
+    sink: {
+      async exportBatch() {
+        return { status: 'exported', partitionsExported: 0, bytesWritten: 0 }
+      },
+    },
+  }
+}
+
+/**
+ * A storage stub whose `readRowsSince` replays a described entry sequence,
+ * honouring `since` exactly as the real seam does (`seq > since`). `dropped`
+ * entries stand in for rows the export seam withholds.
+ *
+ * @param {{ hypHome: string, entries: { seq: number, dropped?: boolean }[] | (() => Iterable<{ seq: number, dropped?: boolean }>), throws?: string }} args
+ */
+function fakeStorage({ hypHome, entries, throws }) {
+  const table = tablePathFor(hypHome)
+  return {
+    cacheRoot: cacheRoot(hypHome),
+    tableExists: (/** @type {string} */ p) => p === table,
+    hasPendingSync: () => false,
+    async flushTable() {},
+    async *readRowsSince(/** @type {string} */ p, /** @type {any} */ opts = {}) {
+      if (throws) throw new Error(throws)
+      if (p !== table) return
+      const since = opts.since ? Number(opts.since.seq) : 0
+      const source = typeof entries === 'function' ? entries() : entries
+      for (const entry of source) {
+        if (entry.seq <= since) continue
+        const after = { v: 1, seq: String(entry.seq) }
+        if (entry.dropped) yield { after, dropped: true }
+        else yield { row: { id: entry.seq }, after }
+      }
+    },
+  }
+}
+
+/** @param {string} hypHome */
+function fakeQuery(hypHome) {
+  return {
+    listDatasets: () => [
+      {
+        name: 'ai_gateway_messages',
+        discoverPartitions: () => [
+          {
+            dataset: 'ai_gateway_messages',
+            partition: { source: 'claude' },
+            tablePath: tablePathFor(hypHome),
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * @param {{ hypHome: string, sinks: any[], storage: any, remotes?: Record<string, { url: string }> }} args
+ */
+function makeCtx({ hypHome, sinks, storage, remotes }) {
+  const stdout = captureStream()
+  const stderr = captureStream()
+  const ctx = /** @type {any} */ ({
+    stdout,
+    stderr,
+    stdin: Object.assign(new PassThrough(), { isTTY: false }),
+    env: { HYP_HOME: hypHome, HYP_CONFIG: '' },
+    cwd: '/home/u',
+    config: remotes ? { version: 2, query: { remotes } } : { version: 2 },
+    query: fakeQuery(hypHome),
+    storage,
+    sinks: { listHandles: () => sinks },
+  })
+  return { ctx, stdout, stderr }
+}
+
+/** Twelve captured rows; two of them (5 and 9) are withheld at the export seam. */
+const TWELVE_ROWS = Array.from({ length: 12 }, (_, i) => ({
+  seq: i + 1,
+  dropped: i + 1 === 5 || i + 1 === 9,
+}))
+
+test('the plan states pending rows, the resume point, and withheld rows per destination', async () => {
+  const hypHome = await makeHome('backlog')
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/central',
+    instance: 'central',
+    seq: '3',
+    updatedAt: '2026-08-12T00:50:31.004Z',
+  })
+  const sinks = [
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs'),
+  ]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: TWELVE_ROWS }),
+    remotes: { hyperparam: { url: 'https://hypaware.example.com' } },
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  // Past watermark seq 3: nine entries, two of them withheld.
+  assert.match(stdout.text, /7 rows pending, captured since 2026-08-12T00:50Z/)
+  assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
+  // No watermark for `local` at all, so its range is the whole local history.
+  assert.match(stdout.text, /10 rows pending, the full local history/)
+  // The withheld rows are stated apart from the pending ones, never added in.
+  assert.doesNotMatch(stdout.text, /9 rows pending/)
+  assert.doesNotMatch(stdout.text, /12 rows pending/)
+})
+
+test('a machine with no backlog renders differently from one with a backlog', async () => {
+  const hypHome = await makeHome('empty')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: [] }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /rows pending/)
+  assert.doesNotMatch(stdout.text, /withheld by policy/)
+
+  // The same command on a machine that has a backlog must not print this.
+  const busy = await makeHome('empty-contrast')
+  const { ctx: busyCtx, stdout: busyOut } = makeCtx({
+    hypHome: busy,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome: busy, entries: TWELVE_ROWS }),
+  })
+  await runSync(['--dry-run'], busyCtx)
+  assert.notEqual(busyOut.text, stdout.text, 'a size-free plan is the defect: these must differ')
+  assert.doesNotMatch(busyOut.text, /nothing pending/)
+})
+
+test('rewinding a watermark changes what the dry-run plan discloses', async () => {
+  const hypHome = await makeHome('rewind')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')
+  const storage = fakeStorage({ hypHome, entries: TWELVE_ROWS })
+
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/central',
+    instance: 'central',
+    seq: '10',
+    updatedAt: '2026-08-20T09:00:00.000Z',
+  })
+  const before = makeCtx({ hypHome, sinks: [sink], storage })
+  await runSync(['--dry-run'], before.ctx)
+  assert.match(before.stdout.text, /2 rows pending, captured since 2026-08-20T09:00Z/)
+
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/central',
+    instance: 'central',
+    seq: '0',
+    updatedAt: '2026-08-20T09:00:00.000Z',
+  })
+  const after = makeCtx({ hypHome, sinks: [sink], storage })
+  await runSync(['--dry-run'], after.ctx)
+  assert.match(after.stdout.text, /10 rows pending, captured since 2026-08-20T09:00Z/)
+  assert.notEqual(after.stdout.text, before.stdout.text)
+})
+
+test('a count that hits its scan budget is disclosed as a floor, never as a total', async () => {
+  const hypHome = await makeHome('floor')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({
+      hypHome,
+      entries: function* () {
+        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+      },
+    }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /at least 200,000 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /nothing pending/)
+})
+
+test('a count that cannot be taken says unknown, never zero', async () => {
+  const hypHome = await makeHome('unknown')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: [], throws: 'cache is unreadable' }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /pending volume unknown/)
+  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /0 rows pending/)
+})
+
+test('a spent wall-clock budget yields unknown, not a floor built from one partial partition', async () => {
+  const hypHome = await makeHome('budget')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs'),
+  ])
+
+  // A clock that jumps past the budget the moment the preview starts counting:
+  // the first reading sets the deadline, every later one is past it.
+  let readings = 0
+  const now = () => (readings++ === 0 ? 1_000 : 9_000)
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: TWELVE_ROWS })),
+    stateRoot: stateDir(hypHome),
+    budgetMs: 100,
+    now,
+  })
+
+  for (const instance of ['central', 'local']) {
+    const volume = /** @type {any} */ (volumes.get(instance))
+    assert.equal(volume.status, 'unknown', `${instance} must not claim a count it never took`)
+    assert.equal(volume.rows, 0)
+  }
+})
+
+test('rows still buffered in the spool make the count a floor rather than a silent undercount', async () => {
+  const hypHome = await makeHome('spool')
+  const storage = fakeStorage({ hypHome, entries: TWELVE_ROWS })
+  storage.hasPendingSync = () => true
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({ hypHome, sinks, storage })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /at least 10 rows pending/)
+})
