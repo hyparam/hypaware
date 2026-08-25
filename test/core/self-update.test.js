@@ -858,7 +858,11 @@ test('a probe that has been failing for a week stops being quiet', async () => {
     })
     assert.equal(readSelfUpdateState(dir).error_since, start.toISOString())
     assert.equal(readSelfUpdateState(dir).checked_at, day.toISOString())
-    assert.equal(describeSelfUpdate({ stateRoot: dir, env: {}, now: () => day }).line, null)
+    const quiet = describeSelfUpdate({ stateRoot: dir, env: {}, now: () => day })
+    assert.equal(quiet.line, null)
+    // The quiet defers diagnosis to `--json`, so `--json` has to carry
+    // what decides how long the quiet lasts, not only the error.
+    assert.equal(quiet.json.error_since, start.toISOString())
 
     // Past the reprieve it is not a flight, it is an updater that will
     // never run again, and LLP 0309#cli-surface puts that in status.
@@ -934,6 +938,156 @@ test('an ignored registry override cannot steer the install either', async () =>
       assert.equal(Object.prototype.hasOwnProperty.call(env ?? {}, 'npm_config_registry'), false)
     }
     await fsp.rm(plain, { recursive: true, force: true })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a trusted override is honored end to end, and its credentials never reach a log', async () => {
+  // "Was the override dropped" is the trust decision, not a string
+  // comparison of the raw value against the resolved one. `URL.href`
+  // normalizes - an explicit `:443` disappears, a host lowercases, an
+  // IDN becomes punycode - so comparing strings reports a *trusted*
+  // override as ignored. That is a false alarm on its own, and because
+  // the resolved form of a trusted override is the operator's own URL,
+  // the "probing" field it reports is their registry password. Both
+  // `hyp update` and the pre-boot daemon lane forward this event
+  // straight to stderr.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-trusted-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {string[]} */
+    const urls = []
+    /** @type {typeof fetch} */
+    // @ts-expect-error minimal Response shape
+    const probe = async (url) => {
+      urls.push(String(url))
+      return { ok: true, status: 200, json: async () => ({ version: '1.0.0' }) }
+    }
+    for (const spelling of [
+      'https://bot:hunter2@npm.corp.example:443',
+      'https://bot:hunter2@NPM.corp.example',
+      'https://bot:hunter2@npm.corp.example',
+    ]) {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-trusted-case-'))
+      /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+      const logged = []
+      urls.length = 0
+      await runSelfUpdatePass({
+        stateRoot: root,
+        env: { npm_config_registry: spelling },
+        packageRoot,
+        runner,
+        fetchImpl: probe,
+        log: (event, fields) => { logged.push({ event, fields: fields ?? {} }) },
+      })
+      // Trusted means honored: the probe went to the operator's registry,
+      // so there is nothing to report as ignored.
+      assert.ok(urls[0]?.startsWith('https://bot:hunter2@npm.corp.example/'), spelling)
+      assert.deepEqual(
+        logged.filter((l) => l.event === 'self_update.registry_override_ignored'),
+        [],
+        spelling
+      )
+      assert.ok(!JSON.stringify(logged).includes('hunter2'), spelling)
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('npm reads the registry override case-insensitively, and so does the guard', async () => {
+  // `@npmcli/config` matches its environment variables with
+  // `/^npm_config_/i`, so `NPM_CONFIG_REGISTRY` steers `npm install -g`
+  // exactly as the lowercase spelling does. A guard that reads only the
+  // lowercase name probes the public registry, sees no override to drop,
+  // hands the environment to npm untouched, and npm pulls the tarball
+  // from the plaintext host - the split the pin exists to close, reached
+  // by shift key alone.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-case-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {Array<NodeJS.ProcessEnv | undefined>} */
+    const envs = []
+    /** @type {CommandRunner} */
+    const runner = async (cmd, args, opts) => {
+      envs.push(opts.env)
+      if (args[0] === 'config') {
+        return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      }
+      const version = String(args[args.length - 1]).split('@').pop()
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version })
+      )
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    /** @param {NodeJS.ProcessEnv} env */
+    const pass = async (env) => {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-case-run-'))
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+      )
+      envs.length = 0
+      /** @type {string[]} */
+      const urls = []
+      /** @type {typeof fetch} */
+      // @ts-expect-error minimal Response shape
+      const probe = async (url) => {
+        urls.push(String(url))
+        return { ok: true, status: 200, json: async () => ({ version: '1.1.0' }) }
+      }
+      const result = await runSelfUpdatePass({
+        stateRoot: root, env, packageRoot, runner, fetchImpl: probe,
+      })
+      await fsp.rm(root, { recursive: true, force: true })
+      return { result, urls, envs: envs.slice() }
+    }
+
+    // Untrusted under the uppercase spelling: probed at the default, and
+    // no spelling of the override survives into the install child.
+    const upper = await pass({ NPM_CONFIG_REGISTRY: 'http://npm.corp.example' })
+    assert.equal(upper.result.action, 'updated')
+    assert.ok(upper.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    assert.ok(upper.envs.length > 0)
+    for (const env of upper.envs) {
+      const spellings = Object.keys(env ?? {}).filter((k) => /^npm_config_registry$/i.test(k))
+      assert.deepEqual(spellings, ['npm_config_registry'])
+      assert.equal(env?.npm_config_registry, 'https://registry.npmjs.org')
+    }
+
+    // Trusted under the uppercase spelling: honored by the probe, which
+    // is what keeps the pin from stealing a legitimate private registry
+    // away from an operator who happens to shout the variable name.
+    const trusted = await pass({ NPM_CONFIG_REGISTRY: 'https://npm.corp.example' })
+    assert.ok(trusted.urls[0]?.startsWith('https://npm.corp.example/'))
+    for (const env of trusted.envs) {
+      assert.equal(env?.NPM_CONFIG_REGISTRY, 'https://npm.corp.example')
+      assert.equal(Object.prototype.hasOwnProperty.call(env ?? {}, 'npm_config_registry'), false)
+    }
+
+    // Two spellings disagreeing have no precedence npm defines, so
+    // neither is believed and the child is pinned to what was probed.
+    const conflict = await pass({
+      npm_config_registry: 'https://npm.corp.example',
+      NPM_CONFIG_REGISTRY: 'http://evil.example',
+    })
+    assert.ok(conflict.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    for (const env of conflict.envs) {
+      const spellings = Object.keys(env ?? {}).filter((k) => /^npm_config_registry$/i.test(k))
+      assert.deepEqual(spellings, ['npm_config_registry'])
+      assert.equal(env?.npm_config_registry, 'https://registry.npmjs.org')
+    }
+
+    // An override set to empty is not an override: npm skips it, so
+    // nothing is dropped and nothing is pinned.
+    const empty = await pass({ npm_config_registry: '' })
+    assert.ok(empty.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    for (const env of empty.envs) {
+      assert.equal(env?.npm_config_registry, '')
+    }
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

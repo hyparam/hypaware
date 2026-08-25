@@ -237,6 +237,30 @@ function trustedRegistryUrl(raw) {
 }
 
 /**
+ * The registry override as npm itself reads it. npm matches its config
+ * environment variables case-insensitively (`@npmcli/config` tests
+ * `/^npm_config_/i` and lowercases the key), so `NPM_CONFIG_REGISTRY`
+ * steers `npm install -g` exactly as the lowercase spelling does.
+ * Reading only the lowercase name would leave the probe looking at one
+ * registry while the install pulled its tarball from another, which is
+ * the split this whole guard exists to close.
+ *
+ * `keys` is every spelling actually carrying a value, so the caller can
+ * clear all of them when it pins the child. Spellings that disagree have
+ * no defined precedence (npm keeps whichever it enumerates last), so
+ * they resolve to no usable override rather than a guess.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{ keys: string[], raw: string | null }}
+ */
+function readRegistryOverride(env) {
+  const keys = Object.keys(env).filter((key) =>
+    /^npm_config_registry$/i.test(key) && typeof env[key] === 'string' && env[key] !== '')
+  const values = new Set(keys.map((key) => String(env[key])))
+  return { keys, raw: values.size === 1 ? String([...values][0]) : null }
+}
+
+/**
  * The npm registry to probe: the standard `npm_config_registry` env
  * override when set and trusted, the public registry otherwise.
  * Reading `.npmrc` is deliberately out of scope for this import-light
@@ -248,10 +272,31 @@ function trustedRegistryUrl(raw) {
  * @returns {string}
  */
 export function resolveRegistryUrl(env) {
-  const raw = env.npm_config_registry
-  const trusted = typeof raw === 'string' ? trustedRegistryUrl(raw) : null
+  const raw = readRegistryOverride(env).raw
+  const trusted = raw === null ? null : trustedRegistryUrl(raw)
   if (trusted) return trusted.href.replace(/\/+$/, '')
   return DEFAULT_REGISTRY
+}
+
+/**
+ * The environment for the install child with every spelling of the
+ * registry override replaced by the registry actually probed. Setting
+ * the lowercase name alone would not do: npm reads the uppercase one
+ * too, and with both present neither wins by rule.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} registryUrl
+ * @returns {NodeJS.ProcessEnv}
+ */
+function pinRegistryEnv(env, registryUrl) {
+  /** @type {NodeJS.ProcessEnv} */
+  const next = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (/^npm_config_registry$/i.test(key)) continue
+    next[key] = value
+  }
+  next.npm_config_registry = registryUrl
+  return next
 }
 
 /**
@@ -611,15 +656,24 @@ export async function runSelfUpdatePass(opts = {}) {
     // Dropping an untrusted override is otherwise a silent decision: the
     // probe asks the public registry about a package that may only exist
     // on the private one, and that 404 lands as `probe_failed`, which no
-    // longer reaches the status line. Scheme and host only, never the raw
-    // value - a registry URL can carry credentials in its userinfo.
-    const rawRegistry = typeof env.npm_config_registry === 'string' ? env.npm_config_registry : ''
-    const registryOverrideIgnored = rawRegistry !== '' && rawRegistry.replace(/\/+$/, '') !== registryUrl
+    // longer reaches the status line.
+    //
+    // "Was it dropped" is the trust decision itself, not a comparison of
+    // the raw string against the resolved one. `URL.href` normalizes
+    // (an explicit `:443` disappears, a host lowercases, an IDN becomes
+    // punycode), so a *trusted* override can differ from its own resolved
+    // form - and reporting that as ignored both lies and, since the
+    // resolved form of a trusted override is the operator's own URL,
+    // prints their registry password. Every field here is an origin:
+    // scheme and host, never a path, a query, or userinfo.
+    const override = readRegistryOverride(env)
+    const registryOverrideIgnored = override.keys.length > 0 &&
+      (override.raw === null || trustedRegistryUrl(override.raw) === null)
     if (registryOverrideIgnored) {
       log('self_update.registry_override_ignored', {
-        error_kind: 'registry_untrusted',
-        ignored_origin: registryOrigin(rawRegistry),
-        probing: registryUrl,
+        error_kind: override.raw === null ? 'registry_ambiguous' : 'registry_untrusted',
+        ignored_origin: override.raw === null ? 'conflicting' : registryOrigin(override.raw),
+        probing: registryOrigin(registryUrl),
       })
     }
     /** @type {string} */
@@ -679,14 +733,16 @@ export async function runSelfUpdatePass(opts = {}) {
         name: identity.name,
         version: latest,
         packageRoot: opts.packageRoot,
-        // npm reads `npm_config_registry` from the environment too, so an
+        // npm reads the registry override from the environment too, so an
         // override this probe refused to believe would still steer the
         // install: the version came from the public registry and the
         // tarball from the plaintext host the probe just rejected. Pin
-        // the child to the registry actually probed. An env with no
-        // override is passed through untouched, so an `.npmrc`-configured
-        // private registry keeps serving the install as it always has.
-        env: registryOverrideIgnored ? { ...env, npm_config_registry: registryUrl } : env,
+        // the child to the registry actually probed, clearing every
+        // spelling npm would read. An env with no override, or one whose
+        // override was trusted and honored, is passed through untouched,
+        // so an `.npmrc`-configured private registry keeps serving the
+        // install as it always has.
+        env: registryOverrideIgnored ? pinRegistryEnv(env, registryUrl) : env,
         runner: opts.runner,
       })
     } finally {
@@ -762,6 +818,12 @@ export function describeSelfUpdate(opts) {
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
     ...(available !== undefined ? { available } : {}),
     ...(state.error ? { error: state.error } : {}),
+    // The quiet below defers diagnosis to `--json`, and `error_since` is
+    // what decides how much longer the quiet lasts. Reporting the error
+    // without it leaves the one question a diagnosing operator has (why
+    // is this not in the status line, and when will it be) unanswerable
+    // from the surface that exists to answer it.
+    ...(state.error_since ? { error_since: state.error_since } : {}),
   }
   // The text line derives only from the shared state file: the process
   // rendering status (an npx run, a checkout) is not necessarily the
