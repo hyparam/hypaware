@@ -127,7 +127,7 @@ test('parseConfigShape rejects a negative compact_batch_bytes', () => {
   )
 })
 
-// @ref LLP 0311#avg-below-batch [tests]: an in-place merged file never
+// @ref LLP 0312#avg-below-batch [tests]: an in-place merged file never
 // exceeds `compact_batch_bytes`, so an average-size threshold above that
 // bound is one a converged partition can never satisfy. Validation rejects
 // the pairing rather than letting a partition read as permanently due.

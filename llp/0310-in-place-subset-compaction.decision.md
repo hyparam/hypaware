@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-25
 **Related:** LLP 0027, LLP 0199, LLP 0207, LLP 0209, LLP 0217, LLP 0218
-**Extended-by:** LLP 0311 (#consequences: the "keep `compact_avg_file_bytes`
+**Extended-by:** LLP 0312 (#consequences: the "keep `compact_avg_file_bytes`
 at or below `compact_batch_bytes`" rule is now enforced by config validation;
 #unreferenced-sweep: the round cap is clamped so one tick cannot spend the
 retention window it calls the reader-safety window; the metadata-size dueness

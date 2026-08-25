@@ -387,7 +387,7 @@ async function snapshotCount(dir) {
   return (meta.snapshots ?? []).length
 }
 
-// @ref LLP 0311#round-cap-under-retention [tests]: one tick must never commit
+// @ref LLP 0312#round-cap-under-retention [tests]: one tick must never commit
 // as many snapshots as retention keeps, or the next tick's expiry retires
 // everything the previous tick left and a reader that started before the tick
 // loses its snapshot. The round cap is what one tick spends, so it is clamped
@@ -429,7 +429,7 @@ test('one in-place tick commits fewer snapshots than snapshot retention keeps', 
   }
 })
 
-// @ref LLP 0311#metadata-dueness [tests]: in-place compaction cannot shrink a
+// @ref LLP 0312#metadata-dueness [tests]: in-place compaction cannot shrink a
 // source table's metadata directory, so a metadata-only dueness verdict is one
 // routine maintenance can never clear. Metadata is bounded by the version trim
 // and the unreferenced sweep, both of which run every tick regardless.

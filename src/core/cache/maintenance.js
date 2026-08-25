@@ -136,7 +136,7 @@ const MAX_INPLACE_COMPACT_ROUNDS = 8
  * Floor of one: a config that retains nothing has no window to protect,
  * and a cap of zero would stall compaction outright rather than slow it.
  *
- * @ref LLP 0311#round-cap-under-retention [implements]: one tick may never spend the whole retention window.
+ * @ref LLP 0312#round-cap-under-retention [implements]: one tick may never spend the whole retention window.
  * @param {MaintenanceConfig} cfg
  * @returns {number}
  */
@@ -900,7 +900,7 @@ async function expireSnapshots(tableDir, cfg, opts) {
  * trigger is left to the legacy epoch layout, where a rewrite clears it.
  * `--force` still routes a source table to the generation-swap writer.
  *
- * @ref LLP 0311#metadata-dueness [implements]: a dueness condition routine compaction cannot clear is not routine dueness.
+ * @ref LLP 0312#metadata-dueness [implements]: a dueness condition routine compaction cannot clear is not routine dueness.
  * @param {string} tableDir
  * @param {MaintenanceConfig} cfg
  * @param {{ dataFiles: number, dataBytes: number } | null} [liveStats] live counts from the snapshot summary; directory counts are the fallback
@@ -1453,7 +1453,7 @@ function selectInPlaceVictims(liveFiles, cfg) {
  * requires `settle` to be pure and idempotent: this call is speculative, on
  * rows that may never be committed, and it repeats next tick.
  *
- * @ref LLP 0311#settle-purity [constrained-by]: the probe is a speculative call the hook must not notice.
+ * @ref LLP 0312#settle-purity [constrained-by]: the probe is a speculative call the hook must not notice.
  * @param {string[]} filePaths
  * @param {Resolver} resolver
  * @param {SettleContext} settle

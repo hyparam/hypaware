@@ -26,7 +26,7 @@ export const MAINTENANCE_DEFAULTS = Object.freeze({
   target_file_bytes: 128 * 1024 * 1024,
   ...SNAPSHOT_RETENTION_DEFAULTS,
   compact_file_count: 32,
-  // @ref LLP 0311#avg-below-batch [constrained-by]: an in-place merged file
+  // @ref LLP 0312#avg-below-batch [constrained-by]: an in-place merged file
   // never exceeds `compact_batch_bytes`, so the average-size threshold that
   // decides dueness must stay at or below it. The defaults are equal, which
   // is the boundary; config validation holds the inequality.

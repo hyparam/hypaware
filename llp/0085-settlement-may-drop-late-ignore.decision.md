@@ -7,7 +7,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-07
 **Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0070, LLP 0083
-**Extended-by:** LLP 0311 (#settle-purity: an enricher's `settle` must be pure
+**Extended-by:** LLP 0312 (#settle-purity: an enricher's `settle` must be pure
 and idempotent, because compaction calls it speculatively and discards the
 result), LLP 0254 (#scope: accepted 2026-08-17; the Claude OTEL
 listener resolves the policy at ingest with cwd already in hand, so the race

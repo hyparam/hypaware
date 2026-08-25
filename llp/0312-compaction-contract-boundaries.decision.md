@@ -1,4 +1,4 @@
-# LLP 0311: The boundaries in-place compaction leans on are contracts, not coincidences
+# LLP 0312: The boundaries in-place compaction leans on are contracts, not coincidences
 
 **Type:** Decision
 **Status:** Accepted

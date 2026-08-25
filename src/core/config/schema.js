@@ -668,7 +668,7 @@ function parseQueryCacheConfig(cache, pointer, errors) {
           }
         }
       }
-      // @ref LLP 0311#avg-below-batch [implements]: routine compaction merges
+      // @ref LLP 0312#avg-below-batch [implements]: routine compaction merges
       // victims in memory, so a merged file never exceeds
       // `compact_batch_bytes` and its size can never reach an average-size
       // threshold set above that bound. A partition would converge and still

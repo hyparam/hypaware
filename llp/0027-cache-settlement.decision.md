@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-06-13
 **Related:** LLP 0013, LLP 0016, LLP 0026
-**Extended-by:** LLP 0311 (#settle-purity: compaction probes the settle hook
+**Extended-by:** LLP 0312 (#settle-purity: compaction probes the settle hook
 speculatively and discards the answer, so an enricher's `settle` must be free
 of observable side effects and idempotent)
 
