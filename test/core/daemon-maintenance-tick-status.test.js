@@ -98,15 +98,20 @@ test('a degraded maintenance tick sets the span status code, not just the attrib
   let handle
   try {
     const cacheRoot = path.join(hypHome, 'hypaware', 'cache')
-    const rows = Array.from({ length: 4 }, (_, i) => ({
-      id: i,
-      session_id: `s-${i}`,
-      attributes: `{"gateway":{"session":"s-${i}"}}`,
-    }))
-    await appendRowsToSourceTable(
-      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
-      { declaration: SESSION_DECLARATION }
-    )
+    // Two waves over the same sessions, so the owed retry is an in-place
+    // merge (LLP 0310) that reads the torn file instead of a floor
+    // reassessment that reads no data.
+    for (const wave of [0, 1]) {
+      const rows = Array.from({ length: 2 }, (_, i) => ({
+        id: wave * 2 + i,
+        session_id: `s-${i}`,
+        attributes: `{"gateway":{"session":"s-${i}","wave":${wave}}}`,
+      }))
+      await appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
+        { declaration: SESSION_DECLARATION }
+      )
+    }
     const partDir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
     await plantStamplessRecord(partDir, 4)
     await tearOneDataFile(partDir)

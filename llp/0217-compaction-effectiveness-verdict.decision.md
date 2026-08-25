@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-13
 **Related:** LLP 0199 (the baseline gate this extends), LLP 0209 (the writer change that made a stale verdict reachable), LLP 0027 (the re-settle baseline the gate was built from)
-**Extended-by:** [LLP 0218](./0218-compaction-failed-attempt-reported.decision.md) (the stamp a failed retry writes carries no effectiveness claim, so the skip report below cannot speak for it: the stamp records when the attempt failed and the skip is reported on that instead); [LLP 0228](./0228-maintenance-skips-are-a-standing-surface.decision.md) (the verdict's skip report stops being visible only to whoever runs `hyp query maintain` or queries the trace: the daemon tick summarizes it into `status.json` and `hyp status` renders it)
+**Extended-by:** [LLP 0218](./0218-compaction-failed-attempt-reported.decision.md) (the stamp a failed retry writes carries no effectiveness claim, so the skip report below cannot speak for it: the stamp records when the attempt failed and the skip is reported on that instead); [LLP 0228](./0228-maintenance-skips-are-a-standing-surface.decision.md) (the verdict's skip report stops being visible only to whoever runs `hyp query maintain` or queries the trace: the daemon tick summarizes it into `status.json` and `hyp status` renders it); [LLP 0310](./0310-in-place-subset-compaction.decision.md) (routine dueness is served by an in-place subset rewrite, and a partition at its identity-partitioning floor receives the ineffectiveness verdict by inspection, without the rewrite that used to reproduce its layout; writer generation 3)
 
 > The partition cursor records the data-file count a rewrite started from
 > beside the count it produced, so "the live count sits on its baseline" can be

@@ -468,7 +468,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * raises.
  *
  * @param {string} tablePath
- * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]>}
+ * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]>}
  * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
  */
 export async function listLiveDataFiles(tablePath) {
@@ -480,7 +480,7 @@ export async function listLiveDataFiles(tablePath) {
   const dataFileMap = await findDataFileEntries(metadata, resolver)
   if (dataFileMap.size === 0) return []
   const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
-  /** @type {{ filePath: string, partition: Record<string, unknown>, deletedPositions: Set<bigint> | undefined }[]} */
+  /** @type {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]} */
   const out = []
   for (const [filePath, { partition, entry }] of dataFileMap) {
     const file = entry.data_file
@@ -488,6 +488,7 @@ export async function listLiveDataFiles(tablePath) {
     out.push({
       filePath,
       partition,
+      sizeBytes: Number(file.file_size_in_bytes ?? 0),
       deletedPositions: deleted.get(filePath),
     })
   }
