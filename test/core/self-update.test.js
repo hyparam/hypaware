@@ -13,6 +13,7 @@ import {
   compareSemver,
   describeSelfUpdate,
   previousBootLooksStuck,
+  readLocalConfigAutoUpdate,
   readSelfUpdateState,
   resolveRegistryUrl,
   runSelfUpdatePass,
@@ -21,7 +22,7 @@ import {
   writeSelfUpdateState,
 } from '../../src/core/update/self_update.js'
 import { DAEMON_RESTART_EXIT_CODE } from '../../src/core/daemon/runtime.js'
-import { parseConfigShape } from '../../src/core/config/schema.js'
+import { CONFIG_BASENAME, parseConfigShape } from '../../src/core/config/schema.js'
 import { mergeConfigLayers } from '../../src/core/config/merge.js'
 
 const HOUR_MS = 60 * 60 * 1000
@@ -246,6 +247,47 @@ test('runSelfUpdatePass never probes from a checkout, and the off switch holds',
     })
     assert.equal(off.action, 'skipped')
     assert.equal(off.reason, 'auto_update_off')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('before the first boot caches the flag, auto_update: false in the local config binds', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-preboot-off-'))
+  try {
+    // Mirror the real layout: stateRoot is `<HYP_HOME>/hypaware`, the
+    // config file its sibling `<HYP_HOME>/hypaware-config.json`.
+    const stateRoot = path.join(dir, 'hypaware')
+    await fsp.mkdir(stateRoot, { recursive: true })
+    const configPath = path.join(dir, CONFIG_BASENAME)
+    await fsp.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false }))
+
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('9.9.9')
+    const off = await runSelfUpdatePass({
+      stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(off.action, 'skipped')
+    assert.equal(off.reason, 'auto_update_off')
+    assert.equal(probe.calledCount(), 0)
+
+    // The daemon-cached effective flag wins over the local file: central
+    // may have overridden a local false, and the cache carries the merge.
+    writeSelfUpdateState(stateRoot, { auto_update: true })
+    const on = await runSelfUpdatePass({
+      stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(on.action, 'updated')
+
+    // HYP_CONFIG relocates the file; a corrupt or flagless file is not an
+    // answer and leaves the default in force.
+    const altPath = path.join(dir, 'alt-config.json')
+    await fsp.writeFile(altPath, JSON.stringify({ version: 2, auto_update: false }))
+    assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: { HYP_CONFIG: altPath } }), false)
+    await fsp.writeFile(configPath, 'not json')
+    assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: {} }), undefined)
+    await fsp.writeFile(configPath, JSON.stringify({ version: 2 }))
+    assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: {} }), undefined)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

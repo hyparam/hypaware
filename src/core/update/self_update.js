@@ -42,6 +42,40 @@ const EAGER_CHECK_MS = 60 * 60 * 1000
 export const SELF_UPDATE_RESTART_EXIT_CODE = 75
 
 /**
+ * Must equal `CONFIG_BASENAME` in `src/core/config/schema.js`.
+ * Duplicated rather than imported for the same reason as the exit code
+ * above; a test asserts the two stay in sync.
+ */
+const CONFIG_BASENAME = 'hypaware-config.json'
+
+/**
+ * The `auto_update` flag straight off the local config file, for a
+ * machine where no daemon boot has cached the effective flag yet. A bare
+ * JSON read, not the config loader: importing the schema machinery here
+ * would let a release broken in config parsing take the unstick lane
+ * down with it. Central-layer merging is out of scope by the same
+ * argument; the daemon-cached effective flag wins whenever it exists.
+ *
+ * @ref LLP 0309#config-key [implements]: the off switch binds before the first successful boot
+ * @param {{ stateRoot: string, env: NodeJS.ProcessEnv }} opts
+ * @returns {boolean | undefined}
+ */
+export function readLocalConfigAutoUpdate(opts) {
+  const configPath = opts.env.HYP_CONFIG
+    ? path.resolve(opts.env.HYP_CONFIG)
+    : path.join(path.dirname(opts.stateRoot), CONFIG_BASENAME)
+  const raw = readFileIfExistsSync(configPath)
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    const flag = parsed && typeof parsed === 'object' ? parsed.auto_update : undefined
+    return typeof flag === 'boolean' ? flag : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
@@ -401,7 +435,11 @@ export async function runSelfUpdatePass(opts = {}) {
 
   try {
     const state = readSelfUpdateState(stateRoot)
-    const auto = opts.autoUpdate ?? state.auto_update ?? true
+    // The cached effective flag (central-aware, written at boot) wins;
+    // until a boot has cached it, fall back to the local config file so
+    // an `auto_update: false` written before first start still binds.
+    const auto = opts.autoUpdate ?? state.auto_update ??
+      readLocalConfigAutoUpdate({ stateRoot, env }) ?? true
     if (!auto && !opts.force) {
       return { action: 'skipped', reason: 'auto_update_off' }
     }

@@ -114,7 +114,16 @@ one publishes. Placement achieves that:
 
 One new recognized top-level config key, `auto_update`, boolean, default
 `true` when absent. No section and no sub-keys until the central-pin work
-needs them. The daemon reads it at boot.
+needs them. The daemon reads it at boot and caches the effective (merged)
+value in the updater's state file for the pre-boot lane.
+
+Until a boot has cached it, the pre-boot lane falls back to a bare JSON
+read of the local config file for the one flag, so `auto_update: false`
+written before the first successful boot still binds. The bare read keeps
+the lane import-light (no schema machinery, so a release broken in config
+parsing cannot take the unstick lane down) and reads only the local layer;
+the central layer reaches the lane through the cached effective value, so
+central keeps fleet control everywhere a daemon has booted.
 
 <a id="cli-surface"></a>
 ## CLI surface
