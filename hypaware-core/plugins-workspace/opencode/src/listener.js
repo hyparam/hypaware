@@ -98,7 +98,14 @@ export function createStartOpenCodeSource(deps) {
         return status
       },
       async stop() {
-        await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve(undefined)))
+        await new Promise((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve(undefined)))
+          // The OpenCode plugin posts with fetch (undici keep-alive), so a
+          // running OpenCode holds an idle socket open and `close()` alone
+          // would block `hyp daemon stop` until it exits.
+          server.closeIdleConnections?.()
+          server.closeAllConnections?.()
+        })
       },
     }
   }

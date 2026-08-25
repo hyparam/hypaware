@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 
@@ -40,7 +41,10 @@ export async function attachOpenCodePlugin(opts) {
     if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
   }
   if (existing !== undefined && !existing.includes(OPENCODE_PLUGIN_MARKER)) {
-    throw new Error(`OpenCode plugin path already exists and is not HypAware-owned: ${settingsPath}`)
+    // @ref LLP 0186#markactionrefused--isactionrefused [implements]: only the
+    //   user can move a foreign plugin file out of the way, so this is a
+    //   terminal refusal, not a failure the reconciler should retry forever.
+    throw markActionRefused(new Error(`OpenCode plugin path already exists and is not HypAware-owned: ${settingsPath}`))
   }
   const changed = existing !== body
   if (changed && !opts.dryRun) {

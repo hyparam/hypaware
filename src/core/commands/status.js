@@ -39,7 +39,7 @@ export async function runStatus(argv, ctx) {
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
 
-  const runtimeClientNames = listClientNames(ctx.capabilities)
+  const runtimeClientNames = listClientNames(ctx)
 
   const report = await collectHypAwareStatus({
     env: ctx.env,
@@ -1093,13 +1093,21 @@ function describeDaemon(daemon) {
 }
 
 /**
- * @param {CommandRunContext['capabilities']} capabilities
+ * The intrinsic registry is the superset: gateway adapters delegate their
+ * registration into it, and an endpoint-free adapter registers only there,
+ * where the gateway capability's `listClients` filters it out. Reading the
+ * capability first would drop every endpoint-free client from the line. The
+ * capability stays as the fallback for a host that predates `ctx.clients`.
+ *
+ * @param {CommandRunContext} ctx
  * @returns {string[]}
+ * @ref LLP 0306#endpoint-free-clients [implements]: status lists clients from the intrinsic registry, not the gateway capability
  */
-function listClientNames(capabilities) {
-  if (!capabilities.has('hypaware.ai-gateway')) return []
+export function listClientNames(ctx) {
+  if (ctx.clients) return ctx.clients.listClients().map((c) => c.name).sort()
+  if (!ctx.capabilities.has('hypaware.ai-gateway')) return []
   /** @type {AiGatewayCapability} */
-  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
+  const gateway = ctx.capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => c.name).sort()
 }
 

@@ -158,3 +158,45 @@ test('recovery drops .hypignore and machine-local ignore while preserving local-
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+// One unreadable session must not sink the rest of the run: the export shells
+// out per session, so a single missing/corrupt session id would otherwise throw
+// out of the generator and drop every session after it (up to 1000 of them).
+test('OpenCode backfill warns past an unreadable session and keeps going', async () => {
+  const sessions = [
+    { id: 'ses_a', updated: Date.parse('2026-08-24T10:00:00.000Z'), directory: '/work/a' },
+    { id: 'ses_throws', updated: Date.parse('2026-08-24T10:00:00.000Z'), directory: '/work/b' },
+    { id: 'ses_bad_json', updated: Date.parse('2026-08-24T10:00:00.000Z'), directory: '/work/c' },
+    { id: 'ses_z', updated: Date.parse('2026-08-24T10:00:00.000Z'), directory: '/work/d' },
+  ]
+  const provider = createOpenCodeBackfillProvider({
+    async runCommand(args) {
+      if (args[0] === 'session') return JSON.stringify(sessions)
+      if (args[1] === 'ses_throws') throw new Error('opencode exited with code 1')
+      if (args[1] === 'ses_bad_json') return '{ not json'
+      return JSON.stringify(exportedSession(args[1], `/work/${args[1]}`))
+    },
+  })
+
+  /** @type {{ event: string, attrs: Record<string, any> }[]} */
+  const warnings = []
+  const ctx = runContext()
+  ctx.log = /** @type {any} */ ({
+    info() {},
+    debug() {},
+    error() {},
+    warn(/** @type {string} */ event, /** @type {any} */ attrs) { warnings.push({ event, attrs }) },
+  })
+
+  const { items } = await collect(provider.run(ctx))
+
+  assert.deepEqual(items.map((i) => i.provenance?.native_id), ['ses_a', 'ses_z'])
+  assert.deepEqual(warnings.map((w) => w.event), [
+    'opencode.backfill.session_read_failed',
+    'opencode.backfill.session_read_failed',
+  ])
+  assert.deepEqual(warnings.map((w) => w.attrs.session_id), ['ses_throws', 'ses_bad_json'])
+  assert.equal(warnings[0].attrs.error_kind, 'session_read_failed')
+  assert.equal(warnings[0].attrs.source_path, 'opencode export ses_throws')
+  assert.equal(warnings[0].attrs.status, 'error')
+})

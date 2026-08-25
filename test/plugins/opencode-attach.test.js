@@ -13,6 +13,7 @@ import {
   attachOpenCodePlugin,
   opencodePluginPath,
 } from '../../hypaware-core/plugins-workspace/opencode/src/attach.js'
+import { isActionRefused } from '../../src/core/config/action_refusal.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 
@@ -118,7 +119,14 @@ test('OpenCode attach refuses an unowned collision and dry-run writes nothing', 
         homeDir: home,
         env: { HOME: home },
       }),
-      /not HypAware-owned/
+      (err) => {
+        assert.match(/** @type {Error} */ (err).message, /not HypAware-owned/)
+        // Only the user can clear a foreign plugin file, so the collision must
+        // reach action_attach.js marked terminal or the reconciler rewrites the
+        // marker with a climbing `attempts` on every pass forever (LLP 0186).
+        assert.equal(isActionRefused(err), true)
+        return true
+      }
     )
     assert.equal(await fs.readFile(settingsPath, 'utf8'), 'export const Mine = async () => ({})\n')
   } finally {

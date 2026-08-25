@@ -106,8 +106,17 @@ function projectMessage(info, parts, index) {
     ...(stringValue(info.mode) ? { permission_mode: stringValue(info.mode) } : {}),
   }
   const usage = usageAttributes(info)
-  if (usage) message.attributes = { usage }
-  if (isPlainObject(info.error)) message.raw_frame = { error: jsonObject(info.error) }
+  // The abort/failure detail rides message `attributes`, not a message-grain
+  // `raw_frame`: every projected block carries its own part frame and row
+  // expansion prefers the block's, so a message-level frame never reaches a row
+  // and the error would be silently discarded.
+  const error = isPlainObject(info.error) ? jsonObject(info.error) : undefined
+  if (usage || error) {
+    message.attributes = {
+      ...(usage ? { usage } : {}),
+      ...(error ? { error } : {}),
+    }
+  }
   return message
 }
 

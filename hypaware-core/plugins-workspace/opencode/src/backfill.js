@@ -3,7 +3,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
+import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { projectOpenCodeSnapshot } from './projector.js'
@@ -93,8 +93,25 @@ async function* runBackfill(deps) {
     // would choose a latest session unrelated to the requested window.
     // @ref LLP 0306#recovery-lane [implements]: bounded metadata selection,
     //   then exact-session content export
-    const rawExport = await deps.runCommand(['export', item.id])
-    const exported = JSON.parse(rawExport)
+    // One unreadable session must not sink the rest of the run: the peer
+    // adapters (codex, openclaw) warn and continue, and this loop can hold up
+    // to MAX_SESSION_LIST sessions behind a single bad export.
+    let exported
+    try {
+      const rawExport = await deps.runCommand(['export', item.id])
+      exported = JSON.parse(rawExport)
+    } catch (err) {
+      deps.ctx.log.warn('opencode.backfill.session_read_failed', {
+        component: 'plugin.opencode.backfill',
+        operation: 'backfill.scan',
+        source_path: `opencode export ${item.id}`,
+        session_id: item.id,
+        status: 'error',
+        error_kind: 'session_read_failed',
+        error: errMessage(err),
+      })
+      continue
+    }
     const session = isPlainObject(exported) && isPlainObject(exported.info) ? exported.info : undefined
     const cwd = stringValue(session?.directory)
     if (!cwd) {

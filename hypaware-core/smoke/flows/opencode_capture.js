@@ -13,6 +13,7 @@ import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
+import { opencodePluginPath } from '../../plugins-workspace/opencode/src/attach.js'
 
 /**
  * Hermetic first-party OpenCode CLI/Desktop capture:
@@ -153,6 +154,40 @@ export async function run({ harness, expect }) {
       return `http://127.0.0.1:${port}`
     })
 
+    // `hyp setup`'s attach lane, over the same registration. The gateway
+    // capability is absent here and its getClient() filters out endpoint-free
+    // registrations anyway, so a finale that resolved adapters through the
+    // capability either skipped this lane outright or recorded the adapterless
+    // not-applicable result meant for a plugin with no runtime adapter.
+    // @ref LLP 0306#endpoint-free-clients [tests]: the setup attach lane
+    //   reaches an endpoint-free client through the intrinsic registry
+    await step('setup_attach_lane', async () => {
+      const { runPickerFinale } = await import('../../../src/core/cli/walkthrough.js')
+      const before = await fs.readFile(opencodePluginPath({ env: process.env }), 'utf8')
+      const summary = await runPickerFinale({
+        finale: { skipDaemon: true, dryRun: true },
+        clientsPicked: ['opencode'],
+        capabilities: kernel.capabilities,
+        clients: kernel.clients,
+        config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/opencode' }] }),
+        configPath: path.join(harness.tmpDir, 'setup-lane-config.json'),
+        env: process.env,
+        stdout: makeBuf(),
+        stderr: makeBuf(),
+        retentionDays: 30,
+        interactive: false,
+      })
+      expect.that(
+        'setup: the attach lane ran for the endpoint-free client and reported no adapter gap',
+        summary.attach,
+        (v) => Array.isArray(v) && v.length === 1 &&
+          v[0].client === 'opencode' && v[0].ok === true &&
+          v[0].noAdapter === undefined && v[0].skipped === undefined
+      )
+      const after = await fs.readFile(opencodePluginPath({ env: process.env }), 'utf8')
+      expect.that('setup: the dry run wrote nothing', after, (v) => v === before)
+    })
+
     await step('live_capture', async () => {
       const first = await postJson(`${endpoint}/snapshot`, {
         session: exported.info,
@@ -284,7 +319,7 @@ export async function run({ harness, expect }) {
       traces.filter((/** @type {any} */ trace) =>
         String(trace.name).startsWith('smoke.step.') && trace.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId
       ),
-      (v) => v.length === 7
+      (v) => v.length === 8
     )
     const logs = await expect.logs()
     expect.that(

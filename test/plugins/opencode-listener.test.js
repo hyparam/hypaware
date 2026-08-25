@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
+import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -283,5 +284,44 @@ test('a turn observed mid-stream lands once, complete, when the assistant messag
     assert.equal(tool?.tool_call_id, `${id}-call`)
   } finally {
     await listener.cleanup()
+  }
+})
+
+// `server.close()` alone waits for every outstanding socket, so a client that
+// is connected but between requests keeps the listener open. The OpenCode
+// plugin posts with fetch, whose agent holds the connection across turns, so a
+// running OpenCode would block `hyp daemon stop` on this. Every peer listener
+// (otel, claude telemetry) closes idle and then all connections for the same
+// reason.
+test('OpenCode listener stop() does not wait on a connected client socket', async () => {
+  const listener = await startListener()
+  const cwd = path.join(listener.root, 'work')
+  await fs.mkdir(cwd, { recursive: true })
+  /** @type {import('node:net').Socket | undefined} */
+  let held
+  try {
+    const posted = await listener.post(snapshot('ses_keepalive', cwd))
+    assert.equal(posted.status, 200)
+    await posted.json()
+
+    const port = Number(new URL(listener.endpoint).port)
+    held = net.connect(port, '127.0.0.1')
+    await new Promise((resolve, reject) => {
+      held?.once('connect', resolve)
+      held?.once('error', reject)
+    })
+
+    const started = Date.now()
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer
+    const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), 2000) })
+    const result = await Promise.race([listener.source.stop().then(() => 'stopped'), timedOut])
+    clearTimeout(timer)
+    assert.equal(result, 'stopped', `stop() did not return within 2s (waited ${Date.now() - started}ms)`)
+
+    await assert.rejects(listener.post(snapshot('ses_after_stop', cwd)))
+  } finally {
+    held?.destroy()
+    await fs.rm(listener.root, { recursive: true, force: true })
   }
 })

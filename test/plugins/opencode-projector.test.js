@@ -193,3 +193,35 @@ test('missing cwd is not guessed into a projection', () => {
   delete fixture.info.directory
   assert.equal(projectOpenCodeSnapshot(fixture), undefined)
 })
+
+// An aborted or failed assistant turn settles on `info.error`, and the error is
+// the only thing that explains the truncated turn. It rides message
+// `attributes`, not a message-grain `raw_frame`: every projected block carries
+// its own part frame and row expansion prefers the block's, so a message-level
+// frame never reaches a row.
+test('an errored assistant turn carries its error onto a row', () => {
+  const exported = exportFixture()
+  const assistant = exported.messages[1]
+  delete (/** @type {any} */ (assistant.info)).finish
+  ;(/** @type {any} */ (assistant.info)).error = {
+    name: 'MessageAbortedError',
+    data: { message: 'aborted by user' },
+  }
+
+  const projection = projectOpenCodeSnapshot(exported)
+  assert.ok(projection)
+  assert.deepEqual(/** @type {any} */ (projection.messages[1].attributes).error, {
+    name: 'MessageAbortedError',
+    data: { message: 'aborted by user' },
+  })
+
+  const rows = aiGatewayRowsFromProjectedExchange(projection)
+  const last = rows[rows.length - 1]
+  assert.deepEqual(/** @type {any} */ (last.attributes).error, {
+    name: 'MessageAbortedError',
+    data: { message: 'aborted by user' },
+  })
+  // The per-part frame still wins on raw_frame, which is why the error had to
+  // go somewhere else to survive at all.
+  assert.equal(/** @type {any} */ (last.raw_frame).type, 'future-shape')
+})

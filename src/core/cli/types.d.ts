@@ -1,5 +1,6 @@
 import type {
   CapabilityRegistry,
+  ClientRegistry,
   HypAwareV2Config,
   VerbInputSchema,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
@@ -186,6 +187,13 @@ export interface PickerFinaleActions {
 
 export interface RunPickerWalkthroughOptions {
   capabilities: CapabilityRegistry
+  /**
+   * Kernel-owned client registry. The superset of attachable clients: the
+   * gateway capability's `getClient`/`listClients` filter to registrations
+   * with a gateway upstream, so an endpoint-free adapter (LLP 0306) is only
+   * reachable here.
+   */
+  clients?: ClientRegistry
   sources?: { stopAll?: () => Promise<void> }
   skills?: {
     list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
