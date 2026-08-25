@@ -1,4 +1,4 @@
-# LLP 0308: The kernel auto-updates itself through npm, unsticking from the front
+# LLP 0309: The kernel auto-updates itself through npm, unsticking from the front
 
 **Type:** Decision
 **Status:** Accepted
@@ -133,9 +133,9 @@ needs them. The daemon reads it at boot.
 ## @refs to add when the code lands
 
 - The early-boot check placement and its import-light constraint:
-  `@ref LLP 0308#unstick-from-the-front [implements]`.
-- The provenance guard in the updater: `@ref LLP 0308#global-install-only`.
+  `@ref LLP 0309#unstick-from-the-front [implements]`.
+- The provenance guard in the updater: `@ref LLP 0309#global-install-only`.
 - The `auto_update` key in the schema's recognized top-level set:
-  `@ref LLP 0308#config-key`.
+  `@ref LLP 0309#config-key`.
 - The staged-restart exit after a successful install:
   `@ref LLP 0017#staged-restart-for-config-replacement [constrained-by]`.
