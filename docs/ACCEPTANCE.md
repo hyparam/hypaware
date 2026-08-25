@@ -1069,7 +1069,18 @@ platform actually serves.
 `/v1` `base_url` (an install that has not re-attached since the upgrade). A
 subscription token arriving on `/v1` is not recoverable from the request, per
 LLP 0313 #sk-never-reaches-chatgpt: only re-running `hyp client attach codex`
-moves such a machine onto the neutral prefix. Step 8 below exercises the
+moves such a machine onto the neutral prefix, and it has to be run with the
+daemon up (with no live endpoint to compare against, attach reports
+`already attached` and rewrites nothing).
+
+That re-attach is **manual**. The reconciler will not do it for you: an attach
+marker goes stale on gateway-endpoint drift, on the asset set, and on Claude's
+attach mode, and a route change moves none of the three, so an already-enrolled
+machine keeps whatever `base_url` its last attach wrote. Machines attached in
+subscription mode were already on `/backend-api/codex` and are unaffected;
+machines attached in API-key mode sit at `/v1` until someone re-attaches them
+by hand. Do not read a passing run of this procedure as evidence that enrolled
+fleets migrated. Step 8 below exercises the
 API-key-back-to-subscription switch, which IS covered once the neutral prefix
 is in place. Nor does it prove anything about Codex Desktop, which shares
 `config.toml` and is covered by `codex_desktop_capture`.
