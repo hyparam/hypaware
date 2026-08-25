@@ -305,7 +305,8 @@ exists.
 - `hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`
   (`applyPathRewrite`, `compileUpstreams`)
 - `test/plugins/codex-credential-routing.test.js`,
-  `test/plugins/codex-auth-mode.test.js`,
+  `test/plugins/codex-attach-route.test.js`,
+  `test/plugins/ai-gateway-proxy-routing.test.js`,
   `test/plugins/gateway-openai-upstream-slot.test.js`
 - `docs/ACCEPTANCE.md` (`codex_login_switch_reroute`)
 - LLP 0099 (superseded by this document), LLP 0157 (extended by it),

@@ -1105,9 +1105,12 @@ evidence about the version it was run on.
    If `base_url` ends in `/v1`, or `name` mentions ChatGPT or OpenAI, you are
    not running the build under test. Stop.
 
-2. Note the row count, so later steps measure only new traffic:
+2. Mark the window and note the row count, so later steps measure only new
+   traffic. `$SINCE` has to be taken BEFORE step 3, because step 6 compares
+   the subscription rows and the rerouted ones in one result:
 
    ```sh
+   SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    hyp query sql "select count(*) from ai_gateway_messages"
    ```
 
@@ -1158,7 +1161,7 @@ evidence about the version it was run on.
             json_extract_string(attributes, '$.gateway.upstream_path')  as sent_to,
             count(*)
      from ai_gateway_messages
-     where message_created_at > now() - interval 10 minute
+     where message_created_at >= '$SINCE'
      group by 1, 2, 3
      order by 4 desc"
    ```
@@ -1176,9 +1179,9 @@ evidence about the version it was run on.
 
    ```sh
    hyp query sql "
-     select role, left(content, 60)
+     select role, left(content_text, 60)
      from ai_gateway_messages
-     where provider = 'openai' and message_created_at > now() - interval 10 minute
+     where provider = 'openai' and message_created_at >= '$SINCE'
      order by message_created_at desc limit 6"
    ```
 
@@ -1200,7 +1203,10 @@ evidence about the version it was run on.
 
 - **Step 5 returns a 401 about missing scopes.** The request still reached
   `chatgpt.com`, so the credential rung did not fire. Check the gateway saw
-  the key at all: `hyp query sql "select path, provider, status_code from ..."`.
+  the key at all - the gateway facts live in `attributes`, not in columns of
+  their own, so read them with `json_extract_string(attributes,
+  '$.gateway.path')` and `json_extract_string(attributes,
+  '$.gateway.status_code')`.
   The likeliest causes are an operator config that declares an upstream named
   `openai-codex` (it must not), and a Codex that sends its key in something
   other than the `Authorization` header - the credential test reads that
