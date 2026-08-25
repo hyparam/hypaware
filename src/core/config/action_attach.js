@@ -167,6 +167,19 @@ export function createAttachHandler(opts = {}) {
         [Attr.STATUS]: 'ok',
       })
 
+      // Read the adapter's freshness key BEFORE the attach, not after. The
+      // adapter reads its client-owned input a second time inside `attach()`,
+      // so the two reads can straddle a change (a `codex login` landing mid
+      // pass, or during the asset copy that follows). Reading first records a
+      // key at least as old as the effect: if the input moved in between, the
+      // next pass recomputes a different key and re-attaches, which is
+      // idempotent and settles. Reading last records a key *newer* than the
+      // `base_url` that landed, and `isCurrent()` would then match it forever
+      // over a config that names the wrong route: issue #996 all over again,
+      // and now unreachable by any later pass.
+      // @ref LLP 0308#the-key-is-adapter-computed [implements]: the recorded key is read before the effect, so a mid-pass input change re-attaches rather than settling stale
+      const attachKey = await readAttachKey(registration)
+
       try {
         await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
       } catch (err) {
@@ -228,12 +241,12 @@ export function createAttachHandler(opts = {}) {
       //   so a plugin the org adds later is a forward gap the reconciler closes
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey !== undefined) detail.assets_key = assetsKey
-      // The third recorded freshness key, and the only one core does not
-      // compute: what client-owned input this attach wrote from. Core stores
-      // the adapter's opaque string and never interprets it, so a Codex login
-      // switch is drift the same way a port rebind is (LLP 0308).
+      // The fourth recorded freshness key, and the only one core does not
+      // compute: what client-owned input this attach wrote from (read above,
+      // before the effect). Core stores the adapter's opaque string and never
+      // interprets it, so a Codex login switch is drift the same way a port
+      // rebind is (LLP 0308).
       // @ref LLP 0308#the-key-is-adapter-computed [implements]: perform() records the adapter's attachKey() on the done marker
-      const attachKey = await readAttachKey(registration)
       if (attachKey !== undefined) detail.attach_key = attachKey
       return { status: 'done', detail }
     },

@@ -147,11 +147,21 @@ export async function activate(ctx) {
      * re-attaching, rather than a settled `done` marker over a `base_url` that
      * now sends the new credential to an upstream not scoped for it (#996).
      *
-     * @returns {Promise<string>}
+     * @returns {Promise<string | undefined>}
      * @ref LLP 0308#the-key-is-adapter-computed [implements]: codex names its attach freshness key; core compares it and never interprets it
      */
     async attachKey() {
-      return providerRouteKeyForAuthMode(await readCodexAuthMode(resolveAuthPath(ctx)))
+      const auth = await readCodexAuth(resolveAuthPath(ctx))
+      // "Cannot tell" is not "/v1". `readCodexAuthMode` collapses an
+      // unreadable file into the same `undefined` as a readable file with no
+      // mode, which `attach()` may do because it has to write *some* route.
+      // The key must not: keying a half-written `auth.json` (the window a
+      // `codex login` or a token refresh passes through) to `/v1` would report
+      // a settled subscription attach as drifted and re-attach it onto the
+      // wrong route. LLP 0308's contract is `undefined` when this boot cannot
+      // tell, which leaves the marker alone.
+      if (!auth.readable) return undefined
+      return providerRouteKeyForAuthMode(auth.authMode)
     },
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
@@ -406,21 +416,50 @@ function resolveCodexHome(ctx) {
  */
 // @ref LLP 0099#decision [implements]: infer chatgpt from tokens-without-key; explicit auth_mode wins
 export async function readCodexAuthMode(authPath) {
+  return (await readCodexAuth(authPath)).authMode
+}
+
+/**
+ * The same read, plus the one bit `readCodexAuthMode` throws away: whether this
+ * boot could see the file at all. `attach()` does not need the distinction (it
+ * has to write *some* route from whatever it can read), but the attach
+ * freshness key does: an unreadable `auth.json` must key to "cannot tell", not
+ * to the `/v1` default, or a transient read failure reports a settled
+ * subscription attach as drift (LLP 0308's `attachKey` contract).
+ *
+ * A *missing* file counts as readable: no `auth.json` is exactly the state
+ * `attach()` writes `/v1` from, so it is a fact, not an unknown. Anything else
+ * (a permission error, a truncated write mid `codex login`, malformed JSON) is
+ * unknowable this pass.
+ *
+ * @param {string} authPath
+ * @returns {Promise<{ readable: boolean, authMode: string | undefined }>}
+ */
+// @ref LLP 0308#unreadable-is-not-the-v1-default [implements]: the freshness key keeps "cannot tell" apart from the /v1 default; attach() does not have to
+async function readCodexAuth(authPath) {
+  /** @type {string} */
+  let text
   try {
-    const parsed = JSON.parse(await fs.readFile(authPath, 'utf8'))
-    if (!parsed || typeof parsed !== 'object') return undefined
-    const mode = Reflect.get(parsed, 'auth_mode')
-    if (typeof mode === 'string') return mode
-    const tokens = Reflect.get(parsed, 'tokens')
-    const apiKey = Reflect.get(parsed, 'OPENAI_API_KEY')
-    if (tokens && typeof tokens === 'object' && typeof apiKey !== 'string') {
-      return 'chatgpt'
-    }
-    return undefined
+    text = await fs.readFile(authPath, 'utf8')
   } catch (err) {
-    if (errCode(err) === 'ENOENT') return undefined
-    return undefined
+    return { readable: errCode(err) === 'ENOENT', authMode: undefined }
   }
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { readable: false, authMode: undefined }
+  }
+  if (!parsed || typeof parsed !== 'object') return { readable: true, authMode: undefined }
+  const mode = Reflect.get(parsed, 'auth_mode')
+  if (typeof mode === 'string') return { readable: true, authMode: mode }
+  const tokens = Reflect.get(parsed, 'tokens')
+  const apiKey = Reflect.get(parsed, 'OPENAI_API_KEY')
+  if (tokens && typeof tokens === 'object' && typeof apiKey !== 'string') {
+    return { readable: true, authMode: 'chatgpt' }
+  }
+  return { readable: true, authMode: undefined }
 }
 
 function skillsRootDir() {

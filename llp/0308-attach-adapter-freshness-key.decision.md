@@ -86,6 +86,17 @@ reader (`readAttachKey`), so what is recorded and what is recompared cannot come
 from different code. Core treats the value as opaque: it compares for equality
 and never interprets, which is what keeps the reconciler generic.
 
+`perform()` reads the key **before** it calls `attach()`, not after. The adapter
+reads the same client-owned input a second time inside `attach()`, so the two
+reads straddle a window (the attach itself, plus the asset copy that follows)
+that a `codex login` can land in. Reading first records a key at least as old as
+the effect: a mid-pass change then recomputes differently on the next pass and
+re-attaches, which is idempotent and settles. Reading last would record a key
+*newer* than the `base_url` that landed, and `isCurrent()` would match it
+forever over a config naming the wrong route, which is issue #996 again and
+unreachable by any later pass. The key must fail toward one redundant attach,
+never toward a permanent stale one.
+
 Reading a client-owned input means touching the filesystem, so `isCurrent()`
 becomes async and the reconciler awaits it. `ActionHandler.isCurrent` therefore
 returns `boolean | Promise<boolean>`; a sync predicate still works unchanged. A
@@ -126,6 +137,22 @@ re-attaches over the other. This matters because LLP 0099 exists precisely
 because Codex stopped writing `auth_mode`: keying on the raw mode would turn a
 Codex upgrade into spurious drift, while keying on the route makes exactly the
 changes that would write a different `base_url` count.
+
+### Unreadable is not the v1 default
+
+The adapter has to hold a distinction `attach()` does not. `readCodexAuthMode`
+collapses every failure into `undefined`, which `attach()` may treat as the
+`/v1` default because it has to write *some* route from whatever it can see. The
+key may not: a permission error, malformed JSON, or a truncated file caught
+mid-write by a `codex login` or a token refresh is "cannot tell", and keying it
+to `/v1` would report a settled subscription attach as drifted and re-attach it
+onto the route its credential is not scoped for, which is the exact harm this
+document exists to prevent. So `attachKey()` returns `undefined` there and
+`isCurrent()` leaves the marker alone.
+
+A *missing* `auth.json` is not in that class. It is the state `attach()` writes
+`/v1` from, so it is a fact rather than an unknown and keys to `/v1` like any
+other API-key login.
 
 ## Consequences
 
