@@ -345,3 +345,113 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   assert.equal(code, 0)
   assert.match(stdout.text, /at least 10 rows pending/)
 })
+
+test('a plan still renders when the count itself throws: unknown, never a missing or zero line', async () => {
+  const hypHome = await makeHome('throws')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: [] }),
+  })
+  // The dataset catalog is plugin-backed, so listing it can fail outright. The
+  // plan is the consent surface: it has to render anyway.
+  ctx.query = { listDatasets() { throw new Error('catalog is corrupt') } }
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /central/)
+  assert.match(stdout.text, /pending volume unknown/)
+  assert.doesNotMatch(stdout.text, /nothing pending/)
+})
+
+test('previewPendingRows never rejects, even when storage itself throws on every call', async () => {
+  const hypHome = await makeHome('nothrow')
+  const exploding = {
+    get cacheRoot() { throw new Error('storage is gone') },
+    tableExists() { throw new Error('storage is gone') },
+    hasPendingSync() { throw new Error('storage is gone') },
+    async *readRowsSince() { throw new Error('storage is gone') },
+  }
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (exploding),
+    stateRoot: stateDir(hypHome),
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+})
+
+test('a truncated count never claims a resume point it did not survey', async () => {
+  const hypHome = await makeHome('resume')
+  // Two partitions. The first is enormous and carries a recent watermark; the
+  // second has no watermark at all, so the destination would forward the whole
+  // local history through it. A count that stops inside the first partition
+  // must not report the first partition's cursor as the destination's range.
+  const cache = cacheRoot(hypHome)
+  const big = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=claude')
+  const virgin = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=codex')
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/central',
+    instance: 'central',
+    seq: '0',
+    updatedAt: '2026-08-24T23:00:00.000Z',
+  })
+  const storage = {
+    cacheRoot: cache,
+    tableExists: () => true,
+    hasPendingSync: () => false,
+    async *readRowsSince(/** @type {string} */ p) {
+      const total = p === big ? 500000 : 3
+      for (let seq = 1; seq <= total; seq += 1) yield { row: { seq }, after: { v: 1, seq: String(seq) } }
+    },
+  }
+  const query = {
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => [
+        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: big },
+        { dataset: 'ai_gateway_messages', partition: { source: 'codex' }, tablePath: virgin },
+      ],
+    }],
+  }
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'the row count stopped at the scan budget')
+  // The unsurveyed-by-the-row-pass partition has no cursor, so the range is the
+  // machine's whole history: reporting the big partition's recent cursor would
+  // understate the reach on the one line consent is given from.
+  assert.equal(volume.resume.kind, 'beginning')
+  assert.notEqual(volume.resume.kind, 'since')
+})
+
+test('a destination whose whole pending range is withheld never renders "at least 0 rows pending"', async () => {
+  const hypHome = await makeHome('allwithheld')
+  const storage = fakeStorage({
+    hypHome,
+    entries: Array.from({ length: 6 }, (_, i) => ({ seq: i + 1, dropped: true })),
+  })
+  storage.hasPendingSync = () => true
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({ hypHome, sinks, storage })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(stdout.text, /at least 0 rows pending/)
+  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /pending volume not fully counted/)
+  assert.match(stdout.text, /6 rows withheld by policy \(not sent\)/)
+})

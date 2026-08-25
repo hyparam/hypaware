@@ -422,6 +422,13 @@ function renderVolume(volume) {
   const lines = []
   if (volume.rows === 0 && volume.status === 'counted') {
     lines.push('nothing pending')
+  } else if (volume.rows === 0) {
+    // A floor of zero is not a floor. "at least 0 rows pending" reads as a bug
+    // on the one line somebody is deciding from, and it is reachable: a
+    // destination whose whole pending range is withheld, counted short. Say the
+    // payload count is incomplete and let the withheld line below carry the
+    // magnitude that is actually known.
+    lines.push(`pending volume not fully counted${volume.reason ? ` (${volume.reason})` : ''}`)
   } else {
     const floor = volume.status === 'partial' ? 'at least ' : ''
     lines.push(`${floor}${plural(volume.rows, 'row')} pending${renderResume(volume.resume)}`)

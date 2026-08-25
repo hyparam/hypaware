@@ -8,7 +8,7 @@ import { createSinkWatermarkStore } from './watermarks.js'
  * @import { HypAwareV2Config, QueryPartition, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
- * @import { PendingPreviewOptions, PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { PendingPreviewOptions, PendingVolume, SinkWatermarkRecord } from '../../../src/core/sinks/types.js'
  */
 
 /**
@@ -47,7 +47,11 @@ const CLOCK_CHECK_EVERY = 512
  * 2. **A count that ran out of budget is a floor, never a total.** `truncated`
  *    says so, and the caller renders "at least N".
  * 3. **A count that could not be taken is `unknown`, never `0`.** A false zero
- *    on a consent prompt is worse than an admitted gap.
+ *    on a consent prompt is worse than an admitted gap. This extends to
+ *    throwing: the plan is the consent surface, so a preview that could not run
+ *    at all resolves to `unknown` for every destination rather than propagating
+ *    and taking the whole prompt down with it. `previewPendingRows` never
+ *    rejects.
  *
  * Nothing here writes: no flush, no mkdir, no watermark move. An un-flushed
  * spool therefore holds rows this cannot see, which is why a partition with
@@ -80,17 +84,30 @@ export async function previewPendingRows(args) {
     return out
   }
 
-  const discovered = await discoverCountablePartitions({ query, storage, config })
-  if (discovered.partitions.length === 0 && discovered.failures > 0) {
-    for (const handle of handles) out.set(handle.instanceName, unknownVolume('the cache partitions could not be listed'))
-    return out
-  }
+  // Rule 3 taken to its conclusion. Everything below reaches into plugin-owned
+  // registries and on-disk state, so "it threw" is a live outcome, and the
+  // caller is a `--dry-run` whose entire job is to print. Fill whatever the
+  // count reached, then backfill the rest as `unknown`: a destination with no
+  // answer is disclosed as having none, never omitted from the plan and never
+  // rendered as zero.
+  try {
+    const discovered = await discoverCountablePartitions({ query, storage, config })
+    if (discovered.partitions.length === 0 && discovered.failures > 0) {
+      for (const handle of handles) out.set(handle.instanceName, unknownVolume('the cache partitions could not be listed'))
+      return out
+    }
 
-  for (const handle of handles) {
-    out.set(
-      handle.instanceName,
-      await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
-    )
+    for (const handle of handles) {
+      out.set(
+        handle.instanceName,
+        await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
+      )
+    }
+  } catch (err) {
+    const reason = `the count failed: ${describeError(err)}`
+    for (const handle of handles) {
+      if (!out.has(handle.instanceName)) out.set(handle.instanceName, unknownVolume(reason))
+    }
   }
   return out
 }
@@ -115,7 +132,17 @@ async function discoverCountablePartitions({ query, storage, config }) {
   const seen = new Set()
   let unflushed = false
   let failures = 0
-  for (const dataset of query.listDatasets()) {
+  /** @type {ReturnType<QueryRegistry['listDatasets']>} */
+  let datasets
+  try {
+    // Listing is plugin-backed too, so it is as capable of throwing as the
+    // per-dataset discovery below. An unlistable catalog is a count that could
+    // not be taken, not a count of zero.
+    datasets = query.listDatasets()
+  } catch {
+    return { partitions: [], unflushed: false, failures: 1 }
+  }
+  for (const dataset of datasets) {
     try {
       const parts = await dataset.discoverPartitions({
         config: config ?? /** @type {HypAwareV2Config} */ ({ version: 2 }),
@@ -161,25 +188,30 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
     return unknownVolume(describeError(err))
   }
 
-  let rows = 0
-  let withheldRows = 0
-  let scanned = 0
-  let read = 0
-  let failed = 0
-  let truncated = false
+  // ---- Pass 1: every partition's resume point, before a single row is read.
+  //
+  // "How far back does this reach" is half of what the prompt discloses, and it
+  // must not be derived from whichever partitions happened to fit inside the
+  // scan budget. A partition the row pass never reaches may be the one with no
+  // durable cursor at all - the destination would forward the machine's entire
+  // history through it - and reporting the *visited* partitions' oldest cursor
+  // would then understate the reach in the one direction a consent surface must
+  // never understate. A watermark record is one small JSON file, so this pass is
+  // bounded by partition count rather than by row count.
+  /** @type {Map<string, SinkWatermarkRecord | null>} */
+  const records = new Map()
   /** @type {number | null} */
   let oldestResumeMs = null
   let anyFromBeginning = false
-
+  // False once any partition's cursor could not be established, so a precise
+  // "captured since <t>" is never claimed over an incomplete survey.
+  let resumeComplete = true
   for (const partition of discovered.partitions) {
-    // Checked before the partition as well as inside it, so a destination that
-    // inherits an already-spent budget reports nothing rather than a floor of
-    // however many rows fit before the first in-loop clock check.
-    if (truncated || now() > deadline) { truncated = true; break }
+    if (now() > deadline) { resumeComplete = false; break }
     const tablePath = /** @type {string} */ (partition.tablePath)
     try {
       const record = await watermarks.read(watermarks.keyFor(storage.cacheRoot, tablePath))
-      const since = record?.continuation
+      records.set(tablePath, record)
       if (record === null) {
         // No durable cursor for this partition: the destination would export it
         // from the beginning, so no timestamp bounds this destination's range.
@@ -188,6 +220,30 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
         const at = Date.parse(record.updatedAt)
         if (Number.isFinite(at) && (oldestResumeMs === null || at < oldestResumeMs)) oldestResumeMs = at
       }
+    } catch {
+      resumeComplete = false
+    }
+  }
+
+  // ---- Pass 2: the rows, reusing pass 1's cursors.
+  let rows = 0
+  let withheldRows = 0
+  let scanned = 0
+  let read = 0
+  let failed = 0
+  // A partition pass 1 never surveyed is a partition pass 2 cannot count, so
+  // the total is a floor from the outset.
+  let truncated = records.size < discovered.partitions.length
+
+  for (const partition of discovered.partitions) {
+    // Checked before the partition as well as inside it, so a destination that
+    // inherits an already-spent budget reports nothing rather than a floor of
+    // however many rows fit before the first in-loop clock check.
+    if (truncated || now() > deadline) { truncated = true; break }
+    const tablePath = /** @type {string} */ (partition.tablePath)
+    if (!records.has(tablePath)) { failed += 1; continue }
+    try {
+      const since = records.get(tablePath)?.continuation
       // @ref LLP 0040#storage-api-extension [constrained-by]: `includeLegacy` is
       // derived exactly as every sink derives it, so a preview never counts a
       // pre-upgrade null-seq backlog the destination has already shipped.
@@ -223,9 +279,13 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
     ...(shortfall !== null ? { reason: shortfall } : {}),
     rows,
     withheldRows,
+    // `beginning` survives an incomplete survey because it is the loudest of the
+    // three and cannot be walked back by a partition still unseen; a precise
+    // `since` does not, because an unsurveyed partition could reach further
+    // back than any cursor pass 1 managed to read.
     resume: anyFromBeginning
       ? { kind: 'beginning' }
-      : oldestResumeMs !== null
+      : resumeComplete && oldestResumeMs !== null
         ? { kind: 'since', at: new Date(oldestResumeMs).toISOString() }
         : { kind: 'unknown' },
   }
