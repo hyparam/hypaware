@@ -1251,7 +1251,10 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
  * Returns `'settle-required'` when the victims carry committed gateway
  * fallback rows and a settle context exists: only the whole-generation
  * rewrite can collapse a split twin pair (the native twin may live in a
- * file this pass would not read), so the caller falls through to it.
+ * file this pass would not read), so the caller falls through to it. A
+ * later round can reach that answer after earlier rounds already committed
+ * merges: those stand (every path here conserves rows) and the rewrite the
+ * caller runs next writes the cursor.
  *
  * A `noop` result means the dueness heuristics fired but no tuple holds
  * two mergeable files - the partition sits on its floor. The verdict
@@ -1273,22 +1276,37 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
   const statsBefore = await liveTableStats(liveDir)
   const dataFilesBefore = statsBefore?.dataFiles ?? countDataFiles(liveDir)
 
+  // Files the table already held when this tick started, and the ones the
+  // settle probe has looked at. Every round's victims are probed EXCEPT the
+  // files this tick's own earlier rounds wrote: those carry rows that were
+  // already offered to the hook, and the rewrite that wrote them applied
+  // deletes and changed no row content. Probing round 0 alone would not do,
+  // because the round budget stops round 0 long before the fragmented set is
+  // exhausted, so later rounds routinely select committed files this tick has
+  // never read - a settleable fallback row in one of those would be merged in
+  // place and its twin left uncollapsed. The escape still fires only for rows
+  // the hook can upgrade right now: an unmatchable fallback (its transcript
+  // line never lands) must not buy a whole-generation rewrite on every growth
+  // tick, which is LLP 0027's own protection restated for this path - measured
+  // live, one permanently-unmatchable row re-created the hourly full rewrite
+  // this decision exists to retire.
+  /** @type {Set<string> | null} */
+  let committedBefore = null
+  /** @type {Set<string>} */
+  const probed = new Set()
+
   let merged = false
   for (let round = 0; round < MAX_INPLACE_COMPACT_ROUNDS; round++) {
     const live = await listLiveDataFiles(liveDir)
+    const committed = committedBefore ??= new Set(live.map((file) => file.filePath))
     const victims = selectInPlaceVictims(live, cfg)
     if (victims.length === 0) break
-    // Only the first round can see committed fallback rows: later rounds'
-    // victims are files this tick just wrote, and the rewrite that wrote
-    // them read with deletes applied and changed no row content. The
-    // escape fires only for fallback rows the settle hook can actually
-    // upgrade: an unmatchable fallback (its transcript line never lands)
-    // must not buy a whole-generation rewrite on every growth tick, which
-    // is LLP 0027's own protection restated for this path - measured live,
-    // one permanently-unmatchable row re-created the hourly full rewrite
-    // this decision exists to retire.
-    if (round === 0 && settle && await victimFallbacksSettleable(victims, resolver, settle)) {
-      return 'settle-required'
+    if (settle) {
+      const unprobed = victims.filter((file) => committed.has(file) && !probed.has(file))
+      for (const file of unprobed) probed.add(file)
+      if (unprobed.length > 0 && await victimFallbacksSettleable(unprobed, resolver, settle)) {
+        return 'settle-required'
+      }
     }
     await icebergRewrite({ catalog, tableUrl, files: victims })
     merged = true
@@ -1327,8 +1345,11 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
  * collects the floor verdict forever while staying fragmented. The prefix
  * rewrites some rows more than once across ticks and in exchange the live
  * file count falls monotonically. When not even the two smallest candidates
- * fit the round's budget the tuple genuinely cannot be merged within the
- * heap bound, and is left alone.
+ * fit the round's budget, THIS rewrite cannot merge them within its heap
+ * bound and the tuple is left alone: the streaming whole-generation rewrite
+ * still could (it batches on the way out), but paying a whole-table rewrite
+ * for it on every growth tick is the cost this decision retires, so that
+ * tuple waits for `--force`.
  *
  * @ref LLP 0310#victim-selection [implements]: small files, whole tuples, byte-bounded rounds.
  * @param {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number }[]} liveFiles

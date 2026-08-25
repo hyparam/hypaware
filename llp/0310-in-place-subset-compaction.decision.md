@@ -57,6 +57,10 @@ Victims that carry a committed gateway fallback row route the tick to the
 full rewrite only when the dataset's settle hook can upgrade one of those
 rows right now, established by offering the victim files' fallback rows to
 the hook in memory (bounded by the round's byte budget, nothing committed).
+Every committed file a round selects is asked about once, not only the first
+round's: the byte budget stops one round well short of a fragmented
+partition, so later rounds reach committed files the tick has not read, and
+a probe scoped to round 0 would merge a settleable fallback row in place.
 An UNMATCHABLE fallback, one whose transcript line never lands, must merge
 in place instead: this is LLP 0027's own protection restated for this path,
 and it is measured, not theoretical - on the live cache one unmatchable row
@@ -80,8 +84,12 @@ due, hand it an empty victim set, and freeze it at its fragmentation under
 the floor verdict forever. The prefix rewrites some rows more than once
 across ticks and in exchange the live file count falls monotonically; a
 tuple whose two smallest candidates do not fit the budget cannot be merged
-within the heap bound at all and is left alone. A tick runs at most
-`MAX_INPLACE_COMPACT_ROUNDS` rounds; a deeper backlog drains on later ticks.
+by THIS rewrite within its heap bound and is left alone. The streaming
+whole-generation rewrite could still merge it, since it batches on the way
+out, but buying a whole-table rewrite on every growth tick is the exact cost
+this decision retires, so such a tuple waits for `--force`. A tick runs at
+most `MAX_INPLACE_COMPACT_ROUNDS` rounds; a deeper backlog drains on later
+ticks.
 
 ### The floor is a verdict {#floor-is-a-verdict}
 
@@ -139,6 +147,12 @@ delete anything.
   only run on the whole-generation paths. Routine in-place ticks preserve
   rows byte-for-byte; residual duplicates or fallback rows in files the
   subset pass never selects wait for a forced or settle-routed full rewrite.
+- An in-place merge materializes its victims, so a merged file never exceeds
+  `compact_batch_bytes` (32 MB by default) and routine maintenance no longer
+  converges a tuple toward `target_file_bytes`. Keep `compact_avg_file_bytes`
+  at or below `compact_batch_bytes`, or a converged partition reads as
+  permanently due; `--force` remains the only path that builds target-sized
+  files.
 - The file-count floor itself stands until the cache is re-partitioned
   (deferred; would supersede LLP 0030's partition fields).
 

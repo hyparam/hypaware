@@ -307,3 +307,61 @@ test('a tuple heavier than one round of budget still merges, a prefix at a time'
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// @ref LLP 0310#in-place-by-default [tests]: the settle escape is asked
+// about every committed victim the tick merges, not only the first round's.
+// The round budget stops round 0 long before a fragmented partition is
+// exhausted, so a settleable fallback row routinely sits in a file only a
+// later round selects; probing round 0 alone would merge that file in place
+// and leave its twin uncollapsed, silently - no error, no row lost.
+test('a settleable fallback row a later round selects still routes to the full rewrite', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-lateprobe-'))
+  try {
+    // Five waves over one tuple. Only the last carries a fallback row, and
+    // its slightly longer attributes make its file the largest, so the
+    // smallest-first prefix the first round takes cannot reach it.
+    for (let wave = 0; wave < 5; wave++) {
+      const fallback = wave === 4
+      await appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+        [{
+          id: wave,
+          session_id: 's-0',
+          attributes: fallback
+            ? '{"gateway":{"identity_source":"gateway_fallback","pad":"only the last wave is a fallback row"}}'
+            : `{"gateway":{"wave":${wave}}}`,
+        }],
+        { declaration: SESSION_DECLARATION }
+      )
+    }
+    const dir = partitionDir(cacheRoot)
+    const generationBefore = readCursorSync(dir).tableDir
+
+    const files = await dataFilesOnDisk(dir)
+    assert.equal(files.length, 5, 'fixture invariant: one tuple, five files')
+    const sizes = (await Promise.all(files.map(async (f) => (await fs.stat(f)).size)))
+      .sort((a, b) => a - b)
+    // A budget that fits exactly the three smallest files. Round 0 therefore
+    // takes three plain files; the fallback row's file is only reachable by
+    // round 1, which is the case this test exists for.
+    const compact_batch_bytes = sizes[0] + sizes[1] + sizes[2]
+    assert.ok(sizes[3] + sizes[4] <= compact_batch_bytes, 'fixture invariant: a later round can take the fallback file')
+    assert.ok(sizes[4] > sizes[3], 'fixture invariant: the fallback row\'s file is the largest, so round 0 cannot reach it')
+
+    const storage = /** @type {any} */ ({})
+    const getSettleHook = () => async (/** @type {Record<string, unknown>[]} */ rows) => rows.map((r) => ({ ...r }))
+    const report = await maintainCache({
+      cacheRoot, compactOnly: true, storage, getSettleHook, config: { compact_batch_bytes },
+    })
+    assert.equal(report.totalCompacted, 1)
+
+    assert.notEqual(
+      readCursorSync(dir).tableDir, generationBefore,
+      'the escape fires for a victim no first round probed'
+    )
+    const rows = await readRowsFromTable(liveTableDir(dir))
+    assert.equal(rows.length, 5, 'every row survives the routed rewrite')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
