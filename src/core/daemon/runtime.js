@@ -308,14 +308,25 @@ export async function runDaemon(opts = {}) {
   // lane (bin/hypaware.js) can honor the off switch without parsing
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
-  const autoUpdateEnabled = boot.config?.auto_update !== false
-  try {
-    writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
-  } catch (err) {
-    fileLog.warn('self_update.flag_cache_failed', {
-      message: err instanceof Error ? err.message : String(err),
-    })
+  let autoUpdateEnabled = true
+  /**
+   * Re-derive the effective flag and re-cache it. Called at boot and
+   * again after every reload: SIGHUP re-merges both config layers, and a
+   * flag captured once at boot would leave the daily lane running (and
+   * the cache advertising `true` to the pre-boot lane) after an operator
+   * turned auto-update off and reloaded.
+   */
+  function refreshAutoUpdateFlag() {
+    autoUpdateEnabled = boot.config?.auto_update !== false
+    try {
+      writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
+    } catch (err) {
+      fileLog.warn('self_update.flag_cache_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
   }
+  refreshAutoUpdateFlag()
   let selfUpdateInFlight = false
 
   // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041 / LLP 0045) -----
@@ -688,6 +699,13 @@ export async function runDaemon(opts = {}) {
         if (result.action === 'updated' && triggerShutdown) {
           void triggerShutdown('restart')
         }
+      }).catch((err) => {
+        // `runSelfUpdatePass` never throws, but the restart handler above
+        // can, and an unhandled rejection is a dead daemon under Node's
+        // default `--unhandled-rejections=throw`.
+        fileLog.error('self_update.tick_failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
       }).finally(() => { selfUpdateInFlight = false })
     }
   }
@@ -927,6 +945,7 @@ export async function runDaemon(opts = {}) {
         }
         const freshConfig = resolved.effective ?? boot.config ?? null
         boot.config = freshConfig
+        refreshAutoUpdateFlag()
         for (const drop of resolved.drops) {
           fileLog.warn('config.local_entry_dropped', {
             [Attr.COMPONENT]: 'config',

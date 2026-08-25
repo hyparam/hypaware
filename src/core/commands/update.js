@@ -26,7 +26,17 @@ export async function runUpdate(argv, ctx) {
   if (!parsed.ok) return parsed.code
 
   const stateRoot = readObservabilityEnv(ctx.env).stateDir
-  const identity = readSelfPackageIdentity()
+  // The daemon's own lane may be mid-`npm install -g` right now, and that
+  // briefly leaves this package root without a package.json. Unguarded,
+  // `hyp update` would die on a raw ENOENT instead of reaching the
+  // apply-lock message that explains what is actually happening.
+  /** @type {{ name: string, version: string }} */
+  let identity
+  try {
+    identity = readSelfPackageIdentity()
+  } catch {
+    identity = { name: 'hypaware', version: 'unknown' }
+  }
 
   // Load the restart helpers *before* the install runs. `npm install -g`
   // replaces this very package directory underneath the running process,

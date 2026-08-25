@@ -824,7 +824,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   ])
   const preferredAdditional = [
     'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'graph',
-    'vector', 'enrichment', 'source', 'version', 'dev',
+    'vector', 'enrichment', 'source', 'version', 'update', 'dev',
   ]
   const additional = orderedHelpNames(rows, 'additional', preferredAdditional)
   if (additional.length > 0) {

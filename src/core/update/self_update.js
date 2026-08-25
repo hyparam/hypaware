@@ -24,10 +24,18 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 const PROBE_TIMEOUT_MS = 5000
-const NPM_TIMEOUT_MS = 120_000
-// An apply lock older than two npm timeouts belonged to a process that
-// died mid-install; honoring it forever would wedge updates permanently.
-const APPLY_LOCK_STALE_MS = NPM_TIMEOUT_MS * 2
+export const NPM_TIMEOUT_MS = 120_000
+// How long a timed-out npm gets to honor SIGTERM before SIGKILL.
+export const NPM_KILL_GRACE_MS = 5000
+// An apply lock this old belonged to a process that died mid-install;
+// honoring it forever would wedge updates permanently. The floor is the
+// longest a live holder can legitimately hold it: `applySelfUpdate` runs
+// two npm commands, each bounded by the timeout plus the kill grace. Two
+// of those again is the margin - reclaiming a lock its owner still holds
+// starts the second concurrent `npm install -g` this lock exists to
+// prevent, so erring long costs a slower recovery and erring short costs
+// the machine.
+export const APPLY_LOCK_STALE_MS = 4 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS)
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
 // stuck on a broken release re-probes eagerly so it jumps to the fix
@@ -114,13 +122,18 @@ export function selfUpdateStatePath(stateRoot) {
 }
 
 /**
+ * Total by construction: an empty state is the answer for a file that is
+ * absent, corrupt, or unreadable alike. `describeSelfUpdate` runs inside
+ * `hyp status` with no guard of its own, and a state file left behind
+ * root-owned by a sudo install would otherwise take the whole report down.
+ *
  * @param {string} stateRoot
  * @returns {SelfUpdateState}
  */
 export function readSelfUpdateState(stateRoot) {
-  const raw = readFileIfExistsSync(selfUpdateStatePath(stateRoot))
-  if (!raw) return {}
   try {
+    const raw = readFileIfExistsSync(selfUpdateStatePath(stateRoot))
+    if (!raw) return {}
     const parsed = JSON.parse(raw)
     return parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
@@ -310,6 +323,33 @@ export function previousBootLooksStuck(stateRoot) {
 }
 
 /**
+ * The environment npm runs in, with the directory of the running node
+ * binary prepended to PATH.
+ *
+ * The daemon does not inherit a login shell's PATH: the LaunchAgent and
+ * the systemd unit both run it through an absolute `process.execPath`
+ * and render no environment block at all, so PATH is whatever the
+ * service manager supplies - on launchd, `/usr/bin:/bin:/usr/sbin:/sbin`.
+ * Homebrew (`/opt/homebrew/bin`), the nodejs.org installer
+ * (`/usr/local/bin`) and nvm are all outside that, so a bare
+ * `spawn('npm')` fails ENOENT and the automatic lane records
+ * `npm_prefix_failed` forever while a hand-typed `hyp update` (with the
+ * user's PATH) works. Prepending is the fix rather than resolving npm to
+ * an absolute path, because npm's own shim starts `#!/usr/bin/env node`
+ * and so needs the same directory reachable anyway.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function withNodeBinOnPath(env) {
+  const nodeBin = path.dirname(process.execPath)
+  if (!nodeBin || nodeBin === '.') return env
+  const parts = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  if (parts[0] === nodeBin) return env
+  return { ...env, PATH: [nodeBin, ...parts.filter((p) => p !== nodeBin)].join(path.delimiter) }
+}
+
+/**
  * Verify the running package root IS the npm global install, then run
  * `npm install -g <name>@<version>`. Returns rather than throws: every
  * caller treats failure as "record and degrade to a status notice".
@@ -326,7 +366,7 @@ export function previousBootLooksStuck(stateRoot) {
  * @returns {Promise<{ applied: boolean, reason?: string }>}
  */
 export async function applySelfUpdate(opts) {
-  const env = opts.env ?? process.env
+  const env = withNodeBinOnPath(opts.env ?? process.env)
   const run = opts.runner ?? runCommand
   const packageRoot = path.resolve(opts.packageRoot ?? PACKAGE_ROOT)
   const platform = opts.platform ?? process.platform
@@ -390,15 +430,23 @@ export function acquireApplyLock(stateRoot) {
   } catch {
     return null
   }
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fd = fs.openSync(lockPath, 'wx')
       try {
-        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+        fs.writeFileSync(fd, JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() }))
       } finally {
         fs.closeSync(fd)
       }
       return () => {
+        // Only ever remove our own lock. A stale-reclaim by another
+        // process replaces the file, and unlinking unconditionally would
+        // hand a third process the lock while the second still holds it.
+        try {
+          const held = JSON.parse(readFileIfExistsSync(lockPath) ?? 'null')
+          if (held?.token !== token) return
+        } catch { return }
         try { fs.unlinkSync(lockPath) } catch { /* already gone */ }
       }
     } catch {
@@ -587,6 +635,15 @@ export function describeSelfUpdate(opts) {
   // report the switch as on while the pass is already honoring an off
   // written in config but not yet cached by a boot.
   const autoUpdate = state.auto_update ?? readLocalConfigAutoUpdate(opts) ?? true
+  // Re-derive availability from the version actually running rather than
+  // trusting the flag the last probe wrote: a manual `npm install -g`
+  // (or `hyp update` from another shell) satisfies a pending update
+  // without clearing it, and status would advertise '1.27.0 available
+  // (running 1.27.0)' until the next probe up to a day later.
+  const available = state.available === undefined
+    ? undefined
+    : Boolean(state.available && state.latest_version &&
+      compareSemver(state.latest_version, identity.version) > 0)
   /** @type {Record<string, unknown>} */
   const json = {
     version: identity.version,
@@ -594,7 +651,7 @@ export function describeSelfUpdate(opts) {
     provenance,
     ...(state.checked_at ? { checked_at: state.checked_at } : {}),
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
-    ...(state.available !== undefined ? { available: state.available } : {}),
+    ...(available !== undefined ? { available } : {}),
     ...(state.error ? { error: state.error } : {}),
   }
   // The text line derives only from the shared state file: the process
@@ -610,7 +667,7 @@ export function describeSelfUpdate(opts) {
       json,
     }
   }
-  if (state.available && state.latest_version) {
+  if (available && state.latest_version) {
     return { line: `self-update: ${state.latest_version} available (running ${identity.version})`, json }
   }
   return { line: null, json }
@@ -637,7 +694,7 @@ function runCommand(cmd, args, opts) {
       const hard = setTimeout(() => {
         try { child.kill('SIGKILL') } catch { /* already gone */ }
         finish(-1)
-      }, 5000)
+      }, NPM_KILL_GRACE_MS)
       hard.unref?.()
     }, NPM_TIMEOUT_MS)
     timer.unref?.()

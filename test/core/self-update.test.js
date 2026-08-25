@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,9 +10,12 @@ import test from 'node:test'
 import {
   acquireApplyLock,
   applySelfUpdate,
+  APPLY_LOCK_STALE_MS,
   classifySelfProvenance,
   compareSemver,
   describeSelfUpdate,
+  NPM_KILL_GRACE_MS,
+  NPM_TIMEOUT_MS,
   previousBootLooksStuck,
   readLocalConfigAutoUpdate,
   readSelfUpdateState,
@@ -19,11 +23,16 @@ import {
   runSelfUpdatePass,
   SELF_UPDATE_RESTART_EXIT_CODE,
   shouldCheckNow,
+  withNodeBinOnPath,
   writeSelfUpdateState,
 } from '../../src/core/update/self_update.js'
 import { DAEMON_RESTART_EXIT_CODE } from '../../src/core/daemon/runtime.js'
 import { CONFIG_BASENAME, parseConfigShape } from '../../src/core/config/schema.js'
 import { mergeConfigLayers } from '../../src/core/config/merge.js'
+
+/**
+ * @import { CommandRunner } from '../../src/core/cli/types.js'
+ */
 
 const HOUR_MS = 60 * 60 * 1000
 
@@ -147,7 +156,7 @@ async function fakeGlobalInstall(dir, opts = {}) {
   )
   /** @type {string[][]} */
   const calls = []
-  /** @type {import('../../src/core/cli/types.js').CommandRunner} */
+  /** @type {CommandRunner} */
   const runner = async (cmd, args) => {
     calls.push([cmd, ...args])
     if (args[0] === 'config') {
@@ -348,6 +357,12 @@ test('an unreadable config or status file is no answer, never a throw', async ()
     await fsp.mkdir(path.join(stateRoot, 'run', 'status.json'), { recursive: true })
     assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: {} }), undefined)
     assert.equal(previousBootLooksStuck(stateRoot), false)
+    // And the state file itself: `describeSelfUpdate` reads it inside
+    // `hyp status`, which has no guard of its own around the call.
+    await fsp.mkdir(path.join(stateRoot, 'run', 'self-update.json'), { recursive: true })
+    assert.deepEqual(readSelfUpdateState(stateRoot), {})
+    assert.equal(describeSelfUpdate({ stateRoot, env: {} }).json.auto_update, true)
+    await fsp.rmdir(path.join(stateRoot, 'run', 'self-update.json'))
 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('9.9.9')
@@ -380,6 +395,98 @@ test('hyp status reports the off switch from config before a boot has cached it'
     const on = describeSelfUpdate({ stateRoot, env: {} })
     assert.equal(on.json.auto_update, true)
     assert.equal(on.line, null)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('npm runs with the node bin directory on PATH, not the service manager default', async () => {
+  // launchd hands a user agent `/usr/bin:/bin:/usr/sbin:/sbin`, which has
+  // neither Homebrew nor nvm on it, and neither service-file writer
+  // renders an environment block. A bare `npm` would be ENOENT there.
+  const nodeBin = path.dirname(process.execPath)
+  const launchd = withNodeBinOnPath({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin' })
+  assert.equal(launchd.PATH?.split(path.delimiter)[0], nodeBin)
+  assert.ok(launchd.PATH?.includes('/usr/bin'))
+  // An empty environment still gets the directory, and an entry already
+  // in front is left alone rather than duplicated.
+  assert.equal(withNodeBinOnPath({}).PATH, nodeBin)
+  const already = withNodeBinOnPath({ PATH: `${nodeBin}:/usr/bin` })
+  assert.equal(already.PATH, `${nodeBin}:/usr/bin`)
+  assert.equal(withNodeBinOnPath({ PATH: `/usr/bin:${nodeBin}` }).PATH, `${nodeBin}:/usr/bin`)
+
+  // And the apply actually uses it.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-path-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {NodeJS.ProcessEnv[]} */
+    const envs = []
+    /** @type {CommandRunner} */
+    const runner = async (cmd, args, opts) => {
+      envs.push(opts.env ?? {})
+      if (args[0] === 'config') return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version: '1.1.0' })
+      )
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    const applied = await applySelfUpdate({
+      name: 'hypaware', version: '1.1.0', packageRoot, runner, env: { PATH: '/usr/bin:/bin' },
+    })
+    assert.equal(applied.applied, true)
+    assert.equal(envs.length, 2)
+    for (const env of envs) assert.equal(env.PATH?.split(path.delimiter)[0], nodeBin)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the apply lock outlives the longest legitimate hold and releases only its own', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-life-'))
+  try {
+    const lockPath = path.join(dir, 'run', 'self-update.lock')
+    // `applySelfUpdate` runs two npm commands, each capped at the npm
+    // timeout plus the SIGKILL grace. A stale window below that sum lets a
+    // second process steal a live holder's lock and start the concurrent
+    // `npm install -g` the lock exists to prevent.
+    assert.ok(APPLY_LOCK_STALE_MS > 2 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS))
+
+    const release = acquireApplyLock(dir)
+    assert.ok(release)
+    assert.equal(acquireApplyLock(dir), null)
+
+    // Simulate the reclaim-and-steal: another process replaces the file.
+    // The original holder's release must leave that lock alone.
+    await fsp.writeFile(lockPath, JSON.stringify({ token: 'someone-else', pid: 1 }))
+    release()
+    assert.equal(JSON.parse(await fsp.readFile(lockPath, 'utf8')).token, 'someone-else')
+
+    await fsp.rm(lockPath)
+    const second = acquireApplyLock(dir)
+    assert.ok(second)
+    second()
+    assert.equal(fs.existsSync(lockPath), false)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('status stops advertising an update the running version already satisfies', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-avail-'))
+  try {
+    // A manual `npm install -g` satisfies a pending update without
+    // clearing the flag the last probe wrote, and the next probe may be a
+    // day away.
+    writeSelfUpdateState(dir, { available: true, latest_version: '1.1.0' })
+    const stale = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.equal(stale.json.available, false)
+    assert.equal(stale.line, null)
+
+    writeSelfUpdateState(dir, { available: true, latest_version: '99.0.0' })
+    const real = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.equal(real.json.available, true)
+    assert.match(String(real.line), /99\.0\.0 available/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
