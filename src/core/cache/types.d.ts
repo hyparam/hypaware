@@ -348,6 +348,11 @@ export interface MaintenancePartitionReport {
   // When that attempt failed, as the cursor records it. Set whenever
   // `compactionAttemptFailed` is.
   compactionAttemptFailedAt?: string
+  // Files of the live generation released by the unreferenced-file sweep
+  // (LLP 0310): superseded by an in-place compaction or by snapshot
+  // expiry, and no longer named by any retained snapshot. Absent when the
+  // sweep removed nothing or did not run.
+  unreferencedFilesRemoved?: number
   // THIS tick's work on the partition ended in an error and the walk moved
   // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
   // off the cursor and says an EARLIER tick's attempt failed and nothing

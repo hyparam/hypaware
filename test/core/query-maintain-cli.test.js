@@ -95,15 +95,20 @@ async function tearOneDataFile(dir) {
 test('hyp query maintain writes a stderr line when the walk loses a partition', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maintain-cli-degraded-'))
   try {
-    const rows = Array.from({ length: 4 }, (_, i) => ({
-      id: i,
-      session_id: `s-${i}`,
-      attributes: `{"gateway":{"session":"s-${i}"}}`,
-    }))
-    await appendRowsToSourceTable(
-      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
-      { declaration: SESSION_DECLARATION }
-    )
+    // Two waves over the same sessions, so the owed retry is an in-place
+    // merge (LLP 0310) that reads the torn file instead of a floor
+    // reassessment that reads no data.
+    for (const wave of [0, 1]) {
+      const rows = Array.from({ length: 2 }, (_, i) => ({
+        id: wave * 2 + i,
+        session_id: `s-${i}`,
+        attributes: `{"gateway":{"session":"s-${i}","wave":${wave}}}`,
+      }))
+      await appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
+        { declaration: SESSION_DECLARATION }
+      )
+    }
     const dir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
     await plantStamplessRecord(dir, 4)
     await tearOneDataFile(dir)

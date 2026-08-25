@@ -46,19 +46,27 @@ const SESSION_DECLARATION = {
 }
 
 /**
+ * Two ingest waves over the same sessions, so every tuple holds two small
+ * files: the retry the planted record owes is then a real in-place merge
+ * (LLP 0310) that has to read the torn file, not a floor reassessment
+ * that reads no data at all.
+ *
  * @param {string} cacheRoot
  * @param {number} sessions
+ * @param {number} waves
  */
-async function seedNeediestPartition(cacheRoot, sessions) {
-  const rows = Array.from({ length: sessions }, (_, i) => ({
-    id: i,
-    session_id: `s-${i}`,
-    attributes: `{"gateway":{"session":"s-${i}"}}`,
-  }))
-  await appendRowsToSourceTable(
-    cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
-    { declaration: SESSION_DECLARATION }
-  )
+async function seedNeediestPartition(cacheRoot, sessions, waves = 2) {
+  for (let wave = 0; wave < waves; wave++) {
+    const rows = Array.from({ length: sessions }, (_, i) => ({
+      id: wave * sessions + i,
+      session_id: `s-${i}`,
+      attributes: `{"gateway":{"session":"s-${i}","wave":${wave}}}`,
+    }))
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
+      { declaration: SESSION_DECLARATION }
+    )
+  }
 }
 
 /**
@@ -153,7 +161,10 @@ function partitionReport(report, dataset) {
  */
 async function seedTornAndHealthy() {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maintain-walk-'))
-  await seedNeediestPartition(cacheRoot, 8)
+  // 4 sessions x 2 waves = 8 live files, so the planted baseline of 8
+  // still sits on the live count and only the missing writer stamp thaws
+  // the partition.
+  await seedNeediestPartition(cacheRoot, 4)
   await seedHealthyPartition(cacheRoot, 3)
   const torn = partitionDir(cacheRoot, 'ai_gateway_messages')
   await plantStamplessRecord(torn, 8)
@@ -306,15 +317,19 @@ test('an all-failing cache does not walk past its budget unbounded: it stops at 
   try {
     for (let i = 0; i < total; i++) {
       const dataset = `walk-budget-bad-${i}`
-      const rows = Array.from({ length: 4 }, (_, j) => ({
-        id: j,
-        session_id: `s-${j}`,
-        attributes: `{"gateway":{"session":"s-${j}"}}`,
-      }))
-      await appendRowsToSourceTable(
-        cacheRoot, dataset, ['source=claude'], SESSION_COLUMNS, rows,
-        { declaration: SESSION_DECLARATION }
-      )
+      // Two waves over the same sessions, so the owed retry is a merge
+      // that reads the torn file (see seedNeediestPartition).
+      for (const wave of [0, 1]) {
+        const rows = Array.from({ length: 2 }, (_, j) => ({
+          id: wave * 2 + j,
+          session_id: `s-${j}`,
+          attributes: `{"gateway":{"session":"s-${j}","wave":${wave}}}`,
+        }))
+        await appendRowsToSourceTable(
+          cacheRoot, dataset, ['source=claude'], SESSION_COLUMNS, rows,
+          { declaration: SESSION_DECLARATION }
+        )
+      }
       const dir = partitionDir(cacheRoot, dataset)
       await plantStamplessRecord(dir, 4)
       await tearOneDataFile(dir)

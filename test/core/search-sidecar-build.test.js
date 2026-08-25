@@ -259,8 +259,11 @@ test('a purge after the index build does not report coverage that can never be r
   const after = await cacheStatus({ cacheRoot })
   const purged = after.partitions.find((p) => p.dataset === DATASET)
   assert.ok(purged)
-  assert.equal(purged.dataFileCount, indexed.dataFileCount + 1, 'the delete file joins the data-file count')
-  assert.equal(purged.indexableFileCount, indexed.indexableFileCount, 'but not the indexable set')
+  // Status reads live counts from the snapshot summary (LLP 0310), so a
+  // stray delete file in the directory no longer joins the data-file count
+  // either; the coverage denominator was the original victim and stays put.
+  assert.equal(purged.dataFileCount, indexed.dataFileCount, 'the delete file does not join the live data-file count')
+  assert.equal(purged.indexableFileCount, indexed.indexableFileCount, 'nor the indexable set')
   assert.equal(purged.indexedFileCount, purged.indexableFileCount, 'so coverage still reads complete')
 })
 
@@ -293,14 +296,16 @@ test('an orphaned publish scratch counts as index bytes, not data bytes', async 
   await fs.writeFile(orphan, Buffer.alloc(dataBytes * 4))
 
   // Due by a hair on the real data bytes; not due at all if the orphan's
-  // bytes join the average.
+  // bytes join the average. The two files sit in different partition
+  // tuples, so a due tick cannot merge them: what proves dueness fired is
+  // the recorded floor verdict (LLP 0310), which only a due tick writes.
   const result = await maintainCache({
     cacheRoot,
     config: { compact_file_count: 1000, compact_avg_file_bytes: Math.ceil(avgBytes) + 1 },
   })
   const report = result.partitions.find((p) => p.dataset === DATASET)
   assert.ok(report)
-  assert.equal(report.compacted, true, 'the orphaned scratch did not inflate the average file size')
+  assert.equal(report.compactionIneffective, true, 'the orphaned scratch did not inflate the average file size')
 })
 
 test('a non-grep dataset is compacted without sidecars', async () => {

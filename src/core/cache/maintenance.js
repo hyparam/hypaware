@@ -4,11 +4,14 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
+import { parquetReadObjects } from 'hyparquet'
 import {
   fileCatalog,
   icebergExpireSnapshots,
+  icebergRewrite,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
+import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
 import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
 import { inferColumnType } from './migrate.js'
@@ -16,7 +19,7 @@ import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartiti
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
-import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
+import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
 import { buildSidecarsForTable, sweepIndexScratch } from '../search/sidecar_build.js'
 import { GREP_DATASET, sidecarPathFor } from '../search/searchable_columns.js'
@@ -36,7 +39,7 @@ import { isPlainObject } from '../util/json_util.js'
  *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
- * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
+ * @import { PartitionSpec, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -101,6 +104,10 @@ const ORPHAN_GRACE_MS = 60 * 60 * 1000
  * 2 - row groups stream into a file that closes on bytes written
  *     (LLP 0209#row-groups), so a rewrite converges toward
  *     `target_file_bytes` per partition tuple.
+ * 3 - routine dueness is served by an in-place subset rewrite that merges
+ *     only fragmented partition tuples (LLP 0310), so a verdict reached by
+ *     the whole-generation writer describes work this writer no longer
+ *     performs; every frozen partition is owed one cheap reassessment.
  *
  * Cursors written before this field existed carry no generation and are
  * therefore never equal to the running one, which is the correct reading:
@@ -108,7 +115,26 @@ const ORPHAN_GRACE_MS = 60 * 60 * 1000
  *
  * @ref LLP 0217#retry-on-writer-change [implements]: the stamp that makes an ineffective verdict retryable exactly once.
  */
-const COMPACTION_WRITER_GENERATION = 2
+const COMPACTION_WRITER_GENERATION = 3
+
+/**
+ * How many in-place merge rounds one maintenance tick may run on one
+ * partition. Each round is bounded by `compact_batch_bytes` of victim
+ * data (the rewrite materializes the victims' rows in memory), so the
+ * cap bounds a first pass over a deeply fragmented backlog without
+ * letting it consume the tick. Fragmentation left after the last round
+ * drains on later ticks, once new flushes make the partition due again.
+ */
+const MAX_INPLACE_COMPACT_ROUNDS = 8
+
+/**
+ * How many `vN.metadata.json` versions the unreferenced-file sweep keeps.
+ * In-place commits stopped retiring whole generation directories, so old
+ * metadata versions no longer die with their directory; without a trim
+ * they accumulate one per commit forever. The kept window is for
+ * debugging a recent commit; nothing reads versions behind the hint.
+ */
+const METADATA_VERSIONS_KEPT = 20
 
 /**
  * The most of one maintenance tick's budget the grep sidecar build may
@@ -485,7 +511,17 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   const liveDir = path.join(r.path, layout.liveDir)
   if (!tableExists(liveDir)) return r
 
-  const dataFilesBefore = countDataFiles(liveDir)
+  // Live counts from the current snapshot's summary where the table keeps
+  // one, not from the directory. In-place compaction (LLP 0310) leaves
+  // superseded data files on disk until snapshot retention releases them,
+  // so a directory count over-reads a freshly compacted partition and the
+  // unreferenced-file sweep would move it back down later - the baseline
+  // gate below would read both moves as growth and re-flag the partition.
+  // The summary tracks exactly the live file set, so the gate, the dueness
+  // heuristics, and the recorded verdicts all move only when data does.
+  // @ref LLP 0310#live-count-units [implements]: gate and verdicts measure live files, not directory entries.
+  const liveStats = layout.kind === 'source-table' ? await liveTableStats(liveDir) : null
+  const dataFilesBefore = liveStats ? liveStats.dataFiles : countDataFiles(liveDir)
   r.dataFilesBefore = dataFilesBefore
   r.dataFilesAfter = dataFilesBefore
 
@@ -520,7 +556,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // size heuristics fire), so gating the expensive re-settle scan behind
     // this check means the common "recognized, nothing to scan for" tick
     // never pays for one.
-    const compactionDue = opts.force || ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg))
+    const compactionDue = opts.force || ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
@@ -602,7 +638,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       } else if (opts.dryRun) {
         r.compacted = true
       } else {
-        /** @type {Awaited<ReturnType<typeof compactGeneration>>} */
+        /** @type {Awaited<ReturnType<typeof compactGeneration>> | Awaited<ReturnType<typeof compactLiveFilesInPlace>>} */
         let result
         try {
           result = await withPartitionMutationLock(r.path, async () => {
@@ -612,6 +648,18 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             const lockedCursor = readCursorSync(r.path)
             const lockedLayout = generationLayout(lockedCursor)
             const lockedLiveDir = path.join(r.path, lockedLayout.liveDir)
+            // @ref LLP 0310#in-place-by-default [implements]: routine dueness
+            // on a source-table generation is served by an in-place subset
+            // rewrite of its fragmented tuples, so cost scales with what
+            // fragmented rather than with the table. The generation-swap
+            // rewrite remains for --force, for the re-settle sweep (it needs
+            // the whole-generation scan to collapse split twins), for the
+            // legacy epoch layout, and for victims whose fallback rows the
+            // settle hook can actually upgrade.
+            if (!opts.force && !hasResettle && lockedLayout.kind === 'source-table') {
+              const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
+              if (inPlace !== 'settle-required') return inPlace
+            }
             const lockedTableInfo = await loadCompactionTableInfo(lockedLiveDir)
             return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo)
           })
@@ -643,7 +691,21 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           }
           throw err
         }
-        if (result) {
+        if (result && 'noop' in result && result.noop) {
+          // Due by the heuristics, but nothing is mergeable: every tuple is
+          // already at one file (the identity-partitioning floor). The
+          // verdict cursor the helper wrote makes the next ticks skip for
+          // this stated reason instead of re-listing the table every hour.
+          // Reported only above one file, exactly as {@link rewriteReducedFiles}
+          // reads the recorded verdict: a lone-file partition is maximally
+          // compact, not unshrinkable.
+          // @ref LLP 0310#floor-is-a-verdict [implements]: an empty victim set is the ineffectiveness verdict, reached without a rewrite.
+          if (result.dataFilesBefore > 1) {
+            r.compactionIneffective = true
+            r.compactionIneffectiveFiles = result.dataFilesBefore
+            getActiveSpan()?.setAttribute('compaction_ineffective', true)
+          }
+        } else if (result) {
           r.compacted = true
           if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
           r.rowCount = result.rowCount
@@ -663,6 +725,24 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         }
       }
     }
+  }
+
+  // Release what nothing references any more. In-place compaction and
+  // snapshot expiry both stop short of deleting files (a retained snapshot
+  // may still read them), so the live generation accumulates superseded
+  // data files and metadata until this sweep finds them unreferenced by
+  // every retained snapshot. Best-effort by construction: a file missed
+  // this tick is caught on a later one, and a sweep failure must not fail
+  // the partition's report.
+  // @ref LLP 0310#unreferenced-sweep [implements]: snapshot retention is the reader-safety window; the sweep only reclaims what fell out of it.
+  if (!opts.dryRun && layout.kind === 'source-table') {
+    try {
+      const removed = await sweepUnreferencedTableFiles(liveDir)
+      if (removed > 0) {
+        r.unreferencedFilesRemoved = removed
+        getActiveSpan()?.setAttribute('unreferenced_files_removed', removed)
+      }
+    } catch { /* swept again next tick */ }
   }
 
   return r
@@ -688,13 +768,18 @@ export async function cacheStatus({ cacheRoot }) {
     const layout = generationLayout(cursor)
     const liveDir = path.join(part.path, layout.liveDir)
 
+    // Live count from the snapshot summary where the table keeps one: an
+    // in-place compaction's superseded files sit in the directory until
+    // snapshot retention releases them, and status must not report them
+    // as live fragmentation (LLP 0310#live-count-units).
+    const liveStats = layout.kind === 'source-table' ? await liveTableStats(liveDir) : null
     /** @type {CacheStatusPartition} */
     const status = {
       dataset: part.dataset,
       partition: part.partition,
       epoch: cursor.epoch,
       rowCount: part.rowCount,
-      dataFileCount: countDataFiles(liveDir),
+      dataFileCount: liveStats ? liveStats.dataFiles : countDataFiles(liveDir),
       metadataBytes: measureMetadataDir(liveDir),
       snapshotCount: countSnapshots(liveDir),
     }
@@ -774,19 +859,47 @@ async function expireSnapshots(tableDir, cfg, opts) {
 /**
  * @param {string} tableDir
  * @param {MaintenanceConfig} cfg
+ * @param {{ dataFiles: number, dataBytes: number } | null} [liveStats] live counts from the snapshot summary; directory counts are the fallback
  * @returns {boolean}
  */
-function needsCompaction(tableDir, cfg) {
-  const dataFiles = countDataFiles(tableDir)
+function needsCompaction(tableDir, cfg, liveStats) {
+  const dataFiles = liveStats ? liveStats.dataFiles : countDataFiles(tableDir)
   if (dataFiles > cfg.compact_file_count) return true
 
-  const totalDataBytes = measureDataDir(tableDir)
+  const totalDataBytes = liveStats ? liveStats.dataBytes : measureDataDir(tableDir)
   if (dataFiles > 0 && totalDataBytes / dataFiles < cfg.compact_avg_file_bytes) return true
 
   const metadataBytes = measureMetadataDir(tableDir)
   if (metadataBytes > 64 * 1024 * 1024) return true
 
   return false
+}
+
+/**
+ * Live file count and data bytes for a source-table generation, read from
+ * the current snapshot's summary. Null when the table, its metadata, or
+ * the summary totals are missing (older snapshots predate the totals),
+ * in which case callers fall back to directory counts.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<{ dataFiles: number, dataBytes: number } | null>}
+ */
+async function liveTableStats(tableDir) {
+  if (!tableExists(tableDir)) return null
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+    const currentId = metadata['current-snapshot-id']
+    if (currentId === undefined || currentId === null || Number(currentId) === -1) return null
+    const snapshot = (metadata.snapshots ?? []).find((s) => BigInt(s['snapshot-id']) === BigInt(currentId))
+    const summary = snapshot?.summary
+    const dataFiles = Number(summary?.['total-data-files'])
+    const dataBytes = Number(summary?.['total-files-size'])
+    if (!Number.isFinite(dataFiles) || !Number.isFinite(dataBytes)) return null
+    return { dataFiles, dataBytes }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -1108,6 +1221,345 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo) {
     dataFiles: newDataFiles,
     bytesWritten: streamed?.bytesWritten ?? 0,
   }
+}
+
+/* ----- In-place subset compaction (LLP 0310) -----
+ *
+ * The generation-swap rewrite above reads and rewrites the whole table,
+ * so on a large partition every hour of new flushes cost a full-table
+ * rewrite. Routine dueness is instead served here: merge only the
+ * fragmented partition tuples, committed as a `replace` snapshot into the
+ * SAME generation directory through icebird's files-scoped rewrite. Cost
+ * scales with what fragmented; converged tuples and the identity-
+ * partitioning floor (one file per tuple) are never re-read. */
+
+/**
+ * Merge the live generation's fragmented tuples in place.
+ *
+ * Returns `'settle-required'` when the victims carry committed gateway
+ * fallback rows and a settle context exists: only the whole-generation
+ * rewrite can collapse a split twin pair (the native twin may live in a
+ * file this pass would not read), so the caller falls through to it.
+ *
+ * A `noop` result means the dueness heuristics fired but no tuple holds
+ * two mergeable files - the partition sits on its floor. The verdict
+ * cursor is written here so later ticks skip for that stated reason.
+ *
+ * @param {string} partitionDir
+ * @param {string} liveDir
+ * @param {PartitionCursor} cursor
+ * @param {MaintenanceConfig} cfg
+ * @param {SettleContext | null} settle
+ * @returns {Promise<{ noop?: boolean, newEpoch?: number, rowCount: number, dataFilesBefore: number, dataFiles: number, bytesWritten?: number } | 'settle-required' | null>}
+ */
+async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settle) {
+  if (!tableExists(liveDir)) return null
+  const { resolver, lister } = await createLocalIcebergIO()
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  const tableUrl = tableUrlForDir(liveDir)
+
+  const statsBefore = await liveTableStats(liveDir)
+  const dataFilesBefore = statsBefore?.dataFiles ?? countDataFiles(liveDir)
+
+  let merged = false
+  for (let round = 0; round < MAX_INPLACE_COMPACT_ROUNDS; round++) {
+    const live = await listLiveDataFiles(liveDir)
+    const victims = selectInPlaceVictims(live, cfg)
+    if (victims.length === 0) break
+    // Only the first round can see committed fallback rows: later rounds'
+    // victims are files this tick just wrote, and the rewrite that wrote
+    // them read with deletes applied and changed no row content. The
+    // escape fires only for fallback rows the settle hook can actually
+    // upgrade: an unmatchable fallback (its transcript line never lands)
+    // must not buy a whole-generation rewrite on every growth tick, which
+    // is LLP 0027's own protection restated for this path - measured live,
+    // one permanently-unmatchable row re-created the hourly full rewrite
+    // this decision exists to retire.
+    if (round === 0 && settle && await victimFallbacksSettleable(victims, resolver, settle)) {
+      return 'settle-required'
+    }
+    await icebergRewrite({ catalog, tableUrl, files: victims })
+    merged = true
+  }
+
+  if (!merged) {
+    await writeCursor(partitionDir, inPlaceVerdictCursor(cursor, dataFilesBefore))
+    return { noop: true, rowCount: cursor.rowCount, dataFilesBefore, dataFiles: dataFilesBefore }
+  }
+
+  const statsAfter = await liveTableStats(liveDir)
+  const dataFilesAfter = statsAfter?.dataFiles ?? countDataFiles(liveDir)
+  await writeCursor(partitionDir, inPlaceCompactedCursor(cursor, { dataFilesBefore, dataFilesAfter }))
+  return { rowCount: cursor.rowCount, dataFilesBefore, dataFiles: dataFilesAfter }
+}
+
+/**
+ * Pick the data files one in-place merge round rewrites.
+ *
+ * A file is a merge candidate only when it is small (below half of
+ * `target_file_bytes`: two such files still merge to at most the target,
+ * and a file past that mark is already big enough that rewriting it buys
+ * little) AND shares its partition tuple with another candidate: a data
+ * file cannot span tuples (LLP 0209#tuple-bound), so a tuple's lone file
+ * is its floor and healthy big files have nothing to gain.
+ * Tuples are taken whole - splitting one across rounds would rewrite the
+ * same rows twice - and the round stops adding tuples once
+ * `compact_batch_bytes` of victim data is selected, because the rewrite
+ * materializes the victims' rows in memory. A single tuple whose small
+ * files together exceed that budget is skipped entirely: only the
+ * streaming whole-generation rewrite can merge it without unbounded heap.
+ *
+ * @ref LLP 0310#victim-selection [implements]: small files, whole tuples, byte-bounded rounds.
+ * @param {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number }[]} liveFiles
+ * @param {MaintenanceConfig} cfg
+ * @returns {string[]}
+ */
+function selectInPlaceVictims(liveFiles, cfg) {
+  /** @type {Map<string, { paths: string[], bytes: number }>} */
+  const tuples = new Map()
+  for (const file of liveFiles) {
+    if (file.sizeBytes >= cfg.target_file_bytes / 2) continue
+    const key = JSON.stringify(file.partition ?? {}, (_, v) => typeof v === 'bigint' ? String(v) : v)
+    const group = tuples.get(key) ?? { paths: [], bytes: 0 }
+    group.paths.push(file.filePath)
+    group.bytes += file.sizeBytes
+    tuples.set(key, group)
+  }
+
+  /** @type {string[]} */
+  const victims = []
+  let budget = cfg.compact_batch_bytes
+  for (const group of tuples.values()) {
+    if (group.paths.length < 2) continue
+    if (group.bytes > cfg.compact_batch_bytes) continue
+    if (group.bytes > budget) continue
+    victims.push(...group.paths)
+    budget -= group.bytes
+  }
+  return victims
+}
+
+/**
+ * Do the victim files hold a committed gateway fallback row that the
+ * dataset's settle hook can upgrade RIGHT NOW? A cheap `attributes` scan
+ * finds candidate files; only those get a full read, and their fallback
+ * rows are offered to the settle hook in memory. Following
+ * {@link resettleFallbackRows}' convention, an upgraded row comes back as
+ * a new object; a hook that returns every row unchanged has no twin to
+ * collapse, so the caller merges in place and the rows survive verbatim.
+ * Nothing here is committed: the hook's real run happens inside the
+ * whole-generation rewrite this answer routes to.
+ *
+ * A file that cannot be read answers false: the merge that follows will
+ * surface the real error, where the failure path records the spent
+ * attempt (LLP 0218).
+ *
+ * @param {string[]} filePaths
+ * @param {Resolver} resolver
+ * @param {SettleContext} settle
+ * @returns {Promise<boolean>}
+ */
+async function victimFallbacksSettleable(filePaths, resolver, settle) {
+  for (const filePath of filePaths) {
+    /** @type {Record<string, unknown>[]} */
+    let fallbackRows
+    try {
+      const probe = await Promise.resolve(resolver.reader(filePath))
+      const attrs = /** @type {Record<string, unknown>[]} */ (
+        await parquetReadObjects({ file: probe, columns: ['attributes'] })
+      )
+      if (!attrs.some(isGatewayFallbackRow)) continue
+      const file = await Promise.resolve(resolver.reader(filePath))
+      const rows = /** @type {Record<string, unknown>[]} */ (
+        await parquetReadObjects({ file })
+      )
+      fallbackRows = rows.filter(isGatewayFallbackRow)
+    } catch {
+      // Unreadable or attributes-less file: not evidence of a fallback row.
+      continue
+    }
+    if (fallbackRows.length === 0) continue
+    try {
+      const out = await settle.settle(fallbackRows, { storage: settle.storage })
+      if (
+        Array.isArray(out) &&
+        out.length === fallbackRows.length &&
+        out.some((row, i) => row !== fallbackRows[i])
+      ) {
+        return true
+      }
+    } catch {
+      // A throwing hook settles nothing this tick; degrade to in-place.
+    }
+  }
+  return false
+}
+
+/**
+ * Cursor after an in-place merge: same generation, same rows, a fresh
+ * compaction record in live-count units. No `previousTableDir` - nothing
+ * was swapped, so there is nothing for the retirement sweep to reclaim;
+ * the superseded files are released by the unreferenced-file sweep once
+ * snapshot retention lets go of them.
+ *
+ * @param {PartitionCursor} cursor
+ * @param {{ dataFilesBefore: number, dataFilesAfter: number }} outcome
+ * @returns {PartitionCursor}
+ */
+function inPlaceCompactedCursor(cursor, outcome) {
+  return {
+    ...cursor,
+    compaction: {
+      compactedAt: new Date().toISOString(),
+      ...compactionOutcomeRecord(outcome),
+    },
+  }
+}
+
+/**
+ * Cursor for a partition the dueness heuristics flag but whose every
+ * tuple already sits at one file: the ineffectiveness verdict, reached by
+ * inspection instead of by a rewrite that reproduces the layout. Records
+ * before == after, so {@link compactionKnownIneffective} reports it and
+ * the baseline gate skips the partition until new data flushes.
+ *
+ * @ref LLP 0310#floor-is-a-verdict [implements]: the verdict costs a listing, not a rewrite.
+ * @param {PartitionCursor} cursor
+ * @param {number} liveDataFiles
+ * @returns {PartitionCursor}
+ */
+function inPlaceVerdictCursor(cursor, liveDataFiles) {
+  const compaction = isPlainObject(cursor.compaction) ? cursor.compaction : {}
+  /** @type {Record<string, unknown>} */
+  const next = {
+    ...compaction,
+    ...compactionOutcomeRecord({ dataFilesBefore: liveDataFiles, dataFilesAfter: liveDataFiles }),
+  }
+  // The verdict settles whatever a failed attempt left hanging, exactly as
+  // a foreign-replace recognition does (LLP 0218#report-the-spent-attempt).
+  delete next.attemptFailedAt
+  return { ...cursor, compaction: next }
+}
+
+/**
+ * Delete the live generation's files that no retained snapshot references.
+ *
+ * The referenced set is every manifest list, manifest, and data/delete
+ * file reachable from ANY snapshot still in the table metadata, so a file
+ * is only reclaimed once snapshot expiry has released every snapshot that
+ * could read it - retention is the reader-safety window. Two guards on
+ * top: nothing younger than {@link ORPHAN_GRACE_MS} is touched (a
+ * concurrent append stages its files before its commit references them),
+ * and metadata versions keep their newest {@link METADATA_VERSIONS_KEPT}
+ * regardless. A data file's grep sidecar dies with it.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<number>} files removed
+ */
+async function sweepUnreferencedTableFiles(tableDir) {
+  if (!tableExists(tableDir)) return 0
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+  const snapshots = metadata.snapshots ?? []
+  if (snapshots.length === 0) return 0
+
+  /** @type {Set<string>} */
+  const referenced = new Set()
+  /** @type {Set<string>} */
+  const manifestPathsSeen = new Set()
+  for (const snapshot of snapshots) {
+    const listPath = snapshot['manifest-list']
+    if (!listPath) continue
+    referenced.add(path.basename(listPath))
+    /** @type {{ manifest_path: string, manifest_length?: number | bigint }[]} */
+    let manifests
+    try {
+      manifests = /** @type {any} */ (await fetchAvroRecords(listPath, resolver))
+    } catch {
+      // An unreadable manifest list means an unknown referenced set: keep
+      // everything rather than delete a file a snapshot may still name.
+      return 0
+    }
+    for (const manifest of manifests) {
+      referenced.add(path.basename(manifest.manifest_path))
+      if (manifestPathsSeen.has(manifest.manifest_path)) continue
+      manifestPathsSeen.add(manifest.manifest_path)
+      /** @type {{ data_file: { file_path: string } }[]} */
+      let entries
+      try {
+        entries = /** @type {any} */ (
+          await fetchAvroRecords(manifest.manifest_path, resolver, Number(manifest.manifest_length))
+        )
+      } catch {
+        return 0
+      }
+      // Every status, including DELETED: an entry that still appears in a
+      // retained snapshot's manifest names a file a time-travel read of
+      // that snapshot's ancestors may resolve. Conservative is cheap here.
+      for (const entry of entries) referenced.add(path.basename(entry.data_file.file_path))
+    }
+  }
+
+  let removed = 0
+  const now = Date.now()
+  /** @param {string} filePath */
+  const removeStale = (filePath) => {
+    try {
+      if (now - fs.statSync(filePath).mtimeMs <= ORPHAN_GRACE_MS) return
+      fs.rmSync(filePath, { force: true })
+      removed++
+    } catch { /* stat/remove race: a later tick retries */ }
+  }
+
+  const dataDir = path.join(tableDir, 'data')
+  /** @type {Set<string>} */
+  let dataNames
+  try {
+    dataNames = new Set(fs.readdirSync(dataDir))
+  } catch {
+    dataNames = new Set()
+  }
+  for (const name of dataNames) {
+    if (name.endsWith('.index.parquet')) {
+      // A sidecar lives and dies with its data file.
+      const base = name.slice(0, -'.index.parquet'.length) + '.parquet'
+      if (!dataNames.has(base)) removeStale(path.join(dataDir, name))
+      continue
+    }
+    if (!name.endsWith('.parquet') && !name.endsWith('.puffin')) continue
+    if (referenced.has(name)) continue
+    removeStale(path.join(dataDir, name))
+    const sidecar = sidecarPathFor(name)
+    if (dataNames.has(sidecar)) removeStale(path.join(dataDir, sidecar))
+  }
+
+  const metadataDir = path.join(tableDir, 'metadata')
+  /** @type {string[]} */
+  let metaNames
+  try {
+    metaNames = fs.readdirSync(metadataDir)
+  } catch {
+    metaNames = []
+  }
+  const versions = metaNames
+    .map((name) => ({ name, version: /^v(\d+)\.metadata\.json$/.exec(name)?.[1] }))
+    .filter((entry) => entry.version !== undefined)
+    .sort((a, b) => Number(b.version) - Number(a.version))
+  const keptVersions = new Set(versions.slice(0, METADATA_VERSIONS_KEPT).map((entry) => entry.name))
+  for (const name of metaNames) {
+    if (name === 'version-hint.text') continue
+    if (/\.metadata\.json$/.test(name)) {
+      if (!/^v\d+\.metadata\.json$/.test(name)) continue
+      if (keptVersions.has(name)) continue
+      removeStale(path.join(metadataDir, name))
+      continue
+    }
+    if (!name.endsWith('.avro')) continue
+    if (referenced.has(name)) continue
+    removeStale(path.join(metadataDir, name))
+  }
+
+  return removed
 }
 
 /* ----- Re-settle sweep (LLP 0027 "Re-settle sweep") -----
