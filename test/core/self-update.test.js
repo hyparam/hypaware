@@ -58,6 +58,36 @@ test('resolveRegistryUrl honors npm_config_registry, strips trailing slash, igno
   assert.equal(resolveRegistryUrl({ npm_config_registry: 'file:///nope' }), 'https://registry.npmjs.org')
 })
 
+test('resolveRegistryUrl trusts http only on this machine', () => {
+  // A local Verdaccio over http is a normal dev and test setup and stays
+  // honored, brackets and all.
+  for (const local of [
+    'http://localhost:4873',
+    'http://127.0.0.1:4873',
+    'http://127.1.2.3:4873',
+    'http://[::1]:4873',
+    'http://npm.localhost',
+  ]) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: local + '/' }), local)
+  }
+  // Off-box plain http is not believed: the probe's answer decides
+  // whether this install ever updates again. It degrades to the public
+  // registry, the same place a .npmrc-only private registry already
+  // probes, rather than to a spoofable "you are already current".
+  for (const remote of [
+    'http://npm.corp.example',
+    'http://npm.corp.example:8080/path',
+    'http://192.168.1.9:4873',
+    'http://localhost.evil.example',
+  ]) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: remote }), 'https://registry.npmjs.org')
+  }
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'https://npm.corp.example' }),
+    'https://npm.corp.example'
+  )
+})
+
 test('classifySelfProvenance tells npx, checkout, and global-like roots apart', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-provenance-'))
   try {
@@ -606,6 +636,91 @@ test('a held apply lock stops a second process from racing npm install -g', asyn
     const after = acquireApplyLock(dir)
     assert.ok(after)
     after?.()
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline probe failure stays out of the status text and in the json', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-probe-quiet-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    // A laptop on a plane must not grow a degraded line on every status.
+    const described = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.equal(described.line, null)
+    assert.match(String(described.json.error), /^probe_failed/)
+
+    // An apply failure is a real, sticky problem and still speaks up.
+    writeSelfUpdateState(dir, { error: 'apply_failed: npm_install_failed' })
+    assert.match(describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? '', /degraded/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unrecognized pass option cannot silently suppress the apply', async () => {
+  // `apply: false` was a dead affordance no caller ever set; it is gone,
+  // and nothing in the option bag may quietly turn an update into a
+  // no-op again.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-no-apply-opt-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('1.1.0')
+    const result = await runSelfUpdatePass(/** @type {any} */ ({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, apply: false,
+    }))
+    assert.equal(result.action, 'updated')
+    assert.ok(calls.some((c) => c.includes('install')))
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unusable run directory is a real error, not "another update is already running"', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-broken-'))
+  try {
+    // A plain file where the run directory belongs. The lock can never be
+    // taken here and no rival process exists to blame, so reporting this
+    // as contention sends an operator hunting a process that is not there.
+    const wrongType = path.join(dir, 'wrong-type')
+    await fsp.mkdir(wrongType, { recursive: true })
+    await fsp.writeFile(path.join(wrongType, 'run'), 'not a directory')
+    assert.throws(() => acquireApplyLock(wrongType), /ENOTDIR|EEXIST|ENOENT/)
+
+    // And a run directory this user cannot write: the lock open fails
+    // EACCES, which is this machine's problem, not another process's.
+    const readOnly = path.join(dir, 'read-only')
+    await fsp.mkdir(path.join(readOnly, 'run'), { recursive: true })
+    await fsp.chmod(path.join(readOnly, 'run'), 0o555)
+    try {
+      let writable = false
+      try {
+        fs.closeSync(fs.openSync(path.join(readOnly, 'run', 'probe'), 'wx'))
+        writable = true
+      } catch { /* the permission bits bite, as intended */ }
+      // Running as root ignores the bits; then there is nothing to assert.
+      if (!writable) assert.throws(() => acquireApplyLock(readOnly), /EACCES|EPERM|EROFS/)
+    } finally {
+      await fsp.chmod(path.join(readOnly, 'run'), 0o755)
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lock contention still reads as contention, and still fails closed', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-eexist-'))
+  try {
+    const held = acquireApplyLock(dir)
+    assert.ok(held)
+    assert.equal(acquireApplyLock(dir), null)
+    held?.()
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

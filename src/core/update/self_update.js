@@ -191,16 +191,45 @@ function parseSemver(value) {
 }
 
 /**
+ * Is this registry override safe to believe? https always is. Plain
+ * http is trusted only on this machine, where a local Verdaccio is a
+ * normal dev and test setup and nothing sits on the wire. Off-box http
+ * is not: the probe's answer decides whether this install ever updates
+ * again, so a spoofable "you are already current" is a mute button for
+ * anyone on the path.
+ *
+ * @param {string} raw
+ * @returns {boolean}
+ */
+function registryUrlIsTrusted(raw) {
+  /** @type {URL} */
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    return false
+  }
+  if (url.protocol === 'https:') return true
+  // `hostname` keeps the brackets on an IPv6 literal.
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  return host === 'localhost' || host.endsWith('.localhost') ||
+    host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
+}
+
+/**
  * The npm registry to probe: the standard `npm_config_registry` env
- * override when set, the public registry otherwise. Reading `.npmrc`
- * is deliberately out of scope for this import-light module.
+ * override when set and trusted, the public registry otherwise.
+ * Reading `.npmrc` is deliberately out of scope for this import-light
+ * module, so a private registry configured only there already probes
+ * the default; an untrusted override degrading to that same default is
+ * a path the module already walks, not a new failure mode.
  *
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
 export function resolveRegistryUrl(env) {
   const raw = env.npm_config_registry
-  if (typeof raw === 'string' && /^https?:\/\//.test(raw)) {
+  if (typeof raw === 'string' && registryUrlIsTrusted(raw)) {
     return raw.replace(/\/+$/, '')
   }
   return DEFAULT_REGISTRY
@@ -417,7 +446,11 @@ function readVersionAt(root) {
  * same moment, and two npm global installs racing over one package
  * directory is the single failure that can leave a machine with no
  * runnable kernel at all. Returns a release function, or null when another
- * process holds the lock.
+ * process holds the lock. Anything that is not lock contention (an
+ * unwritable run directory, a read-only filesystem) throws instead of
+ * returning null: it still fails closed, but reporting it as "another
+ * update is already running" sends the operator looking for a process
+ * that does not exist.
  *
  * @param {string} stateRoot
  * @returns {(() => void) | null}
@@ -425,11 +458,7 @@ function readVersionAt(root) {
 export function acquireApplyLock(stateRoot) {
   const runDir = daemonRunDir(stateRoot)
   const lockPath = path.join(runDir, 'self-update.lock')
-  try {
-    fs.mkdirSync(runDir, { recursive: true })
-  } catch {
-    return null
-  }
+  fs.mkdirSync(runDir, { recursive: true })
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -449,7 +478,10 @@ export function acquireApplyLock(stateRoot) {
         } catch { return }
         try { fs.unlinkSync(lockPath) } catch { /* already gone */ }
       }
-    } catch {
+    } catch (err) {
+      // Only EEXIST means somebody else holds it. EACCES, EROFS and the
+      // rest are this machine's problem and belong in front of a human.
+      if (errnoCode(err) !== 'EEXIST') throw err
       if (attempt > 0) return null
       /** @type {number | null} */
       let ageMs = null
@@ -459,6 +491,15 @@ export function acquireApplyLock(stateRoot) {
     }
   }
   return null
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string | undefined}
+ */
+function errnoCode(err) {
+  const code = /** @type {{ code?: unknown }} */ (err)?.code
+  return typeof code === 'string' ? code : undefined
 }
 
 /**
@@ -487,7 +528,6 @@ function realpathOrSelf(p) {
  *   configPath?: string,
  *   autoUpdate?: boolean,
  *   force?: boolean,
- *   apply?: boolean,
  *   packageRoot?: string,
  *   runner?: CommandRunner,
  *   fetchImpl?: typeof fetch,
@@ -558,13 +598,15 @@ export async function runSelfUpdatePass(opts = {}) {
     })
     log('self_update.checked', { latest_version: latest, available })
     if (!available) return { action: 'checked', latest }
-    if (opts.apply === false) return { action: 'checked', reason: 'update_available', latest }
     if (provenance !== 'global-candidate') {
       return { action: 'checked', reason: provenance, latest }
     }
 
     // Single-flight across processes, not just within one: the daemon's
-    // lane and a hand-typed `hyp update` can arrive together.
+    // lane and a hand-typed `hyp update` can arrive together. A lock this
+    // cannot take for a reason other than contention throws, landing on
+    // the outer catch with its errno in the log rather than reporting a
+    // rival process that does not exist.
     const releaseLock = acquireApplyLock(stateRoot)
     if (!releaseLock) {
       log('self_update.apply_locked', { latest_version: latest })
@@ -661,7 +703,11 @@ export function describeSelfUpdate(opts) {
   if (autoUpdate === false) {
     return { line: 'self-update: off (auto_update is false)', json }
   }
-  if (state.error) {
+  // A probe failure is usually just a laptop off the network, and it
+  // clears itself on the next successful check. Rendering it would put
+  // a degraded line on every `hyp status` for the length of a flight.
+  // It stays in `json` for anyone actually diagnosing the updater.
+  if (state.error && !state.error.startsWith('probe_failed')) {
     return {
       line: `self-update: degraded (${state.error}); run 'hyp update' or 'npm install -g ${identity.name}@latest'`,
       json,
