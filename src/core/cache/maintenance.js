@@ -523,7 +523,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   // heuristics, and the recorded verdicts all move only when data does.
   // @ref LLP 0310#live-count-units [implements]: gate and verdicts measure live files, not directory entries.
   const liveStats = layout.kind === 'source-table' ? await liveTableStats(liveDir) : null
-  const dataFilesBefore = liveStats ? liveStats.dataFiles : countDataFiles(liveDir)
+  const dataFilesBefore = liveStats?.dataFiles ?? countDataFiles(liveDir)
   r.dataFilesBefore = dataFilesBefore
   r.dataFilesAfter = dataFilesBefore
 
@@ -633,7 +633,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       // A due re-partition also outranks the recognition: a foreign sorted
       // replace under the OLD spec is still on the old spec.
-      if (!opts.force && !repartitionDue && foreignSortedReplace(tableInfo)) {
+      if (!opts.force && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
         // The counter proves a rebaseline happened at all, but it carries
         // only the dataset; tagging the enclosing maintenance.partition span
         // names the partition, so a trace query finds which day re-baselined
@@ -656,7 +656,12 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         }
       } else if (opts.dryRun) {
         r.compacted = true
-        if (repartitionDue) r.repartitioned = true
+        // Preview what the real run would actually do, not what it was
+        // asked to do: the migration only applies if the target layout can
+        // be derived from the metadata already in hand, exactly as below.
+        if (repartitionDue && declaration && repartitionTargetLayout(declaration, tableInfo)) {
+          r.repartitioned = true
+        }
       } else {
         /** @type {Awaited<ReturnType<typeof compactGeneration>> | Awaited<ReturnType<typeof compactLiveFilesInPlace>>} */
         let result
@@ -691,6 +696,20 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             const targetLayout = repartitionDue && declaration
               ? repartitionTargetLayout(declaration, lockedTableInfo)
               : undefined
+            // @ref LLP 0311#migration [constrained-by]: a due re-partition
+            // that cannot derive its target layout (unreadable metadata, so
+            // no schema) must not fall through to a swap under the recorded
+            // layout. That swap converges nothing the migration wanted, and
+            // `repartitionDue` is what made this partition due at all, so it
+            // is still due next tick: the partition would pay a whole-
+            // generation rewrite every tick, forever, and with no schema in
+            // hand the replacement generation is written with no partition
+            // spec at all. Defer instead, and let a tick that can read the
+            // metadata do it; `--force` still rewrites.
+            if (!opts.force && repartitionDue && declaration && !targetLayout) {
+              getActiveSpan()?.setAttribute('repartition_deferred', true)
+              return null
+            }
             repartitionApplied = targetLayout !== undefined
             return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout)
           })
@@ -826,7 +845,7 @@ export async function cacheStatus({ cacheRoot }) {
       partition: part.partition,
       epoch: cursor.epoch,
       rowCount: part.rowCount,
-      dataFileCount: liveStats ? liveStats.dataFiles : countDataFiles(liveDir),
+      dataFileCount: liveStats?.dataFiles ?? countDataFiles(liveDir),
       metadataBytes: measureMetadataDir(liveDir),
       snapshotCount: countSnapshots(liveDir),
     }
@@ -906,14 +925,14 @@ async function expireSnapshots(tableDir, cfg, opts) {
 /**
  * @param {string} tableDir
  * @param {MaintenanceConfig} cfg
- * @param {{ dataFiles: number, dataBytes: number } | null} [liveStats] live counts from the snapshot summary; directory counts are the fallback
+ * @param {{ dataFiles: number | null, dataBytes: number | null } | null} [liveStats] live counts from the snapshot summary; directory counts are the fallback, including when the summary carries no usable totals
  * @returns {boolean}
  */
 function needsCompaction(tableDir, cfg, liveStats) {
-  const dataFiles = liveStats ? liveStats.dataFiles : countDataFiles(tableDir)
+  const dataFiles = liveStats?.dataFiles ?? countDataFiles(tableDir)
   if (dataFiles > cfg.compact_file_count) return true
 
-  const totalDataBytes = liveStats ? liveStats.dataBytes : measureDataDir(tableDir)
+  const totalDataBytes = liveStats?.dataBytes ?? measureDataDir(tableDir)
   if (dataFiles > 0 && totalDataBytes / dataFiles < cfg.compact_avg_file_bytes) return true
 
   const metadataBytes = measureMetadataDir(tableDir)
@@ -923,13 +942,23 @@ function needsCompaction(tableDir, cfg, liveStats) {
 }
 
 /**
- * Live file count and data bytes for a source-table generation, read from
- * the current snapshot's summary. Null when the table, its metadata, or
- * the summary totals are missing (older snapshots predate the totals),
- * in which case callers fall back to directory counts.
+ * What the current snapshot of a source-table generation says about
+ * itself: the live file count and data bytes from its summary, the
+ * partition spec it is recorded under, and its own snapshot id.
+ *
+ * `dataFiles` and `dataBytes` are `null` when the summary carries no
+ * usable totals (older snapshots predate them) and callers fall back to
+ * directory counts. The spec and the snapshot id come from the metadata
+ * itself, so they survive that gap: a due re-partition (LLP 0311) and the
+ * "did we commit this replace?" test below must not hinge on an unrelated
+ * counter being parseable, which would leave a table silently unmigrated
+ * with nothing reporting the standing mismatch.
+ *
+ * Null only when the table, its metadata, or its current snapshot is
+ * missing outright.
  *
  * @param {string} tableDir
- * @returns {Promise<{ dataFiles: number, dataBytes: number, partitionSpec: PartitionSpec | undefined } | null>}
+ * @returns {Promise<{ dataFiles: number | null, dataBytes: number | null, partitionSpec: PartitionSpec | undefined, snapshotId: string } | null>}
  */
 async function liveTableStats(tableDir) {
   if (!tableExists(tableDir)) return null
@@ -942,11 +971,16 @@ async function liveTableStats(tableDir) {
     const summary = snapshot?.summary
     const dataFiles = Number(summary?.['total-data-files'])
     const dataBytes = Number(summary?.['total-files-size'])
-    if (!Number.isFinite(dataFiles) || !Number.isFinite(dataBytes)) return null
-    // The spec rides along because the metadata is already in hand: the
-    // re-partition dueness check (LLP 0311) runs every tick and must not
-    // cost a second metadata load.
-    return { dataFiles, dataBytes, partitionSpec: currentPartitionSpec(metadata) }
+    const totals = Number.isFinite(dataFiles) && Number.isFinite(dataBytes)
+    return {
+      dataFiles: totals ? dataFiles : null,
+      dataBytes: totals ? dataBytes : null,
+      // The spec rides along because the metadata is already in hand: the
+      // re-partition dueness check (LLP 0311) runs every tick and must not
+      // cost a second metadata load.
+      partitionSpec: currentPartitionSpec(metadata),
+      snapshotId: String(currentId),
+    }
   } catch {
     return null
   }
@@ -1018,19 +1052,50 @@ function repartitionTargetLayout(declaration, tableInfo) {
  * blessed: only a rewrite that carries the layout declaration counts as
  * convergence.
  *
+ * FOREIGN is the operative word, and it stopped being implied by the
+ * shape alone. Until LLP 0311 no cache table declared a sort order, so
+ * "replace + declared sort order" could only be the server's compactor;
+ * now the cache table declares one of its own, and LLP 0310's in-place
+ * merge commits `replace` on exactly that table. The two are told apart
+ * by the cursor: an in-place merge records the snapshot id it committed,
+ * so a current snapshot we wrote is ours, not a foreign layout to
+ * preserve. Without this the retry a `COMPACTION_WRITER_GENERATION` bump
+ * grants (LLP 0217) would be spent on a recognition instead of a rewrite
+ * for every partition whose last commit was an in-place merge - which is
+ * the frozen-partition failure that decision exists to cure.
+ *
  * @ref LLP 0207#foreign-replace [implements]: the recognition test, the
  * kernel-side mirror of the server day compactor's alreadyCompacted +
  * sortOrderDeclared skip.
+ * @ref LLP 0217#retry-on-writer-change [constrained-by]: recognition must not swallow the retry a writer change grants.
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} tableInfo
+ * @param {PartitionCursor} cursor
  * @returns {boolean}
  */
-function foreignSortedReplace(tableInfo) {
+function foreignSortedReplace(tableInfo, cursor) {
   if (!tableInfo?.sortColumns?.length) return false
   const { metadata } = tableInfo
   const currentId = metadata['current-snapshot-id']
   if (currentId === undefined || currentId === null || Number(currentId) === -1) return false
+  if (String(currentId) === inPlaceSnapshotId(cursor)) return false
   const snapshot = (metadata.snapshots ?? []).find((s) => BigInt(s['snapshot-id']) === BigInt(currentId))
   return snapshot?.summary?.operation === 'replace'
+}
+
+/**
+ * The snapshot id of the last in-place merge this kernel committed on the
+ * live generation, as its cursor records it. Undefined for a cursor
+ * written before the id was recorded (or by a generation swap, which
+ * leaves no `replace` behind), which reads as "not ours" - the
+ * pre-existing behaviour.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {string | undefined}
+ */
+function inPlaceSnapshotId(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c) || typeof c.inPlaceSnapshotId !== 'string' || c.inPlaceSnapshotId === '') return undefined
+  return c.inPlaceSnapshotId
 }
 
 const COMPACT_BATCH_SIZE = 10_000
@@ -1383,7 +1448,10 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
 
   const statsAfter = await liveTableStats(liveDir)
   const dataFilesAfter = statsAfter?.dataFiles ?? countDataFiles(liveDir)
-  await writeCursor(partitionDir, inPlaceCompactedCursor(cursor, { dataFilesBefore, dataFilesAfter }))
+  await writeCursor(
+    partitionDir,
+    inPlaceCompactedCursor(cursor, { dataFilesBefore, dataFilesAfter }, statsAfter?.snapshotId)
+  )
   return { rowCount: cursor.rowCount, dataFilesBefore, dataFiles: dataFilesAfter }
 }
 
@@ -1525,16 +1593,24 @@ async function victimFallbacksSettleable(filePaths, resolver, settle) {
  * the superseded files are released by the unreferenced-file sweep once
  * snapshot retention lets go of them.
  *
+ * The committed snapshot id rides along so {@link foreignSortedReplace}
+ * can tell this `replace` from the server compactor's; see its comment.
+ * Omitted, rather than recorded as empty, when the post-merge metadata
+ * could not be read: an absent id reads as "not ours", the conservative
+ * direction (a recognition, never a rewrite of a foreign layout).
+ *
  * @param {PartitionCursor} cursor
  * @param {{ dataFilesBefore: number, dataFilesAfter: number }} outcome
+ * @param {string} [snapshotId]  the snapshot the merge committed
  * @returns {PartitionCursor}
  */
-function inPlaceCompactedCursor(cursor, outcome) {
+function inPlaceCompactedCursor(cursor, outcome, snapshotId) {
   return {
     ...cursor,
     compaction: {
       compactedAt: new Date().toISOString(),
       ...compactionOutcomeRecord(outcome),
+      ...(snapshotId ? { inPlaceSnapshotId: snapshotId } : {}),
     },
   }
 }

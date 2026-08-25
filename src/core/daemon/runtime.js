@@ -737,6 +737,22 @@ export async function runDaemon(opts = {}) {
           // left fragmented was, until now, a span attribute and nothing
           // else, so an operator who did not have tracing on when the tick
           // ran had no way to find it at all.
+          // @ref LLP 0311#migration [implements]: the swap rewrites the
+          // user's live cache under a layout it has never held before, and
+          // it happens once per partition, ever. `repartitioned` is set on
+          // the span, but a tracer nobody was running when the tick fired
+          // records nothing, so the migration also gets a durable line: it
+          // is the only evidence afterwards that the layout moved, and when.
+          for (const p of report.partitions) {
+            if (!p.repartitioned) continue
+            fileLog.info('daemon.cache_repartitioned', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files_before: p.dataFilesBefore,
+              data_files_after: p.dataFilesAfter,
+              row_count: p.rowCount,
+            })
+          }
           const skips = summarizeMaintenanceSkips(report)
           persist({ maintenance: skips })
           span.setAttribute('partitions_visited', skips.partitionsVisited)

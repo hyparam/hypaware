@@ -28,6 +28,22 @@ function validateCachePartitioning(decl, schema, datasetName) {
       )
     }
   }
+
+  // @ref LLP 0311#declaration-split [constrained-by]: `sortOnly` demotes a
+  // field out of the partition spec, and the drift guard reads a recorded
+  // partition field the declaration has demoted as a pending migration
+  // rather than drift. Demoting EVERY field is therefore two failures at
+  // once: the cache table would be created unpartitioned (the grep walk
+  // orders files by their partition `date`, which would no longer exist),
+  // and `validatePartitionSpecStability` would have no expected field left
+  // to check and no recorded field it could reject, so it would accept any
+  // spec at all. Neither is a state a declaration should be able to reach
+  // by omission, so refuse it where the declaration is registered.
+  if (decl.iceberg.fields.length > 0 && decl.iceberg.fields.every(f => f.sortOnly)) {
+    throw new Error(
+      `registerDataset '${datasetName}': cachePartitioning declares every Iceberg field sortOnly - at least one field must partition the cache table`
+    )
+  }
 }
 
 /**

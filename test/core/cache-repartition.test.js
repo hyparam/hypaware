@@ -17,17 +17,19 @@ import path from 'node:path'
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { currentPartitionSpec, readRowsFromTable, sortColumnsFromMetadata } from '../../src/core/cache/iceberg/store.js'
 import {
   partitionSpecForDeclaration,
   partitionSpecMigrationDue,
+  sortColumnsForDeclaration,
   validatePartitionSpecStability,
 } from '../../src/core/iceberg/partition-spec.js'
 
 /**
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetRegistration } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/iceberg/types.js'
  */
 
@@ -79,6 +81,29 @@ test('sortOnly fields are excluded from the derived partition spec', () => {
   assert.deepEqual(oldSpec.fields.map((f) => f.name), ['session_id', 'date'])
 })
 
+test('the sort order carries identity lookup columns only', () => {
+  assert.deepEqual(
+    sortColumnsForDeclaration(NEW_DECLARATION).map((c) => c.column),
+    ['session_id', 'date'],
+    'partitioned and sortOnly fields alike are sort columns'
+  )
+  // A cache sort order is recorded as identity on the source column, so a
+  // transformed field would declare a sort the declaration never asked for.
+  // Same rule the export's sortOrderForLookup applies.
+  assert.deepEqual(
+    sortColumnsForDeclaration({
+      source: { columns: ['source'] },
+      iceberg: {
+        fields: [
+          { column: 'session_id', transform: 'identity', sortOnly: true },
+          { column: 'date', transform: 'day' },
+        ],
+      },
+    }).map((c) => c.column),
+    ['session_id']
+  )
+})
+
 test('a recorded spec on a demoted column is a pending migration, not drift', () => {
   const recorded = partitionSpecForDeclaration(OLD_DECLARATION, ICEBERG_SCHEMA)
   // Tolerated: appends keep landing under the recorded spec.
@@ -99,6 +124,57 @@ test('a recorded spec on a demoted column is a pending migration, not drift', ()
     () => validatePartitionSpecStability(dropped, recorded, ICEBERG_SCHEMA),
     /was removed/
   )
+})
+
+/**
+ * A minimal `DatasetRegistration` carrying only the declaration under test;
+ * the discovery/data-source members are never called by `registerDataset`.
+ *
+ * @param {string} name
+ * @param {CachePartitioningDeclaration} cachePartitioning
+ * @returns {DatasetRegistration}
+ */
+function registration(name, cachePartitioning) {
+  return {
+    name,
+    plugin: /** @type {DatasetRegistration['plugin']} */ ('test'),
+    schema: { columns: COLUMNS },
+    cachePartitioning,
+    discoverPartitions: () => [],
+    createDataSource: () => ({ columns: [], scan: () => ({ appliedWhere: false, appliedLimitOffset: false, async *rows() {} }) }),
+  }
+}
+
+test('a declaration that demotes every field is refused at registration', () => {
+  // Demoting the last partition field creates the cache table unpartitioned
+  // AND leaves `validatePartitionSpecStability` with no expected field to
+  // check and no recorded field it could reject, so it would accept any spec
+  // at all. Refused where the declaration is registered.
+  const registry = createQueryRegistry()
+  assert.throws(
+    () => registry.registerDataset(registration('all_sort_only', {
+      source: { columns: ['session_id'] },
+      iceberg: {
+        fields: [
+          { column: 'session_id', transform: 'identity', sortOnly: true },
+          { column: 'date', transform: 'identity', sortOnly: true },
+        ],
+      },
+    })),
+    /every Iceberg field sortOnly/
+  )
+
+  // One partition field left is fine: that is the shape LLP 0311 ships.
+  registry.registerDataset(registration('one_partition_field', {
+    source: { columns: ['session_id'] },
+    iceberg: {
+      fields: [
+        { column: 'session_id', transform: 'identity', sortOnly: true },
+        { column: 'date', transform: 'identity', required: true },
+      ],
+    },
+  }))
+  assert.ok(registry.getDataset('one_partition_field'))
 })
 
 /**
