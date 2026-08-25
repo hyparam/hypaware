@@ -89,10 +89,10 @@ function asyncBufferFromBytes(bytes) {
 }
 
 /**
- * Build a `hyparquet-writer` Writer that finalizes onto the local
- * filesystem with an atomic rename. `ifNoneMatch === '*'` is honored
- * to surface `412` collisions on concurrent commits, matching the
- * conditional-write semantics `icebird`'s file catalog expects.
+ * Build a `hyparquet-writer` Writer that publishes onto the local
+ * filesystem in one syscall. `ifNoneMatch === '*'` is honored to surface
+ * `412` collisions on concurrent commits, matching the conditional-write
+ * semantics `icebird`'s file catalog expects.
  *
  * The writer implements the optional `flush()` hook, which
  * `hyparquet-writer` calls after every row group: buffered bytes are
@@ -203,24 +203,38 @@ function localWriter(ByteWriter, filePath, options) {
   }
 
   writer.finish = async function () {
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      if (fd !== null) {
-        fs.closeSync(fd)
-        fs.rmSync(/** @type {string} */ (tmp), { force: true })
-        fd = null
-      }
-      throw collision(filePath)
-    }
     openTmp()
     if (writer.index) fs.writeSync(/** @type {number} */ (fd), writer.getBytes())
     fs.closeSync(/** @type {number} */ (fd))
     fd = null
     writer.index = 0
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      fs.rmSync(/** @type {string} */ (tmp), { force: true })
-      throw collision(filePath)
+    const staged = /** @type {string} */ (tmp)
+    if (options?.ifNoneMatch !== '*') {
+      fs.renameSync(staged, filePath)
+      tmp = null
+      return
     }
-    fs.renameSync(/** @type {string} */ (tmp), filePath)
+    // `ifNoneMatch: '*'` is a create-only precondition, so the publish
+    // itself has to be the thing that refuses to overwrite. `rename`
+    // cannot be: POSIX rename replaces the destination silently, so an
+    // `existsSync` in front of it is check-then-act and two committers
+    // racing the same `v(N+1).metadata.json` can both find it absent,
+    // both publish, and the loser's snapshot is lost with no error for
+    // the retry loop to catch. `link` fails with EEXIST when the
+    // destination exists, atomically and with no window, which is
+    // exactly the guarantee the precondition promises. The cache has no
+    // external catalog to arbitrate for it, so this one call is the whole
+    // of its concurrency control.
+    try {
+      fs.linkSync(staged, filePath)
+    } catch (err) {
+      fs.rmSync(staged, { force: true })
+      tmp = null
+      if (/** @type {NodeJS.ErrnoException} */ (err).code === 'EEXIST') throw collision(filePath)
+      throw err
+    }
+    fs.rmSync(staged, { force: true })
+    tmp = null
   }
   return writer
 }
