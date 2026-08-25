@@ -173,11 +173,76 @@ test('a stale request handed over by the boot clear never dispatches, a fresh on
   try {
     await waitFor(() => !fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), 'stale request consumed')
     assert.equal(stops, 0, 'a stale leftover must not stop a fresh boot')
-    // A fresh request carries new content, so it no longer matches the
+    // A fresh request carries new bytes (the payload nonce guarantees it,
+    // even inside the same millisecond), so it no longer matches the
     // recorded leftover and dispatches normally.
-    await new Promise((resolve) => setTimeout(resolve, 5))
     writeControlRequest(stateRoot, 'stop')
     await waitFor(() => stops === 1, 'fresh stop dispatch after the stale one')
+  } finally {
+    watcher.close()
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+// The unreadable-recording case: the clear could neither remove nor read the
+// leftover (content null). A live request written after boot must still
+// dispatch - requestedAt orders it after the boot - while a leftover
+// stamped before boot is discarded even though the recording matches
+// nothing. And once the marker's file is observed absent, the marker is
+// dropped, so it can never eat a later request.
+test('a null-content stale marker never eats a live post-boot request', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-stale-null-'))
+  let stops = 0
+  /** @type {string[]} */
+  const warnings = []
+  // A leftover stamped a minute before this "boot", unreadable at clear time.
+  fsSync.mkdirSync(controlDirPath(stateRoot), { recursive: true })
+  fsSync.writeFileSync(
+    controlRequestPath(stateRoot, 'stop'),
+    JSON.stringify({ requestedAt: new Date(Date.now() - 60_000).toISOString(), pid: 12345 })
+  )
+  const watcher = watchControlRequests(stateRoot, {
+    onStop: () => { stops += 1 },
+    onReload: () => assert.fail('reload dispatched with none written'),
+    log: { warn: (event) => { warnings.push(event) } },
+    pollIntervalMs: 50,
+    staleRequests: { stop: { content: null, message: 'EACCES (simulated)' } },
+    bootedAtMs: Date.now(),
+  })
+  try {
+    await waitFor(() => !fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), 'pre-boot leftover consumed')
+    assert.equal(stops, 0, 'a pre-boot leftover must not dispatch, matching recording or not')
+    assert.ok(warnings.includes('daemon.control_stale_discarded'), 'the discard is named in the log')
+    // A genuine request stamped after boot dispatches even though the
+    // recording was unreadable.
+    writeControlRequest(stateRoot, 'stop')
+    await waitFor(() => stops === 1, 'post-boot stop dispatch')
+  } finally {
+    watcher.close()
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+// The failure latch resets on absence, so the second stuck request of a
+// daemon's life still warns instead of staying mute.
+test('a second stuck request warns after the first one vanishes', async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-control-relatch-'))
+  /** @type {string[]} */
+  const warnings = []
+  fsSync.mkdirSync(controlRequestPath(stateRoot, 'reload'), { recursive: true })
+  const watcher = watchControlRequests(stateRoot, {
+    onStop: () => assert.fail('stop dispatched with none written'),
+    onReload: () => assert.fail('reload dispatched for an unconsumable file'),
+    log: { warn: (event) => { warnings.push(event) } },
+    pollIntervalMs: 25,
+  })
+  const failedWarns = () => warnings.filter((w) => w === 'daemon.control_scan_failed').length
+  try {
+    await waitFor(() => failedWarns() === 1, 'first stuck warn')
+    fsSync.rmdirSync(controlRequestPath(stateRoot, 'reload'))
+    await waitFor(() => warnings.includes('daemon.control_scan_recovered'), 'recovery warn on absence')
+    fsSync.mkdirSync(controlRequestPath(stateRoot, 'reload'))
+    await waitFor(() => failedWarns() === 2, 'second stuck warn')
   } finally {
     watcher.close()
     await fs.rm(stateRoot, { recursive: true, force: true })

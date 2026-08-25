@@ -1,5 +1,6 @@
 // @ts-check
 
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -66,20 +67,26 @@ function ensureControlDir(dir, log) {
 /**
  * Ask the daemon watching `stateRoot` to stop or reload. The file content is
  * for a human debugging a stuck request, and it is what distinguishes a
- * fresh request from a stale leftover the boot clear could not remove; the
- * watcher keys on the filename alone. Creating the directory is part of the
- * write: the requester may run before the daemon ever has.
+ * fresh request from a stale leftover the boot clear could not remove: the
+ * nonce makes every write byte-distinct (two same-pid writes can share a
+ * millisecond), and `requestedAt` orders a request against a daemon's boot.
+ * The watcher keys on the filename alone. Creating the directory is part of
+ * the write: the requester may run before the daemon ever has.
  *
  * @param {string} stateRoot
  * @param {'stop'|'reload'} kind
+ * @param {{ warn(event: string, fields?: Record<string, unknown>): void }} [log]
  */
-export function writeControlRequest(stateRoot, kind) {
+export function writeControlRequest(stateRoot, kind, log) {
   const file = controlRequestPath(stateRoot, kind)
   // 0700, not the umask: the trust argument above is "writing here requires
   // owning the state dir", so the directory must not pick up group write
   // from a permissive umask (same shape as the config-control dir).
-  ensureControlDir(path.dirname(file))
-  fs.writeFileSync(file, JSON.stringify({ requestedAt: new Date().toISOString(), pid: process.pid }))
+  ensureControlDir(path.dirname(file), log)
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ requestedAt: new Date().toISOString(), pid: process.pid, nonce: randomUUID() })
+  )
 }
 
 /**
@@ -149,6 +156,7 @@ export function clearControlRequests(stateRoot) {
  *   log?: { warn(event: string, fields?: Record<string, unknown>): void },
  *   pollIntervalMs?: number,
  *   staleRequests?: Partial<Record<'stop'|'reload', UnclearedRequest>>,
+ *   bootedAtMs?: number,
  * }} handlers
  * @returns {{ close(): void }}
  * @ref LLP 0300#stop-wins [implements]: both present consumes both, dispatches stop only
@@ -160,17 +168,74 @@ export function watchControlRequests(stateRoot, handlers) {
   let scanning = false
   let rescan = false
 
+  const bootedAtMs = handlers.bootedAtMs ?? Date.now()
+
   // Requests the boot-time clear could not remove (see clearControlRequests).
   // A consume that meets one of these deletes the file but does not
   // dispatch: it is an instruction to a daemon that no longer exists. A
-  // fresh request overwrites the file with a new requestedAt/pid, so it no
-  // longer matches the recorded content and dispatches normally.
+  // fresh request rewrites the file with new content, so it no longer
+  // matches and dispatches normally. The recording never outlives the file
+  // it describes: any 'absent' observation drops it, so a leftover the
+  // operator removed by hand cannot leave a marker armed against the next
+  // genuine request.
   const stale = { ...(handlers.staleRequests ?? {}) }
 
-  // Warn on transition, not on every pass: an unconsumable file under the
-  // win32 1s poll would otherwise append ~86k identical lines a day to a
-  // daemon log that never rotates.
-  const failing = { stop: false, reload: false }
+  // Warn on the failure transition and then at most once per REWARN_MS: an
+  // unconsumable file under the win32 1s poll would otherwise append ~86k
+  // identical lines a day to a daemon log that never rotates, while a
+  // single line for the daemon's whole lifetime would leave a wedged
+  // channel effectively mute. Reset on any success or absence, so the next
+  // stuck request warns afresh.
+  const REWARN_MS = 10 * 60 * 1000
+  /** @type {Record<'stop'|'reload', number>} 0 = healthy; else last warn time */
+  const failedWarnedAt = { stop: 0, reload: 0 }
+
+  /** @param {'stop'|'reload'} kind @returns {'absent'} */
+  function noteAbsent(kind) {
+    delete stale[kind]
+    noteConsumable(kind)
+    return 'absent'
+  }
+
+  /** @param {'stop'|'reload'} kind */
+  function noteConsumable(kind) {
+    if (failedWarnedAt[kind] !== 0) {
+      failedWarnedAt[kind] = 0
+      handlers.log?.warn('daemon.control_scan_recovered', { request: REQUEST_FILES[kind] })
+    }
+  }
+
+  /**
+   * Decide whether freshly consumed bytes describe a live request rather
+   * than the recorded boot leftover. A readable recording is decisive on
+   * its own: the nonce in every payload makes two writes byte-distinct, so
+   * equal bytes ARE the leftover and differing bytes prove a rewrite. Only
+   * an unreadable recording falls back to time: a `requestedAt` at or after
+   * this boot proves a fresh write, because the leftover was necessarily
+   * written before this daemon started. "Recorded null + readable now"
+   * alone would NOT be safe: a win32 EPERM/EBUSY can fail the boot-time
+   * read and let a later read succeed on the very same stale bytes.
+   *
+   * @param {string | null} content
+   * @param {UnclearedRequest} staleEntry
+   */
+  function isLiveRequest(content, staleEntry) {
+    if (content === null) return false
+    if (staleEntry.content !== null) return content !== staleEntry.content
+    const ts = requestTimestamp(content)
+    return ts !== null && ts >= bootedAtMs
+  }
+
+  /** @param {string} content @returns {number | null} */
+  function requestTimestamp(content) {
+    try {
+      const parsed = JSON.parse(content)
+      const ts = Date.parse(/** @type {{ requestedAt?: string }} */ (parsed)?.requestedAt ?? '')
+      return Number.isNaN(ts) ? null : ts
+    } catch {
+      return null
+    }
+  }
 
   /**
    * Delete one request file. `'consumed'` earns a dispatch, `'stale'` is a
@@ -193,17 +258,18 @@ export function watchControlRequests(stateRoot, handlers) {
       try {
         content = fs.readFileSync(file, 'utf8')
       } catch (err) {
-        if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 'absent'
-        // Present but unreadable: the unlink below decides, and the null
-        // content matches the stale entry conservatively.
+        if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return noteAbsent(kind)
+        // Present but unreadable: the unlink below decides, and
+        // isLiveRequest treats the null content conservatively.
       }
     }
     try {
       fs.unlinkSync(file)
     } catch (err) {
-      if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 'absent'
-      if (!failing[kind]) {
-        failing[kind] = true
+      if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return noteAbsent(kind)
+      const now = Date.now()
+      if (failedWarnedAt[kind] === 0 || now - failedWarnedAt[kind] >= REWARN_MS) {
+        failedWarnedAt[kind] = now
         handlers.log?.warn('daemon.control_scan_failed', {
           request: REQUEST_FILES[kind],
           message: err instanceof Error ? err.message : String(err),
@@ -211,17 +277,13 @@ export function watchControlRequests(stateRoot, handlers) {
       }
       return 'failed'
     }
-    if (failing[kind]) {
-      failing[kind] = false
-      handlers.log?.warn('daemon.control_scan_recovered', { request: REQUEST_FILES[kind] })
-    }
+    noteConsumable(kind)
     if (staleEntry !== undefined) {
       delete stale[kind]
-      // Match on content when both sides are readable; when either side is
-      // unknown, err on "stale": the cost of dropping one ambiguous request
-      // (the CLI retries) is smaller than stopping a fresh boot on a
-      // leftover, which is the invariant boot-clears-stale exists for.
-      if (staleEntry.content === null || content === null || content === staleEntry.content) {
+      if (!isLiveRequest(content, staleEntry)) {
+        // Named in the log, never silent: if the discrimination above is
+        // ever wrong, this line is what makes the drop diagnosable.
+        handlers.log?.warn('daemon.control_stale_discarded', { request: REQUEST_FILES[kind] })
         return 'stale'
       }
     }

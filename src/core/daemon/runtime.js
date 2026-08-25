@@ -1002,11 +1002,18 @@ export async function runDaemon(opts = {}) {
   // sources are already running and whose PID file is on disk. Signals still
   // stop it everywhere but win32.
   try {
+    // TODO(win32): the watcher installs at the tail of runDaemon, after
+    // bootKernel and every source start, so a stop request written during
+    // that window times out even though it is honored moments later, and a
+    // boot that hangs has no win32 stop path at all. When the Windows
+    // service installer lands, arm the handlers next to writePidFile with
+    // the same forward-reference/park pattern triggerShutdown already uses.
     controlWatcher = watchControlRequests(stateRoot, {
       onStop: () => { void shutdown('control') },
       onReload: () => { reloadSafely() },
       log: fileLog,
       staleRequests: staleControlRequests,
+      bootedAtMs: startedAtMs,
     })
   } catch (err) {
     fileLog.warn('daemon.control_watch_install_failed', {
@@ -1350,7 +1357,7 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
  * leaves the PID file stale, and drops unflushed log lines.
  *
  * @ref LLP 0300#posix-keeps-signals [implements]: only win32 routes through the file channel
- * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number, platform?: NodeJS.Platform }} args
+ * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number, platform?: NodeJS.Platform, log?: { warn(event: string, fields?: Record<string, unknown>): void } }} args
  * @returns {Promise<'stopped'|'not_running'|'timed_out'>}
  */
 export async function requestDaemonStop({
@@ -1358,6 +1365,7 @@ export async function requestDaemonStop({
   timeoutMs = 5_000,
   pollIntervalMs = 50,
   platform = process.platform,
+  log,
 }) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
@@ -1365,7 +1373,7 @@ export async function requestDaemonStop({
     return 'not_running'
   }
   if (platform === 'win32') {
-    writeControlRequest(stateRoot, 'stop')
+    writeControlRequest(stateRoot, 'stop', log)
   } else {
     try {
       process.kill(entry.pid, 'SIGTERM')

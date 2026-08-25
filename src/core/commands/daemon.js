@@ -204,7 +204,17 @@ export async function runDaemonStop(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const { requestDaemonStop } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const outcome = await requestDaemonStop({ stateRoot: stateDir })
+  // The requester-side control-dir warnings (a chmod it could not apply)
+  // land on stderr; they do not change the exit code.
+  const outcome = await requestDaemonStop({
+    stateRoot: stateDir,
+    log: {
+      warn: (event, fields) => {
+        const message = fields && typeof fields.message === 'string' ? `: ${fields.message}` : ''
+        ctx.stderr.write(`hyp daemon stop: warning: ${event}${message}\n`)
+      },
+    },
+  })
   if (outcome === 'not_running') {
     ctx.stdout.write('daemon: not running\n')
     return 0

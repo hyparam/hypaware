@@ -97,10 +97,14 @@ One that survived a crash, or a hard kill, must not stop the next boot on
 sight. The clear is best-effort per file and cannot block the boot; a
 leftover it cannot remove (a transient win32 EPERM/EBUSY can outlive the
 clear) is recorded, by content, and handed to the watcher, which consumes a
-matching file without dispatching it. A fresh request rewrites the file with
-a new `requestedAt`/`pid`, so it no longer matches and dispatches normally.
-Anything the watcher dispatches is therefore a genuine live request, whether
-the clear succeeded or not.
+matching file without dispatching it (logged as discarded). The recording
+never outlives the file: any observed absence drops it. A fresh request
+rewrites the file with new bytes (every payload carries a nonce), so it no
+longer matches and dispatches normally; independently, a `requestedAt` at or
+after this boot proves a request fresh even when the recorded side was
+unreadable, since the leftover necessarily predates the boot. Anything the
+watcher dispatches is therefore a genuine live request, and anything it
+discards is a genuine leftover, whether the clear succeeded or not.
 
 <a id="stop-wins"></a>**When both requests are present, stop wins.** A
 reload of a daemon that has been asked to stop is work thrown away; both
