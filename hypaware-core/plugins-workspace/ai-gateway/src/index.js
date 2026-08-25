@@ -1,7 +1,7 @@
 // @ts-check
 
 import { createAiGatewayApi, createGatewayState } from './api.js'
-import { aiGatewayBackfillMaterializer, aiGatewayDatasetRegistration } from './dataset.js'
+import { ensureAiGatewayStorageContracts } from './storage_contracts.js'
 import { createStartSource } from './source.js'
 import { setAiGatewayRuntime } from './runtime.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from './session_command.js'
@@ -41,11 +41,10 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  */
 export async function activate(ctx) {
   const state = createGatewayState()
-  const api = createAiGatewayApi(state, { storage: ctx.storage })
+  const api = createAiGatewayApi(state, { storage: ctx.storage, clients: ctx.clients })
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
-  ctx.query.registerDataset(aiGatewayDatasetRegistration(state))
-  ctx.backfillMaterializers.register(aiGatewayBackfillMaterializer())
+  ensureAiGatewayStorageContracts(ctx, state)
 
   ctx.sources.register({
     name: 'ai-gateway',
@@ -63,7 +62,7 @@ export async function activate(ctx) {
   // that advertises the route (the claude telemetry listener, LLP 0256), so
   // one verb reaches them all. Deliberately NOT `hyp ignore --session`:
   // LLP 0110 diagnosed that shape.
-  ctx.commands.register({
+  if (!ctx.commands.get('session ignore')) ctx.commands.register({
     name: 'session ignore',
     plugin: PLUGIN_NAME,
     category: 'capture-movement',
@@ -73,7 +72,7 @@ export async function activate(ctx) {
     run: runSessionIgnore,
   })
 
-  ctx.commands.register({
+  if (!ctx.commands.get('session unignore')) ctx.commands.register({
     name: 'session unignore',
     plugin: PLUGIN_NAME,
     category: 'capture-movement',
@@ -83,7 +82,7 @@ export async function activate(ctx) {
     run: runSessionUnignore,
   })
 
-  ctx.commands.register({
+  if (!ctx.commands.get('session status')) ctx.commands.register({
     name: 'session status',
     plugin: PLUGIN_NAME,
     category: 'capture-movement',

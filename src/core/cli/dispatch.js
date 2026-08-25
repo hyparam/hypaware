@@ -441,6 +441,7 @@ export async function dispatch(argv, opts = {}) {
     plugins: activePlugins,
     failedPlugins,
     capabilities: kernel.capabilities,
+    clients: kernel.clients,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
     // over the module-private `runCommandByName`, populated here the same

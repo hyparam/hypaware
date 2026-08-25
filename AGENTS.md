@@ -129,6 +129,11 @@ Written acceptance procedures:
   `openai` credentials. Proves both capture lanes (live gateway and the
   scheduled transcript sweep) and that a turn both lanes observe settles to
   one row. See `docs/ACCEPTANCE.md`.
+- `opencode_cli_desktop_capture`: opt-in/manual, needs OpenCode CLI and Desktop
+  sharing one config home. Proves both capture lanes (the managed global
+  JavaScript plugin and the bounded `opencode export` recovery), that the live
+  `entrypoint` distinguishes CLI from Desktop, and that detach removes only the
+  marker-owned plugin file. See `docs/ACCEPTANCE.md`.
 - `claude_otel_shape_check`: opt-in/manual, needs a real Claude Code 2.1.214
   or newer. The release gate against upstream drift on the OTEL attach path:
   proves the installed Claude Code still honors the managed `env` block and
@@ -254,6 +259,7 @@ hyp dev smoke claude_telemetry_capture
 hyp dev smoke hypignore_capture_drop
 hyp dev smoke local_only_export_withhold
 hyp dev smoke source_optout_export_withhold
+hyp dev smoke opencode_capture
 hyp dev smoke otel_loopback_capture
 hyp dev smoke local_parquet_export
 hyp dev smoke query_grep_roundtrip

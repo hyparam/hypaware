@@ -2407,6 +2407,12 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       return { attached: raw.includes(probe.marker_header), settingsPath }
     }
 
+    // @ref LLP 0306#managed-plugin-file [implements]: a whole-file attach is
+    //   owned only while its exact marker remains present
+    if (probe.format === 'managed_file' && probe.marker_text) {
+      return { attached: raw.includes(probe.marker_text), settingsPath }
+    }
+
     // @ref LLP 0172#lane-a-detach [implements]: the json_path read branch removed by
     // LLP 0143 / PR #510, restored parallel to the json/toml branches above; pure
     // read, attached when any configured provider key's marker header matches.

@@ -148,6 +148,9 @@ export async function detachClientFromDisk({
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
   }
+  if (probe.format === 'managed_file' && probe.marker_text) {
+    return await detachManagedFile({ settingsPath, markerText: probe.marker_text, fs })
+  }
   // @ref LLP 0172#lane-a-detach [implements]: the json_path branch LLP 0143 removed returns, reshaped for two provider entries plus a cache purge
   if (probe.format === 'json_path') {
     return await detachJsonPathProviders({
@@ -162,6 +165,34 @@ export async function detachClientFromDisk({
   }
   // Unknown/incomplete probe: nothing this core routine knows how to reverse.
   return { changed: false, settingsPath }
+}
+
+/**
+ * Remove a whole managed file only while its ownership marker is intact.
+ * A user replacement at the same path is left in place and reported.
+ *
+ * @param {{ settingsPath: string, markerText: string, fs: typeof fsp }} args
+ * @returns {Promise<DetachFromDiskResult>}
+ * @ref LLP 0306#managed-plugin-file [implements]: detach removes only the
+ *   still-marked HypAware plugin file
+ */
+async function detachManagedFile({ settingsPath, markerText, fs }) {
+  let raw
+  try {
+    raw = await fs.readFile(settingsPath, 'utf8')
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return { changed: false, settingsPath }
+    throw err
+  }
+  if (!raw.includes(markerText)) {
+    return {
+      changed: false,
+      settingsPath,
+      warning: 'managed file ownership marker is missing; leaving file in place',
+    }
+  }
+  await fs.unlink(settingsPath)
+  return { changed: true, settingsPath }
 }
 
 /* ------------------------------- JSON format ------------------------------ */
