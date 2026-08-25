@@ -93,6 +93,15 @@ kernel verb and a server change (register-and-replace, or suppress the core
 verb server-side) must land as a coordinated pair; shipping the kernel half
 alone is a regression on every server host.
 
+**Superseded-by:** [LLP 0314](./0314-grep-search-one-registration-injected-backend.rfc.md).
+The paragraph above is the registration-collision rule only, and it is the
+part that is replaced: the pair no longer resolves a collision, because
+there is only one registration. The kernel keeps `grep_search`, and a
+server supplies its archive-backed data plane through `ctx.search` instead
+of registering a second verb and taking the name back. Everything else in
+this document, the mirrored two-tier mechanism, the shared hit shape and
+the one column allowlist, stands unchanged.
+
 ## Local visibility: the one thing the server never faced {#visibility}
 
 `local-only` rows never reach the server (the export seam withholds them,
