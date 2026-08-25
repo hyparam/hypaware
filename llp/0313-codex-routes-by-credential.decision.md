@@ -101,16 +101,29 @@ a non-ChatGPT URL, a combination that has never occurred.)
 ### The credential rung {#the-credential-rung}
 
 A codex-owned upstream preset, `openai-codex`, matches a request that
-arrives on the neutral prefix carrying an `Authorization` bearer beginning
-`sk-`, and points at `api.openai.com`. Three rungs, in order:
+arrives on the neutral prefix carrying an `Authorization` header whose
+credential begins `sk-`, and points at `api.openai.com`. Two rungs:
 
-1. An explicit `x-hypaware-upstream` steer (LLP 0157) wins over the rung: a
-   caller that named its upstream is not asking to be rerouted by
-   credential, and no reroute or rewrite happens. It does not win over the
-   invariant below, which is not a routing preference.
-2. The neutral prefix plus an `sk-` bearer selects `openai-codex`.
-3. Anything else declines, so an unrecognized or absent credential falls
+1. The neutral prefix plus an api-key-shaped credential selects
+   `openai-codex`, and nothing overrides it. An `x-hypaware-upstream` steer
+   (LLP 0157) names a destination; this rung is not a destination preference
+   but the invariant below, and an invariant takes no preferences. Deferring
+   to the steer would defeat it, because the presets the steer resolves
+   against are the two operator config replaces, and a replaced entry
+   carries no `match()`. Claiming the request here costs a steered caller
+   nothing it can want: `openai-codex` IS `api.openai.com`, at the path
+   shape that host serves.
+2. Anything else declines, so an unrecognized or absent credential falls
    back to path routing, which is the behavior that exists today.
+
+**The credential test is deliberately broad**, and broader than a strict
+`Bearer <token>` parse: an upper-cased prefix, a stray trailing token and a
+missing scheme all still count as a key. The two ways of being wrong are not
+symmetrical. A false positive sends a non-key credential to
+`api.openai.com`, which answers 401. A false negative sends a real platform
+key to `chatgpt.com`, which is the whole failure this document exists to
+close, and per the invariant below nothing downstream catches it on a
+default install.
 
 **Why a new preset name rather than a rung on `openai`.** `openai` is a
 name-keyed, last-write-wins preset slot that both `@hypaware/codex` and
@@ -123,22 +136,46 @@ presets by name and can express neither a `match()` nor a rewrite: the
 presets are routinely replaced on a real install, and `openai-codex` is not.
 
 The preset states `priority: 10` rather than inheriting a rank from its
-prefix length, so the reroute does not depend on which adapter registered
-first. It cannot divert anything else, because its `match()` requires both
-the prefix and the credential.
+prefix length, and that rank is load-bearing rather than tidy: config
+entries compile at priority 0 and sort ahead of presets on equal rank, so at
+the inherited rank the `chatgpt` entry `hyp init` writes would win the
+default install, which is the install this fix is for.
+
+**The cost, stated rather than waved past.** An operator who declares their
+own upstream on `/backend-api/codex` IS outranked, for requests carrying an
+api-key-shaped credential. Nothing else is diverted (`match()` requires both
+the prefix and the credential), but that one case is a real and deliberate
+exception to "operator config wins the routing question": the alternative is
+forwarding a platform key to a host that must never see it, and a routing
+preference does not outrank a credential-safety refusal.
 
 ### An `sk-` key is never sent to chatgpt.com {#sk-never-reaches-chatgpt}
 
 Stated as an invariant, not as a consequence of rung order. The `chatgpt`
-preset's `match()` refuses a request carrying an `sk-` bearer, so if
-`openai-codex` is ever absent or outranked the turn fails at the gateway
-with a 404 rather than handing the user's platform key to a host that has no
-business seeing it.
+preset's `match()` refuses a request carrying an api-key-shaped credential,
+so if `openai-codex` is ever absent or outranked the turn fails at the
+gateway with a 404 rather than handing the user's platform key to a host that
+has no business seeing it.
 
-This is second-line only, and knowingly so: an operator config that declares
-an upstream named `chatgpt` replaces the preset outright, and TOML has no way
-to state a credential rung. `openai-codex` is the mechanism that survives
-that, which is why the reroute does not depend on the guard.
+**That guard is second-line, and on a default install it is not present at
+all.** The `hyp init` picker composes the codex manifest's
+`gateway_upstream` block, which declares an upstream named `chatgpt`;
+operator config wins by name and TOML can express no credential rung, so on
+a shipping machine the entry that replaced the preset routes on
+`path_prefix` alone. `openai-codex` is therefore not a belt beside a
+braces: it is the only thing holding the invariant up where it matters, and
+two consequences follow that the design has to honour rather than note.
+
+- Its `match()` must recognise **every** credential the guard would have
+  refused, because anything it fails to recognise is forwarded rather than
+  refused. Hence the broad credential test above, and hence its rung takes no
+  precedence from a steering header.
+- Its rank must clear operator config, not merely the sibling preset. Hence
+  `priority: 10`.
+
+Tests assert the invariant on the merged table `hyp init` actually writes,
+not only on the presets: a preset-only table is the one table no shipping
+machine compiles.
 
 **Scope: one direction only.** Only the subscription-to-API-key direction is
 recoverable from the request. The reverse (a subscription token arriving on

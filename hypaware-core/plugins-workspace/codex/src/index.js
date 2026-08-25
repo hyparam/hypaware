@@ -35,6 +35,9 @@ const CODEX_ROUTE_PREFIX = '/backend-api/codex'
 const CODEX_PROVIDER_NAME = 'HypAware Codex Gateway'
 // OpenAI platform keys are the only credential the `/v1` upstream accepts and
 // the only one `chatgpt.com` never will, so the prefix is the whole test.
+// Compared against a lower-cased token: the question is "could these bytes be
+// a platform key", and a case-sensitive miss forwards a real one to
+// `chatgpt.com`.
 const API_KEY_PREFIX = 'sk-'
 // Gateway-local request metadata naming the real upstream a steering client
 // wants, stripped before the request leaves for the provider (LLP 0109).
@@ -108,11 +111,20 @@ export async function activate(ctx) {
     base_url: 'https://api.openai.com',
     path_prefix: CODEX_ROUTE_PREFIX,
     provider: 'openai',
-    // The chatgpt preset anchors the same prefix, and equal-priority entries
-    // sort by prefix length then registration order. Stating the rank rather
-    // than inheriting it keeps the reroute from depending on who registered
-    // first. It cannot divert anything else: `match()` requires both the
-    // prefix and the credential.
+    // Above every config entry, not merely above the `chatgpt` preset, and
+    // that is load-bearing rather than decorative: the `hyp init` picker
+    // writes a `chatgpt` upstream into operator config, config entries
+    // compile at priority 0 and sort ahead of presets on equal rank, so at
+    // the inherited rank this preset would lose the default install, which is
+    // the install the fix is for.
+    //
+    // The cost, stated plainly because this comment used to deny it: an
+    // operator who declares their own upstream on `/backend-api/codex` IS
+    // outranked for requests carrying an api-key-shaped credential. Nothing
+    // else is diverted (`match()` requires both the prefix and the
+    // credential), but that one case is a real exception to "operator config
+    // wins the routing question", taken deliberately because the alternative
+    // is forwarding the key to a host that must never see it.
     priority: 10,
     match: matchOpenaiCodexUpstream,
     rewrite: { from: CODEX_ROUTE_PREFIX, to: '/v1' },
@@ -308,25 +320,30 @@ function matchOpenaiUpstream(input) {
  * will never accept one, so the only route that can succeed is
  * `api.openai.com/v1/*` (the preset's `rewrite` supplies the path shape).
  *
- * Three rungs, in precedence order:
+ * Two rungs:
  *
- *  1. An explicit `x-hypaware-upstream` steer wins over this rung: a caller
- *     that named its upstream is not asking to be rerouted by credential,
- *     and the steered presets are the ones that answer it. It does not win
- *     over the invariant in `matchChatgptUpstream`, which is not a routing
- *     preference.
- *  2. The neutral prefix plus an `sk-` bearer selects this upstream.
- *  3. Anything else declines, so an unrecognized or absent credential falls
+ *  1. The neutral prefix plus an api-key-shaped credential selects this
+ *     upstream, and nothing overrides that. An `x-hypaware-upstream` steer
+ *     (LLP 0157) names a destination, and this rung is not a destination
+ *     preference but a refusal: no steer may put a platform key on
+ *     `chatgpt.com`. Letting the header decline this rung was a hole, because
+ *     the presets it deferred to are exactly the ones operator config
+ *     replaces (`hyp init` writes `openai` and `chatgpt`), so a steered key
+ *     fell through to the unguarded `chatgpt` entry and left for the wrong
+ *     host. Claiming it here costs a steered caller nothing it can want:
+ *     this upstream is `api.openai.com`, the only host an `sk-` key can
+ *     reach, at the `/v1` shape that host actually serves.
+ *  2. Anything else declines, so an unrecognized or absent credential falls
  *     back to path routing, which is the behavior that exists today.
  *
  * @ref LLP 0313#decision [implements]: routing is per request, by path and credential
+ * @ref LLP 0313#sk-never-reaches-chatgpt [implements]: this preset, not the second-line guard, is what makes the invariant true on a default install
  * @param {AiGatewayRouteInput} input
  * @returns {boolean}
  */
 function matchOpenaiCodexUpstream(input) {
-  if (headerValue(input.headers, UPSTREAM_HEADER) !== undefined) return false
   if (!isCodexRoutePath(input.path)) return false
-  return hasApiKeyBearer(input.headers)
+  return carriesApiKeyCredential(input.headers)
 }
 
 /**
@@ -342,11 +359,16 @@ function matchOpenaiCodexUpstream(input) {
  * 404 rather than handing the user's platform key to a host that has no
  * business seeing it.
  *
- * Residual: an operator whose config declares an upstream named `chatgpt`
- * replaces this preset entirely (config wins the routing question by name),
- * and TOML has no way to state a credential rung. The `openai-codex` preset
- * is the mechanism that survives that, which is why the reroute does not
- * depend on this guard.
+ * Residual, and it is the ordinary case rather than an exotic one: the
+ * `hyp init` picker writes an upstream named `chatgpt` into operator config,
+ * config wins the routing question by name, and TOML can express no
+ * credential rung. So on a DEFAULT install this guard is not in the routing
+ * table at all, and the entry that replaced it routes on `path_prefix`
+ * alone. That is why the invariant may not rest here: every request
+ * `carriesApiKeyCredential` fails to recognise is one this guard would have
+ * refused and that config entry forwards to `chatgpt.com`. `openai-codex`
+ * is the mechanism that survives config, which is why its credential test is
+ * deliberately the broader one.
  *
  * @ref LLP 0313#sk-never-reaches-chatgpt [implements]: the guard is second-line, behind the openai-codex preset
  * @param {AiGatewayRouteInput} input
@@ -354,7 +376,7 @@ function matchOpenaiCodexUpstream(input) {
  */
 function matchChatgptUpstream(input) {
   if (!isCodexRoutePath(input.path)) return false
-  return !hasApiKeyBearer(input.headers)
+  return !carriesApiKeyCredential(input.headers)
 }
 
 /**
@@ -369,7 +391,16 @@ function isCodexRoutePath(path) {
 }
 
 /**
- * Does the request carry an OpenAI platform key?
+ * Could this request's `Authorization` header be carrying an OpenAI platform
+ * key?
+ *
+ * Deliberately broader than a strict `Bearer <token>` parse, because the two
+ * ways of being wrong are not symmetrical. A false positive sends a non-key
+ * credential to `api.openai.com`, which answers 401. A false negative sends
+ * a real platform key to `chatgpt.com`, which is the leak this whole change
+ * exists to prevent, and on a default install nothing downstream catches it
+ * (see `matchChatgptUpstream`). So a malformed scheme, a stray trailing
+ * token and an upper-cased prefix all still count as a key.
  *
  * Prefix inspection only, and the value never leaves this function: the
  * gateway already reads and forwards `Authorization`, so testing its first
@@ -380,12 +411,17 @@ function isCodexRoutePath(path) {
  * @param {Record<string, string[]> | undefined} headers
  * @returns {boolean}
  */
-function hasApiKeyBearer(headers) {
+function carriesApiKeyCredential(headers) {
   const auth = headerValue(headers, 'authorization')
   if (typeof auth !== 'string') return false
-  const match = /^bearer\s+(\S+)$/i.exec(auth.trim())
-  if (!match) return false
-  return match[1].startsWith(API_KEY_PREFIX)
+  const value = auth.trim()
+  // A well-formed `Bearer <token>` yields the token; anything else is tested
+  // whole, so a header that forgot its scheme is still recognised. A real
+  // auth-scheme name (`Basic`, `Negotiate`, `Digest`) never begins `sk-`,
+  // so testing the whole value adds no false positive.
+  const bearer = /^bearer\s+/i.exec(value)
+  const token = bearer ? value.slice(bearer[0].length) : value
+  return token.toLowerCase().startsWith(API_KEY_PREFIX)
 }
 
 /**

@@ -14,6 +14,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
 import { activate as activateCodex } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
 import { activate as activateOpenclaw } from '../../hypaware-core/plugins-workspace/openclaw/src/index.js'
+import { mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 
 /**
  * @import { UpstreamConfig } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js'
@@ -91,21 +92,52 @@ const CASES = [
     expect: 'chatgpt',
   },
   {
-    // The steer names the upstream, so the credential rung stays out of it:
-    // no reroute and no rewrite, exactly as before LLP 0313.
-    label: 'an explicit steer wins over the credential rung',
+    // Steering names a destination; the credential rung is a refusal, and a
+    // refusal does not take preferences. Letting the header decline the rung
+    // was a hole: the presets it deferred to (`openai`, `chatgpt`) are the
+    // two `hyp init` replaces in operator config, and a replaced entry
+    // carries no `match()`, so a steered key fell through to `chatgpt` on a
+    // default install. Claiming it here costs the steered caller nothing:
+    // `openai-codex` IS api.openai.com, at the path shape that host serves.
+    label: 'a steer does not defeat the credential rung',
     path: `${NEUTRAL_PREFIX}/responses`,
     headers: { authorization: [API_KEY_BEARER], [UPSTREAM_HEADER]: ['openai'] },
-    expect: 'openai',
+    expect: 'openai-codex',
   },
   {
-    // ...but not over the invariant. Steering is a routing preference; "an
-    // sk- key is never sent to chatgpt.com" is not negotiable, so this is
-    // refused at the gateway rather than forwarded.
     label: 'a steer cannot push an API key onto chatgpt.com',
     path: `${NEUTRAL_PREFIX}/responses`,
     headers: { authorization: [API_KEY_BEARER], [UPSTREAM_HEADER]: ['chatgpt'] },
-    expect: undefined,
+    expect: 'openai-codex',
+  },
+  {
+    // The credential test is deliberately broader than a strict
+    // `Bearer <token>` parse. Each of these carries a real platform key, and
+    // a matcher that fails to recognise one forwards it to chatgpt.com.
+    label: 'an upper-cased key prefix is still a key',
+    path: `${NEUTRAL_PREFIX}/responses`,
+    headers: { authorization: ['Bearer SK-TEST-NOT-A-REAL-KEY'] },
+    expect: 'openai-codex',
+  },
+  {
+    label: 'a key with a stray trailing token is still a key',
+    path: `${NEUTRAL_PREFIX}/responses`,
+    headers: { authorization: [`${API_KEY_BEARER} extra`] },
+    expect: 'openai-codex',
+  },
+  {
+    label: 'a key sent without its scheme is still a key',
+    path: `${NEUTRAL_PREFIX}/responses`,
+    headers: { authorization: ['sk-test-not-a-real-key'] },
+    expect: 'openai-codex',
+  },
+  {
+    // ...and the breadth stops at the shape. A real auth-scheme name never
+    // begins `sk-`, so nothing that is not a key is diverted.
+    label: 'a base64 Basic credential is not mistaken for a key',
+    path: `${NEUTRAL_PREFIX}/responses`,
+    headers: { authorization: ['Basic c2stbm90LWEta2V5'] },
+    expect: 'chatgpt',
   },
   {
     label: 'an API key already on the OpenAI prefix is unaffected',
@@ -151,6 +183,66 @@ test('the credential rung survives the openai preset slot collision', async () =
     assert.equal(rerouter.provider, 'openai')
     assert.deepEqual(rerouter.rewrite, { from: NEUTRAL_PREFIX, to: '/v1' })
   }
+})
+
+/**
+ * The install every user actually has. `hyp init` composes the codex
+ * manifest's `gateway_upstream` block into operator config, which wins by
+ * name (`mergeUpstreams`) and can carry no `match()` - so on a DEFAULT
+ * install the `chatgpt` preset's guard is not in the routing table at all
+ * and that entry routes on `path_prefix` alone. Every case here therefore
+ * rests on `openai-codex`, the one entry config does not replace.
+ *
+ * Asserted against the merged table rather than the presets, because a
+ * preset-only table is exactly the table no shipping machine compiles.
+ *
+ * @ref LLP 0313#sk-never-reaches-chatgpt [tests]: the invariant holds on the
+ *   config `hyp init` writes, not only on the presets
+ */
+test('no api-key-shaped credential reaches chatgpt.com on a default hyp init install', async () => {
+  const presets = await presetsFromActivate([CODEX, OPENCLAW])
+  // Verbatim from hypaware-core/plugins-workspace/codex/hypaware.plugin.json.
+  const table = compileUpstreams(mergeUpstreams([
+    { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+    { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: NEUTRAL_PREFIX, provider: 'chatgpt' },
+  ], /** @type {any} */ ({ presets })))
+
+  // The premise, asserted rather than assumed: config really did take the
+  // guard off the chatgpt entry. If this ever stops being true the cases
+  // below would pass for the wrong reason.
+  assert.equal(
+    table.find((u) => u.name === 'chatgpt')?.match,
+    undefined,
+    'operator config no longer replaces the chatgpt preset; re-derive what this test proves'
+  )
+
+  const carriesAKey = [
+    ['a well-formed bearer', API_KEY_BEARER],
+    ['an upper-cased prefix', 'Bearer SK-TEST-NOT-A-REAL-KEY'],
+    ['a stray trailing token', `${API_KEY_BEARER} extra`],
+    ['no scheme at all', 'sk-test-not-a-real-key'],
+    ['extra interior whitespace', 'Bearer   sk-test-not-a-real-key'],
+  ]
+  for (const [label, authorization] of carriesAKey) {
+    const matched = matchUpstream(table, 'POST', `${NEUTRAL_PREFIX}/responses`, { authorization })
+    assert.notEqual(matched?.baseUrl.hostname, 'chatgpt.com', `${label}: the key left for chatgpt.com`)
+    assert.equal(matched?.name, 'openai-codex', label)
+  }
+
+  // A steer is a destination preference and must not defeat the refusal.
+  for (const steer of ['openai', 'chatgpt', 'anthropic']) {
+    const matched = matchUpstream(table, 'POST', `${NEUTRAL_PREFIX}/responses`, {
+      authorization: API_KEY_BEARER,
+      [UPSTREAM_HEADER]: steer,
+    })
+    assert.notEqual(matched?.baseUrl.hostname, 'chatgpt.com', `steer ${steer}: the key left for chatgpt.com`)
+  }
+
+  // ...and the subscription route, which must not regress, still lands.
+  assert.equal(
+    matchUpstream(table, 'POST', `${NEUTRAL_PREFIX}/responses`, { authorization: SUBSCRIPTION_BEARER })?.name,
+    'chatgpt'
+  )
 })
 
 /**

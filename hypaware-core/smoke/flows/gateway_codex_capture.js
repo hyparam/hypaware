@@ -68,21 +68,28 @@ export async function run({ harness, expect }) {
           upstreams: [
             // Config-driven local fakes. Names are prefixed `local-` so
             // they don't collide with the `openai` / `chatgpt` preset
-            // names @hypaware/codex registers in production. Both
-            // local entries appear first in the merged routing table
-            // (lower seq), so with identical priority + prefix length
-            // they outrank the plugin presets at routing time. The
-            // plugin presets remain in the table. They just never win
-            // routing for this smoke's traffic.
-            { name: 'local-openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai' },
-            { name: 'local-chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt' },
+            // names @hypaware/codex registers in production. The plugin
+            // presets remain in the table; they just never win routing
+            // for this smoke's traffic.
+            //
+            // The `priority` is what guarantees that, and it is not
+            // decoration. Seq order alone stopped being enough once a
+            // preset stated a priority of its own: `openai-codex` sits at
+            // 10 and anchors this same `/backend-api/codex` prefix, so a
+            // fixture that grew an `Authorization: Bearer sk-...` header
+            // would route past these fakes and egress to the real
+            // api.openai.com. A hermetic flow may not depend on its own
+            // fixture staying credential-free.
+            { name: 'local-openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai', priority: 100 },
+            { name: 'local-chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt', priority: 100 },
           ],
         },
       },
       // Activate the Codex adapter so its exchange projector gets
       // registered. The plugin's preset upstreams (real api.openai.com
       // / chatgpt.com) are also added to the routing table but are
-      // outranked by the local-* config entries above.
+      // outranked by the local-* config entries above, which state a
+      // priority above every preset's.
       { name: '@hypaware/codex', config: {} },
     ],
     query: { cache: { retention: { default_days: 30 } } },

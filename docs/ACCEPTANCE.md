@@ -1065,10 +1065,14 @@ cannot: that `api.openai.com/v1/responses` accepts the body Codex builds for
 the neutral provider block, and that the rewritten path is one the OpenAI
 platform actually serves.
 
-**What it does not prove:** the reverse direction (API key back to
-subscription), which is out of scope and unrecoverable from a request; nor
-anything about Codex Desktop, which shares `config.toml` and is covered by
-`codex_desktop_capture`.
+**What it does not prove:** anything about a machine still pinned at the old
+`/v1` `base_url` (an install that has not re-attached since the upgrade). A
+subscription token arriving on `/v1` is not recoverable from the request, per
+LLP 0313 #sk-never-reaches-chatgpt: only re-running `hyp client attach codex`
+moves such a machine onto the neutral prefix. Step 8 below exercises the
+API-key-back-to-subscription switch, which IS covered once the neutral prefix
+is in place. Nor does it prove anything about Codex Desktop, which shares
+`config.toml` and is covered by `codex_desktop_capture`.
 
 **Requires:** a machine with the Codex CLI installed and **both** credentials
 available: a ChatGPT account you can `codex login` with, and an OpenAI
@@ -1120,12 +1124,20 @@ evidence about the version it was run on.
 4. Now switch credentials **without touching anything else**. Do not
    re-attach, do not restart the daemon, and leave `config.toml` alone:
 
+   Save the provider block in step 1 first, so there is something to compare
+   against:
+
    ```sh
+   # ...before step 4, right after the grep in step 1:
+   grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" > /tmp/codex-provider-before
+
    codex login --api-key "sk-..."    # or however this Codex spells it
-   diff <(grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml") -
+   grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+     | diff /tmp/codex-provider-before -
    ```
 
-   Confirm `config.toml` is unchanged from step 1. If HypAware rewrote it,
+   Confirm `config.toml` is unchanged from step 1 (`diff` prints nothing and
+   exits 0). If HypAware rewrote it,
    the neutral URL is not doing its job and this procedure is measuring the
    old repair path instead of the new routing.
 
@@ -1190,9 +1202,10 @@ evidence about the version it was run on.
   `chatgpt.com`, so the credential rung did not fire. Check the gateway saw
   the key at all: `hyp query sql "select path, provider, status_code from ..."`.
   The likeliest causes are an operator config that declares an upstream named
-  `openai-codex` (it must not), and a Codex that sends its key somewhere
-  other than an `Authorization: Bearer` header. Never paste the key itself
-  into an issue, a log, or a query.
+  `openai-codex` (it must not), and a Codex that sends its key in something
+  other than the `Authorization` header - the credential test reads that
+  header only, though it does tolerate a missing or malformed scheme within
+  it. Never paste the key itself into an issue, a log, or a query.
 - **Step 5 returns a 404.** The host was right and the path was wrong, so the
   rewrite did not apply. Check `aigw.path_rewritten` in the daemon log: it
   names the upstream and both pathnames, and its absence means the matched
