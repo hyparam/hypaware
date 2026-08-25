@@ -77,6 +77,47 @@ export interface SinkWatermarkStore {
   ): Promise<SinkWatermarkRecord>
 }
 
+/**
+ * How much data one destination would send right now, read off the same
+ * watermark + `readRowsSince` seam the export uses. Produced by
+ * `previewPendingRows` for the `hyp sync` consent summary.
+ */
+export interface PendingVolume {
+  /**
+   * `counted` - `rows` is the total.
+   * `partial` - `rows` is a **floor**; the scan stopped early or could not see
+   * everything, so the caller must render it as "at least N".
+   * `unknown` - no usable count. Never render this as zero.
+   */
+  status: 'counted' | 'partial' | 'unknown'
+  /** Payload rows that would be sent. A floor when `status` is `partial`. */
+  rows: number
+  /**
+   * Rows the export seam withholds (a `local-only` directory, an opted-out
+   * source). Reported apart from `rows` and never added to it: they advance the
+   * cursor but never ship.
+   */
+  withheldRows: number
+  /**
+   * How far back the pending range reaches. `since` carries the oldest resume
+   * point across the destination's partitions; `beginning` means at least one
+   * partition has no durable cursor, so the range is the whole local history;
+   * `unknown` means no cursor timestamp was readable.
+   */
+  resume: { kind: 'beginning' } | { kind: 'unknown' } | { kind: 'since'; at: string }
+  /** Why the count is `partial` or `unknown`. Short enough to print. */
+  reason?: string
+}
+
+export interface PendingPreviewOptions {
+  /** Rows one destination may scan before reporting a floor. */
+  rowLimit?: number
+  /** Wall-clock budget for the whole preview, shared across destinations. */
+  budgetMs?: number
+  /** Clock seam (tests). */
+  now?: () => number
+}
+
 export interface DriverOptions {
   sinkRegistry: ExtendedSinkRegistry
   queryRegistry: QueryRegistry
