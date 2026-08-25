@@ -24,6 +24,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
 import {
@@ -1930,6 +1931,7 @@ export async function collectHypAwareStatus(opts = {}) {
     maintenance,
     captureHealth,
     proxyTrust,
+    selfUpdate: describeSelfUpdate({ stateRoot, env }),
   }
 }
 

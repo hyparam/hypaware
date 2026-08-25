@@ -772,6 +772,12 @@ export interface HypAwareV2Config {
    * listed must be unambiguously provided.
    */
   disambiguate?: Record<CapabilityName, PluginName>
+  /**
+   * Kernel self-update switch. Default true when absent; the daemon
+   * applies new HypAware releases automatically. Central wins over
+   * local when both layers set it.
+   */
+  auto_update?: boolean
 }
 
 /** Legacy alias retained only while the project rename completes. */

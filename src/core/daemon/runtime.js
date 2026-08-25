@@ -37,6 +37,7 @@ import {
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
 import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { runSelfUpdatePass, writeSelfUpdateState } from '../update/self_update.js'
 
 /**
  * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
@@ -326,6 +327,32 @@ export async function runDaemon(opts = {}) {
     buildConfigApplyDeps({ stateRoot, configRegistry: boot.runtime.configRegistry })
   )
   configControl.armProbationWatchdog()
+
+  // ----- Kernel self-update (LLP 0309) -----
+  // Cache the effective auto_update flag so the import-light pre-boot
+  // lane (bin/hypaware.js) can honor the off switch without parsing
+  // config layers.
+  // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
+  let autoUpdateEnabled = true
+  /**
+   * Re-derive the effective flag and re-cache it. Called at boot and
+   * again after every reload: SIGHUP re-merges both config layers, and a
+   * flag captured once at boot would leave the daily lane running (and
+   * the cache advertising `true` to the pre-boot lane) after an operator
+   * turned auto-update off and reloaded.
+   */
+  function refreshAutoUpdateFlag() {
+    autoUpdateEnabled = boot.config?.auto_update !== false
+    try {
+      writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
+    } catch (err) {
+      fileLog.warn('self_update.flag_cache_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  refreshAutoUpdateFlag()
+  let selfUpdateInFlight = false
 
   // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041 / LLP 0045) -----
   // The daemon is the only host with `configControl`, so a reconciler
@@ -678,6 +705,34 @@ export async function runDaemon(opts = {}) {
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
     await refreshSourceDetails()
     persist()
+
+    // The daily self-update check rides this tick rather than owning a
+    // timer (same shape as the backfill sweep above). The pass itself
+    // is TTL-gated and provenance-guarded, so this is a cheap state
+    // read on almost every tick. An applied update exits through the
+    // staged-restart path: the service manager relaunches onto the new
+    // code.
+    // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
+    if (autoUpdateEnabled && !selfUpdateInFlight) {
+      selfUpdateInFlight = true
+      void runSelfUpdatePass({
+        stateRoot,
+        env,
+        autoUpdate: autoUpdateEnabled,
+        log: (event, fields) => fileLog.info(event, fields ?? {}),
+      }).then((result) => {
+        if (result.action === 'updated' && triggerShutdown) {
+          void triggerShutdown('restart')
+        }
+      }).catch((err) => {
+        // `runSelfUpdatePass` never throws, but the restart handler above
+        // can, and an unhandled rejection is a dead daemon under Node's
+        // default `--unhandled-rejections=throw`.
+        fileLog.error('self_update.tick_failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }).finally(() => { selfUpdateInFlight = false })
+    }
   }
 
   if (tickIntervalMs > 0) {
@@ -923,6 +978,7 @@ export async function runDaemon(opts = {}) {
         }
         const freshConfig = resolved.effective ?? boot.config ?? null
         boot.config = freshConfig
+        refreshAutoUpdateFlag()
         for (const drop of resolved.drops) {
           fileLog.warn('config.local_entry_dropped', {
             [Attr.COMPONENT]: 'config',
