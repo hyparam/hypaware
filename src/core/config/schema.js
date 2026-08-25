@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 
@@ -666,6 +667,22 @@ function parseQueryCacheConfig(cache, pointer, errors) {
             maint[key] = /** @type {number} */ (m[key])
           }
         }
+      }
+      // @ref LLP 0311#avg-below-batch [implements]: routine compaction merges
+      // victims in memory, so a merged file never exceeds
+      // `compact_batch_bytes` and its size can never reach an average-size
+      // threshold set above that bound. A partition would converge and still
+      // read as due on every growth tick, forever, with no error anywhere.
+      // Compared on EFFECTIVE values: a config that raises only the average
+      // is paired with the default batch bound, which is the likelier way to
+      // write this mistake.
+      const avg = maint.compact_avg_file_bytes ?? MAINTENANCE_DEFAULTS.compact_avg_file_bytes
+      const batch = maint.compact_batch_bytes ?? MAINTENANCE_DEFAULTS.compact_batch_bytes
+      if (avg > batch) {
+        errors.push({
+          pointer: `${pointer}/maintenance/compact_avg_file_bytes`,
+          message: `must be at or below compact_batch_bytes (${batch}); routine compaction merges in memory, so a merged file never reaches a larger average and the partition would read as permanently due`,
+        })
       }
       out.maintenance = maint
     }

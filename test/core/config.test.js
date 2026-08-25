@@ -99,6 +99,9 @@ test('parseConfigShape preserves query.cache.maintenance.compact_batch_bytes', (
       cache: {
         maintenance: {
           compact_batch_bytes: 16 * 1024 * 1024,
+          // Lowering the batch bound below the default average would leave a
+          // converged partition permanently due, so the pair moves together.
+          compact_avg_file_bytes: 16 * 1024 * 1024,
           compact_file_count: 8,
         },
       },
@@ -122,6 +125,65 @@ test('parseConfigShape rejects a negative compact_batch_bytes', () => {
       result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
     true
   )
+})
+
+// @ref LLP 0311#avg-below-batch [tests]: an in-place merged file never
+// exceeds `compact_batch_bytes`, so an average-size threshold above that
+// bound is one a converged partition can never satisfy. Validation rejects
+// the pairing rather than letting a partition read as permanently due.
+test('parseConfigShape rejects compact_avg_file_bytes above compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: 32 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const error = result.ok === false &&
+    result.errors.find((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes'))
+  assert.ok(error, 'the offending key is named')
+  assert.match(error.message, /compact_batch_bytes/)
+})
+
+test('parseConfigShape rejects compact_avg_file_bytes above the default compact_batch_bytes', () => {
+  // Only the average is set, so the pairing is with the default batch bound
+  // (32 MB). Comparing the two written values alone would let this through.
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: { cache: { maintenance: { compact_avg_file_bytes: 128 * 1024 * 1024 } } },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.ok === false &&
+      result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    true
+  )
+})
+
+test('parseConfigShape accepts compact_avg_file_bytes equal to compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 8 * 1024 * 1024,
+          compact_batch_bytes: 8 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, true)
 })
 
 test('validateConfig catches cross-plugin and schedule errors', async () => {

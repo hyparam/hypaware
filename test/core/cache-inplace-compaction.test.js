@@ -365,3 +365,104 @@ test('a settleable fallback row a later round selects still routes to the full r
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+/**
+ * Snapshots the live generation's newest metadata version records. The
+ * reader-safety window is measured in these: snapshot expiry keeps the
+ * newest `min_snapshots_to_keep`, and the unreferenced-file sweep only
+ * reclaims what no retained snapshot names.
+ *
+ * @param {string} dir
+ * @returns {Promise<number>}
+ */
+async function snapshotCount(dir) {
+  const metaDir = path.join(liveTableDir(dir), 'metadata')
+  const versions = (await fs.readdir(metaDir))
+    .map((name) => ({ name, version: Number(/^v(\d+)\.metadata\.json$/.exec(name)?.[1]) }))
+    .filter((entry) => Number.isFinite(entry.version))
+    .sort((a, b) => b.version - a.version)
+  const latest = versions[0]
+  assert.ok(latest, 'fixture invariant: the live generation has metadata versions')
+  const meta = JSON.parse(await fs.readFile(path.join(metaDir, latest.name), 'utf8'))
+  return (meta.snapshots ?? []).length
+}
+
+// @ref LLP 0311#round-cap-under-retention [tests]: one tick must never commit
+// as many snapshots as retention keeps, or the next tick's expiry retires
+// everything the previous tick left and a reader that started before the tick
+// loses its snapshot. The round cap is what one tick spends, so it is clamped
+// by `min_snapshots_to_keep` rather than being a constant 8.
+test('one in-place tick commits fewer snapshots than snapshot retention keeps', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-window-'))
+  try {
+    // One tuple, twenty small files: fragmented enough to want far more
+    // merge rounds than a tick may spend.
+    await seedFragmented(cacheRoot, 1, 20)
+    const dir = partitionDir(cacheRoot)
+    const files = await dataFilesOnDisk(dir)
+    assert.equal(files.length, 20, 'fixture invariant: one tuple, twenty small files')
+
+    // A budget that fits only the two smallest files, so every round merges
+    // a prefix and the partition stays due for another round.
+    const sizes = (await Promise.all(files.map(async (f) => (await fs.stat(f)).size)))
+      .sort((a, b) => a - b)
+    const compact_batch_bytes = sizes[0] + sizes[1]
+
+    const min_snapshots_to_keep = 3
+    const before = await snapshotCount(dir)
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      config: { compact_batch_bytes, min_snapshots_to_keep },
+    })
+    assert.equal(report.partitions[0].compacted, true, 'the tick still merges')
+
+    const committed = await snapshotCount(dir) - before
+    assert.ok(committed > 0, 'fixture invariant: the tick committed merges')
+    assert.ok(
+      committed < min_snapshots_to_keep,
+      `a tick committed ${committed} snapshots while retention keeps ${min_snapshots_to_keep}: ` +
+      'the next expiry would retire every snapshot the previous tick left'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0311#metadata-dueness [tests]: in-place compaction cannot shrink a
+// source table's metadata directory, so a metadata-only dueness verdict is one
+// routine maintenance can never clear. Metadata is bounded by the version trim
+// and the unreferenced sweep, both of which run every tick regardless.
+test('a fat metadata directory alone does not make a source table due', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-fatmeta-'))
+  try {
+    // One file per tuple: the identity-partitioning floor, nothing to merge.
+    await seedFragmented(cacheRoot, 4, 1)
+    const dir = partitionDir(cacheRoot)
+    assert.equal((await dataFilesOnDisk(dir)).length, 4, 'fixture invariant: the partition is on its floor')
+
+    // 65 MB of metadata, sparse so the fixture costs no disk.
+    const fat = await fs.open(path.join(liveTableDir(dir), 'metadata', 'fat.avro'), 'w')
+    try {
+      await fat.truncate(65 * 1024 * 1024)
+    } finally {
+      await fat.close()
+    }
+
+    // Neither size heuristic can fire, so metadata bytes are the only thing
+    // that could call this partition due.
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      dryRun: true,
+      config: { compact_file_count: 1000, compact_avg_file_bytes: 1 },
+    })
+
+    assert.ok(
+      !report.partitions[0].compacted,
+      'metadata bytes routine compaction cannot shrink must not schedule a rewrite'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

@@ -1910,6 +1910,17 @@ export interface AiGatewayRecordResult {
  * honored only by the flush-time `settleBatch`, before partition write; the
  * maintenance `resettleBatch` ignores it, so an already-committed row is never
  * purged.
+ *
+ * `settle` MUST be free of observable side effects and MUST be idempotent.
+ * Cache maintenance calls it SPECULATIVELY, on rows it may never commit and
+ * possibly on the same rows again next tick, purely to answer "would
+ * settlement change anything" before choosing a compaction path
+ * (`victimFallbacksSettleable`); it then discards the returned rows. So
+ * calling `settle` twice, or calling it and throwing the answer away, must be
+ * indistinguishable from not calling it at all. Reading logs and memoising in
+ * memory is fine; marking a transcript line consumed, advancing a cursor, or
+ * writing anything a later run or another process can observe is not. See
+ * LLP 0311 #settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
