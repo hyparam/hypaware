@@ -926,6 +926,15 @@ export interface ValidationError {
 // =============================================================================
 
 export interface CommandRegistry {
+  /**
+   * Claim a command name. `command` is an input, not the registry's
+   * storage: the registry keeps a shallow copy and fills the semantic
+   * defaults (`category`, `audience`, `bootProfile`) on that copy, so a
+   * frozen module-level registration is accepted, a registration this
+   * call rejects comes back exactly as it was passed, and editing the
+   * object afterwards does not reach what `get`/`list` return. Function
+   * members (`run`) are shared with the copy, not cloned.
+   */
   register(command: CommandRegistration): void
   /**
    * Describe a command *group* (`graph`, `query`) so its `--help` can

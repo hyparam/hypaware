@@ -83,12 +83,19 @@ function markVerbProjection(command) {
  * and so the command a released verb name is entitled to retract. A
  * plugin's own command that merely shares the name is not.
  *
- * @param {CommandRegistration | undefined} command
+ * Total on a missing command, `null` included. The caller is
+ * `VerbRegistry.unregister`, reading the command back out of a registry the
+ * kernel accepts by injection, and a throw on that path takes daemon boot
+ * down. `WeakSet.has` was total for free; a property read is not, so both
+ * nullish cases are named here rather than left to the caller's guard.
+ *
+ * @param {CommandRegistration | undefined | null} command
  * @returns {boolean}
  * @ref LLP 0264#verb [implements]: releasing a verb name gives the CLI surface back whichever kernel path projected it, and never takes somebody else's command
  */
 export function isVerbProjection(command) {
-  return command !== undefined && /** @type {any} */ (command)[VERB_PROJECTION] === true
+  if (command === undefined || command === null) return false
+  return /** @type {any} */ (command)[VERB_PROJECTION] === true
 }
 
 /**
