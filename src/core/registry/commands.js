@@ -57,35 +57,44 @@ export function createCommandRegistry() {
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
+    //
+    // The defaulting writes into a copy, never into the argument. A caller's
+    // registration is an input, not the registry's storage: a plugin is free
+    // to pass a frozen module-level constant (mutating it would throw a
+    // TypeError out of the defaulting, before any registry rule ran), and a
+    // registration this function goes on to *reject* below has to leave the
+    // caller's object exactly as it arrived.
     // @ref LLP 0248#semantic-boot [implements]: category, audience, and boot policy live on the canonical registry entry
-    command.category ??= command.plugin ? 'additional' : command.name.split(' ')[0]
-    command.audience ??= command.hidden
+    /** @type {CommandRegistration} */
+    const record = { ...command }
+    record.category ??= record.plugin ? 'additional' : record.name.split(' ')[0]
+    record.audience ??= record.hidden
       ? 'machine'
-      : command.category === 'additional'
+      : record.category === 'additional'
         ? 'operator'
-        : command.category === 'dev'
+        : record.category === 'dev'
           ? 'developer'
           : 'everyday'
-    command.bootProfile ??= 'config'
-    if (command.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(command.audience)) {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid audience '${command.audience}'`)
+    record.bootProfile ??= 'config'
+    if (record.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(record.audience)) {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' has invalid audience '${record.audience}'`)
     }
-    if (command.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(command.bootProfile)) {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid bootProfile '${command.bootProfile}'`)
+    if (record.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(record.bootProfile)) {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' has invalid bootProfile '${record.bootProfile}'`)
     }
-    if (byName.has(command.name) || aliasIndex.has(command.name)) {
-      throw new Error(`CommandRegistry.register: duplicate command name '${command.name}'`)
+    if (byName.has(record.name) || aliasIndex.has(record.name)) {
+      throw new Error(`CommandRegistry.register: duplicate command name '${record.name}'`)
     }
-    for (const alias of command.aliases ?? []) {
+    for (const alias of record.aliases ?? []) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
-          `CommandRegistry.register: alias '${alias}' for '${command.name}' collides with an existing command`
+          `CommandRegistry.register: alias '${alias}' for '${record.name}' collides with an existing command`
         )
       }
     }
-    byName.set(command.name, command)
-    for (const alias of command.aliases ?? []) {
-      aliasIndex.set(alias, command.name)
+    byName.set(record.name, record)
+    for (const alias of record.aliases ?? []) {
+      aliasIndex.set(alias, record.name)
     }
   }
 

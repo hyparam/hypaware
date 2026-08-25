@@ -214,7 +214,7 @@ src/
     plugin_install/     # resolver, fetch, lock, update_check
     sinks/              # cron driver + encoder utility
 hypaware-core/
-  smoke/                # `hyp smoke <name>` flows
+  smoke/                # `hyp dev smoke <name>` flows
   plugins-workspace/
     ai-gateway/         # @hypaware/ai-gateway
     otel/               # @hypaware/otel
@@ -242,22 +242,22 @@ npm pack --dry-run        # verify the published file set
 Re-run the smoke battery and confirm every one is green:
 
 ```sh
-hyp smoke package_bin_boot
-hyp smoke cli_bundled_plugins_activated
-hyp smoke daemon_foreground_start_stop
-hyp smoke daemon_install_render
-hyp smoke walkthrough_picker_to_first_query
-hyp smoke client_attach_idempotent
-hyp smoke gateway_claude_capture
-hyp smoke gateway_codex_capture
-hyp smoke claude_telemetry_capture
-hyp smoke hypignore_capture_drop
-hyp smoke local_only_export_withhold
-hyp smoke source_optout_export_withhold
-hyp smoke otel_loopback_capture
-hyp smoke local_parquet_export
-hyp smoke query_grep_roundtrip
-hyp smoke status_diagnostics
+hyp dev smoke package_bin_boot
+hyp dev smoke cli_bundled_plugins_activated
+hyp dev smoke daemon_foreground_start_stop
+hyp dev smoke daemon_install_render
+hyp dev smoke walkthrough_picker_to_first_query
+hyp dev smoke client_attach_idempotent
+hyp dev smoke gateway_claude_capture
+hyp dev smoke gateway_codex_capture
+hyp dev smoke claude_telemetry_capture
+hyp dev smoke hypignore_capture_drop
+hyp dev smoke local_only_export_withhold
+hyp dev smoke source_optout_export_withhold
+hyp dev smoke otel_loopback_capture
+hyp dev smoke local_parquet_export
+hyp dev smoke query_grep_roundtrip
+hyp dev smoke status_diagnostics
 ```
 
 Finally, exercise the manual gate end-to-end on at least one macOS host

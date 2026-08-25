@@ -53,7 +53,7 @@ import {
 import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
 
 /**
- * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandGroupRegistration, CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CommandRegistryExtended } from '../../../src/core/cli/types.js'
  */
 
@@ -74,6 +74,9 @@ export function registerCoreCommands(registry) {
   for (const cmd of buildCoreCommands(registry)) {
     registry.register(cmd)
   }
+  for (const group of CORE_COMMAND_GROUPS) {
+    registry.registerGroup(group)
+  }
   // Project the intrinsic core verbs (query_sql) as CLI commands here too,
   // so `hyp --help` (rendered before the kernel boots) lists `query sql`.
   // The kernel verb registry re-projects them idempotently during boot and
@@ -82,6 +85,45 @@ export function registerCoreCommands(registry) {
     if (!registry.get(verb.name)) registry.register(verbToCommand(verb))
   }
 }
+
+/**
+ * Descriptions for the core groups that exist only as a shared prefix. A
+ * group whose bare command `makeGroupCommand` built speaks for itself; these
+ * three have no bare command, so without a registered description their
+ * `--help` opens on a naked `usage:` line and a table, and the reader is
+ * never told what the group is for.
+ *
+ * @type {CommandGroupRegistration[]}
+ * @ref LLP 0214#d2 [implements]: the group registry is where a bare-command-less group keeps its voice, core groups included
+ */
+const CORE_COMMAND_GROUPS = [
+  {
+    name: 'cache',
+    summary: 'Inspect and maintain the local query cache',
+    help: [
+      'The cache is the local Iceberg store every query reads. These',
+      'subcommands report how fresh it is, force a refresh for one dataset,',
+      'and run its maintenance routines. They are local-only: none of them',
+      'answers about a remote target.',
+      '',
+      'The same three routines also answer to their former query spellings',
+      '(query status/refresh/maintain).',
+    ].join('\n'),
+  },
+  {
+    name: 'client history',
+    summary: 'Import past sessions from AI clients on this machine',
+    help: [
+      'Backfill reads history a client wrote before HypAware was capturing,',
+      'from the transcript files the client keeps on disk. Start with plan,',
+      'which reports what each provider would scan without writing a row.',
+    ].join('\n'),
+  },
+  {
+    name: 'dev plugin',
+    summary: 'Scaffold and diagnose plugins under development',
+  },
+]
 
 /**
  * @param {CommandRegistryExtended} registry

@@ -368,6 +368,43 @@ test('every visible group renders its registry-backed subcommand table', { timeo
   }
 })
 
+// A group with a bare command speaks through that command; a group that is
+// only a shared prefix speaks through the description core registered for it.
+// Neither is optional: a group with no voice opens its help on a naked
+// 'usage:' line and never says what it is for, which is what 'hyp cache
+// --help' and 'hyp client history --help' did before core registered theirs.
+// @ref LLP 0214#d2 [tests]: a group with no bare command still renders a header and paragraph, core groups included
+test('every reachable core group renders a header line, bare command or not', { timeout: SWEEP_TIMEOUT_MS }, async () => {
+  const registry = coreRegistry()
+  const { run } = await harness(registry)
+  /** @type {Set<string>} */
+  const prefixes = new Set()
+  for (const command of registry.list()) {
+    if (command.hidden) continue
+    const tokens = command.name.split(' ')
+    for (let i = 1; i < tokens.length; i += 1) prefixes.add(tokens.slice(0, i).join(' '))
+  }
+  assert.ok(prefixes.size > 0, 'expected at least one group prefix')
+  for (const prefix of [...prefixes].sort()) {
+    // A prefix that resolves to a command renders under that command's
+    // canonical name (`mcp` is an alias of `mcp serve`); one that resolves to
+    // nothing renders under the prefix and needs a registered description.
+    const owner = registry.get(prefix)
+    const header = owner
+      ? `hyp ${owner.name} - ${owner.summary}`
+      : `hyp ${prefix} - ${registry.getGroup(prefix)?.summary}`
+    assert.doesNotMatch(
+      header,
+      /undefined/,
+      `hyp ${prefix}: no bare command and no registered group description, so its help has no header`
+    )
+    const { code, out, err } = await run([...prefix.split(' '), '--help'])
+    assert.equal(code, 0, `${prefix} --help exited ${code}`)
+    assert.equal(err, '', `${prefix} --help wrote to stderr`)
+    assert.ok(out.startsWith(`${header}\n`), `${prefix} --help omits its header line`)
+  }
+})
+
 test('every visible leaf renders its own summary, usage, and nothing on stderr', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)
