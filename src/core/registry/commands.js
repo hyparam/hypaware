@@ -42,50 +42,65 @@ export function createCommandRegistry() {
     if (!command || typeof command !== 'object') {
       throw new TypeError('CommandRegistry.register: command must be an object')
     }
-    if (typeof command.name !== 'string' || command.name.length === 0) {
+    // Copy first, then check the copy. A caller's registration is an input,
+    // not the registry's storage: the defaulting below has to land somewhere
+    // the caller does not own, so a plugin can pass a frozen module-level
+    // constant and a registration this function goes on to reject comes back
+    // exactly as it arrived.
+    //
+    // Validating the argument and storing the copy would let the two
+    // disagree, because a spread copies own enumerable properties and nothing
+    // else: a class instance whose `run()` lives on its prototype passed the
+    // shape check here and stored a record with no `run` at all, which
+    // surfaces as a TypeError inside dispatch rather than as the boundary
+    // error this function exists to raise. Everything below reads `record`
+    // for that reason, the shape checks included.
+    /** @type {CommandRegistration} */
+    const record = { ...command }
+    if (typeof record.name !== 'string' || record.name.length === 0) {
       throw new TypeError('CommandRegistry.register: command.name must be a non-empty string')
     }
-    if (typeof command.summary !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing summary`)
+    if (typeof record.summary !== 'string') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing summary`)
     }
-    if (typeof command.usage !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing usage`)
+    if (typeof record.usage !== 'string') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing usage`)
     }
-    if (typeof command.run !== 'function') {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' missing run()`)
+    if (typeof record.run !== 'function') {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' missing run()`)
     }
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
     // @ref LLP 0248#semantic-boot [implements]: category, audience, and boot policy live on the canonical registry entry
-    command.category ??= command.plugin ? 'additional' : command.name.split(' ')[0]
-    command.audience ??= command.hidden
+    record.category ??= record.plugin ? 'additional' : record.name.split(' ')[0]
+    record.audience ??= record.hidden
       ? 'machine'
-      : command.category === 'additional'
+      : record.category === 'additional'
         ? 'operator'
-        : command.category === 'dev'
+        : record.category === 'dev'
           ? 'developer'
           : 'everyday'
-    command.bootProfile ??= 'config'
-    if (command.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(command.audience)) {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid audience '${command.audience}'`)
+    record.bootProfile ??= 'config'
+    if (record.audience !== undefined && !['everyday', 'operator', 'developer', 'machine'].includes(record.audience)) {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' has invalid audience '${record.audience}'`)
     }
-    if (command.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(command.bootProfile)) {
-      throw new TypeError(`CommandRegistry.register: '${command.name}' has invalid bootProfile '${command.bootProfile}'`)
+    if (record.bootProfile !== undefined && !['config', 'all-available', 'none'].includes(record.bootProfile)) {
+      throw new TypeError(`CommandRegistry.register: '${record.name}' has invalid bootProfile '${record.bootProfile}'`)
     }
-    if (byName.has(command.name) || aliasIndex.has(command.name)) {
-      throw new Error(`CommandRegistry.register: duplicate command name '${command.name}'`)
+    if (byName.has(record.name) || aliasIndex.has(record.name)) {
+      throw new Error(`CommandRegistry.register: duplicate command name '${record.name}'`)
     }
-    for (const alias of command.aliases ?? []) {
+    for (const alias of record.aliases ?? []) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
-          `CommandRegistry.register: alias '${alias}' for '${command.name}' collides with an existing command`
+          `CommandRegistry.register: alias '${alias}' for '${record.name}' collides with an existing command`
         )
       }
     }
-    byName.set(command.name, command)
-    for (const alias of command.aliases ?? []) {
-      aliasIndex.set(alias, command.name)
+    byName.set(record.name, record)
+    for (const alias of record.aliases ?? []) {
+      aliasIndex.set(alias, record.name)
     }
   }
 
