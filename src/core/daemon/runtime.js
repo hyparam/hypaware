@@ -727,6 +727,10 @@ export async function runDaemon(opts = {}) {
             // their uuid twin.
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
+            // @ref LLP 0311#migration: let the tick detect and run the
+            // one-time re-partition when a dataset's declaration demoted
+            // partition columns to sortOnly.
+            getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately

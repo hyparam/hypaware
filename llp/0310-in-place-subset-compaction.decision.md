@@ -36,7 +36,8 @@ untouched, with its original sequence numbers, in one `replace` commit.
 
 Re-partitioning the cache to a coarser layout (day grain, as the export side
 chose in LLP 0022) would lower the floor itself; that is deliberately deferred
-until this machinery has bedded in, and would supersede LLP 0030's spec.
+until this machinery has bedded in, and would supersede LLP 0030's spec
+(done in [LLP 0311](./0311-cache-date-partition.decision.md)).
 
 ## Decision {#decision}
 

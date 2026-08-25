@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-16
 **Related:** LLP 0016, LLP 0022, LLP 0023, LLP 0026 (claude-native-granularity)
+**Superseded-by:** LLP 0311 (decision 4, the cache partition fields)
 
 ## Summary
 
