@@ -344,7 +344,7 @@ async function startStubCentralServer() {
     }
 
     if (req.method === 'POST' && (url.pathname === '/v1/identity/bootstrap' || url.pathname === '/v1/identity/refresh')) {
-      reply(200, { 'content-type': 'application/json' }, JSON.stringify({ jwt, expires_at: expiresAt }))
+      reply(200, { 'content-type': 'application/json' }, JSON.stringify({ jwt, expires_at: expiresAt, org: 'smoke.test' }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/config') {

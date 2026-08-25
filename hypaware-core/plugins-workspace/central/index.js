@@ -2,12 +2,12 @@
 
 import path from 'node:path'
 
-import { createInstanceWatermarkStore } from '../../../src/core/sinks/incremental.js'
+import { createSinkWatermarkStore } from '../../../src/core/sinks/watermarks.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
-import { createDatasetRolloutStore } from './src/rollout.js'
+import { bindDestinationState, createDatasetRolloutStore, markDestinationStateReady } from './src/rollout.js'
 import { createForwardSink, initializeOpenDatasetRollouts } from './src/sink.js'
 
 /**
@@ -63,22 +63,48 @@ export async function activate(ctx) {
         hyp_identity_source: source,
       })
 
-      // Per-(sink instance, partition) incremental-read watermarks. The plugin
-      // `stateDir` is per-PLUGIN, so two `@hypaware/central` instances would
-      // share, and clobber, one watermark file and skip each other's rows;
-      // `createInstanceWatermarkStore` namespaces by the instance name, matching
-      // local-fs/s3. Each forward instance then reads only rows added since its
-      // own last successful export.
-      // @ref LLP 0040#watermark-contract [implements]: one watermark per (sink instance, partition), scoped by instance name
-      const watermarks = createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
-      const rollouts = createDatasetRolloutStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
+      // Bind progress before creating either state store. Existing unscoped
+      // progress is adopted once for the current destination; a new origin/org
+      // gets an isolated scope durably marked for retained-history replay.
+      // @ref LLP 0315#destination-identity [implements]: watermarks and rollout manifests share one destination-scoped state root
+      let destinationState = await bindDestinationState({
+        paths: sinkCtx.paths,
+        instanceName: sinkCtx.name,
+        destination: identityClient.getDestination(),
+      })
+      sinkCtx.log.info('central.destination.bound', {
+        hyp_sink_instance: sinkCtx.name,
+        destination_origin: destinationState.destination.origin,
+        destination_org: destinationState.destination.org,
+        destination_phase: destinationState.phase,
+        adopted_legacy_progress: destinationState.adoptedLegacy,
+      })
 
-      // Establish open-dataset rollout state during sink creation. On an
-      // upgraded machine this baselines partitions already on disk; on a cold
-      // machine it durably records an empty dataset before the first captured
-      // row can be mistaken for rollout history.
+      const watermarks = createSinkWatermarkStore({ stateDir: destinationState.stateDir })
+      const rollouts = createDatasetRolloutStore({ stateDir: destinationState.stateDir })
+
+      // Establish open-dataset rollout state during sink creation. An existing
+      // destination's software rollout baselines current partitions; a new
+      // destination starts them at zero so retained eligible history forwards.
+      // An empty dataset still gets a durable manifest before its first row.
       // @ref LLP 0307#rollout-instant [implements]: initialize dataset rollout state before scheduled exports can observe a first partition
-      await initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log: sinkCtx.log })
+      // @ref LLP 0315#new-destination-replay [implements]: a newly bound destination initializes eligible open datasets for retained-history replay
+      await initializeOpenDatasetRollouts({
+        query,
+        storage,
+        watermarks,
+        rollouts,
+        log: sinkCtx.log,
+        replayRetainedHistory: destinationState.phase === 'initializing-history',
+      })
+      if (destinationState.phase === 'initializing-history') {
+        destinationState = await markDestinationStateReady(destinationState)
+        sinkCtx.log.info('central.destination.ready', {
+          hyp_sink_instance: sinkCtx.name,
+          destination_origin: destinationState.destination.origin,
+          destination_org: destinationState.destination.org,
+        })
+      }
 
       const sink = createForwardSink({
         config,

@@ -412,14 +412,14 @@ async function startFakeCentralServer() {
       if (req.method === 'POST' && url === '/v1/identity/bootstrap') {
         issuedCount += 1
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ jwt: signFakeJwt(`gateway-${issuedCount}`), expires_at: nextExpiresAt }))
+        res.end(JSON.stringify({ jwt: signFakeJwt(`gateway-${issuedCount}`), expires_at: nextExpiresAt, org: 'smoke.test' }))
         return
       }
       if (req.method === 'POST' && url === '/v1/identity/refresh') {
         issuedCount += 1
         nextExpiresAt += 24 * 60 * 60
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ jwt: signFakeJwt(`gateway-${issuedCount}`), expires_at: nextExpiresAt }))
+        res.end(JSON.stringify({ jwt: signFakeJwt(`gateway-${issuedCount}`), expires_at: nextExpiresAt, org: 'smoke.test' }))
         return
       }
       if (req.method === 'POST' && url.startsWith('/v1/ingest/')) {

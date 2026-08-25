@@ -321,10 +321,11 @@ function datasetForwardingVerdict(dataset, name) {
 /**
  * Establish the start-now boundary while the sink is being created, before a
  * cold machine can capture its first post-rollout row. Existing materialized
- * partitions are baselined; an empty dataset gets an initialized empty
- * manifest, so a partition created later starts at zero and forwards its first
- * row. An existing manifest is authoritative and is never reconstructed from
- * watermarks.
+ * partitions are baselined for a software rollout, or start at zero when a new
+ * remote destination must receive retained history. An empty dataset gets an
+ * initialized empty manifest, so a partition created later starts at zero and
+ * forwards its first row. An existing manifest is authoritative and is never
+ * reconstructed from watermarks.
  *
  * @param {{
  *   query: QueryRegistry,
@@ -332,15 +333,24 @@ function datasetForwardingVerdict(dataset, name) {
  *   watermarks: SinkWatermarkStore,
  *   rollouts: DatasetRolloutStore,
  *   log: PluginLogger,
+ *   replayRetainedHistory?: boolean,
  * }} args
  */
-export async function initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log }) {
+export async function initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log, replayRetainedHistory = false }) {
   for (const dataset of query.listDatasets()) {
     if (!isEligibleOpenDataset(dataset)) continue
     const existing = await rollouts.read(dataset.name)
     if (existing) continue
     const partitions = await discoverRolloutPartitions(dataset, storage)
-    await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
+    await initializeDatasetRollout({
+      dataset,
+      partitions,
+      storage,
+      watermarks,
+      rollouts,
+      log,
+      replayRetainedHistory,
+    })
   }
 }
 
@@ -424,10 +434,11 @@ async function ensureOpenDatasetPartition(args) {
  *   watermarks: SinkWatermarkStore,
  *   rollouts: DatasetRolloutStore,
  *   log: PluginLogger,
+ *   replayRetainedHistory?: boolean,
  * }} args
  * @returns {Promise<DatasetRolloutRecord>}
  */
-async function initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log }) {
+async function initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log, replayRetainedHistory = false }) {
   const existing = await rollouts.read(dataset.name)
   if (existing) return existing
 
@@ -439,14 +450,29 @@ async function initializeDatasetRollout({ dataset, partitions, storage, watermar
     partitionKeys.add(key.partitionKey)
     const progress = await watermarks.read(key)
     if (progress) continue
-    await writeHistoryBaseline({
-      dataset: dataset.name,
-      tablePath: partition.tablePath,
-      storage,
-      watermarks,
-      watermarkKey: key,
-      log,
-    })
+    if (replayRetainedHistory) {
+      // A new destination starts before every sequence-bearing retained row.
+      // Persist this before the manifest so a crash resumes the same replay
+      // boundary instead of moving it to the current high-water.
+      // @ref LLP 0315#new-destination-replay [implements]: existing eligible open-dataset partitions start at zero for a destination with no progress of its own
+      await watermarks.write(key, {
+        continuation: { v: 1, seq: '0' },
+        exportedRowCount: 0,
+      })
+      log.info('central.forward.retained_history_ready', {
+        hyp_dataset: dataset.name,
+        partition_key: key.partitionKey,
+      })
+    } else {
+      await writeHistoryBaseline({
+        dataset: dataset.name,
+        tablePath: partition.tablePath,
+        storage,
+        watermarks,
+        watermarkKey: key,
+        log,
+      })
+    }
   }
 
   // Every baseline is durable before the manifest becomes authoritative. If a

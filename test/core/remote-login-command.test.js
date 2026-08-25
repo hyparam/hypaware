@@ -46,7 +46,7 @@ async function makeCtx({ hypHome, stdin, remotes, sinks }) {
 function gatewaySession() {
   return {
     refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
-    gateway: { jwt: 'gw-jwt', expiresAt: 1_920_000_000, gatewayId: 'gw-1' },
+    gateway: { jwt: 'gw-jwt', expiresAt: 1_920_000_000, gatewayId: 'gw-1', org: 'acme' },
   }
 }
 
@@ -261,6 +261,7 @@ test('a login-minted gateway credential seeds the matching central sink (LLP 006
     jwt: 'gw-jwt',
     expires_at: 1_920_000_000,
     gateway_id: 'gw-1',
+    org: 'acme',
     central_url: 'https://hyp.internal',
     origin: 'login',
   })
