@@ -48,6 +48,24 @@ if (argv[0] === '__smoke_internal') {
   }
 }
 
+/**
+ * The value of `--config <path>` / `--config=<path>` in argv, matching
+ * how `resolveConfigPath` reads the flag the daemon was launched with.
+ *
+ * @param {string[]} args
+ * @returns {string | undefined}
+ */
+function readConfigFlag(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]
+    if (token.startsWith('--config=')) return token.slice('--config='.length)
+    if (token !== '--config') continue
+    const next = args[i + 1]
+    if (next !== undefined && !next.startsWith('--')) return next
+  }
+  return undefined
+}
+
 // The self-update check runs before dispatch (and so before any kernel
 // import) for `daemon run` only: a release broken anywhere past this
 // point still reaches the check on every service-manager relaunch, so a
@@ -60,6 +78,12 @@ if (argv[0] === 'daemon' && argv[1] === 'run') {
     const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } =
       await import('../src/core/update/self_update.js')
     const result = await runSelfUpdatePass({
+      // The installed service unit always renders `--config <path>` (both
+      // the launchd and the systemd writer do), and that file is where an
+      // operator writes `auto_update: false`. Hand it to the lane so the
+      // off switch binds on a non-default config too; the parse is inline
+      // because the codec lives past the import boundary this lane keeps.
+      configPath: readConfigFlag(argv),
       // Routine skips (a dev checkout, auto_update off) stay silent
       // here; only events an operator would act on reach stderr.
       log: (event, fields) => {

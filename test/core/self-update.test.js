@@ -293,6 +293,98 @@ test('before the first boot caches the flag, auto_update: false in the local con
   }
 })
 
+test('the pre-boot lane honors the --config the service unit was launched with', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-preboot-cfg-'))
+  try {
+    // Both installers render `--config <path>` into the service unit, so a
+    // non-default config is the ordinary shape, not an exotic one. The
+    // default path is deliberately left absent here: if the lane read it
+    // instead, the pass would probe and apply.
+    const stateRoot = path.join(dir, 'hypaware')
+    await fsp.mkdir(stateRoot, { recursive: true })
+    const unitConfig = path.join(dir, 'elsewhere', 'hypaware-config.json')
+    await fsp.mkdir(path.dirname(unitConfig), { recursive: true })
+    await fsp.writeFile(unitConfig, JSON.stringify({ version: 2, auto_update: false }))
+
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('9.9.9')
+    const off = await runSelfUpdatePass({
+      stateRoot, env: {}, configPath: unitConfig, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(off.action, 'skipped')
+    assert.equal(off.reason, 'auto_update_off')
+    assert.equal(probe.calledCount(), 0)
+
+    // Same precedence as `resolveConfigPath`: the explicit flag outranks
+    // HYP_CONFIG, which outranks the default beside the state root.
+    const envPath = path.join(dir, 'env-config.json')
+    await fsp.writeFile(envPath, JSON.stringify({ version: 2, auto_update: true }))
+    assert.equal(
+      readLocalConfigAutoUpdate({ stateRoot, env: { HYP_CONFIG: envPath }, configPath: unitConfig }),
+      false
+    )
+    assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: { HYP_CONFIG: envPath } }), true)
+
+    // Without the flag the lane looks beside the state root, finds nothing,
+    // and the default carries the pass through to an apply.
+    const on = await runSelfUpdatePass({
+      stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(on.action, 'updated')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unreadable config or status file is no answer, never a throw', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-unreadable-'))
+  try {
+    const stateRoot = path.join(dir, 'hypaware')
+    await fsp.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+    // A directory where a file belongs raises EISDIR, not ENOENT. A throw
+    // escaping here would take the whole pass down on a machine the
+    // pre-boot lane exists to repair, so both readers must absorb it.
+    await fsp.mkdir(path.join(dir, CONFIG_BASENAME), { recursive: true })
+    await fsp.mkdir(path.join(stateRoot, 'run', 'status.json'), { recursive: true })
+    assert.equal(readLocalConfigAutoUpdate({ stateRoot, env: {} }), undefined)
+    assert.equal(previousBootLooksStuck(stateRoot), false)
+
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('9.9.9')
+    const result = await runSelfUpdatePass({
+      stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(result.action, 'updated')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('hyp status reports the off switch from config before a boot has cached it', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-status-off-'))
+  try {
+    const stateRoot = path.join(dir, 'hypaware')
+    await fsp.mkdir(stateRoot, { recursive: true })
+    await fsp.writeFile(
+      path.join(dir, CONFIG_BASENAME),
+      JSON.stringify({ version: 2, auto_update: false })
+    )
+    // Status must not say the switch is on while the pass is already
+    // honoring the off: same precedence on both sides.
+    const off = describeSelfUpdate({ stateRoot, env: {} })
+    assert.match(String(off.line), /self-update: off/)
+    assert.equal(off.json.auto_update, false)
+
+    // The cached effective flag still wins, here and in the updater.
+    writeSelfUpdateState(stateRoot, { auto_update: true })
+    const on = describeSelfUpdate({ stateRoot, env: {} })
+    assert.equal(on.json.auto_update, true)
+    assert.equal(on.line, null)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a probe failure degrades to a recorded error, never a throw', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-probe-fail-'))
   try {

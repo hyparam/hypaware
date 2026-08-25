@@ -49,6 +49,25 @@ export const SELF_UPDATE_RESTART_EXIT_CODE = 75
 const CONFIG_BASENAME = 'hypaware-config.json'
 
 /**
+ * Which config file holds the off switch, by the same precedence
+ * `resolveConfigPath` (`src/core/runtime/boot.js`) applies when the
+ * kernel boots: an explicit `--config` first, then `HYP_CONFIG`, then
+ * `<HYP_HOME>/hypaware-config.json` (the state root's parent). The
+ * explicit rung is not optional: the installed service unit always
+ * renders `--config <path>` on both platforms, so without it an
+ * `auto_update: false` written in a non-default config would not bind
+ * in the pre-boot lane at all.
+ *
+ * @param {{ stateRoot: string, env: NodeJS.ProcessEnv, configPath?: string }} opts
+ * @returns {string}
+ */
+function resolveLocalConfigPath(opts) {
+  if (opts.configPath) return path.resolve(opts.configPath)
+  if (opts.env.HYP_CONFIG) return path.resolve(opts.env.HYP_CONFIG)
+  return path.join(path.dirname(opts.stateRoot), CONFIG_BASENAME)
+}
+
+/**
  * The `auto_update` flag straight off the local config file, for a
  * machine where no daemon boot has cached the effective flag yet. A bare
  * JSON read, not the config loader: importing the schema machinery here
@@ -56,17 +75,19 @@ const CONFIG_BASENAME = 'hypaware-config.json'
  * down with it. Central-layer merging is out of scope by the same
  * argument; the daemon-cached effective flag wins whenever it exists.
  *
+ * Every failure reads as "no answer here", the read included: a config
+ * that is a directory, or one the daemon's user cannot open, raises
+ * something other than ENOENT, and a throw escaping this far would
+ * disable the entire pass on a machine this lane exists to repair.
+ *
  * @ref LLP 0309#config-key [implements]: the off switch binds before the first successful boot
- * @param {{ stateRoot: string, env: NodeJS.ProcessEnv }} opts
+ * @param {{ stateRoot: string, env: NodeJS.ProcessEnv, configPath?: string }} opts
  * @returns {boolean | undefined}
  */
 export function readLocalConfigAutoUpdate(opts) {
-  const configPath = opts.env.HYP_CONFIG
-    ? path.resolve(opts.env.HYP_CONFIG)
-    : path.join(path.dirname(opts.stateRoot), CONFIG_BASENAME)
-  const raw = readFileIfExistsSync(configPath)
-  if (!raw) return undefined
   try {
+    const raw = readFileIfExistsSync(resolveLocalConfigPath(opts))
+    if (!raw) return undefined
     const parsed = JSON.parse(raw)
     const flag = parsed && typeof parsed === 'object' ? parsed.auto_update : undefined
     return typeof flag === 'boolean' ? flag : undefined
@@ -275,9 +296,9 @@ export function shouldCheckNow({ state, nowMs, eager, jitter }) {
  * @returns {boolean}
  */
 export function previousBootLooksStuck(stateRoot) {
-  const raw = readFileIfExistsSync(path.join(daemonRunDir(stateRoot), 'status.json'))
-  if (!raw) return false
   try {
+    const raw = readFileIfExistsSync(path.join(daemonRunDir(stateRoot), 'status.json'))
+    if (!raw) return false
     const parsed = JSON.parse(raw)
     if (parsed?.state === 'starting') return true
     if (parsed?.state !== 'degraded') return false
@@ -415,6 +436,7 @@ function realpathOrSelf(p) {
  * @param {{
  *   stateRoot?: string,
  *   env?: NodeJS.ProcessEnv,
+ *   configPath?: string,
  *   autoUpdate?: boolean,
  *   force?: boolean,
  *   apply?: boolean,
@@ -439,7 +461,7 @@ export async function runSelfUpdatePass(opts = {}) {
     // until a boot has cached it, fall back to the local config file so
     // an `auto_update: false` written before first start still binds.
     const auto = opts.autoUpdate ?? state.auto_update ??
-      readLocalConfigAutoUpdate({ stateRoot, env }) ?? true
+      readLocalConfigAutoUpdate({ stateRoot, env, configPath: opts.configPath }) ?? true
     if (!auto && !opts.force) {
       return { action: 'skipped', reason: 'auto_update_off' }
     }
@@ -561,10 +583,14 @@ export function describeSelfUpdate(opts) {
   } catch {
     identity = { name: 'hypaware', version: 'unknown' }
   }
+  // The same precedence the updater itself applies, so status cannot
+  // report the switch as on while the pass is already honoring an off
+  // written in config but not yet cached by a boot.
+  const autoUpdate = state.auto_update ?? readLocalConfigAutoUpdate(opts) ?? true
   /** @type {Record<string, unknown>} */
   const json = {
     version: identity.version,
-    auto_update: state.auto_update ?? true,
+    auto_update: autoUpdate,
     provenance,
     ...(state.checked_at ? { checked_at: state.checked_at } : {}),
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
@@ -575,7 +601,7 @@ export function describeSelfUpdate(opts) {
   // rendering status (an npx run, a checkout) is not necessarily the
   // install doing the updating, so its own provenance would mislead
   // here. JSON carries provenance for the curious.
-  if (state.auto_update === false) {
+  if (autoUpdate === false) {
     return { line: 'self-update: off (auto_update is false)', json }
   }
   if (state.error) {
