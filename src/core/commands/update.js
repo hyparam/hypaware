@@ -50,6 +50,16 @@ export async function runUpdate(argv, ctx) {
     stateRoot,
     env: ctx.env,
     force: true,
+    // The pass never throws: an unexpected failure (an unwritable run
+    // directory, a lock this machine cannot take) collapses into a bare
+    // `unexpected_error` reason that names nothing an operator can act
+    // on, and the daemon's file log is not where a hand-typed command
+    // reports. Pass the diagnostic events through; the routine ones are
+    // already this command's own output.
+    log: (event, fields) => {
+      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored') return
+      try { ctx.stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
+    },
   })
 
   if (result.action === 'checked' && !result.reason) {

@@ -9,6 +9,12 @@ export interface SelfUpdateState {
   /** Probe or apply failure recorded for `hyp status`; absent when healthy. */
   error?: string
   /**
+   * ISO timestamp of the first failure in the current unbroken run of
+   * them. Bounds how long a probe failure may stay out of the status
+   * line; cleared by the next successful probe.
+   */
+  error_since?: string
+  /**
    * Cached effective `auto_update` config flag, written by the booted
    * daemon so the import-light pre-boot lane never parses config layers.
    */
