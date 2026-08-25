@@ -36,6 +36,7 @@ import {
   runDaemonUninstall,
 } from '../commands/daemon.js'
 import { runAsk } from '../commands/ask.js'
+import { runUpdate } from '../commands/update.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkMaintain } from '../commands/sink.js'
@@ -794,6 +795,16 @@ function buildCoreCommands(registry) {
       summary: 'Print version and environment info',
       usage: coreUsage('version'),
       run: runVersion,
+    },
+    {
+      name: 'update',
+      category: 'additional',
+      audience: 'operator',
+      bootProfile: 'none',
+      summary: 'Update HypAware to the latest release now',
+      usage: coreUsage('update'),
+      help: 'Checks the npm registry, installs a newer release with npm install -g,\nand restarts the installed daemon so the running code matches.',
+      run: runUpdate,
     },
     {
       name: 'dev smoke',

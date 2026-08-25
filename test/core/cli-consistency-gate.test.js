@@ -296,7 +296,7 @@ test('hyp --help renders the exact journey order and compact operations list', a
     'client', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
   assert.deepEqual(additionalCommandNames(out), [
-    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'dev',
+    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'dev', 'update',
   ])
   assert.doesNotMatch(out, /\b(?:admin|fleet)\b/)
 })

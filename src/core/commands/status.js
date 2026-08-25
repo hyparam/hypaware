@@ -332,6 +332,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       platform: report.daemon.platform,
       ...(report.daemon.error ? { error: report.daemon.error } : {}),
     },
+    ...(report.selfUpdate ? { self_update: report.selfUpdate.json } : {}),
     sources: report.sources.map((s) => ({
       name: s.name,
       plugin: s.plugin,
@@ -597,6 +598,12 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   const daemonLine = describeDaemon(report.daemon)
   stdout.write(`  daemon:   ${daemonLine}\n`)
+
+  // Quiet when healthy: the line appears only when self-update is off,
+  // skipped, degraded, or a newer release is waiting.
+  if (report.selfUpdate?.line) {
+    stdout.write(`  ${report.selfUpdate.line}\n`)
+  }
 
   stdout.write('  active plugins:\n')
   if (report.activePlugins.length === 0) {

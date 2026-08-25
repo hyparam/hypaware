@@ -293,6 +293,16 @@ export function parseConfigShape(value) {
     }
   }
 
+  /** @type {boolean|undefined} */
+  let autoUpdate
+  if (root.auto_update !== undefined) {
+    if (typeof root.auto_update !== 'boolean') {
+      errors.push({ pointer: '/auto_update', message: 'auto_update must be a boolean' })
+    } else {
+      autoUpdate = root.auto_update
+    }
+  }
+
   for (const key of Object.keys(root)) {
     if (!RECOGNIZED_TOP_KEYS.has(key)) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
@@ -307,10 +317,11 @@ export function parseConfigShape(value) {
   if (sinks) config.sinks = sinks
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
+  if (autoUpdate !== undefined) config.auto_update = autoUpdate
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`

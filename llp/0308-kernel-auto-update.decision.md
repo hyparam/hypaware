@@ -59,11 +59,14 @@ no self-managed versioned root.
 <a id="global-install-only"></a>
 ## Only the global npm install auto-updates
 
-A daemon running from a dev checkout or an explicit `--bin` path never
-auto-updates: `npm install -g` would create a second, skewed install beside
-the one actually running. The guard is on the running binary's provenance;
-skipping is logged with its reason, and the update check still surfaces the
-available version in `hyp status`.
+A daemon running from a dev checkout or an npx cache never auto-updates:
+`npm install -g` would create a second, skewed install beside the one
+actually running. The guard is on the running package root's provenance,
+and a skipped install does not probe the registry either: hermetic smokes
+boot the daemon from the repo checkout, and the guard keeping them off the
+network is what keeps them deterministic. `hyp update` still probes from
+anywhere and explains why it cannot apply. Skipping is logged with its
+reason, and provenance is reported under `hyp status --json`.
 
 <a id="version-discovery"></a>
 ## Version discovery: npm `latest`, central pin deferred
@@ -119,9 +122,13 @@ needs them. The daemon reads it at boot.
 - `hyp update` applies an update immediately (the manual lane; also the
   repair path when auto-update is off, degraded, or skipped by the
   [provenance guard](#global-install-only)).
-- `hyp status` shows the current version, any available update, the last
-  check, and whether auto-update is off or degraded. An install that cannot
-  self-update must say so there, never only in logs.
+- `hyp status` surfaces self-update health, and a degraded updater (a
+  failed npm install, an unreachable prefix) must say so there, never only
+  in logs. The text line derives only from the shared state file (off,
+  degraded, update available), because the process rendering status is not
+  necessarily the install doing the updating: an npx-run `hyp status` must
+  not smear its own provenance over a healthy global daemon. `--json`
+  carries the full picture: version, cached flag, provenance, last probe.
 
 ## @refs to add when the code lands
 

@@ -85,6 +85,12 @@ export function mergeConfigLayers(central, local) {
   const centralQueryIgnored = central.query !== undefined
   if (local?.query !== undefined) effective.query = local.query
 
+  // auto_update: a scalar, so "central wins and locks" degenerates to
+  // plain precedence; the local value applies only when central is silent.
+  // @ref LLP 0308#config-key: central layer gets fleet on/off control for free via layering
+  if (central.auto_update !== undefined) effective.auto_update = central.auto_update
+  else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
+
   return { effective, drops, centralQueryIgnored }
 }
 
@@ -138,6 +144,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
   if (Object.keys(central.sinks ?? {}).length > 0) current.sinks = { ...central.sinks }
   if (Object.keys(central.disambiguate ?? {}).length > 0) current.disambiguate = { ...central.disambiguate }
   if (base.effective.query !== undefined) current.query = base.effective.query
+  if (base.effective.auto_update !== undefined) current.auto_update = base.effective.auto_update
 
   /** @type {ConfigLayerDrop[]} */
   const drops = [...base.drops]
@@ -206,6 +213,7 @@ function cloneShallow(cfg) {
   if (cfg.sinks) out.sinks = { ...cfg.sinks }
   if (cfg.disambiguate) out.disambiguate = { ...cfg.disambiguate }
   if (cfg.query !== undefined) out.query = cfg.query
+  if (cfg.auto_update !== undefined) out.auto_update = cfg.auto_update
   return out
 }
 

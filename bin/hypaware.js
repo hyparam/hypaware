@@ -48,6 +48,29 @@ if (argv[0] === '__smoke_internal') {
   }
 }
 
+// The self-update check runs before dispatch (and so before any kernel
+// import) for `daemon run` only: a release broken anywhere past this
+// point still reaches the check on every service-manager relaunch, so a
+// stuck machine jumps forward when a fixed version is published. When
+// an update lands, exit through the restart code so the service manager
+// relaunches onto the new code instead of booting the old.
+// @ref LLP 0308#unstick-from-the-front [implements]: pre-boot lane; only the import-light updater loads before it runs
+if (argv[0] === 'daemon' && argv[1] === 'run') {
+  try {
+    const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } =
+      await import('../src/core/update/self_update.js')
+    const result = await runSelfUpdatePass({
+      // Routine skips (a dev checkout, auto_update off) stay silent
+      // here; only events an operator would act on reach stderr.
+      log: (event, fields) => {
+        if (event === 'self_update.skipped') return
+        try { stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
+      },
+    })
+    if (result.action === 'updated') process.exit(SELF_UPDATE_RESTART_EXIT_CODE)
+  } catch { /* the updater must never block a boot */ }
+}
+
 const { dispatch } = await import('../src/core/cli/dispatch.js')
 const { installObservability } = await import('../src/core/observability/index.js')
 const { flushStream } = await import('../src/core/cli/flush-streams.js')

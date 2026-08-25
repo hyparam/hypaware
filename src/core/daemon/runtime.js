@@ -32,6 +32,7 @@ import {
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
 import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { runSelfUpdatePass, writeSelfUpdateState } from '../update/self_update.js'
 
 /**
  * @import { AiGatewayCapability, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
@@ -301,6 +302,21 @@ export async function runDaemon(opts = {}) {
     buildConfigApplyDeps({ stateRoot, configRegistry: boot.runtime.configRegistry })
   )
   configControl.armProbationWatchdog()
+
+  // ----- Kernel self-update (LLP 0308) -----
+  // Cache the effective auto_update flag so the import-light pre-boot
+  // lane (bin/hypaware.js) can honor the off switch without parsing
+  // config layers.
+  // @ref LLP 0308#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
+  const autoUpdateEnabled = boot.config?.auto_update !== false
+  try {
+    writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
+  } catch (err) {
+    fileLog.warn('self_update.flag_cache_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
+  let selfUpdateInFlight = false
 
   // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041 / LLP 0045) -----
   // The daemon is the only host with `configControl`, so a reconciler
@@ -653,6 +669,27 @@ export async function runDaemon(opts = {}) {
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
     await refreshSourceDetails()
     persist()
+
+    // The daily self-update check rides this tick rather than owning a
+    // timer (same shape as the backfill sweep above). The pass itself
+    // is TTL-gated and provenance-guarded, so this is a cheap state
+    // read on almost every tick. An applied update exits through the
+    // staged-restart path: the service manager relaunches onto the new
+    // code.
+    // @ref LLP 0308#cadence [implements]: boot + daily with jitter, applied via the staged restart
+    if (autoUpdateEnabled && !selfUpdateInFlight) {
+      selfUpdateInFlight = true
+      void runSelfUpdatePass({
+        stateRoot,
+        env,
+        autoUpdate: autoUpdateEnabled,
+        log: (event, fields) => fileLog.info(event, fields ?? {}),
+      }).then((result) => {
+        if (result.action === 'updated' && triggerShutdown) {
+          void triggerShutdown('restart')
+        }
+      }).finally(() => { selfUpdateInFlight = false })
+    }
   }
 
   if (tickIntervalMs > 0) {

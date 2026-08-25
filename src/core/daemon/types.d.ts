@@ -535,6 +535,12 @@ export interface HypAwareStatusReport {
    * "unknown" a user could not act on.
    */
   proxyTrust: ProxyTrustReport | null
+  /**
+   * Kernel self-update health (LLP 0308). `line` is null when there is
+   * nothing worth surfacing on the text renderer; `json` always carries
+   * version, cached auto_update flag, provenance, and the last probe.
+   */
+  selfUpdate: { line: string | null, json: Record<string, unknown> }
 }
 
 export interface CollectStatusOptions {
