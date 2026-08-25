@@ -9,9 +9,11 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createLocalIcebergIO } from '../../src/core/cache/iceberg/resolver.js'
+import { appendRowsToTable, readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 
 /**
  * @import { WriterOptions } from 'icebird/src/types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { AbortableWriter } from '../../src/core/cache/types.js'
  */
 
@@ -320,6 +322,45 @@ test('a conditional commit that flushed row groups still publishes atomically', 
 
   const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
   assert.deepEqual(leftovers, [], 'the published commit leaves no temp file behind')
+
+  await fsp.rm(dir, { recursive: true, force: true })
+})
+
+test('a create that loses the race to another creator is the table existing, not a failed append', async () => {
+  const dir = await tempDir('hyp-iceberg-race-')
+  const table = path.join(dir, 'events')
+  /** @type {ColumnSpec[]} */
+  const columns = [{ name: 'id', type: 'INT32', nullable: false }]
+
+  // `icebergCreate` has no retry: its contract hands a 412 back to the caller
+  // to read as "the table already exists". Until the resolver enforced the
+  // create-only precondition that 412 was unreachable, because the losing
+  // creator simply overwrote the winner's `v1` and carried on. Now it is
+  // reachable, so build the competing table for real and drop it into the
+  // window between this append's `tableExists` probe and its create.
+  await appendRowsToTable(table, columns, [{ id: 1 }])
+  const saved = path.join(dir, 'saved')
+  fs.cpSync(table, saved, { recursive: true })
+  fs.rmSync(table, { recursive: true, force: true })
+
+  const realLink = fs.linkSync
+  let raced = false
+  try {
+    fs.linkSync = (from, to) => {
+      if (!raced && String(to).endsWith(`v1.metadata.json`)) {
+        raced = true
+        fs.cpSync(saved, table, { recursive: true })
+      }
+      return realLink(from, to)
+    }
+    await appendRowsToTable(table, columns, [{ id: 2 }])
+  } finally {
+    fs.linkSync = realLink
+  }
+
+  assert.ok(raced, 'the competing table was created inside the create window')
+  const ids = (await readRowsFromTable(table)).map((row) => row.id).sort()
+  assert.deepEqual(ids, [1, 2], 'the loser appends onto the winner\'s table instead of failing')
 
   await fsp.rm(dir, { recursive: true, force: true })
 })

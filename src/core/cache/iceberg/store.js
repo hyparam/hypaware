@@ -114,20 +114,35 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   // then throws, leaving the table's schema ahead of its data.
   const records = rows.length > 0 ? rowsToIcebergRecords(columns, rows) : []
 
-  if (!tableExists(tablePath)) {
+  // `tableExists` is a probe, not a claim: another committer can create the
+  // table between the probe and the create below. The local resolver enforces
+  // the create-only precondition with `link`, so that race now raises a real
+  // 412 instead of one creator silently overwriting the other's `v1`, and
+  // `icebergCreate` deliberately has no retry: its contract hands 412 back to
+  // the caller to read as "the table already exists". Read it that way. The
+  // create existed to make the table exist, it does, and the existing-table
+  // path is the one that should run.
+  let tablePresent = tableExists(tablePath)
+  if (!tablePresent) {
     /** @type {PartitionSpec | undefined} */
     const partitionSpec = declaration
       ? partitionSpecForDeclaration(declaration, schema)
       : options?.partitionSpec
-    await icebergCreateTable({
-      catalog,
-      tableUrl: url,
-      schema,
-      formatVersion: 3,
-      partitionSpec,
-      sortOrder: options?.sortOrder ? sortOrderForColumns(options.sortOrder, schema) : undefined,
-    })
-  } else if (declaration) {
+    try {
+      await icebergCreateTable({
+        catalog,
+        tableUrl: url,
+        schema,
+        formatVersion: 3,
+        partitionSpec,
+        sortOrder: options?.sortOrder ? sortOrderForColumns(options.sortOrder, schema) : undefined,
+      })
+    } catch (err) {
+      if (!isCommitCollision(err)) throw err
+      tablePresent = true
+    }
+  }
+  if (tablePresent && declaration) {
     const { metadata: existing } = await loadLatestFileCatalogMetadata({
       tableUrl: url, resolver, lister,
     })
@@ -169,6 +184,21 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   }
   const bytesWritten = metadata ? addedFilesSize(metadata) : 0
   return { tableUrl: url, appended: rows.length > 0, bytesWritten }
+}
+
+/**
+ * True for the conditional-commit collision a create or a metadata commit
+ * raises when another committer got the same version first. Mirrors icebird's
+ * own `isCommitConflict`, which reads `status`; `statusCode` is accepted too
+ * because the resolvers set both and only the local one is ours.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isCommitCollision(err) {
+  if (!err || typeof err !== 'object') return false
+  const { status, statusCode } = /** @type {{ status?: number, statusCode?: number }} */ (err)
+  return status === 412 || status === 409 || statusCode === 412 || statusCode === 409
 }
 
 /**
