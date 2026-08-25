@@ -14,7 +14,7 @@ import {
 import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
 import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
-import { MAINTENANCE_DEFAULTS, SNAPSHOT_RETENTION_DEFAULTS } from './maintenance_defaults.js'
+import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
@@ -43,8 +43,6 @@ import { isPlainObject } from '../util/json_util.js'
  * @import { PartitionSpec, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
  */
-
-export { SNAPSHOT_RETENTION_DEFAULTS }
 
 /** @type {Readonly<MaintenanceConfig>} */
 const DEFAULTS = MAINTENANCE_DEFAULTS

@@ -648,6 +648,14 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
       /** @type {QueryCacheMaintenanceConfig} */
       const maint = {}
+      /**
+       * Keys the user wrote that failed their own check. Their value is
+       * gone, so no cross-field rule below can say anything true about
+       * them.
+       *
+       * @type {Set<string>}
+       */
+      const rejected = new Set()
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {
           errors.push({ pointer: `${pointer}/maintenance/enabled`, message: 'must be a boolean' })
@@ -663,6 +671,7 @@ function parseQueryCacheConfig(cache, pointer, errors) {
         if (m[key] !== undefined) {
           if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {
             errors.push({ pointer: `${pointer}/maintenance/${key}`, message: `must be a non-negative number` })
+            rejected.add(key)
           } else {
             maint[key] = /** @type {number} */ (m[key])
           }
@@ -676,13 +685,21 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       // Compared on EFFECTIVE values: a config that raises only the average
       // is paired with the default batch bound, which is the likelier way to
       // write this mistake.
-      const avg = maint.compact_avg_file_bytes ?? MAINTENANCE_DEFAULTS.compact_avg_file_bytes
-      const batch = maint.compact_batch_bytes ?? MAINTENANCE_DEFAULTS.compact_batch_bytes
-      if (avg > batch) {
-        errors.push({
-          pointer: `${pointer}/maintenance/compact_avg_file_bytes`,
-          message: `must be at or below compact_batch_bytes (${batch}); routine compaction merges in memory, so a merged file never reaches a larger average and the partition would read as permanently due`,
-        })
+      //
+      // Silent when either key already failed its own check: the written
+      // value is gone, so the pairing this rule would report is with a
+      // DEFAULT the user never wrote, and the message would name a bound
+      // absent from their file and blame the wrong key. Fixing the key
+      // that really failed re-runs this rule against the real pair.
+      if (!rejected.has('compact_avg_file_bytes') && !rejected.has('compact_batch_bytes')) {
+        const avg = maint.compact_avg_file_bytes ?? MAINTENANCE_DEFAULTS.compact_avg_file_bytes
+        const batch = maint.compact_batch_bytes ?? MAINTENANCE_DEFAULTS.compact_batch_bytes
+        if (avg > batch) {
+          errors.push({
+            pointer: `${pointer}/maintenance/compact_avg_file_bytes`,
+            message: `must be at or below compact_batch_bytes (${batch}); routine compaction merges in memory, so a merged file never reaches a larger average and the partition would read as permanently due`,
+          })
+        }
       }
       out.maintenance = maint
     }

@@ -186,6 +186,40 @@ test('parseConfigShape accepts compact_avg_file_bytes equal to compact_batch_byt
   assert.equal(result.ok, true)
 })
 
+// @ref LLP 0312#avg-below-batch [tests]: the rule compares EFFECTIVE values,
+// which means a key that failed its own check would otherwise be paired with
+// a default the user never wrote. Reporting that pairing names a bound absent
+// from their file and blames the key that is not broken.
+test('parseConfigShape does not blame compact_avg_file_bytes for an invalid compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          // Legal against the batch bound the user actually wants; the batch
+          // bound itself is what is malformed.
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: -1,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const errors = result.ok === false ? result.errors : []
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
+    true,
+    'the key that is actually malformed is reported'
+  )
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    false,
+    'the cross-field rule stays silent rather than name a default bound the config never wrote'
+  )
+})
+
 test('validateConfig catches cross-plugin and schedule errors', async () => {
   const result = await validateConfig({
     version: 2,
