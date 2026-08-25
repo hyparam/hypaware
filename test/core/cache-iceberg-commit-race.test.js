@@ -77,6 +77,7 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
   const realRename = fs.renameSync
   const realLink = fs.linkSync
   let raced = false
+  let landedInWindow = false
   /** @type {Promise<void> | null} */
   let winnerFinish = null
   /** @param {unknown} dest */
@@ -84,11 +85,15 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
     if (raced || String(dest) !== target) return
     raced = true
     // `finish()` is async in signature but synchronous in body, so the
-    // winner's file is on disk before this hook returns. Assert that
-    // rather than assume it: if it ever stops holding, this test must
-    // fail loudly instead of quietly stopping to test anything.
+    // winner's file is on disk before this hook returns. Record that
+    // rather than assume it, and assert it below once the real syscalls
+    // are back: throwing from inside the patched syscall would be caught
+    // by the resolver's own error path and resurface as a status
+    // mismatch, which reports that the test failed but not why. If
+    // `finish()` ever stops being synchronous, the assertion below fails
+    // on its own message instead.
     winnerFinish = /** @type {Promise<void>} */ (winner.finish())
-    assert.ok(fs.existsSync(target), 'the competing commit landed inside the window')
+    landedInWindow = fs.existsSync(target)
   }
 
   /** @type {unknown} */
@@ -114,6 +119,7 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
   await winnerFinish
 
   assert.ok(raced, 'the competing commit was injected in front of the publish syscall')
+  assert.ok(landedInWindow, 'the competing commit landed inside the publish window')
   assert.ok(
     loserError,
     'the second committer must observe a precondition failure, not a silent success'
@@ -151,6 +157,74 @@ test('a conditional commit onto an existing target is a 412 that leaves the targ
 
   const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
   assert.deepEqual(leftovers, [], 'the failed commit leaves no temp file behind')
+
+  await fsp.rm(dir, { recursive: true, force: true })
+})
+
+test('a filesystem that cannot hard link fails the commit loudly, and not as a conflict', async () => {
+  const dir = await tempDir('hyp-iceberg-race-')
+  const newWriter = await localWriterFactory()
+  const target = path.join(dir, 'metadata', 'v2.metadata.json')
+
+  const writer = newWriter(url(target), { ifNoneMatch: '*' })
+  writer.appendBytes(new TextEncoder().encode('{"committer":"only"}'))
+
+  const realLink = fs.linkSync
+  /** @type {unknown} */
+  let failure = null
+  try {
+    fs.linkSync = () => {
+      throw Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' })
+    }
+    try {
+      await writer.finish()
+    } catch (err) {
+      failure = err
+    }
+  } finally {
+    fs.linkSync = realLink
+  }
+
+  assert.ok(failure, 'a link the filesystem refuses cannot report a published commit')
+  assert.equal(/** @type {{ code?: string }} */ (failure).code, 'EPERM')
+  assert.match(/** @type {Error} */ (failure).message, /hard links/)
+  // A 412 would send `commitWithRetry` around the retry loop up to 50
+  // times against a filesystem that will refuse every one of them.
+  assert.equal(/** @type {{ status?: number }} */ (failure).status, undefined)
+  assert.equal(fs.existsSync(target), false, 'nothing was published')
+
+  const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
+  assert.deepEqual(leftovers, [], 'the failed commit leaves no temp file behind')
+
+  await fsp.rm(dir, { recursive: true, force: true })
+})
+
+test('a cleanup failure after the link does not turn a published commit into a failed one', async () => {
+  const dir = await tempDir('hyp-iceberg-race-')
+  const newWriter = await localWriterFactory()
+  const target = path.join(dir, 'metadata', 'v2.metadata.json')
+
+  const writer = newWriter(url(target), { ifNoneMatch: '*' })
+  writer.appendBytes(new TextEncoder().encode('{"committer":"only"}'))
+
+  // The link is the commit point. Unlinking the staged second name to the
+  // same inode is cleanup after the fact, so if it fails the caller must
+  // still be told the snapshot landed - reporting a failure would leave
+  // the table advanced and the writer convinced it was not.
+  const realRm = fs.rmSync
+  try {
+    fs.rmSync = (/** @type {any} */ at, /** @type {any} */ options) => {
+      if (String(at).includes('.tmp.')) throw new Error('EBUSY: resource busy or locked, unlink')
+      return realRm(at, options)
+    }
+    await writer.finish()
+  } finally {
+    fs.rmSync = realRm
+  }
+
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"committer":"only"}')
+  const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
+  assert.equal(leftovers.length, 1, 'the cleanup really did fail, so the case is not vacuous')
 
   await fsp.rm(dir, { recursive: true, force: true })
 })

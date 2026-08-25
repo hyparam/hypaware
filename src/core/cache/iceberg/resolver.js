@@ -230,10 +230,44 @@ function localWriter(ByteWriter, filePath, options) {
     } catch (err) {
       fs.rmSync(staged, { force: true })
       tmp = null
-      if (/** @type {NodeJS.ErrnoException} */ (err).code === 'EEXIST') throw collision(filePath)
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code
+      if (code === 'EEXIST') throw collision(filePath)
+      // `staged` is a sibling of `filePath`, so this can never be EXDEV.
+      // What it can be is a filesystem with no hard links at all (FAT and
+      // exFAT volumes, and some FUSE or cloud-sync mounts), which answers
+      // every `link` with EPERM/ENOSYS/EOPNOTSUPP. That wedges every
+      // conditional commit, and a bare errno does not say why, so name the
+      // cause. Falling back to a check-then-act `rename` is not on the
+      // table: that is the defect this call exists to remove. Supporting
+      // such a filesystem would mean publishing through
+      // `open(filePath, 'wx')` instead, trading atomic content for atomic
+      // creation, which is the trade the `local-fs` blob store makes.
+      if (code === 'EPERM' || code === 'ENOSYS' || code === 'EOPNOTSUPP') {
+        const unsupported = /** @type {Error & { code?: string }} */ (
+          new Error(
+            `local iceberg conditional commit needs hard links: link() failed with ${code} on ` +
+              `${filePath}. The cache directory must be on a filesystem that supports link(2).`,
+            { cause: err }
+          )
+        )
+        unsupported.code = code
+        throw unsupported
+      }
       throw err
     }
-    fs.rmSync(staged, { force: true })
+    // The link is the commit point: the file is published, and `staged` is
+    // now just a second name for the same inode that nothing reads.
+    // Dropping that name is cleanup, so a failure here must not be reported
+    // as a failed commit - the caller would be told its snapshot did not
+    // land when it did, and `commitWithRetry` does not retry a non-412.
+    // The leftover is inert: `v<N>.metadata.json.tmp.*` matches neither
+    // icebird's anchored version regex nor the maintenance sweep's
+    // suffixes, so it costs one directory entry and nothing else.
+    try {
+      fs.rmSync(staged, { force: true })
+    } catch {
+      // Already published; the temp name is the only thing left behind.
+    }
     tmp = null
   }
   return writer
