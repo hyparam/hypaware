@@ -25,6 +25,9 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 const PROBE_TIMEOUT_MS = 5000
 const NPM_TIMEOUT_MS = 120_000
+// An apply lock older than two npm timeouts belonged to a process that
+// died mid-install; honoring it forever would wedge updates permanently.
+const APPLY_LOCK_STALE_MS = NPM_TIMEOUT_MS * 2
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
 // stuck on a broken release re-probes eagerly so it jumps to the fix
@@ -226,9 +229,13 @@ export function shouldCheckNow({ state, nowMs, eager, jitter }) {
 }
 
 /**
- * Did the previous daemon boot fail before reaching healthy? The
- * status file's terminal states are `healthy` / `degraded` / `stopped`;
- * a file frozen at `starting` means the last boot died mid-way.
+ * Did the previous daemon boot fail before reaching healthy? Two shapes
+ * count, because a broken release produces both: a status file frozen at
+ * `starting` (the process died mid-boot and never rewrote it), and one at
+ * `degraded` carrying a `boot_failed:` warning (the runtime caught the
+ * boot throw and recorded it before exiting). A `degraded` file without
+ * that warning is a healthy kernel with a failed source, which no amount
+ * of updating fixes and which must not buy an hourly probe.
  *
  * @param {string} stateRoot
  * @returns {boolean}
@@ -238,7 +245,10 @@ export function previousBootLooksStuck(stateRoot) {
   if (!raw) return false
   try {
     const parsed = JSON.parse(raw)
-    return parsed?.state === 'starting'
+    if (parsed?.state === 'starting') return true
+    if (parsed?.state !== 'degraded') return false
+    const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : []
+    return warnings.some((w) => String(w).startsWith('boot_failed'))
   } catch {
     return false
   }
@@ -283,7 +293,69 @@ export async function applySelfUpdate(opts) {
   if (install.exitCode !== 0) {
     return { applied: false, reason: 'npm_install_failed' }
   }
+  // Believe the filesystem, not the exit code. Reporting `applied` is what
+  // makes the daemon exit for a restart, so an npm that returned 0 without
+  // replacing the global root would become a restart loop on the same
+  // version instead of a recorded failure.
+  if (readVersionAt(globalRoot) !== opts.version) {
+    return { applied: false, reason: 'version_not_installed' }
+  }
   return { applied: true }
+}
+
+/**
+ * @param {string} root
+ * @returns {string | null}
+ */
+function readVersionAt(root) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+    return typeof parsed?.version === 'string' ? parsed.version : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Best-effort cross-process mutex around `npm install -g`. The daemon's
+ * periodic lane and a hand-typed `hyp update` can reach the install at the
+ * same moment, and two npm global installs racing over one package
+ * directory is the single failure that can leave a machine with no
+ * runnable kernel at all. Returns a release function, or null when another
+ * process holds the lock.
+ *
+ * @param {string} stateRoot
+ * @returns {(() => void) | null}
+ */
+export function acquireApplyLock(stateRoot) {
+  const runDir = daemonRunDir(stateRoot)
+  const lockPath = path.join(runDir, 'self-update.lock')
+  try {
+    fs.mkdirSync(runDir, { recursive: true })
+  } catch {
+    return null
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx')
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+      } finally {
+        fs.closeSync(fd)
+      }
+      return () => {
+        try { fs.unlinkSync(lockPath) } catch { /* already gone */ }
+      }
+    } catch {
+      if (attempt > 0) return null
+      /** @type {number | null} */
+      let ageMs = null
+      try { ageMs = Date.now() - fs.statSync(lockPath).mtimeMs } catch { ageMs = null }
+      if (ageMs !== null && ageMs < APPLY_LOCK_STALE_MS) return null
+      try { fs.unlinkSync(lockPath) } catch { /* raced; the retry decides */ }
+    }
+  }
+  return null
 }
 
 /**
@@ -383,13 +455,26 @@ export async function runSelfUpdatePass(opts = {}) {
       return { action: 'checked', reason: provenance, latest }
     }
 
-    const applied = await applySelfUpdate({
-      name: identity.name,
-      version: latest,
-      packageRoot: opts.packageRoot,
-      env,
-      runner: opts.runner,
-    })
+    // Single-flight across processes, not just within one: the daemon's
+    // lane and a hand-typed `hyp update` can arrive together.
+    const releaseLock = acquireApplyLock(stateRoot)
+    if (!releaseLock) {
+      log('self_update.apply_locked', { latest_version: latest })
+      return { action: 'checked', reason: 'apply_locked', latest }
+    }
+    /** @type {{ applied: boolean, reason?: string }} */
+    let applied
+    try {
+      applied = await applySelfUpdate({
+        name: identity.name,
+        version: latest,
+        packageRoot: opts.packageRoot,
+        env,
+        runner: opts.runner,
+      })
+    } finally {
+      releaseLock()
+    }
     writeSelfUpdateState(stateRoot, {
       last_apply: {
         at: new Date(nowMs).toISOString(),
@@ -427,7 +512,17 @@ export async function runSelfUpdatePass(opts = {}) {
 export function describeSelfUpdate(opts) {
   const provenance = classifySelfProvenance({ env: opts.env })
   const state = readSelfUpdateState(opts.stateRoot)
-  const identity = readSelfPackageIdentity()
+  // `hyp status` must survive its own updater. An in-flight
+  // `npm install -g` briefly leaves this package root without a
+  // package.json, and a throw here would take the whole status report
+  // down at exactly the moment an operator is asking what is going on.
+  /** @type {{ name: string, version: string }} */
+  let identity
+  try {
+    identity = readSelfPackageIdentity()
+  } catch {
+    identity = { name: 'hypaware', version: 'unknown' }
+  }
   /** @type {Record<string, unknown>} */
   const json = {
     version: identity.version,
@@ -470,8 +565,16 @@ function runCommand(cmd, args, opts) {
     /** @type {Buffer[]} */
     const stderrChunks = []
     let settled = false
+    // Two-stage kill: an npm that ignores SIGTERM would otherwise leave
+    // this promise pending forever, and the daemon's `selfUpdateInFlight`
+    // guard pinned with it - no further check for the life of the process.
     const timer = setTimeout(() => {
       try { child.kill('SIGTERM') } catch { /* already gone */ }
+      const hard = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* already gone */ }
+        finish(-1)
+      }, 5000)
+      hard.unref?.()
     }, NPM_TIMEOUT_MS)
     timer.unref?.()
     /** @param {number} exitCode */

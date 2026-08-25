@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  acquireApplyLock,
   applySelfUpdate,
   classifySelfProvenance,
   compareSemver,
@@ -83,15 +84,31 @@ test('shouldCheckNow: daily normally, hourly when the last boot looked stuck', (
   assert.equal(shouldCheckNow({ state: { checked_at: 'garbage' }, nowMs, eager: false }), true)
 })
 
-test('previousBootLooksStuck only for a status file frozen at starting', async () => {
+test('previousBootLooksStuck for a boot that died mid-way or threw out of bootKernel', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-stuck-'))
   try {
     assert.equal(previousBootLooksStuck(dir), false)
     const runDir = path.join(dir, 'run')
     await fsp.mkdir(runDir, { recursive: true })
-    await fsp.writeFile(path.join(runDir, 'status.json'), JSON.stringify({ state: 'starting' }))
+    const statusPath = path.join(runDir, 'status.json')
+    await fsp.writeFile(statusPath, JSON.stringify({ state: 'starting' }))
     assert.equal(previousBootLooksStuck(dir), true)
-    await fsp.writeFile(path.join(runDir, 'status.json'), JSON.stringify({ state: 'healthy' }))
+    await fsp.writeFile(statusPath, JSON.stringify({ state: 'healthy' }))
+    assert.equal(previousBootLooksStuck(dir), false)
+    // The runtime catches a bootKernel throw and records it as degraded
+    // with a boot_failed warning, which is the shape a broken release
+    // actually leaves behind most of the time.
+    await fsp.writeFile(
+      statusPath,
+      JSON.stringify({ state: 'degraded', warnings: ['boot_failed: kaboom'] })
+    )
+    assert.equal(previousBootLooksStuck(dir), true)
+    // A degraded kernel with a failed source is not a stuck boot: no
+    // release fixes it, so it must not buy an hourly registry probe.
+    await fsp.writeFile(
+      statusPath,
+      JSON.stringify({ state: 'degraded', warnings: ['source_failed: claude'] })
+    )
     assert.equal(previousBootLooksStuck(dir), false)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
@@ -117,7 +134,7 @@ test('state writes merge instead of clobbering the cached flag', async () => {
  * answers with that prefix and whose install succeeds.
  *
  * @param {string} dir
- * @param {{ installExit?: number, prefix?: string }} [opts]
+ * @param {{ installExit?: number, prefix?: string, installWritesVersion?: boolean }} [opts]
  */
 async function fakeGlobalInstall(dir, opts = {}) {
   const prefix = opts.prefix ?? path.join(dir, 'prefix')
@@ -135,7 +152,18 @@ async function fakeGlobalInstall(dir, opts = {}) {
     if (args[0] === 'config') {
       return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
     }
-    return { exitCode: opts.installExit ?? 0, stdout: '', stderr: '' }
+    const exitCode = opts.installExit ?? 0
+    // A real `npm install -g` replaces the package directory. The updater
+    // reads the version back off disk before it claims success, so the
+    // fake has to move too or it is not testing the same thing.
+    if (exitCode === 0 && opts.installWritesVersion !== false) {
+      const version = String(args[args.length - 1]).split('@').pop()
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version })
+      )
+    }
+    return { exitCode, stdout: '', stderr: '' }
   }
   return { packageRoot, runner, calls }
 }
@@ -302,4 +330,42 @@ test('config: auto_update parses as a boolean and central wins the merge', () =>
   assert.equal(mergeConfigLayers(/** @type {any} */ (central), /** @type {any} */ (local)).effective.auto_update, false)
   assert.equal(mergeConfigLayers(null, /** @type {any} */ (local)).effective.auto_update, true)
   assert.equal(mergeConfigLayers(/** @type {any} */ ({ version: 2 }), /** @type {any} */ (local)).effective.auto_update, true)
+})
+
+test('an npm install that exits 0 without replacing the root is not a success', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-noop-install-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir, { installWritesVersion: false })
+    const result = await applySelfUpdate({
+      name: 'hypaware', version: '1.1.0', packageRoot, env: {}, runner, platform: 'darwin',
+    })
+    assert.deepEqual(result, { applied: false, reason: 'version_not_installed' })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a held apply lock stops a second process from racing npm install -g', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-'))
+  try {
+    const held = acquireApplyLock(dir)
+    assert.ok(held)
+    assert.equal(acquireApplyLock(dir), null)
+
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('1.1.0')
+    const blocked = await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(blocked.action, 'checked')
+    assert.equal(blocked.reason, 'apply_locked')
+    assert.ok(!calls.some((c) => c.includes('install')))
+
+    held?.()
+    const after = acquireApplyLock(dir)
+    assert.ok(after)
+    after?.()
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
 })

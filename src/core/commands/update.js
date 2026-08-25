@@ -7,6 +7,8 @@ import { processIsAlive, readPidFile } from '../daemon/pid.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { restartServiceDaemon as restartServiceDaemonFn } from '../../../src/core/daemon/install.js'
+ * @import { serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
  */
 
 /**
@@ -25,6 +27,15 @@ export async function runUpdate(argv, ctx) {
 
   const stateRoot = readObservabilityEnv(ctx.env).stateDir
   const identity = readSelfPackageIdentity()
+
+  // Load the restart helpers *before* the install runs. `npm install -g`
+  // replaces this very package directory underneath the running process,
+  // so a dynamic import issued afterwards can resolve a path that no
+  // longer exists - failing exactly between a successful install and the
+  // restart that makes it take effect, the one window where a crash
+  // leaves the daemon on stale code with no message saying so.
+  const daemonInstall = await import('../daemon/install.js')
+
   const result = await runSelfUpdatePass({
     stateRoot,
     env: ctx.env,
@@ -34,6 +45,13 @@ export async function runUpdate(argv, ctx) {
   if (result.action === 'checked' && !result.reason) {
     ctx.stdout.write(`hypaware ${identity.version} is up to date\n`)
     return 0
+  }
+  if (result.reason === 'apply_locked') {
+    ctx.stderr.write(
+      "hyp update: another update is already running (the daemon's own check, most likely); " +
+      'try again in a minute\n'
+    )
+    return 1
   }
   if (result.reason === 'probe_failed') {
     ctx.stderr.write('hyp update: could not reach the npm registry; try again later\n')
@@ -57,7 +75,7 @@ export async function runUpdate(argv, ctx) {
   }
 
   ctx.stdout.write(`hypaware updated: ${identity.version} -> ${result.latest}\n`)
-  return restartDaemonIfRunning(ctx, result.latest ?? '')
+  return restartDaemonIfRunning(ctx, result.latest ?? '', daemonInstall)
 }
 
 /**
@@ -68,10 +86,14 @@ export async function runUpdate(argv, ctx) {
  *
  * @param {CommandRunContext} ctx
  * @param {string} version
+ * @param {{
+ *   restartServiceDaemon: typeof restartServiceDaemonFn,
+ *   serviceDaemonStatus: typeof serviceDaemonStatusFn,
+ * }} daemonInstall
  * @returns {Promise<number>}
  */
-async function restartDaemonIfRunning(ctx, version) {
-  const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
+async function restartDaemonIfRunning(ctx, version, daemonInstall) {
+  const { restartServiceDaemon, serviceDaemonStatus } = daemonInstall
   const status = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
   if (status.installed) {
     try {
