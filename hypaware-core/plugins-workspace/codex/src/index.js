@@ -139,6 +139,20 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    /**
+     * The client-owned input this adapter's `attach()` writes from: the gateway
+     * route Codex's own `auth.json` selects (LLP 0099). The daemon records it
+     * on the attach marker and recomputes it every reconcile pass, so a user
+     * running `codex login` in the other mode is drift it closes by
+     * re-attaching, rather than a settled `done` marker over a `base_url` that
+     * now sends the new credential to an upstream not scoped for it (#996).
+     *
+     * @returns {Promise<string>}
+     * @ref LLP 0308#the-key-is-adapter-computed [implements]: codex names its attach freshness key; core compares it and never interprets it
+     */
+    async attachKey() {
+      return providerRouteKeyForAuthMode(await readCodexAuthMode(resolveAuthPath(ctx)))
+    },
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const configPath = resolveConfigPath(ctx)
@@ -301,20 +315,56 @@ function resolveConfigPath(ctx) {
 }
 
 /**
+ * The two gateway routes attach chooses between, keyed by nothing but the auth
+ * mode. Split out of `providerRouteForAuthMode` so the route a port-bearing
+ * attach writes and the port-free key the reconciler compares (`attachKey()`)
+ * are the same decision read twice, not two ternaries that can drift apart.
+ *
+ * @type {{ chatgpt: { pathPrefix: string, providerName: string }, openai: { pathPrefix: string, providerName: string } }}
+ */
+const PROVIDER_ROUTES = {
+  chatgpt: { pathPrefix: '/backend-api/codex', providerName: 'HypAware ChatGPT Gateway' },
+  openai: { pathPrefix: '/v1', providerName: 'HypAware OpenAI Gateway' },
+}
+
+/**
+ * The route this auth mode attaches to, independent of which port the gateway
+ * bound. This is the attach-marker freshness key the daemon records and
+ * recomputes: a login switch changes it while the endpoint and the asset set
+ * sit still, which is exactly the drift the reconciler could not see (#996).
+ *
+ * Deliberately the route, not the raw auth mode. Only the route decides what
+ * lands in `config.toml`, so `auth_mode: "apikey"` and a missing field both key
+ * to `/v1` and neither re-attaches over the other: a Codex version that starts
+ * or stops writing the field is not drift, and only a change that would write a
+ * different `base_url` is.
+ *
+ * @param {string | undefined} authMode
+ * @returns {string}
+ * @ref LLP 0308#the-key-is-the-route-not-the-auth-mode [implements]: key on the route, so a field Codex stops writing is not drift but a login switch is
+ */
+export function providerRouteKeyForAuthMode(authMode) {
+  return routeForAuthMode(authMode).pathPrefix
+}
+
+/**
+ * @param {string | undefined} authMode
+ */
+// @ref LLP 0099#decision [implements]: only an affirmative chatgpt mode leaves the /v1 default
+function routeForAuthMode(authMode) {
+  return authMode === 'chatgpt' ? PROVIDER_ROUTES.chatgpt : PROVIDER_ROUTES.openai
+}
+
+/**
  * @param {string | undefined} authMode
  * @param {number} port
  */
 // @ref LLP 0099#decision [implements]: only an affirmative chatgpt mode leaves the /v1 default
 export function providerRouteForAuthMode(authMode, port) {
-  if (authMode === 'chatgpt') {
-    return {
-      baseUrl: `http://127.0.0.1:${port}/backend-api/codex`,
-      providerName: 'HypAware ChatGPT Gateway',
-    }
-  }
+  const route = routeForAuthMode(authMode)
   return {
-    baseUrl: `http://127.0.0.1:${port}/v1`,
-    providerName: 'HypAware OpenAI Gateway',
+    baseUrl: `http://127.0.0.1:${port}${route.pathPrefix}`,
+    providerName: route.providerName,
   }
 }
 

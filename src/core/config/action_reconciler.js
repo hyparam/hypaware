@@ -152,7 +152,7 @@ export function createActionReconciler(opts) {
           results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
           continue
         }
-        if (existing && existing.status === 'done' && markerIsCurrent(handler, existing, action, ctx)) {
+        if (existing && existing.status === 'done' && await markerIsCurrent(handler, existing, action, ctx)) {
           results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
           continue
         }
@@ -424,6 +424,12 @@ export function createActionReconciler(opts) {
  * unexpected error must never spuriously re-perform a `done` effect on a loop,
  * so it degrades to the pre-LLP-0086 level-triggered behavior.
  *
+ * The hook may be async, and a predicate that *rejects* is the same case as one
+ * that throws: the await sits inside the same `try`. Attach's is async because
+ * one of its freshness keys is owned by the client rather than by the daemon,
+ * so only the adapter can read it (LLP 0308). A sync predicate is still
+ * accepted: `await` over a plain boolean is that boolean.
+ *
  * Only `done` markers reach here. A `refused` marker short-circuits before this
  * is consulted (LLP 0186): its gate is the user fixing the precondition and
  * re-running `hyp attach`, which no freshness predicate can observe.
@@ -432,12 +438,13 @@ export function createActionReconciler(opts) {
  * @param {ActionMarker} marker
  * @param {DesiredAction} action
  * @param {ActionContext} ctx
- * @returns {boolean}
+ * @returns {Promise<boolean>}
+ * @ref LLP 0308#the-key-is-adapter-computed [implements]: the freshness hook is awaited, so an adapter-owned key can be read from disk
  */
-function markerIsCurrent(handler, marker, action, ctx) {
+async function markerIsCurrent(handler, marker, action, ctx) {
   if (typeof handler.isCurrent !== 'function') return true
   try {
-    return handler.isCurrent(marker, action, ctx) !== false
+    return (await handler.isCurrent(marker, action, ctx)) !== false
   } catch {
     return true
   }

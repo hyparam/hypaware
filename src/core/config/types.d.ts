@@ -370,6 +370,18 @@ export interface ActionMarker {
    */
   mode?: string
   /**
+   * The route key the client adapter reported it attached under (recorded on a
+   * `done` attach marker from the adapter's optional `attachKey()` hook). The
+   * fourth freshness key, and the only one whose input the *client* owns rather
+   * than the daemon: Codex picks its gateway route from `auth.json` at attach
+   * time (LLP 0099), so switching between a ChatGPT subscription and an API key
+   * changes which `base_url` is correct while the endpoint and the asset set
+   * both sit still (LLP 0308). Absent for adapters that declare no
+   * `attachKey()`, which stay judged by the other three keys, and absent on
+   * pre-LLP-0308 markers (treated as stale once, which records one).
+   */
+  attach_key?: string
+  /**
    * `true` when an earlier pass at this request key reached `done`, i.e. the
    * handler applied an effect that is still on disk. Recorded only on a
    * `failed`/`refused` marker rewritten over such a pass; a `done` marker says
@@ -536,8 +548,18 @@ export interface ActionHandler {
    * imported data never goes stale) omit it, so a `done` marker is permanently
    * done. The attach handler implements it to re-attach after the gateway
    * rebinds to a new ephemeral port (issue #277 / LLP 0086). Pure: no effects.
+   *
+   * May be async. The attach handler is, because one of its freshness keys is
+   * owned by the client rather than by the daemon and only the adapter can read
+   * it (LLP 0308). A predicate that rejects is treated exactly like one that
+   * throws: current, so an unexpected error never re-performs a `done` effect
+   * in a loop.
    */
-  isCurrent?(marker: ActionMarker, action: DesiredAction, ctx: ActionContext): boolean
+  isCurrent?(
+    marker: ActionMarker,
+    action: DesiredAction,
+    ctx: ActionContext
+  ): boolean | Promise<boolean>
 }
 
 /** Arguments to one {@link ActionReconciler.reconcile} pass. */

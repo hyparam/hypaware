@@ -1966,6 +1966,29 @@ export interface AiGatewayClientRegistration {
   defaultUpstream: string
   attach(ctx: AiGatewayClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
+  /**
+   * An opaque key naming the *client-owned* input this adapter's `attach()`
+   * would write from right now: everything it reads outside the gateway
+   * endpoint and the contributed asset set, which the reconciler already
+   * tracks itself. The daemon records it on the `done` attach marker and
+   * recomputes it every pass; a different value is drift it closes by
+   * re-attaching.
+   *
+   * Codex is the reason it exists. Its `base_url` is one of two gateway routes
+   * chosen by reading Codex's own `auth.json` (LLP 0099), so a user switching
+   * between a ChatGPT subscription and an API key invalidates a settled attach
+   * without moving the port or the plugin set, and the stale route sends the
+   * new credential to an upstream not scoped for it (LLP 0308).
+   *
+   * Contract: cheap, side-effect free, and stable for an unchanged input, since
+   * it runs on every reconcile pass. Return `undefined` when this boot cannot
+   * tell (an unreadable input): the reconciler then leaves the marker alone
+   * rather than re-attaching on a value it does not trust. An adapter with no
+   * such input omits the hook entirely.
+   *
+   * @ref LLP 0308#the-key-is-adapter-computed [implements]: adapters name their own attach freshness key; core compares, never interprets
+   */
+  attachKey?(): Promise<string | undefined> | string | undefined
 }
 
 export interface AiGatewayClientAttachContext {

@@ -7,6 +7,10 @@
 **Date:** 2026-07-11
 **Related:** LLP 0016, LLP 0045, LLP 0083
 
+**Extended-by:** LLP 0308 (the attach marker carries the chosen route as a
+freshness key, so a login switch re-attaches instead of leaving a stale
+`base_url`)
+
 > `hyp attach codex` picks between two gateway routes by reading Codex's
 > `auth.json`. An explicit `auth_mode` wins; when the field is absent, OAuth
 > `tokens` without an `OPENAI_API_KEY` string infer the ChatGPT route.

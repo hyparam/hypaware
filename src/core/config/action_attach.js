@@ -228,11 +228,18 @@ export function createAttachHandler(opts = {}) {
       //   so a plugin the org adds later is a forward gap the reconciler closes
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey !== undefined) detail.assets_key = assetsKey
+      // The third recorded freshness key, and the only one core does not
+      // compute: what client-owned input this attach wrote from. Core stores
+      // the adapter's opaque string and never interprets it, so a Codex login
+      // switch is drift the same way a port rebind is (LLP 0308).
+      // @ref LLP 0308#the-key-is-adapter-computed [implements]: perform() records the adapter's attachKey() on the done marker
+      const attachKey = await readAttachKey(registration)
+      if (attachKey !== undefined) detail.attach_key = attachKey
       return { status: 'done', detail }
     },
 
     /**
-     * Freshness predicate for a `done` attach marker (LLP 0086). Three things
+     * Freshness predicate for a `done` attach marker (LLP 0086). Four things
      * can go stale, and each is checked against what the marker recorded.
      *
      * **The endpoint.** Returns `false` when the recorded endpoint no longer
@@ -283,15 +290,33 @@ export function createAttachHandler(opts = {}) {
      * `hyp attach claude` even after the user upgrades. That is LLP 0186's named
      * auto-re-arm gap, now reachable by more machines than before.
      *
+     * **The adapter's own key**, for any client that declares `attachKey()`.
+     * The three keys above are all things *core* can see. Codex's `base_url` is
+     * not: attach picks one of two gateway routes by reading Codex's own
+     * `auth.json` (LLP 0099), so a user switching between a ChatGPT
+     * subscription and an API key invalidates the settled attach while the
+     * endpoint, the mode, and the asset set all sit still. The marker records
+     * whatever opaque string the adapter named at attach time and this
+     * recomputes it; core compares and never interprets. An adapter with no
+     * such input declares no hook and is judged by the other three keys alone.
+     * The same two guards apply: an unreadable input (`undefined`) stays
+     * current rather than re-attaching on a value nothing trusts, and a
+     * pre-LLP-0308 marker is stale exactly once.
+     *
+     * This is the only key that reads the filesystem, which is why the
+     * predicate is async and why it is checked last: the three pure keys settle
+     * every pass that has already drifted before any disk is touched.
+     *
      * @param {ActionMarker} marker
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
-     * @returns {boolean}
+     * @returns {Promise<boolean>}
      * @ref LLP 0086#re-attach-on-drift [implements]: a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
+     * @ref LLP 0308#drift-is-a-forward-gap [implements]: a done attach whose adapter-owned input moved is not current, so a Codex login switch re-attaches instead of failing every turn
      */
-    isCurrent(marker, action, ctx) {
+    async isCurrent(marker, action, ctx) {
       const live = ctx.endpoint
       if (typeof live !== 'string' || live.length === 0) return true
       if (marker.endpoint !== live) return false
@@ -302,8 +327,23 @@ export function createAttachHandler(opts = {}) {
       // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
       if (client === 'claude' && marker.mode !== 'otel') return false
       const assetsKey = attachedAssetsKey(client, ctx)
-      if (assetsKey === undefined) return true
-      return marker.assets_key === assetsKey
+      if (assetsKey !== undefined && marker.assets_key !== assetsKey) return false
+      // The client-owned key, checked last because it is the only one that
+      // touches disk. Codex's `base_url` is one of two gateway routes chosen
+      // from Codex's own `auth.json` at attach time (LLP 0099), so a login
+      // switch invalidates a settled attach without moving the port or the
+      // asset set: no key above can see it, and the stale route hands the new
+      // credential to an upstream not scoped for it (#996).
+      // @ref LLP 0308#drift-is-a-forward-gap [implements]: a recomputed adapter key that differs from the marker's is stale, so the reconciler re-attaches
+      const attachKey = await readAttachKey(ctx.clients?.getClient(client))
+      // No key this pass (the adapter declares no hook, or could not read its
+      // input): nothing trustworthy to compare, so stay current rather than
+      // re-attach on a value we do not have.
+      if (attachKey === undefined) return true
+      // A pre-LLP-0308 marker recorded none: `undefined !== key` → stale
+      // exactly once, which records one and self-heals, the same way the
+      // endpoint and asset keys did when they were introduced.
+      return marker.attach_key === attachKey
     },
 
     /**
@@ -533,6 +573,32 @@ function attachedAssetOptions(client, ctx) {
 function attachedAssetsKey(client, ctx) {
   const options = attachedAssetOptions(client, ctx)
   return options ? clientAssetsKey(options) : undefined
+}
+
+/**
+ * The adapter-owned freshness key for one client registration: the opaque
+ * string naming whatever *client-owned* input its `attach()` would write from
+ * right now (LLP 0308). Core stores and compares it, never interprets it.
+ *
+ * Both callers route through here so `perform()` records exactly what
+ * `isCurrent()` recomputes. `undefined` is the honest "cannot tell" and covers
+ * every degenerate case identically: no registration this pass, an adapter that
+ * declares no hook, a hook that returns a non-string, and a hook that throws.
+ * Never throws: a freshness key is an optimization over re-attaching, so a
+ * broken one must not turn a settled attach into a `failed` marker.
+ *
+ * @param {{ attachKey?(): Promise<string | undefined> | string | undefined } | undefined} registration
+ * @returns {Promise<string | undefined>}
+ * @ref LLP 0308#the-key-is-adapter-computed [implements]: one reader for both halves, so the recorded key and the recomputed one cannot drift
+ */
+async function readAttachKey(registration) {
+  if (!registration || typeof registration.attachKey !== 'function') return undefined
+  try {
+    const key = await registration.attachKey()
+    return typeof key === 'string' && key.length > 0 ? key : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**

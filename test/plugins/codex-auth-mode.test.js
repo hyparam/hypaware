@@ -9,6 +9,7 @@ import path from 'node:path'
 // @ref LLP 0099#decision [tests]: auth.json shape decides the attach route
 import {
   providerRouteForAuthMode,
+  providerRouteKeyForAuthMode,
   readCodexAuthMode,
 } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
 
@@ -63,4 +64,33 @@ test('providerRouteForAuthMode maps chatgpt to the backend-api route', () => {
     baseUrl: 'http://127.0.0.1:4388/v1',
     providerName: 'HypAware OpenAI Gateway',
   })
+})
+
+// @ref LLP 0308#the-key-is-the-route-not-the-auth-mode [tests]: the attach
+// freshness key names the route, so only a change that would write a different
+// base_url counts as drift
+test('providerRouteKeyForAuthMode keys on the route, not on the raw auth mode', () => {
+  assert.equal(providerRouteKeyForAuthMode('chatgpt'), '/backend-api/codex')
+  assert.equal(providerRouteKeyForAuthMode('apikey'), '/v1')
+  // A Codex version that stops writing `auth_mode` for an API-key login is not
+  // drift: both spellings route to /v1, so the key does not move and the
+  // reconciler does not re-attach.
+  assert.equal(
+    providerRouteKeyForAuthMode(undefined),
+    providerRouteKeyForAuthMode('apikey'),
+    'an absent auth_mode and an explicit apikey key the same, so neither re-attaches over the other'
+  )
+  // The switch that IS drift.
+  assert.notEqual(providerRouteKeyForAuthMode('chatgpt'), providerRouteKeyForAuthMode('apikey'))
+})
+
+test('the attach key and the written base_url are the same decision (#996)', () => {
+  for (const mode of ['chatgpt', 'apikey', undefined]) {
+    const route = providerRouteForAuthMode(mode, 4388)
+    assert.equal(
+      route.baseUrl,
+      `http://127.0.0.1:4388${providerRouteKeyForAuthMode(mode)}`,
+      `the key must be the path the attach writes for mode ${String(mode)}`
+    )
+  }
 })
