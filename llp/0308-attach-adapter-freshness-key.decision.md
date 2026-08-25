@@ -154,6 +154,27 @@ A *missing* `auth.json` is not in that class. It is the state `attach()` writes
 `/v1` from, so it is a fact rather than an unknown and keys to `/v1` like any
 other API-key login.
 
+### The key is bounded
+
+`readAttachKey` gives the hook a deadline (2s, overridable for tests) and reads
+a hook that misses it as "cannot tell", the same as one that throws.
+
+The hook is already specified cheap and side-effect free *because* it runs on
+every pass, so the deadline enforces the contract rather than adding to it. It
+is there because a hang is the one broken-hook mode a `try` cannot catch, and
+the only one whose blast radius is the whole daemon: `isCurrent()` runs on the
+**settled** path, so an `attachKey()` that never answers (a plugin that reaches
+the network, a `~/.codex` on a stalled network mount) stops every later
+reconcile pass over every action, permanently and with no diagnostic. That is
+strictly worse than `perform()`'s unbounded `attach()`, which is an effect that
+cannot be safely abandoned and only runs when something has already drifted.
+
+Timing out costs nothing a conforming adapter can notice: 2s is three orders of
+magnitude above the local file read Codex's hook does, and a miss lands on an
+outcome the contract already defines. The hook is abandoned rather than
+cancelled, since `attachKey()` has no cancellation channel; leaking one pending
+promise is the cheaper leak.
+
 ## Consequences
 
 - A Codex login switch self-heals on the next reconcile pass on an enrolled
@@ -162,8 +183,8 @@ other API-key login.
 - Any adapter with a client-owned attach input can opt into the same currency by
   declaring `attachKey()`. Adapters without one (claude, openclaw) are unchanged
   and stay judged by the three existing keys.
-- `isCurrent()` now performs one small read per attached client per reconcile
-  pass, for adapters that declare the hook. Codex's is a single `auth.json`
+- `isCurrent()` now performs one small, deadlined read per attached client per
+  reconcile pass, for adapters that declare the hook. Codex's is a single `auth.json`
   parse it already does at attach time.
 - This does not make the drift *reportable*. `hyp status` still cannot say the
   managed `base_url` disagrees with `auth.json`, because the TOML `attach_probe`

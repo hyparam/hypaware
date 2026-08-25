@@ -806,6 +806,14 @@ export interface CreateAttachHandlerOptions {
    * touching `ctx.clients` (which lacks the dropped client at reverse time).
    */
   detach?: ClientDetachFromDisk
+  /**
+   * Deadline in ms for a client adapter's optional `attachKey()` freshness
+   * hook (LLP 0308). Defaults to a bound far above any conforming hook, which
+   * does a local read. Overridden only by tests, which would otherwise have to
+   * spend the real one to prove a hook that never answers cannot wedge the
+   * pass.
+   */
+  attachKeyTimeoutMs?: number
   log?: PluginLogger
 }
 

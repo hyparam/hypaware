@@ -30,6 +30,13 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  */
 
 /**
+ * Default deadline for a client adapter's `attachKey()` hook, in ms.
+ *
+ * @ref LLP 0308#the-key-is-bounded [implements]: the freshness hook is bounded, so a hook that never answers cannot wedge reconciliation
+ */
+const ATTACH_KEY_TIMEOUT_MS = 2000
+
+/**
  * The attach action handler: the reversible instance of the generic
  * client-action reconciler (LLP 0036 / LLP 0044). When a joined machine
  * confirms a central config that enables a client adapter, the daemon performs
@@ -61,6 +68,11 @@ import { detachClientFromDisk } from './client_detach_disk.js'
 export function createAttachHandler(opts = {}) {
   /** @type {ClientDetachFromDisk} */
   const detach = opts.detach ?? detachClientFromDisk
+  // How long the adapter's freshness hook gets before this pass gives up and
+  // reads "cannot tell" (see readAttachKey). Three orders of magnitude above
+  // the local file read Codex's hook actually does, so no conforming adapter
+  // can reach it; overridable only so tests need not spend it.
+  const attachKeyTimeoutMs = opts.attachKeyTimeoutMs ?? ATTACH_KEY_TIMEOUT_MS
 
   return {
     kind: 'attach',
@@ -178,7 +190,7 @@ export function createAttachHandler(opts = {}) {
       // over a config that names the wrong route: issue #996 all over again,
       // and now unreachable by any later pass.
       // @ref LLP 0308#the-key-is-adapter-computed [implements]: the recorded key is read before the effect, so a mid-pass input change re-attaches rather than settling stale
-      const attachKey = await readAttachKey(registration)
+      const attachKey = await readAttachKey(registration, attachKeyTimeoutMs)
 
       try {
         await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
@@ -348,7 +360,7 @@ export function createAttachHandler(opts = {}) {
       // asset set: no key above can see it, and the stale route hands the new
       // credential to an upstream not scoped for it (#996).
       // @ref LLP 0308#drift-is-a-forward-gap [implements]: a recomputed adapter key that differs from the marker's is stale, so the reconciler re-attaches
-      const attachKey = await readAttachKey(ctx.clients?.getClient(client))
+      const attachKey = await readAttachKey(ctx.clients?.getClient(client), attachKeyTimeoutMs)
       // No key this pass (the adapter declares no hook, or could not read its
       // input): nothing trustworthy to compare, so stay current rather than
       // re-attach on a value we do not have.
@@ -596,22 +608,77 @@ function attachedAssetsKey(client, ctx) {
  * Both callers route through here so `perform()` records exactly what
  * `isCurrent()` recomputes. `undefined` is the honest "cannot tell" and covers
  * every degenerate case identically: no registration this pass, an adapter that
- * declares no hook, a hook that returns a non-string, and a hook that throws.
- * Never throws: a freshness key is an optimization over re-attaching, so a
- * broken one must not turn a settled attach into a `failed` marker.
+ * declares no hook, a hook that returns a non-string, a hook that throws, and a
+ * hook that does not answer in time. Never throws and never waits forever: a
+ * freshness key is an optimization over re-attaching, so a broken one must not
+ * turn a settled attach into a `failed` marker, and must not stop the pass.
+ *
+ * The deadline is enforcement of a contract the hook already has, not a new
+ * one: `attachKey()` is specified cheap and side-effect free *because* it runs
+ * on every reconcile pass. A hook that hangs is the one broken-hook mode the
+ * `try` cannot catch, and it is the worst one. `isCurrent()` calls this on the
+ * *settled* path, so unlike `perform()`'s unbounded `attach()` (which only runs
+ * when something has already drifted) a hang here wedges every later pass over
+ * every action, permanently and silently. Timing out maps that onto the outcome
+ * the contract already defines for an input this boot cannot read.
  *
  * @param {{ attachKey?(): Promise<string | undefined> | string | undefined } | undefined} registration
+ * @param {number} timeoutMs
  * @returns {Promise<string | undefined>}
  * @ref LLP 0308#the-key-is-adapter-computed [implements]: one reader for both halves, so the recorded key and the recomputed one cannot drift
+ * @ref LLP 0308#the-key-is-bounded [implements]: a hook that never answers reads as "cannot tell" rather than wedging the reconcile pass
  */
-async function readAttachKey(registration) {
+async function readAttachKey(registration, timeoutMs) {
   if (!registration || typeof registration.attachKey !== 'function') return undefined
   try {
-    const key = await registration.attachKey()
+    const key = await withAttachKeyDeadline(registration.attachKey(), timeoutMs)
     return typeof key === 'string' && key.length > 0 ? key : undefined
   } catch {
     return undefined
   }
+}
+
+/**
+ * Settle `value` or reject at `timeoutMs`, whichever comes first, and clear the
+ * timer the moment the hook settles so the normal path leaves nothing behind.
+ *
+ * The timer is deliberately NOT `unref`d. It is live only while this pass is
+ * genuinely awaiting the hook, so holding the loop open for it is exactly
+ * right: an `unref`d deadline over a hook that never answers lets the process
+ * drain and exit with the reconcile silently unfinished, which is worse than
+ * the hang it was meant to bound. The cost is at most `timeoutMs` of delayed
+ * exit, and only when a hook is already misbehaving.
+ *
+ * A hook that never settles is abandoned, not cancelled: there is no
+ * cancellation in the `attachKey()` contract, and leaking one pending promise
+ * is strictly better than leaking the whole reconcile loop.
+ *
+ * @param {Promise<string | undefined> | string | undefined} value
+ * @param {number} timeoutMs
+ * @returns {Promise<string | undefined>}
+ */
+function withAttachKeyDeadline(value, timeoutMs) {
+  // Thenable, not `instanceof Promise`: a plugin may return a promise from
+  // another realm or library, and arming no timer for those would put the hang
+  // back. A sync return needs no timer at all.
+  const thenable = /** @type {any} */ (value)
+  if (!thenable || typeof thenable.then !== 'function') return Promise.resolve(value)
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`attachKey() did not answer within ${timeoutMs}ms`)),
+      timeoutMs
+    )
+    thenable.then(
+      (/** @type {string | undefined} */ key) => {
+        clearTimeout(timer)
+        resolve(key)
+      },
+      (/** @type {unknown} */ err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
 }
 
 /**

@@ -296,14 +296,14 @@ const CLAUDE_DESCRIPTOR = {
 }
 
 /**
- * @param {{ key: { get: () => any }, calls: string[] }} script
+ * @param {{ key: { get: () => any }, calls: string[], attachKeyTimeoutMs?: number }} script
  */
 async function runScripted(script) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-attach-key-core-'))
   const stateRoot = path.join(root, 'hypaware')
   const reconciler = createActionReconciler({
     stateRoot,
-    handlers: [createAttachHandler()],
+    handlers: [createAttachHandler({ attachKeyTimeoutMs: script.attachKeyTimeoutMs })],
     now: () => Date.parse('2026-08-25T00:00:00.000Z'),
     log: NOOP_LOG,
   })
@@ -408,6 +408,45 @@ test('a pre-LLP-0308 marker is stale exactly once, then settles', async () => {
       'and every pass after it is current: the migration does not repeat'
     )
     assert.equal(calls.filter((c) => c === 'attach').length, 1)
+  } finally {
+    await harness.cleanup()
+  }
+})
+
+test('an attachKey that never answers is bounded, not a wedged reconcile pass (LLP 0308)', async () => {
+  // The one broken-hook mode the `try` in `readAttachKey` cannot catch. It is
+  // also the worst one: `isCurrent()` runs on the SETTLED path, so a hook that
+  // hangs stops every later pass over every action, not just this attach. The
+  // deadline maps it onto "cannot tell", which the marker already survives.
+  // A real 2s bound is shrunk here only so the test need not spend it.
+  const calls = /** @type {string[]} */ ([])
+  /** @type {{ get: () => any }} */
+  const box = { get: () => '/backend-api/codex' }
+  const harness = await runScripted({ key: box, calls, attachKeyTimeoutMs: 25 })
+  try {
+    const first = await harness.reconciler.reconcile(harness.input)
+    assert.deepEqual(first.results.map((r) => r.outcome), ['done'])
+    assert.equal(harness.marker().attach_key, '/backend-api/codex')
+
+    // The hook stops answering. Without a deadline this await never returns and
+    // the test times out; with one it reads as "cannot tell".
+    box.get = () => new Promise(() => {})
+    const second = await harness.reconciler.reconcile(harness.input)
+    assert.deepEqual(
+      second.results.map((r) => r.outcome),
+      ['skipped'],
+      'a hook that never answers leaves the settled attach alone rather than stopping the pass'
+    )
+    assert.equal(harness.marker().attach_key, '/backend-api/codex')
+    assert.equal(calls.filter((c) => c === 'attach').length, 1)
+
+    // And perform()'s half is bounded too: a pass that has drifted for another
+    // reason still applies its attach, recording no key rather than hanging.
+    harness.input.endpoint = 'http://127.0.0.1:40001'
+    const rebound = await harness.reconciler.reconcile(harness.input)
+    assert.deepEqual(rebound.results.map((r) => r.outcome), ['done'])
+    assert.equal(harness.marker().attach_key, undefined)
+    assert.equal(calls.filter((c) => c === 'attach').length, 2)
   } finally {
     await harness.cleanup()
   }

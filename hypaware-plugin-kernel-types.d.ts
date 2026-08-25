@@ -1986,6 +1986,11 @@ export interface AiGatewayClientRegistration {
    * rather than re-attaching on a value it does not trust. An adapter with no
    * such input omits the hook entirely.
    *
+   * "Cheap" is enforced, not merely asked: the reconciler gives the hook a
+   * short deadline and reads a miss as the same `undefined`, so a hook that
+   * never answers degrades one freshness key instead of stopping reconciliation
+   * for every action. Do not reach the network from here.
+   *
    * @ref LLP 0308#the-key-is-adapter-computed [implements]: adapters name their own attach freshness key; core compares, never interprets
    */
   attachKey?(): Promise<string | undefined> | string | undefined
