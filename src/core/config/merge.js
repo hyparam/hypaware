@@ -87,7 +87,7 @@ export function mergeConfigLayers(central, local) {
 
   // auto_update: a scalar, so "central wins and locks" degenerates to
   // plain precedence; the local value applies only when central is silent.
-  // @ref LLP 0308#config-key: central layer gets fleet on/off control for free via layering
+  // @ref LLP 0309#config-key: central layer gets fleet on/off control for free via layering
   if (central.auto_update !== undefined) effective.auto_update = central.auto_update
   else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
 

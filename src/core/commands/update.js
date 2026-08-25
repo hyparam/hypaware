@@ -15,7 +15,7 @@ import { processIsAlive, readPidFile } from '../daemon/pid.js'
  * repair path when auto-update is off, degraded, or skipped by the
  * provenance guard.
  *
- * @ref LLP 0308#cli-surface [implements]: applies immediately, then restarts the daemon so running code matches
+ * @ref LLP 0309#cli-surface [implements]: applies immediately, then restarts the daemon so running code matches
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */

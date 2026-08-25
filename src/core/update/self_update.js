@@ -4,7 +4,7 @@
 // it must stay loadable even when the rest of a release is broken,
 // because the pre-boot lane in `bin/hypaware.js` is what lets a
 // crash-looping version jump forward to a fixed release.
-// @ref LLP 0308#unstick-from-the-front [implements]: the check runs before the kernel boots, in a module that imports no kernel code
+// @ref LLP 0309#unstick-from-the-front [implements]: the check runs before the kernel boots, in a module that imports no kernel code
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -141,7 +141,7 @@ export function resolveRegistryUrl(env) {
  * checkout would create a second, skewed install beside the one
  * actually running.
  *
- * @ref LLP 0308#global-install-only [implements]: provenance guard on the running package root
+ * @ref LLP 0309#global-install-only [implements]: provenance guard on the running package root
  * @param {{ packageRoot?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {SelfInstallProvenance}
  */
@@ -249,7 +249,7 @@ export function previousBootLooksStuck(stateRoot) {
  * `npm install -g <name>@<version>`. Returns rather than throws: every
  * caller treats failure as "record and degrade to a status notice".
  *
- * @ref LLP 0308#mechanism [implements]: npm install -g through the same lane setup uses; failure degrades, never loops
+ * @ref LLP 0309#mechanism [implements]: npm install -g through the same lane setup uses; failure degrades, never loops
  * @param {{
  *   name: string,
  *   version: string,
@@ -420,7 +420,7 @@ export async function runSelfUpdatePass(opts = {}) {
  * (healthy automatic updates with nothing pending); `json` always
  * carries the full picture for `--json`.
  *
- * @ref LLP 0308#cli-surface [implements]: an install that cannot self-update says so in status, never only in logs
+ * @ref LLP 0309#cli-surface [implements]: an install that cannot self-update says so in status, never only in logs
  * @param {{ stateRoot: string, env: NodeJS.ProcessEnv }} opts
  * @returns {{ line: string | null, json: Record<string, unknown> }}
  */

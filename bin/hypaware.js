@@ -54,7 +54,7 @@ if (argv[0] === '__smoke_internal') {
 // stuck machine jumps forward when a fixed version is published. When
 // an update lands, exit through the restart code so the service manager
 // relaunches onto the new code instead of booting the old.
-// @ref LLP 0308#unstick-from-the-front [implements]: pre-boot lane; only the import-light updater loads before it runs
+// @ref LLP 0309#unstick-from-the-front [implements]: pre-boot lane; only the import-light updater loads before it runs
 if (argv[0] === 'daemon' && argv[1] === 'run') {
   try {
     const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } =

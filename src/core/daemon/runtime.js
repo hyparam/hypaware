@@ -303,11 +303,11 @@ export async function runDaemon(opts = {}) {
   )
   configControl.armProbationWatchdog()
 
-  // ----- Kernel self-update (LLP 0308) -----
+  // ----- Kernel self-update (LLP 0309) -----
   // Cache the effective auto_update flag so the import-light pre-boot
   // lane (bin/hypaware.js) can honor the off switch without parsing
   // config layers.
-  // @ref LLP 0308#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
+  // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   const autoUpdateEnabled = boot.config?.auto_update !== false
   try {
     writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
@@ -676,7 +676,7 @@ export async function runDaemon(opts = {}) {
     // read on almost every tick. An applied update exits through the
     // staged-restart path: the service manager relaunches onto the new
     // code.
-    // @ref LLP 0308#cadence [implements]: boot + daily with jitter, applied via the staged restart
+    // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
     if (autoUpdateEnabled && !selfUpdateInFlight) {
       selfUpdateInFlight = true
       void runSelfUpdatePass({
