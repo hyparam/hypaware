@@ -55,7 +55,7 @@ async function invoke(run, argv, config) {
   return { code, out, err }
 }
 
-test('install-helper writes an executable no-arg wrapper under the state dir', async () => {
+test('install-helper writes an executable no-arg wrapper under the state dir', { skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'subscription' })
   await activate(ctx)
@@ -74,7 +74,7 @@ test('install-helper writes an executable no-arg wrapper under the state dir', a
   assert.ok(/exec .*claude-account credential/.test(body))
 })
 
-test('the generated wrapper runs its target with no arguments', async () => {
+test('the generated wrapper runs its target with no arguments', { skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
   // A fake "hyp" that echoes JSON only when called with exactly the two
   // credential args, proving the wrapper appends nothing.

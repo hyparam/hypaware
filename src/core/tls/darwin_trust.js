@@ -42,7 +42,10 @@ const defaultRunner = (cmd, args) => runServiceCommand(cmd, args)
  * @returns {string}
  */
 export function loginKeychainPath(homeDir = os.homedir()) {
-  return path.join(homeDir, 'Library', 'Keychains', 'login.keychain-db')
+  // path.posix: this names a path on a darwin host and lands in `security`
+  // command argv, so it keeps POSIX form wherever it is rendered (tests,
+  // dry-run surfaces on other platforms). Identical to path.join on darwin.
+  return path.posix.join(homeDir, 'Library', 'Keychains', 'login.keychain-db')
 }
 
 /**

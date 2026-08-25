@@ -62,11 +62,11 @@ test('resolveClientSettingsPath sanitizes client env override names', () => {
       { CLAUDE_DESKTOP_HOME: '/tmp/claude-desktop-home' },
       '/Users/hyp'
     ),
-    '/tmp/claude-desktop-home/settings.json'
+    path.resolve('/tmp/claude-desktop-home/settings.json')
   )
   assert.equal(
     resolveClientSettingsPath('codex', '.codex/config.toml', {}, '/Users/hyp'),
-    '/Users/hyp/.codex/config.toml'
+    path.resolve('/Users/hyp/.codex/config.toml')
   )
 })
 
@@ -131,11 +131,11 @@ test('resolveClientSettingsPath rejects a settings_file that climbs out of its b
   // lands, not about which characters it contains.
   assert.equal(
     resolveClientSettingsPath('codex', '.codex/sub/../config.toml', {}, '/Users/hyp'),
-    '/Users/hyp/.codex/config.toml'
+    path.resolve('/Users/hyp/.codex/config.toml')
   )
   assert.equal(
     resolveClientSettingsPath('codex', '.codex/config.toml', { CODEX_HOME: '/tmp/ch' }, '/Users/hyp'),
-    '/tmp/ch/config.toml'
+    path.resolve('/tmp/ch/config.toml')
   )
 })
 

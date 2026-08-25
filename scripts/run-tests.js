@@ -10,6 +10,24 @@ import process from 'node:process'
 const ROOT = 'test'
 const IGNORED_DIRS = new Set(['.git', '.github', 'node_modules'])
 
+/**
+ * Test files whose entire subject is a POSIX mechanism the OS refuses on
+ * stock Windows, skipped there as whole files (LLP 0300 names the port
+ * status). TODO(win32): replace the first with a symlink capability probe
+ * (Developer Mode allows symlinks) instead of a blanket skip.
+ * - usage-policy-symlink: creates real file symlinks (EPERM without
+ *   Developer Mode / admin)
+ * - service-command-timeout: drives hanging children through sh-script fake
+ *   `security` / `launchctl` binaries on PATH (shebangs + exec bits)
+ * - service-manager-test-sandbox: meta-suite spawning the launchctl /
+ *   systemctl attach fixtures
+ */
+const WIN32_SKIPPED_FILES = new Set([
+  path.join('core', 'usage-policy-symlink.test.js'),
+  path.join('core', 'service-command-timeout.test.js'),
+  path.join('core', 'service-manager-test-sandbox.test.js'),
+])
+
 if (isMain(import.meta.url, process.argv[1])) {
   process.exit(run(process.argv.slice(2)))
 }
@@ -23,6 +41,17 @@ export function run(forwardedArgs) {
   const files = []
   collectTestFiles(path.resolve(ROOT), files)
   files.sort()
+
+  if (process.platform === 'win32') {
+    // Anchor on the same resolved root the collector walked, so matching
+    // does not silently depend on npm test running from the repo root.
+    const skipped = files.filter((f) => WIN32_SKIPPED_FILES.has(path.relative(path.resolve(ROOT), f)))
+    if (skipped.length > 0) {
+      // Loud, never silent: name what this platform is not running.
+      process.stderr.write(`win32: skipping ${skipped.length} POSIX-bound test file(s): ${skipped.map((f) => path.basename(f)).join(', ')}\n`)
+      for (const f of skipped) files.splice(files.indexOf(f), 1)
+    }
+  }
 
   if (files.length === 0) {
     process.stderr.write(`no test files found under ${ROOT}\n`)

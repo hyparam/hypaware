@@ -878,3 +878,16 @@ export interface BackfillSweepTickReport {
 export interface BackfillSweepDriver {
   tick(opts?: BackfillSweepTickOptions): Promise<BackfillSweepTickReport>
 }
+
+/**
+ * One control request the boot-time clear could not remove
+ * (`clearControlRequests`), handed to `watchControlRequests` as
+ * `staleRequests` so the watcher consumes a matching leftover without
+ * dispatching it.
+ */
+export interface UnclearedRequest {
+  /** The file's bytes when readable, else null (matched conservatively). */
+  content: string | null
+  /** The error that kept the clear from removing the file. */
+  message: string
+}

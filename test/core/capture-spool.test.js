@@ -114,7 +114,7 @@ test('sweepCaptureSpool: a file it cannot remove is counted, not thrown', async 
   }
 })
 
-test('sweepCaptureSpool: a symlink is removed as the link, not followed', async () => {
+test('sweepCaptureSpool: a symlink is removed as the link, not followed', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async () => {
   const home = await tmpDir('symlink')
   const outside = await tmpDir('symlink-target')
   try {

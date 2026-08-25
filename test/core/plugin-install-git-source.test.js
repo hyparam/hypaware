@@ -156,7 +156,7 @@ test('validateEntrypoint accepts a relative path that stays inside the artifact 
   assert.equal(result, undefined)
 })
 
-test('findSymlink reports the first symlink encountered in the tree', async () => {
+test('findSymlink reports the first symlink encountered in the tree', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-git-symlink-'))
   try {
     await fs.mkdir(path.join(dir, 'sub'))

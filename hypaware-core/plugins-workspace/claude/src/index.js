@@ -522,7 +522,8 @@ function firstNonEmpty(...values) {
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
   const force = argv.includes('--force')
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)

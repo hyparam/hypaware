@@ -517,6 +517,10 @@ function attachActionClient(action) {
  */
 function attachedAssetOptions(client, ctx) {
   const descriptors = ctx.clientDescriptors
+  // `?? ''`, not os.homedir(): the install side stays deliberately inert
+  // without an env-provided HOME (see the removal-side comment above); the
+  // empty string is what arms the guard below. LLP 0300's homedir fallback
+  // is for read-side path resolution, not this write-side seam.
   const homeDir = ctx.env.HOME ?? ''
   if (!descriptors || homeDir.length === 0) return undefined
   if (!ctx.skills && !ctx.agents) return undefined

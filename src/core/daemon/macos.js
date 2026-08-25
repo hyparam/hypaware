@@ -95,8 +95,8 @@ export function buildPlist(options) {
   if (!configPath || typeof configPath !== 'string') throw new LaunchAgentError('configPath is required')
   if (!logDir || typeof logDir !== 'string') throw new LaunchAgentError('logDir is required')
 
-  const stdoutPath = path.join(logDir, 'daemon.out.log')
-  const stderrPath = path.join(logDir, 'daemon.err.log')
+  const stdoutPath = path.posix.join(logDir, 'daemon.out.log')
+  const stderrPath = path.posix.join(logDir, 'daemon.err.log')
 
   /** @type {string[]} */
   const programArgs = [nodePath, binPath, 'daemon', 'run']
@@ -170,7 +170,7 @@ function escapeXml(value) {
  * @returns {string}
  */
 export function plistPathFor(plistDir, label = LAUNCH_LABEL) {
-  return path.join(plistDir, plistFileName(label))
+  return path.posix.join(plistDir, plistFileName(label))
 }
 
 /**

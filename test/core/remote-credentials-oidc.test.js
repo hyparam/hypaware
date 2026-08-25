@@ -58,7 +58,7 @@ test('an oidc session round-trips with kind: oidc', async () => {
   const creds = await readCredentials(dir)
   assert.deepEqual(creds.prod, { kind: 'oidc', refreshToken: 'rt', accessJwt: 'jwt', expiresAt: FUTURE, org: 'acme' })
   const st = await fs.stat(remoteCredentialsPath(dir))
-  assert.equal(st.mode & 0o777, 0o600)
+  if (process.platform !== 'win32') assert.equal(st.mode & 0o777, 0o600)
 })
 
 test('a record with a refreshToken but no accessJwt still yields its usable static token', async () => {

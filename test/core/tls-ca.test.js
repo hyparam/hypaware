@@ -37,7 +37,7 @@ test('ensureLocalCa generates a CA and persists it 0600', async (t) => {
   const paths = caPaths(stateRoot)
   const keyStat = await fsp.stat(paths.keyPath)
   // The private key must not be group- or world-readable.
-  assert.equal(keyStat.mode & 0o077, 0, 'CA key is not readable by anyone else')
+  if (process.platform !== 'win32') assert.equal(keyStat.mode & 0o077, 0, 'CA key is not readable by anyone else')
 })
 
 test('a second call reuses the stored CA rather than minting a new one', async (t) => {
