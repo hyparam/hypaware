@@ -1475,6 +1475,19 @@ export interface DatasetRegistration {
    * non-upgraded fallback against its own copy). Compaction owns the
    * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
    * dedupe assumes the rows are not yet committed.
+   *
+   * MUST be free of observable side effects and MUST be idempotent. This is
+   * the hook cache maintenance calls SPECULATIVELY, before it has picked a
+   * compaction path: it asks whether re-settlement would change a candidate
+   * file's rows, discards the rows it gets back, and may ask again on the
+   * next tick about rows it never commits. An implementation that marked a
+   * transcript line consumed, advanced a cursor, or wrote anything a later
+   * run or another process can observe would fire that effect for work which
+   * never happened. Reading logs and memoising in memory is fine. Whatever
+   * this hook fans out to inherits the requirement; for the gateway dataset
+   * that is `AiGatewaySettlementEnricher`.
+   *
+   * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
