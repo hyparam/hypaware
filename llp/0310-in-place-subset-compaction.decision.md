@@ -69,13 +69,19 @@ decision retires.
 A file is a merge candidate only when it is small (below half of
 `target_file_bytes`, so two candidates still merge to at most the target and
 a file past that mark has little to gain) and shares its tuple with another
-candidate; a tuple's lone file is its floor. Tuples are taken whole, and a round
-stops adding tuples at `compact_batch_bytes` of victim data, because the
-files-scoped rewrite materializes the victims' rows in memory - the same
-bound LLP 0209 puts on a compaction batch. A single tuple exceeding that
-budget by itself is left to the streaming whole-generation rewrite. A tick
-runs at most `MAX_INPLACE_COMPACT_ROUNDS` rounds; a deeper backlog drains on
-later ticks.
+candidate; a tuple's lone file is its floor. A tuple is taken whole where it
+fits, and a round stops adding tuples at `compact_batch_bytes` of victim
+data, because the files-scoped rewrite materializes the victims' rows in
+memory - the same bound LLP 0209 puts on a compaction batch. A tuple whose
+candidates outweigh that budget by themselves is merged a prefix at a time,
+smallest files first: routine dueness no longer reaches the streaming
+whole-generation rewrite, so skipping such a tuple would keep the partition
+due, hand it an empty victim set, and freeze it at its fragmentation under
+the floor verdict forever. The prefix rewrites some rows more than once
+across ticks and in exchange the live file count falls monotonically; a
+tuple whose two smallest candidates do not fit the budget cannot be merged
+within the heap bound at all and is left alone. A tick runs at most
+`MAX_INPLACE_COMPACT_ROUNDS` rounds; a deeper backlog drains on later ticks.
 
 ### The floor is a verdict {#floor-is-a-verdict}
 

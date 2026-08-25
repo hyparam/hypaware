@@ -735,14 +735,26 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   // this tick is caught on a later one, and a sweep failure must not fail
   // the partition's report.
   // @ref LLP 0310#unreferenced-sweep [implements]: snapshot retention is the reader-safety window; the sweep only reclaims what fell out of it.
-  if (!opts.dryRun && layout.kind === 'source-table') {
-    try {
-      const removed = await sweepUnreferencedTableFiles(liveDir)
-      if (removed > 0) {
-        r.unreferencedFilesRemoved = removed
-        getActiveSpan()?.setAttribute('unreferenced_files_removed', removed)
-      }
-    } catch { /* swept again next tick */ }
+  //
+  // Read the generation off the cursor AGAIN rather than reuse `layout`:
+  // when the tick took the generation-swap rewrite (--force, the settle
+  // escape, the legacy layout) the directory `liveDir` names is the RETIRED
+  // one. Sweeping that is both wrong and expensive - a full metadata and
+  // manifest walk, every tick for the whole 24 h retirement grace, of a
+  // directory the retirement sweep deletes wholesale - and it would report
+  // the retired generation's releases as the live generation's.
+  if (!opts.dryRun) {
+    const sweptCursor = tryReadCursorSync(r.path) ?? cursor
+    const sweptLayout = generationLayout(sweptCursor)
+    if (sweptLayout.kind === 'source-table') {
+      try {
+        const removed = await sweepUnreferencedTableFiles(path.join(r.path, sweptLayout.liveDir))
+        if (removed > 0) {
+          r.unreferencedFilesRemoved = removed
+          getActiveSpan()?.setAttribute('unreferenced_files_removed', removed)
+        }
+      } catch { /* swept again next tick */ }
+    }
   }
 
   return r
@@ -1302,12 +1314,21 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
  * little) AND shares its partition tuple with another candidate: a data
  * file cannot span tuples (LLP 0209#tuple-bound), so a tuple's lone file
  * is its floor and healthy big files have nothing to gain.
- * Tuples are taken whole - splitting one across rounds would rewrite the
+ * A tuple is taken whole where it fits - splitting one costs rewriting the
  * same rows twice - and the round stops adding tuples once
  * `compact_batch_bytes` of victim data is selected, because the rewrite
- * materializes the victims' rows in memory. A single tuple whose small
- * files together exceed that budget is skipped entirely: only the
- * streaming whole-generation rewrite can merge it without unbounded heap.
+ * materializes the victims' rows in memory.
+ *
+ * A tuple whose small files outweigh that budget by themselves is merged a
+ * PREFIX at a time, smallest files first, rather than skipped. Skipping it
+ * would freeze it: routine dueness no longer reaches the streaming
+ * whole-generation rewrite (only `--force` and the settle escape do), so a
+ * skipped tuple keeps the partition due, produces an empty victim set, and
+ * collects the floor verdict forever while staying fragmented. The prefix
+ * rewrites some rows more than once across ticks and in exchange the live
+ * file count falls monotonically. When not even the two smallest candidates
+ * fit the round's budget the tuple genuinely cannot be merged within the
+ * heap bound, and is left alone.
  *
  * @ref LLP 0310#victim-selection [implements]: small files, whole tuples, byte-bounded rounds.
  * @param {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number }[]} liveFiles
@@ -1315,13 +1336,13 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
  * @returns {string[]}
  */
 function selectInPlaceVictims(liveFiles, cfg) {
-  /** @type {Map<string, { paths: string[], bytes: number }>} */
+  /** @type {Map<string, { files: { path: string, bytes: number }[], bytes: number }>} */
   const tuples = new Map()
   for (const file of liveFiles) {
     if (file.sizeBytes >= cfg.target_file_bytes / 2) continue
     const key = JSON.stringify(file.partition ?? {}, (_, v) => typeof v === 'bigint' ? String(v) : v)
-    const group = tuples.get(key) ?? { paths: [], bytes: 0 }
-    group.paths.push(file.filePath)
+    const group = tuples.get(key) ?? { files: [], bytes: 0 }
+    group.files.push({ path: file.filePath, bytes: file.sizeBytes })
     group.bytes += file.sizeBytes
     tuples.set(key, group)
   }
@@ -1330,11 +1351,28 @@ function selectInPlaceVictims(liveFiles, cfg) {
   const victims = []
   let budget = cfg.compact_batch_bytes
   for (const group of tuples.values()) {
-    if (group.paths.length < 2) continue
-    if (group.bytes > cfg.compact_batch_bytes) continue
-    if (group.bytes > budget) continue
-    victims.push(...group.paths)
-    budget -= group.bytes
+    if (group.files.length < 2) continue
+    if (group.bytes <= budget) {
+      for (const file of group.files) victims.push(file.path)
+      budget -= group.bytes
+      continue
+    }
+    // Past the round's budget: take the smallest candidates that fit
+    // rather than skip the tuple, so a tuple heavier than one round's heap
+    // bound still converges. See the doc comment above for why skipping it
+    // would be permanent.
+    const smallestFirst = [...group.files].sort((a, b) => a.bytes - b.bytes)
+    /** @type {string[]} */
+    const prefix = []
+    let taken = 0
+    for (const file of smallestFirst) {
+      if (taken + file.bytes > budget) break
+      prefix.push(file.path)
+      taken += file.bytes
+    }
+    if (prefix.length < 2) continue
+    victims.push(...prefix)
+    budget -= taken
   }
   return victims
 }
@@ -1529,6 +1567,10 @@ async function sweepUnreferencedTableFiles(tableDir) {
     if (!name.endsWith('.parquet') && !name.endsWith('.puffin')) continue
     if (referenced.has(name)) continue
     removeStale(path.join(dataDir, name))
+    // Only a parquet data file has a sidecar. `sidecarPathFor` rewrites a
+    // `.parquet` suffix, so handing it a `.puffin` name returns that name
+    // back and the file would be handed to `removeStale` a second time.
+    if (!name.endsWith('.parquet')) continue
     const sidecar = sidecarPathFor(name)
     if (dataNames.has(sidecar)) removeStale(path.join(dataDir, sidecar))
   }

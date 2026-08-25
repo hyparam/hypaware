@@ -17,7 +17,7 @@ import path from 'node:path'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
-import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { deleteMatchingRows, readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -235,6 +235,74 @@ test('the sweep releases superseded files once no retained snapshot references t
     assert.equal(remaining.length, 4, 'exactly the live merged files survive')
     const rows = await readRowsFromTable(liveTableDir(dir))
     assert.equal(rows.length, 12, 'the sweep never touches what the table still references')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0302#purge-by-position [tests]: the in-place merge reads its
+// victims with committed position deletes applied, so a purged row cannot
+// come back through compaction. The whole-generation rewrite was the only
+// compactor before LLP 0310; this pins the property for the path that
+// replaced it, because the failure is silent (rows reappear, nothing errors).
+test('an in-place merge does not resurrect rows a purge deleted', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-purge-'))
+  try {
+    await seedFragmented(cacheRoot, 4, 3)
+    const dir = partitionDir(cacheRoot)
+
+    const purged = await deleteMatchingRows(
+      liveTableDir(dir), (row) => row.session_id === 's-1', { columns: ['session_id'] }
+    )
+    assert.equal(purged.rowsDeleted, 3, 'fixture invariant: one tuple loses all three of its rows')
+    const before = await readRowsFromTable(liveTableDir(dir))
+    assert.equal(before.length, 9)
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.partitions[0].compacted, true)
+
+    const after = await readRowsFromTable(liveTableDir(dir))
+    assert.equal(after.length, 9, 'the merge conserves exactly the live rows it started from')
+    assert.deepEqual(
+      after.map((r) => Number(r.id)).sort((a, b) => a - b),
+      before.map((r) => Number(r.id)).sort((a, b) => a - b),
+      'row identity survives the merge, purged ids included in neither side'
+    )
+    assert.ok(!after.some((r) => r.session_id === 's-1'), 'the purged tuple stays purged')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0310#victim-selection [tests]: a tuple heavier than one round's
+// byte budget is merged a prefix at a time. Skipping it instead would be
+// permanent: routine dueness never reaches the whole-generation rewrite, so
+// the partition would stay due, produce an empty victim set, and collect the
+// floor verdict while remaining fragmented.
+test('a tuple heavier than one round of budget still merges, a prefix at a time', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-overbudget-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 6)
+    const dir = partitionDir(cacheRoot)
+    const files = await dataFilesOnDisk(dir)
+    assert.equal(files.length, 6, 'fixture invariant: one tuple, six small files')
+
+    // A budget that fits some of the tuple's files but nowhere near all of
+    // them: the shape that used to skip the tuple outright.
+    const sizes = await Promise.all(files.map(async (f) => (await fs.stat(f)).size))
+    const total = sizes.reduce((a, b) => a + b, 0)
+    const compact_batch_bytes = Math.floor(total / 2)
+    assert.ok(compact_batch_bytes < total, 'fixture invariant: the tuple does not fit one round')
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true, config: { compact_batch_bytes } })
+    const part = report.partitions[0]
+    assert.equal(part.compacted, true, 'an over-budget tuple must still be merged, not frozen')
+    assert.ok(part.dataFilesAfter < 6, 'the live file count falls')
+    assert.equal(part.compactionIneffective, undefined, 'a real reduction is not the floor verdict')
+
+    const rows = await readRowsFromTable(liveTableDir(dir))
+    assert.equal(rows.length, 6, 'the prefix merges conserve every row')
+    assert.deepEqual(rows.map((r) => Number(r.id)).sort((a, b) => a - b), [0, 1, 2, 3, 4, 5])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
