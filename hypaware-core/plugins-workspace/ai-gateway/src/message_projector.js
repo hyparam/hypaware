@@ -1123,7 +1123,9 @@ function expandMessageParts(ctx) {
     const toolName = extractToolName(block, toolCallId, ctx.conversationLookup)
     const row = {
       ...base,
-      part_id: `${ctx.identity.messageId}#${partIndex}`,
+      // @ref LLP 0306#recovery-lane [implements]: an adapter-supplied native
+      //   part id is the canonical dedupe identity across live and replay
+      part_id: stringValue(block.part_id) ?? `${ctx.identity.messageId}#${partIndex}`,
       part_index: partIndex,
       part_type: partType,
       provider_type: stringValue(ctx.message.provider_type),
@@ -1131,7 +1133,7 @@ function expandMessageParts(ctx) {
       content_text: extractContentText(block),
       tool_name: toolName,
       tool_call_id: toolCallId,
-      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use'
+      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use' || blockType === 'tool_result'
         ? readKey(block, 'input')
         : undefined,
       caller_type: readCallerType(block),
@@ -1144,7 +1146,9 @@ function expandMessageParts(ctx) {
       is_error: readKey(block, 'is_error') === true ? true : undefined,
       status: buildStatus(block, isLast, ctx.role, finishReason),
       attributes: mergeJsonObjects(baseClientAttributes, isLast ? messageAttributes : nonCarrierAttributes),
-      raw_frame: isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
+      raw_frame: isPlainObject(block.raw_frame)
+        ? block.raw_frame
+        : isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
     }
     if (
       partType === 'tool_call' &&
@@ -1347,6 +1351,10 @@ function extractToolCallId(block) {
 function extractToolName(block, tool_call_id, lookup) {
   if (!isPlainObject(block)) return undefined
   if (block.type === 'tool_use' || block.type === 'server_tool_use') return stringValue(block.name)
+  if (block.type === 'tool_result' || block.type === 'web_search_tool_result') {
+    const direct = stringValue(block.name)
+    if (direct) return direct
+  }
   if ((block.type === 'tool_result' || block.type === 'web_search_tool_result') && tool_call_id && lookup) {
     return lookup.get(tool_call_id)?.tool_name
   }

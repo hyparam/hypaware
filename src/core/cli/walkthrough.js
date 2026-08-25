@@ -31,7 +31,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
@@ -778,6 +778,7 @@ export async function runPickerWalkthrough(opts) {
       finale: opts.finale,
       clientsPicked,
       capabilities,
+      ...(opts.clients ? { clients: opts.clients } : {}),
       sources: opts.sources,
       skills: opts.skills,
       agents: opts.agents,
@@ -1578,6 +1579,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   finale: PickerFinaleActions,
  *   clientsPicked: string[],
  *   capabilities: CapabilityRegistry,
+ *   clients?: ClientRegistry,
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
@@ -1707,11 +1709,27 @@ export async function runPickerFinale(args) {
     )
   }
 
-  if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
+  // The intrinsic registry is the superset of attachable clients: gateway
+  // adapters delegate their registration into it, and an endpoint-free adapter
+  // registers only there. Resolving through the gateway capability alone hid
+  // every endpoint-free client from this lane - a solo pick skipped attach
+  // outright, and a mixed pick reported the adapterless success that LLP 0115
+  // means for a plugin with no runtime adapter at all.
+  // @ref LLP 0306#endpoint-free-clients [implements]: the finale resolves adapters through the intrinsic registry, not the gateway capability
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = capabilities.has('hypaware.ai-gateway')
+    ? capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  /** @param {string} name @returns {ClientRegistration | undefined} */
+  const resolveAdapter = (name) => args.clients?.getClient(name) ?? gateway?.getClient(name)
+  const anyAdapterPicked = clientsPicked.some((client) => resolveAdapter(client) !== undefined)
+
+  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway)) {
     // Skipped when no daemon was installed (the join lane restarts only
     // after attach, so no CA can appear before it) and on dry runs; the
-    // wait-or-skip decision itself lives in the helper.
-    if (!dryRun && !skipInstall) {
+    // wait-or-skip decision itself lives in the helper. Also skipped when no
+    // gateway is active at all: there is no proxy CA to wait for.
+    if (!dryRun && !skipInstall && gateway) {
       await waitForProxyCaBeforeAttach({
         config,
         env,
@@ -1719,14 +1737,12 @@ export async function runPickerFinale(args) {
         ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
       })
     }
-    /** @type {AiGatewayCapability} */
-    const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {
       if (args.skipAttachClients?.has(client)) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
       }
-      const adapter = gateway.getClient(client)
+      const adapter = resolveAdapter(client)
       if (!adapter) {
         // Not attachable, not failed: `contributes.client` also covers plugins
         // that own skill/agent dirs but deliberately register no runtime
@@ -1745,11 +1761,15 @@ export async function runPickerFinale(args) {
       // @ref LLP 0114#fixed-default-port [implements]: an unpinned install attaches at the known default rather than a port nothing can bind
       let endpoint = configuredGatewayEndpoint(config) ?? DEFAULT_GATEWAY_ENDPOINT
       try {
-        endpoint = gateway.localEndpoint()
+        if (gateway) endpoint = gateway.localEndpoint()
       } catch {}
+      // An endpoint-free adapter writes a managed file rather than pointing a
+      // client at a bound port, so it is handed no endpoint at all, the same
+      // way the reconciler's attach action calls it.
+      const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
         await adapter.attach({
-          endpoint,
+          ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
           stdout,
           stderr,

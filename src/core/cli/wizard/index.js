@@ -930,6 +930,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
         finale: finaleActions,
         clientsPicked: picked.clientsPicked,
         capabilities: opts.capabilities,
+        // The intrinsic registry, so the attach lane also sees endpoint-free
+        // clients the gateway capability filters out (LLP 0306).
+        ...(opts.ctx.clients ? { clients: opts.ctx.clients } : {}),
         ...(opts.sources ? { sources: opts.sources } : {}),
         ...(opts.skills ? { skills: opts.skills } : {}),
         ...(opts.agents ? { agents: opts.agents } : {}),

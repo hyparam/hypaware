@@ -275,7 +275,7 @@ export interface PluginAttachProbeManifest {
    * (client_detach_disk.js) and read (daemon/status.js) sides, which close
    * the #212 gap this format's prior removal warned about.
    */
-  format: 'json' | 'toml' | 'json_path'
+  format: 'json' | 'toml' | 'json_path' | 'managed_file'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -288,6 +288,8 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /** `managed_file` only: exact ownership marker required for probe and removal. */
+  marker_text?: string
   /**
    * `json_path` only: dotted path, relative to the parsed settings file,
    * to the container object the probe/undo navigate (e.g.
@@ -645,6 +647,8 @@ export interface PluginActivationContext {
    * before appending to the cache.
    */
   backfillMaterializers: BackfillMaterializerRegistry
+  /** Kernel-owned client lifecycle registry. */
+  clients: ClientRegistry
   /**
    * Narrow facade over the kernel config apply engine (LLP 0023). Only
    * present when the host process runs an apply engine (the daemon);
@@ -1019,6 +1023,8 @@ export interface CommandRunContext {
    */
   failedPlugins?: string[]
   capabilities: CapabilityRegistry
+  /** Kernel-owned client lifecycle registry. Present on current hosts. */
+  clients?: ClientRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
   /**
@@ -1961,15 +1967,27 @@ export interface AiGatewayEndpointOptions {
  *
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
-export interface AiGatewayClientRegistration {
+export interface ClientRegistration {
   name: string
-  defaultUpstream: string
-  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+  /** False when attach installs a local integration and needs no gateway URL. */
+  requiresEndpoint?: boolean
+  attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
 }
 
-export interface AiGatewayClientAttachContext {
-  endpoint: string
+export interface ClientRegistry {
+  registerClient(client: ClientRegistration): void
+  getClient(name: string): ClientRegistration | undefined
+  listClients(): ClientRegistration[]
+}
+
+export interface AiGatewayClientRegistration extends ClientRegistration {
+  defaultUpstream: string
+  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+}
+
+export interface ClientAttachContext {
+  endpoint?: string
   config: JsonObject
   stdout: WriteStream
   stderr: WriteStream
@@ -1986,6 +2004,10 @@ export interface AiGatewayClientAttachContext {
    * `changed`, `prev_value`).
    */
   json?: boolean
+}
+
+export interface AiGatewayClientAttachContext extends ClientAttachContext {
+  endpoint: string
 }
 
 export interface AiGatewayClientStatusContext {

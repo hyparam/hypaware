@@ -97,14 +97,15 @@ test('hyp client attach all: a catalog-known client missing from the live regist
     const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:'))
     assert.deepEqual(lines, [
       "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
+      "note: opencode is a known client but its adapter is not enabled; run 'hyp client attach opencode' to enable it",
     ])
   })
 })
 
 test('hyp client attach all: the note does not change the exit code, only real attach failures among the live set do', async () => {
   await withTempHome(async (home) => {
-    // Only claude and claude-desktop are live; codex and openclaw are both
-    // known-but-not-enabled. Two notes, zero live-attach failures, exit code
+    // Only claude and claude-desktop are live; codex, openclaw, and opencode
+    // are known-but-not-enabled. Three notes, zero live-attach failures, exit code
     // still 0.
     const { ctx, stdout, stderr } = makeCtx({ home, registered: ['claude', 'claude-desktop'] })
     const code = await runAttach(['all'], ctx)
@@ -116,6 +117,7 @@ test('hyp client attach all: the note does not change the exit code, only real a
     assert.deepEqual(notes, [
       "note: codex is a known client but its adapter is not enabled; run 'hyp client attach codex' to enable it",
       "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
+      "note: opencode is a known client but its adapter is not enabled; run 'hyp client attach opencode' to enable it",
     ])
   })
 })
