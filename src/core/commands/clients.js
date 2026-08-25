@@ -50,7 +50,7 @@ import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
 
 /**
- * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, ClientRegistry, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
@@ -155,16 +155,27 @@ async function runClientLifecycle(action, argv, ctx) {
     return exitCode
   }
 
-  // Attach dispatches to the per-adapter attach() hook and threads the
-  // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
-  // capability.
+  // Attach dispatches to the per-adapter attach() hook. Gateway-backed
+  // clients also receive localEndpoint(); endpoint-free clients do not need
+  // the gateway capability.
   // Tracks which single client name (if any) this invocation just enabled
   // through T9's accept path at THIS gate, so the loop below knows to offer
   // T10's backfill consent for it once its attach() actually succeeds.
   // `maybeInteractiveEnableAttach` already refuses `--client all`, so at
   // most one name can ever be set here.
   let capMissingActivatedName
-  if (!ctx.capabilities.has('hypaware.ai-gateway')) {
+  /** @type {AiGatewayCapability | undefined} */
+  const initialGateway = ctx.capabilities.has('hypaware.ai-gateway', '^2.0.0')
+    ? ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  const initialClients = mergeClientRegistries(
+    ctx.clients,
+    /** @type {ClientRegistry | undefined} */ (initialGateway)
+  )
+  const hasRequestedClient = parsed.client === 'all'
+    ? (initialClients?.listClients().length ?? 0) > 0
+    : initialClients?.getClient(parsed.client) !== undefined
+  if (!hasRequestedClient && !ctx.capabilities.has('hypaware.ai-gateway')) {
     // The capability is absent exactly when no *enabled* plugin pulls the
     // gateway in, which for a catalog-known client means its adapter is not
     // enabled - not that the capability is missing from the install. Ask the
@@ -226,10 +237,16 @@ async function runClientLifecycle(action, argv, ctx) {
     }
     capMissingActivatedName = parsed.client
   }
-  /** @type {AiGatewayCapability} */
-  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = ctx.capabilities.has('hypaware.ai-gateway', '^2.0.0')
+    ? ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  const clients = mergeClientRegistries(
+    ctx.clients,
+    /** @type {ClientRegistry | undefined} */ (gateway)
+  )
 
-  const clientNames = expandClientName(parsed.client, gateway)
+  const clientNames = clients ? expandClientName(parsed.client, clients) : []
   if (parsed.client === 'all' && !parsed.json) {
     // `hyp attach all` never prompts mid-run (a gauntlet of enable questions
     // inside a bulk command is the picker's job, badly reinvented); instead it
@@ -261,7 +278,7 @@ async function runClientLifecycle(action, argv, ctx) {
       reportAttachEnablement({ name: parsed.client, enablement, parsed, ctx })
       return 1
     }
-    const known = gateway.listClients().map((c) => c.name)
+    const known = clients?.listClients().map((c) => c.name) ?? []
     ctx.stderr.write(
       `error: unknown client '${parsed.client}'. Registered clients: ${known.join(', ') || '(none)'}\n`
     )
@@ -278,7 +295,7 @@ async function runClientLifecycle(action, argv, ctx) {
     // T10's backfill offer to the accept branch, per its own scope.
     let activatedViaPrompt = name === capMissingActivatedName
     try {
-      let client = gateway.getClient(name)
+      let client = clients?.getClient(name)
       if (!client) {
         // The gateway is live but this client never registered. That is the
         // second failure site the design names: some other gateway-using
@@ -295,7 +312,7 @@ async function runClientLifecycle(action, argv, ctx) {
           // api object this closure already holds (it is `ctx.capabilities`'
           // live registration, not a snapshot), so re-reading it here sees
           // the just-activated client with no extra capability lookup.
-          client = gateway.getClient(name)
+          client = clients?.getClient(name)
           activatedViaPrompt = true
         }
         if (!client) {
@@ -322,7 +339,7 @@ async function runClientLifecycle(action, argv, ctx) {
       // the attach: base-URL attach is exactly what this install already
       // does, so it stays the fallback.
       // @ref LLP 0244#attach-offers [implements]: attach is the migration verb for a base-URL install whose client attaches by proxy
-      if (action === 'attach') {
+      if (action === 'attach' && client.requiresEndpoint !== false) {
         try {
           await maybeOfferProxyModeMigration({ name, ctx, parsed })
         } catch (migrationErr) {
@@ -337,7 +354,11 @@ async function runClientLifecycle(action, argv, ctx) {
       // endpoint: adapters are expected to short-circuit before
       // touching it.
       let endpoint
-      if (parsed.dryRun) {
+      if (client.requiresEndpoint === false) {
+        endpoint = undefined
+      } else if (!gateway) {
+        throw new Error(`attach client '${name}' requires the @hypaware/ai-gateway plugin`)
+      } else if (parsed.dryRun) {
         try {
           endpoint = gateway.localEndpoint()
         } catch {
@@ -1775,13 +1796,43 @@ async function purgeProxyTrustResidue({ ctx }) {
  * return the requested name verbatim.
  *
  * @param {string} requested
- * @param {AiGatewayCapability} gateway
+ * @param {ClientRegistry} clients
  */
-function expandClientName(requested, gateway) {
+function expandClientName(requested, clients) {
   if (requested === 'all') {
-    return gateway.listClients().map((c) => c.name)
+    return clients.listClients().map((c) => c.name)
   }
   return [requested]
+}
+
+/**
+ * Current hosts register gateway-backed and endpoint-free clients in the
+ * intrinsic registry. Keep gateway capability injection compatible for older
+ * hosts and narrow test/runtime seams by filling only names the intrinsic
+ * registry does not carry.
+ *
+ * @param {ClientRegistry | undefined} primary
+ * @param {ClientRegistry | undefined} fallback
+ * @returns {ClientRegistry | undefined}
+ */
+function mergeClientRegistries(primary, fallback) {
+  if (!primary) return fallback
+  if (!fallback || primary === fallback) return primary
+  return {
+    registerClient(client) {
+      primary.registerClient(client)
+    },
+    getClient(name) {
+      return primary.getClient(name) ?? fallback.getClient(name)
+    },
+    listClients() {
+      const merged = new Map(primary.listClients().map((client) => [client.name, client]))
+      for (const client of fallback.listClients()) {
+        if (!merged.has(client.name)) merged.set(client.name, client)
+      }
+      return Array.from(merged.values())
+    },
+  }
 }
 
 /**

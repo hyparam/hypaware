@@ -11,7 +11,7 @@ import type {
   BackfillRegistry,
   PluginLogger,
   JsonObject,
-  AiGatewayCapability,
+  ClientRegistry,
   AgentRegistry,
   SkillRegistry,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
@@ -479,12 +479,11 @@ export interface ActionContext {
    */
   clientDescriptors?: Map<string, ClientDescriptor>
   /**
-   * Runtime gateway capability, used only to *invoke* a client's effect
-   * (`getClient(name).attach(...)`). Present when the AI gateway plugin is
-   * enabled; `desired()` guards on `getClient(name)` so it never names a
-   * client `perform()` cannot reach (LLP 0045 §Part 1).
+   * Runtime client registry used to invoke attach effects. Gateway-backed and
+   * endpoint-free adapters share it; `desired()` still guards on
+   * `getClient(name)` before naming an action (LLP 0045 §Part 1).
    */
-  clients?: AiGatewayCapability
+  clients?: ClientRegistry
   /**
    * Kernel skill / subagent registries, threaded so an org-driven attach
    * materializes the same client assets a manual attach does rather than
@@ -580,11 +579,8 @@ export interface ReconcileInput {
    * Absent on a plain CLI boot.
    */
   clientDescriptors?: Map<string, ClientDescriptor>
-  /**
-   * Runtime gateway capability for invoking a client's attach effect, present
-   * when the AI gateway plugin is enabled (LLP 0045 §Part 1).
-   */
-  clients?: AiGatewayCapability
+  /** Runtime registry for gateway-backed and endpoint-free client attaches. */
+  clients?: ClientRegistry
   /**
    * Kernel skill / subagent registries, so an org-driven attach materializes
    * the client's helper assets (LLP 0107 §every-attach). Absent on a plain

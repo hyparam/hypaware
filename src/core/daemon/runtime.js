@@ -34,7 +34,7 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 
 /**
- * @import { AiGatewayCapability, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -1048,28 +1048,29 @@ export function createReconcilePassScheduler({ run, log }) {
  * listen failed), the daemon must **not** fall back to the configured-`listen`
  * URL: auto-attach is involuntary, and recording a base URL for a port nothing
  * bound would point clients at a dead endpoint. Instead `endpoint` stays
- * undefined and the attach handler's `perform()` guard keeps it inert this pass
- * (attaching once the gateway is proven-bound on a later boot). Manual
+ * undefined and the attach handler's `perform()` guard keeps gateway-backed
+ * clients inert this pass (attaching once the gateway is proven-bound on a
+ * later boot). Endpoint-free clients can still attach. Manual
  * `hyp attach`/`init` keep the configured-`listen` fallback: there the user
  * asked explicitly (`core_commands.js`).
  *
  * @param {{ boot: BootKernelResult, fileLog: ReturnType<typeof openDaemonLog> }} args
- * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: AiGatewayCapability | undefined, endpoint: string | undefined }}
- * @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback; that's the manual path's)
+ * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: ClientRegistry | undefined, endpoint: string | undefined }}
+ * @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors and the intrinsic client registry always reach reconciliation; only gateway-backed attaches require the separately proven live endpoint
  */
 function resolveClientActionSeam({ boot, fileLog }) {
   const clientDescriptors = boot.clientDescriptors
-  /** @type {AiGatewayCapability | undefined} */
-  let clients
+  let clients = boot.runtime.clients
   /** @type {string | undefined} */
   let endpoint
 
   if (boot.runtime.capabilities.has('hypaware.ai-gateway', '^2.0.0')) {
-    clients = /** @type {AiGatewayCapability} */ (
+    const gateway = /** @type {AiGatewayCapability} */ (
       boot.runtime.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
     )
+    clients ??= gateway
     try {
-      endpoint = clients.localEndpoint()
+      endpoint = gateway.localEndpoint()
     } catch {
       // The gateway never bound (e.g. its listen failed). Unlike manual
       // `hyp attach`, the daemon does NOT fall back to the configured-`listen`

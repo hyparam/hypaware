@@ -163,7 +163,10 @@ export function createAttachHandler(opts = {}) {
         return { status: 'failed', reason: `no registered client '${client}' to attach` }
       }
       const endpoint = ctx.endpoint
-      if (typeof endpoint !== 'string' || endpoint.length === 0) {
+      if (
+        registration.requiresEndpoint !== false &&
+        (typeof endpoint !== 'string' || endpoint.length === 0)
+      ) {
         return { status: 'failed', reason: 'attach action missing gateway endpoint' }
       }
 
@@ -175,7 +178,7 @@ export function createAttachHandler(opts = {}) {
         [Attr.OPERATION]: 'client_action.perform',
         [Attr.PLUGIN]: typeof action.params?.plugin === 'string' ? action.params.plugin : client,
         client,
-        endpoint,
+        ...(endpoint ? { endpoint } : {}),
         [Attr.STATUS]: 'ok',
       })
 
@@ -193,7 +196,7 @@ export function createAttachHandler(opts = {}) {
       const attachKey = await readAttachKey(registration, attachKeyTimeoutMs)
 
       try {
-        await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
+        await registration.attach({ ...(endpoint ? { endpoint } : {}), config: {}, stdout, stderr, json: true })
       } catch (err) {
         // A marked refusal (LLP 0186) is a permanent precondition failure only
         // the user can fix; anything else is the transient `failed` the
@@ -228,7 +231,7 @@ export function createAttachHandler(opts = {}) {
       // prev_value / port are best-effort detail from the adapter's payload.
       // @ref LLP 0086#endpoint-aware-markers [implements]: perform() records the endpoint on the done marker so drift is representable
       /** @type {JsonObject} */
-      const detail = { endpoint }
+      const detail = endpoint ? { endpoint } : {}
       // Claude's adapter has exactly one successful attach mode. Record that
       // invariant from the requested client, not from best-effort stdout, so a
       // parse miss cannot leave the new marker stale and re-run attach forever.
@@ -315,6 +318,11 @@ export function createAttachHandler(opts = {}) {
      * `hyp attach claude` even after the user upgrades. That is LLP 0186's named
      * auto-re-arm gap, now reachable by more machines than before.
      *
+     * **A client that declares `requiresEndpoint: false`** attaches by writing
+     * a managed file rather than by pointing at a bound port, so the endpoint
+     * key above does not apply and is skipped for it: its marker stays current
+     * across a gateway rebind, and the asset set is the only key left.
+     *
      * **The adapter's own key**, for any client that declares `attachKey()`.
      * The three keys above are all things *core* can see. Codex's `base_url` is
      * not: attach picks one of two gateway routes by reading Codex's own
@@ -339,13 +347,17 @@ export function createAttachHandler(opts = {}) {
      * @ref LLP 0086#re-attach-on-drift [implements]: a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
+     * @ref LLP 0306#endpoint-free-clients [implements]: an endpoint-free client's marker is not staled by a port that moved
      * @ref LLP 0308#drift-is-a-forward-gap [implements]: a done attach whose adapter-owned input moved is not current, so a Codex login switch re-attaches instead of failing every turn
      */
     async isCurrent(marker, action, ctx) {
-      const live = ctx.endpoint
-      if (typeof live !== 'string' || live.length === 0) return true
-      if (marker.endpoint !== live) return false
       const client = attachActionClient(action)
+      const registration = ctx.clients?.getClient(client)
+      const live = ctx.endpoint
+      if (registration?.requiresEndpoint !== false) {
+        if (typeof live !== 'string' || live.length === 0) return true
+        if (marker.endpoint !== live) return false
+      }
       // A proxy-era marker at an unchanged gateway endpoint is still stale:
       // Claude's adapter now has one desired mode, and re-performing it is the
       // migration that releases the proxy settings and writes the OTEL block.
@@ -360,7 +372,7 @@ export function createAttachHandler(opts = {}) {
       // asset set: no key above can see it, and the stale route hands the new
       // credential to an upstream not scoped for it (#996).
       // @ref LLP 0308#drift-is-a-forward-gap [implements]: a recomputed adapter key that differs from the marker's is stale, so the reconciler re-attaches
-      const attachKey = await readAttachKey(ctx.clients?.getClient(client), attachKeyTimeoutMs)
+      const attachKey = await readAttachKey(registration, attachKeyTimeoutMs)
       // No key this pass (the adapter declares no hook, or could not read its
       // input): nothing trustworthy to compare, so stay current rather than
       // re-attach on a value we do not have.

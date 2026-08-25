@@ -169,10 +169,11 @@ test('runDaemon runs the boot already-confirmed pass when a central layer is pre
     assert.equal(typeof calls[0].backfills.list, 'function')
     // The client-action seam (LLP 0045 §Part 1) is threaded onto every input:
     // clientDescriptors always (from the boot catalog), but with no gateway
-    // plugin enabled the runtime registry + endpoint are undefined, so the
-    // attach handler is inert by construction.
+    // plugin enabled the intrinsic runtime registry is empty and the endpoint
+    // is undefined, so the attach handler is inert by construction.
     assert.ok(calls[0].clientDescriptors instanceof Map)
-    assert.equal(calls[0].clients, undefined)
+    assert.equal(typeof calls[0].clients?.listClients, 'function')
+    assert.deepEqual(calls[0].clients?.listClients(), [])
     assert.equal(calls[0].endpoint, undefined)
   } finally {
     if (handle) {

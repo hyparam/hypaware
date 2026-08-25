@@ -170,6 +170,230 @@ installed from the package under test, and a working `~/.codex`.
 
 ---
 
+## `opencode_cli_desktop_capture`
+
+**What it proves:** that one first-party OpenCode adapter captures real CLI and
+Desktop conversations through its managed global JavaScript plugin, preserves
+the live frontend, and converges with bounded exact-session export recovery. It
+also checks setup-picker detection, privacy gates, source health, replay
+idempotence, and marker-safe detach.
+
+**What it does not prove:** native OpenCode OTLP completeness, provider proxying,
+a hosted gateway route, fleet forwarding, or behavior on another machine.
+OpenCode 1.18.22 did not reliably deliver completed turns through native OTLP,
+so no pass condition below depends on it.
+
+**Requires:** OpenCode CLI and Desktop installed and configured to use the same
+OpenCode config home, HypAware installed from the package under test with
+`@hypaware/opencode` not yet enabled, `jq`, and a running HypAware daemon. Use a
+dedicated acceptance host if the adapter is already enabled. The operator must
+obtain explicit authorization for the model turns below because they may
+consume paid tokens. Do not delete any OpenCode session during this procedure.
+
+**Related:** [LLP 0306](../llp/0306-opencode-cli-and-desktop-capture.decision.md).
+
+### Steps
+
+1. Record the product versions and config root, then check the setup picker.
+   OpenCode follows `XDG_CONFIG_HOME` and otherwise uses `~/.config`; it does
+   not document `OPENCODE_HOME`.
+
+   ```sh
+   opencode --version
+   OPENCODE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+   test -d "$OPENCODE_CONFIG_ROOT"
+   printf 'OpenCode config root: %s\n' "$OPENCODE_CONFIG_ROOT"
+   hyp setup
+   ```
+
+   Also record the Desktop version from its About window. Pass condition: the
+   visible `OpenCode` row is pre-checked and says it records CLI and Desktop
+   through a local plugin with bounded history recovery. Cancel the walkthrough
+   without saving. A fresh installation that has never created the shared
+   config directory is allowed to remain unchecked, but the row must still be
+   visible and selectable. If this host intentionally sets `XDG_CONFIG_HOME`,
+   launch `hyp setup` with the same value and confirm detection there. Do not
+   set `OPENCODE_HOME` as a substitute.
+
+2. Enable and attach only the OpenCode adapter, then restart both OpenCode
+   frontends so they load the global plugin.
+
+   ```sh
+   hyp client attach opencode
+   PLUGIN="$OPENCODE_CONFIG_ROOT/plugins/hypaware.js"
+   grep -n 'HYPWARE_OPENCODE_PLUGIN' "$PLUGIN"
+   hyp daemon restart
+   hyp status
+   ```
+
+   Accept the prompt to enable OpenCode and decline the history-import prompt
+   for now, so step 5 controls the recovery window. Pass condition: the
+   consent flow adds and activates `@hypaware/opencode`, composes no
+   `@hypaware/ai-gateway`, installs the marker-owned plugin, and offers bounded
+   backfill only after attach succeeds. Status reports OpenCode configured,
+   attached, and its source started. Fully quit and reopen Desktop after
+   attaching. Start a new CLI process after attaching too.
+
+3. Create one controlled file in a non-sensitive scratch project. Run one CLI
+   conversation and one Desktop conversation from that project. In each, ask
+   OpenCode to read the file with its file-reading tool and report its short,
+   non-secret contents. Record the two new session IDs by comparing the session
+   list before and after the turns.
+
+   ```sh
+   mkdir -p /tmp/hyp-opencode-acceptance/main
+   printf 'opencode acceptance probe\n' > /tmp/hyp-opencode-acceptance/main/probe.txt
+   opencode session list --format json --max-count 10
+   cd /tmp/hyp-opencode-acceptance/main
+   opencode run "Read probe.txt with the file-reading tool, then state its contents."
+   opencode session list --format json --max-count 10
+   ```
+
+   Open the same directory in Desktop and repeat the prompt there. Set
+   `CLI_SESSION` and `DESKTOP_SESSION` from the observed IDs for the remaining
+   steps. Do not infer them from titles alone.
+
+4. Confirm live text and the completed tool operation landed once with native
+   IDs and distinct frontend provenance.
+
+   ```sh
+   hyp query sql "
+     select session_id, entrypoint, message_id, part_id, part_type,
+            tool_name, tool_call_id, content_text
+     from ai_gateway_messages
+     where session_id in ('$CLI_SESSION', '$DESKTOP_SESSION')
+     order by session_id, message_index, part_index"
+   ```
+
+   Pass condition: both sessions have text rows and a completed tool row with
+   non-null `message_id`, `part_id`, `tool_name`, and `tool_call_id`. The CLI
+   session has `entrypoint = 'cli'`; the Desktop session has
+   `entrypoint = 'desktop'`. Record representative native message, part, and
+   tool-call IDs in the release notes so the recovery comparison can use exact
+   values rather than row position.
+
+   Also compare each assistant `content_text` against what the frontend
+   displayed. It must be the whole final answer, not a streaming prefix. A
+   message is captured once it settles precisely because the append-only dedupe
+   is at message grain: whichever version lands first is the one kept forever,
+   so a truncated row here is a capture defect, not a display difference, and no
+   later snapshot or import can repair it.
+
+5. Prove export/recovery convergence with a tight time cursor. First save exact
+   exports for the two IDs and note the current durable counts. Then import only
+   the short interval containing these turns twice.
+
+   ```sh
+   opencode export "$CLI_SESSION" > /tmp/hyp-opencode-acceptance/cli-export.json
+   opencode export "$DESKTOP_SESSION" > /tmp/hyp-opencode-acceptance/desktop-export.json
+   hyp query sql "
+     select session_id, count(*) n, count(distinct part_id) distinct_parts
+     from ai_gateway_messages
+     where session_id in ('$CLI_SESSION', '$DESKTOP_SESSION')
+     group by 1 order by 1"
+   hyp client history import opencode \
+     --since '<UTC timestamp immediately before step 3>' \
+     --until '<UTC timestamp immediately after step 3>' --json
+   hyp client history import opencode \
+     --since '<the same timestamp used for --since above>' \
+     --until '<the same timestamp used for --until above>' --json
+   ```
+
+   The second run must repeat the first run's interval exactly. A narrower or
+   zero-width window selects nothing, so it would report zero new rows without
+   ever re-exporting the sessions the dedupe is being tested on.
+
+   Pass condition: each import reports only sessions inside the requested
+   interval; the provider lists metadata within that cursor and invokes
+   `opencode export <exact-session-id>` only for selected IDs. Both runs write
+   zero new rows for the two live-captured sessions, and the counts and exact
+   `part_id` values remain unchanged. The saved exports retain message/part
+   order and the same native IDs. Historical rows may say
+   `entrypoint = 'unknown'`; they must not overwrite the live `cli` or
+   `desktop` provenance.
+
+6. Exercise the four privacy gates from controlled scratch directories. Each
+   marking is prospective. Record the new session ID after each turn and never
+   use a pre-existing personal project.
+
+   ```sh
+   mkdir -p /tmp/hyp-opencode-acceptance/dotignore \
+     /tmp/hyp-opencode-acceptance/private \
+     /tmp/hyp-opencode-acceptance/local-only \
+     /tmp/hyp-opencode-acceptance/session-ignore
+   printf 'ignore\n' > /tmp/hyp-opencode-acceptance/dotignore/.hypignore
+   hyp privacy set /tmp/hyp-opencode-acceptance/private ignore
+   hyp privacy set /tmp/hyp-opencode-acceptance/local-only local-only
+   ```
+
+   Run one short OpenCode CLI turn from each of the first three directories.
+   For session ignore, run a first short turn in `session-ignore`, record its
+   ID as `IGNORED_SESSION`, note its current row count, then run:
+
+   ```sh
+   hyp session ignore "$IGNORED_SESSION"
+   hyp session status "$IGNORED_SESSION"
+   cd /tmp/hyp-opencode-acceptance/session-ignore
+   opencode run --session "$IGNORED_SESSION" "Reply with the single word ignored."
+   ```
+
+   Re-run the bounded history import over this step's interval. Pass condition:
+   the `.hypignore` and machine-local `ignore` sessions have zero rows from
+   both live and recovery producers; the local-only session is queryable in
+   the local cache and keeps its real `cwd`; and the ignored session's count
+   does not grow while ignored. `hyp session unignore "$IGNORED_SESSION"`
+   must restore recording for a later turn. On an enrolled test host, also
+   confirm the local-only row is withheld from configured shared export.
+
+7. Check listener and reconciliation health after the real traffic.
+
+   ```sh
+   hyp status --json | jq '.sources[] | select(.name == "opencode")'
+   ```
+
+   Pass condition: the source is ready/started, `plugin_events` and
+   `snapshots_received` advanced, `reconciliation_cursor` names the newest
+   observed session/message, and writes/skips plus policy/session drops account
+   for the turns above. `unknown_entrypoints`, `store_activity_gaps`,
+   `missing_cwd`, and the error field must be zero/empty for this controlled
+   run. A nonzero counter is a visible health result to investigate, not a
+   reason to guess missing provenance or cwd.
+
+8. Clean up only HypAware-managed effects. Do not delete the OpenCode sessions.
+
+   ```sh
+   hyp session unignore "$IGNORED_SESSION"
+   hyp privacy unset /tmp/hyp-opencode-acceptance/private ignore
+   hyp privacy unset /tmp/hyp-opencode-acceptance/local-only local-only
+   hyp client detach opencode
+   test ! -e "$PLUGIN"
+   hyp status
+   ```
+
+   Pass condition: detach removes the marker-owned plugin file and leaves the
+   shared OpenCode config and every session untouched. If the file no longer
+   carries the ownership marker, detach must refuse to remove it. Re-attach on
+   a working machine only after the acceptance result has been recorded.
+
+### If it fails
+
+- No live rows: confirm the daemon source is started, the plugin file is in the
+  effective XDG config root, and both frontends were fully restarted after
+  attach. Do not switch to OTLP as a completeness workaround.
+- CLI lands as `unknown`: the plugin process did not expose the documented
+  default. Desktop lands as `unknown`: its shared sidecar did not set
+  `OPENCODE_CLIENT=desktop`. Preserve the observed value and treat attribution
+  as failed rather than guessing from the session store.
+- Recovery writes duplicates: compare exact native `part.id` values in the
+  saved export against `part_id` in the cache. Do not add content-derived IDs.
+- The picker row is visible but unchecked on an existing config home: confirm
+  `XDG_CONFIG_HOME` agrees between OpenCode and `hyp setup`. Do not broaden the
+  single-probe picker schema or invent `OPENCODE_HOME`.
+- Detach finds an unowned collision: preserve it and report the path. Never
+  overwrite or remove a file without the HypAware ownership marker.
+
+---
+
 ## `openclaw_capture`
 
 **What it proves:** that a conversation held in **OpenClaw** reaches
