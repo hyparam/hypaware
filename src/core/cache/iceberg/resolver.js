@@ -228,21 +228,36 @@ function localWriter(ByteWriter, filePath, options) {
     try {
       fs.linkSync(staged, filePath)
     } catch (err) {
-      fs.rmSync(staged, { force: true })
-      tmp = null
       const code = /** @type {NodeJS.ErrnoException} */ (err).code
+      // The link did not land, so the staged name is dead weight. Reclaiming
+      // it is best-effort for the same reason it is on the success path: an
+      // `rmSync` that throws here would replace the reason the publish
+      // failed, and an `EEXIST` that reaches `commitWithRetry` as anything
+      // other than a 412 is rethrown rather than reloaded, turning the
+      // retryable race this call exists to expose back into a hard failure.
+      try {
+        fs.rmSync(staged, { force: true })
+      } catch {
+        // The publish already failed; a leftover temp name is the lesser
+        // problem, and clearing `tmp` stops `abort()` retrying the same rm.
+      }
+      tmp = null
       if (code === 'EEXIST') throw collision(filePath)
       // `staged` is a sibling of `filePath`, so this can never be EXDEV.
       // What it can be is a filesystem with no hard links at all (FAT and
       // exFAT volumes, and some FUSE or cloud-sync mounts), which answers
-      // every `link` with EPERM/ENOSYS/EOPNOTSUPP. That wedges every
-      // conditional commit, and a bare errno does not say why, so name the
-      // cause. Falling back to a check-then-act `rename` is not on the
-      // table: that is the defect this call exists to remove. Supporting
-      // such a filesystem would mean publishing through
-      // `open(filePath, 'wx')` instead, trading atomic content for atomic
-      // creation, which is the trade the `local-fs` blob store makes.
-      if (code === 'EPERM' || code === 'ENOSYS' || code === 'EOPNOTSUPP') {
+      // every `link` with EPERM/ENOSYS/ENOTSUP. libuv has no name for POSIX
+      // `EOPNOTSUPP`, so that spelling never reaches JS on the platforms
+      // Node maps - `util.getSystemErrorMap()` carries `ENOTSUP` and not
+      // `EOPNOTSUPP` - and it stays listed only for a runtime that passes it
+      // through. Any of them wedges every conditional commit, and a bare
+      // errno does not say why, so name the cause. Falling back to a
+      // check-then-act `rename` is not on the table: that is the defect this
+      // call exists to remove. Supporting such a filesystem would mean
+      // publishing through `open(filePath, 'wx')` instead, trading atomic
+      // content for atomic creation, which is the trade the `local-fs` blob
+      // store makes.
+      if (code === 'EPERM' || code === 'ENOSYS' || code === 'ENOTSUP' || code === 'EOPNOTSUPP') {
         const unsupported = /** @type {Error & { code?: string }} */ (
           new Error(
             `local iceberg conditional commit needs hard links: link() failed with ${code} on ` +

@@ -78,6 +78,8 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
   const realLink = fs.linkSync
   let raced = false
   let landedInWindow = false
+  /** @type {unknown} */
+  let winnerError = null
   /** @type {Promise<void> | null} */
   let winnerFinish = null
   /** @param {unknown} dest */
@@ -92,7 +94,13 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
     // mismatch, which reports that the test failed but not why. If
     // `finish()` ever stops being synchronous, the assertion below fails
     // on its own message instead.
-    winnerFinish = /** @type {Promise<void>} */ (winner.finish())
+    // Settle the winner's outcome here rather than letting it reject out of
+    // the `await` below: an async `finish()` would leave the winner racing
+    // the loser for real and reject with its own 412, which would surface
+    // before the guard below and report the wrong failure.
+    winnerFinish = Promise.resolve(winner.finish()).catch((err) => {
+      winnerError = err
+    })
     landedInWindow = fs.existsSync(target)
   }
 
@@ -120,6 +128,7 @@ test('a conditional commit whose target appears mid-publish fails the preconditi
 
   assert.ok(raced, 'the competing commit was injected in front of the publish syscall')
   assert.ok(landedInWindow, 'the competing commit landed inside the publish window')
+  assert.equal(winnerError, null, 'the committer that got there first published')
   assert.ok(
     loserError,
     'the second committer must observe a precondition failure, not a silent success'
@@ -161,40 +170,88 @@ test('a conditional commit onto an existing target is a 412 that leaves the targ
   await fsp.rm(dir, { recursive: true, force: true })
 })
 
-test('a filesystem that cannot hard link fails the commit loudly, and not as a conflict', async () => {
+// Every errno a filesystem without hard links can answer `link` with. Node
+// surfaces libuv's spelling, and libuv names errno 95 `ENOTSUP`: there is no
+// `EOPNOTSUPP` in `util.getSystemErrorMap()`, so a mapping that recognized
+// only the POSIX spelling would let the common case fall through to a bare
+// errno, which is the thing the message exists to replace.
+for (const code of ['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP']) {
+  test(`a filesystem that answers link with ${code} fails the commit loudly, and not as a conflict`, async () => {
+    const dir = await tempDir('hyp-iceberg-race-')
+    const newWriter = await localWriterFactory()
+    const target = path.join(dir, 'metadata', 'v2.metadata.json')
+
+    const writer = newWriter(url(target), { ifNoneMatch: '*' })
+    writer.appendBytes(new TextEncoder().encode('{"committer":"only"}'))
+
+    const realLink = fs.linkSync
+    /** @type {unknown} */
+    let failure = null
+    try {
+      fs.linkSync = () => {
+        throw Object.assign(new Error(`${code}: link not supported`), { code })
+      }
+      try {
+        await writer.finish()
+      } catch (err) {
+        failure = err
+      }
+    } finally {
+      fs.linkSync = realLink
+    }
+
+    assert.ok(failure, 'a link the filesystem refuses cannot report a published commit')
+    assert.equal(/** @type {{ code?: string }} */ (failure).code, code)
+    assert.match(/** @type {Error} */ (failure).message, /hard links/)
+    assert.ok(/** @type {{ cause?: unknown }} */ (failure).cause, 'the original errno survives as the cause')
+    // A 412 would send `commitWithRetry` around the retry loop up to 50
+    // times against a filesystem that will refuse every one of them.
+    assert.equal(/** @type {{ status?: number }} */ (failure).status, undefined)
+    assert.equal(fs.existsSync(target), false, 'nothing was published')
+
+    const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
+    assert.deepEqual(leftovers, [], 'the failed commit leaves no temp file behind')
+
+    await fsp.rm(dir, { recursive: true, force: true })
+  })
+}
+
+test('a cleanup failure after a losing link still reports the collision, not the cleanup', async () => {
   const dir = await tempDir('hyp-iceberg-race-')
   const newWriter = await localWriterFactory()
   const target = path.join(dir, 'metadata', 'v2.metadata.json')
 
-  const writer = newWriter(url(target), { ifNoneMatch: '*' })
-  writer.appendBytes(new TextEncoder().encode('{"committer":"only"}'))
+  const first = newWriter(url(target), { ifNoneMatch: '*' })
+  first.appendBytes(new TextEncoder().encode('{"committer":"first"}'))
+  await first.finish()
 
-  const realLink = fs.linkSync
+  const second = newWriter(url(target), { ifNoneMatch: '*' })
+  second.appendBytes(new TextEncoder().encode('{"committer":"second"}'))
+
+  // The staged file the loser cleans up is the same file an indexer or a
+  // scanner can be holding, so this rm can fail exactly like the one on the
+  // success path. If it did, the 412 would be replaced by an EBUSY, and
+  // `commitWithRetry` rethrows a non-412 instead of reloading - the loser
+  // would get a hard commit failure out of a race it is supposed to retry.
+  const realRm = fs.rmSync
   /** @type {unknown} */
   let failure = null
   try {
-    fs.linkSync = () => {
-      throw Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' })
+    fs.rmSync = (/** @type {any} */ at, /** @type {any} */ options) => {
+      if (String(at).includes('.tmp.')) throw new Error('EBUSY: resource busy or locked, unlink')
+      return realRm(at, options)
     }
     try {
-      await writer.finish()
+      await second.finish()
     } catch (err) {
       failure = err
     }
   } finally {
-    fs.linkSync = realLink
+    fs.rmSync = realRm
   }
 
-  assert.ok(failure, 'a link the filesystem refuses cannot report a published commit')
-  assert.equal(/** @type {{ code?: string }} */ (failure).code, 'EPERM')
-  assert.match(/** @type {Error} */ (failure).message, /hard links/)
-  // A 412 would send `commitWithRetry` around the retry loop up to 50
-  // times against a filesystem that will refuse every one of them.
-  assert.equal(/** @type {{ status?: number }} */ (failure).status, undefined)
-  assert.equal(fs.existsSync(target), false, 'nothing was published')
-
-  const leftovers = fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.tmp.'))
-  assert.deepEqual(leftovers, [], 'the failed commit leaves no temp file behind')
+  assert.equal(/** @type {{ status?: number }} */ (failure).status, 412)
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"committer":"first"}')
 
   await fsp.rm(dir, { recursive: true, force: true })
 })
