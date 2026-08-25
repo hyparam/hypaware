@@ -753,6 +753,18 @@ export async function runDaemon(opts = {}) {
               row_count: p.rowCount,
             })
           }
+          // The same argument, for the case where the layout did NOT move.
+          // A deferred migration is the state that most needs durable
+          // evidence: the mismatch stands, and without a line here the only
+          // record is a span attribute nobody was collecting.
+          for (const p of report.partitions) {
+            if (!p.repartitionDeferred) continue
+            fileLog.warn('daemon.cache_repartition_deferred', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files: p.dataFilesAfter,
+            })
+          }
           const skips = summarizeMaintenanceSkips(report)
           persist({ maintenance: skips })
           span.setAttribute('partitions_visited', skips.partitionsVisited)

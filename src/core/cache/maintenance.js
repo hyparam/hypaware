@@ -669,6 +669,11 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         // layout: an unreadable schema falls back to carrying the recorded
         // spec, and that swap must not be reported as the migration.
         let repartitionApplied = false
+        // Set when the migration was due but its target layout could not be
+        // derived, so this tick made no progress on it. Reported, because a
+        // deferral that only ever shows up as a span attribute is invisible
+        // to anyone who was not tracing when the tick fired.
+        let repartitionDeferred = false
         try {
           result = await withPartitionMutationLock(r.path, async () => {
             // Flushes may have appended after the due check and metadata load.
@@ -693,7 +698,17 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               if (inPlace !== 'settle-required') return inPlace
             }
             const lockedTableInfo = await loadCompactionTableInfo(lockedLiveDir)
-            const targetLayout = repartitionDue && declaration
+            // Re-derive dueness from the metadata read under the lock, for
+            // the same reason the cursor is re-read above: the pre-lock
+            // check can be stale. `hyp query maintain` and the daemon tick
+            // are separate PROCESSES, so the in-process lock does not
+            // serialize them, and a partition another run has already
+            // migrated would otherwise be swapped a second time and, worse,
+            // reported as `repartitioned` for a swap that moved no layout.
+            const lockedRepartitionDue = repartitionDue && declaration && lockedTableInfo?.partitionSpec
+              ? partitionSpecMigrationDue(declaration, lockedTableInfo.partitionSpec)
+              : repartitionDue
+            const targetLayout = lockedRepartitionDue && declaration
               ? repartitionTargetLayout(declaration, lockedTableInfo)
               : undefined
             // @ref LLP 0311#migration [constrained-by]: a due re-partition
@@ -706,8 +721,22 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // hand the replacement generation is written with no partition
             // spec at all. Defer instead, and let a tick that can read the
             // metadata do it; `--force` still rewrites.
-            if (!opts.force && repartitionDue && declaration && !targetLayout) {
-              getActiveSpan()?.setAttribute('repartition_deferred', true)
+            if (!opts.force && lockedRepartitionDue && declaration && !targetLayout) {
+              repartitionDeferred = true
+              // Deferring the migration must not also stop the partition
+              // compacting. `repartitionDue` suppressed the in-place merge
+              // above because an in-place commit keeps the recorded spec,
+              // which is the thing being migrated away from - but once the
+              // swap is deferred there is no new layout for the merge to
+              // undo, and the partition is due on the ordinary heuristics
+              // too. Without this the mismatch would disable BOTH paths for
+              // as long as it stands: measured on a stubbed-out target
+              // layout, the live file count then grows every tick and
+              // nothing in the report says why.
+              if (!hasResettle && lockedLayout.kind === 'source-table') {
+                const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
+                if (inPlace !== 'settle-required') return inPlace
+              }
               return null
             }
             repartitionApplied = targetLayout !== undefined
@@ -740,6 +769,10 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             } catch { /* see above */ }
           }
           throw err
+        }
+        if (repartitionDeferred) {
+          r.repartitionDeferred = true
+          getActiveSpan()?.setAttribute('repartition_deferred', true)
         }
         if (result && 'noop' in result && result.noop) {
           // Due by the heuristics, but nothing is mergeable: every tuple is
@@ -1425,6 +1458,8 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
   const probed = new Set()
 
   let merged = false
+  /** @type {string | undefined} */
+  let mergedSnapshotId
   for (let round = 0; round < MAX_INPLACE_COMPACT_ROUNDS; round++) {
     const live = await listLiveDataFiles(liveDir)
     const committed = committedBefore ??= new Set(live.map((file) => file.filePath))
@@ -1437,7 +1472,14 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
         return 'settle-required'
       }
     }
-    await icebergRewrite({ catalog, tableUrl, files: victims })
+    const rewritten = await icebergRewrite({ catalog, tableUrl, files: victims })
+    // The metadata the commit returned is the authority on which snapshot
+    // this merge wrote. Reading the id here rather than from the extra
+    // `liveTableStats` load below keeps {@link foreignSortedReplace} able to
+    // recognize our own `replace` even when that load comes back null: an
+    // unclaimed `replace` is read as the server compactor's layout and
+    // re-baselined, which is the LLP 0217 frozen-partition symptom.
+    mergedSnapshotId = snapshotIdOf(rewritten) ?? mergedSnapshotId
     merged = true
   }
 
@@ -1450,9 +1492,22 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
   const dataFilesAfter = statsAfter?.dataFiles ?? countDataFiles(liveDir)
   await writeCursor(
     partitionDir,
-    inPlaceCompactedCursor(cursor, { dataFilesBefore, dataFilesAfter }, statsAfter?.snapshotId)
+    inPlaceCompactedCursor(cursor, { dataFilesBefore, dataFilesAfter }, mergedSnapshotId ?? statsAfter?.snapshotId)
   )
   return { rowCount: cursor.rowCount, dataFilesBefore, dataFiles: dataFilesAfter }
+}
+
+/**
+ * The current snapshot id of a table metadata, as the string form the cursor
+ * records. Undefined when the metadata names no current snapshot.
+ *
+ * @param {TableMetadata | undefined | null} metadata
+ * @returns {string | undefined}
+ */
+function snapshotIdOf(metadata) {
+  const id = metadata?.['current-snapshot-id']
+  if (id === undefined || id === null || Number(id) === -1) return undefined
+  return String(id)
 }
 
 /**

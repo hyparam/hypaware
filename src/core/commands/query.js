@@ -386,6 +386,9 @@ export async function runQueryMaintain(argv, ctx) {
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
     if (p.repartitioned) actions.push('re-partitioned to the declared layout')
+    // @ref LLP 0311#migration: a deferred migration leaves the partition on
+    // its recorded layout, so the run must not read as "nothing to migrate".
+    if (p.repartitionDeferred) actions.push('re-partition deferred (target layout not derivable)')
     // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
     // rewrite; without this line the run reads as "nothing due".
     if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)

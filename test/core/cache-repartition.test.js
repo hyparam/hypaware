@@ -291,3 +291,77 @@ test('a fresh table under a sortOnly declaration is born on the new layout', asy
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// A `sortOnly` field is carried by `sortColumnsForDeclaration`, which takes
+// identity fields only; combined with the partition-spec exclusion that
+// leaves a non-identity sortOnly field contributing to neither. Refused at
+// registration rather than left to be discovered as a column that silently
+// does nothing.
+test('a sortOnly field with a non-identity transform is refused at registration', () => {
+  const registry = createQueryRegistry()
+  assert.throws(
+    () => registry.registerDataset(registration('bad_sort_only', {
+      source: { columns: ['session_id'] },
+      iceberg: {
+        fields: [
+          { column: 'date', transform: 'day', sortOnly: true },
+          { column: 'date', transform: 'identity', required: true },
+        ],
+      },
+    })),
+    /sortOnly requires transform 'identity'/
+  )
+})
+
+// The cache table declares a sort order now, so LLP 0310's in-place merge
+// commits a `replace` that looks exactly like the foreign sorted rewrite
+// LLP 0207 recognizes. The cursor's recorded snapshot id is the only thing
+// telling them apart, so it has to be the id the merge actually committed -
+// taken from the commit's own metadata, not from a second read that can
+// come back empty.
+test('an in-place merge records the snapshot id it committed', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-repartition-inplace-'))
+  try {
+    // One day, many single-row appends: fragmented enough to be due, and
+    // every file sits in the same date partition so the merge has victims.
+    for (let i = 0; i < 8; i++) {
+      await appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], COLUMNS,
+        [{ id: i, session_id: `s-${i}`, date: '2026-08-01' }],
+        { declaration: NEW_DECLARATION }
+      )
+    }
+    const dir = partitionDir(cacheRoot)
+    const generationBefore = readCursorSync(dir).tableDir
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      getDeclaration: () => NEW_DECLARATION,
+    })
+    assert.equal(report.partitions[0].compacted, true)
+    assert.equal(readCursorSync(dir).tableDir, generationBefore, 'merged in place, not swapped')
+
+    const cursor = readCursorSync(dir)
+    const compaction = cursor.compaction
+    assert.ok(compaction && typeof compaction === 'object')
+    const metadata = await loadTableMetadata(liveTableDir(dir))
+    const currentId = String(metadata['current-snapshot-id'])
+    assert.equal(
+      /** @type {Record<string, unknown>} */ (compaction).inPlaceSnapshotId,
+      currentId,
+      'the cursor claims the snapshot the merge committed'
+    )
+    const snapshot = (metadata.snapshots ?? []).find((s) => String(s['snapshot-id']) === currentId)
+    assert.equal(snapshot?.summary?.operation, 'replace', 'which is the replace foreignSortedReplace would otherwise bless')
+
+    // And so a later tick does not mistake it for a foreign layout.
+    const second = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      getDeclaration: () => NEW_DECLARATION,
+    })
+    assert.equal(second.totalRebaselined, 0)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

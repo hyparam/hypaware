@@ -39,6 +39,22 @@ function validateCachePartitioning(decl, schema, datasetName) {
   // to check and no recorded field it could reject, so it would accept any
   // spec at all. Neither is a state a declaration should be able to reach
   // by omission, so refuse it where the declaration is registered.
+  // @ref LLP 0311#declaration-split [constrained-by]: `sortOnly` moves a
+  // field from the partition spec to the sort order, and a cache sort order
+  // carries identity fields only (`sortColumnsForDeclaration`, which skips
+  // anything else so a `day`/`bucket` transform is never silently recorded
+  // as a sort on the raw column). A non-identity field marked `sortOnly` is
+  // therefore in neither: it partitions nothing and sorts nothing, and the
+  // declaration reads as though it does both. Refuse it rather than let a
+  // future dataset declare a column that contributes nothing at all.
+  for (const field of decl.iceberg.fields) {
+    if (field.sortOnly && field.transform !== 'identity') {
+      throw new Error(
+        `registerDataset '${datasetName}': cachePartitioning field '${field.column}' is sortOnly with transform '${field.transform}' - sortOnly requires transform 'identity'`
+      )
+    }
+  }
+
   if (decl.iceberg.fields.length > 0 && decl.iceberg.fields.every(f => f.sortOnly)) {
     throw new Error(
       `registerDataset '${datasetName}': cachePartitioning declares every Iceberg field sortOnly - at least one field must partition the cache table`

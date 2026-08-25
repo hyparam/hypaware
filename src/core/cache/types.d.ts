@@ -315,6 +315,11 @@ export interface MaintenancePartitionReport {
   // swap wrote the new generation under the declaration's partition spec
   // and sort order instead of carrying the recorded ones (LLP 0311).
   repartitioned?: boolean
+  // The re-partition was due but its target layout could not be derived
+  // from the table's metadata, so this tick deferred it. The partition
+  // still compacts in place under its recorded spec; the layout has not
+  // moved and the mismatch stands until a tick can read the metadata.
+  repartitionDeferred?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number
