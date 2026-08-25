@@ -99,6 +99,9 @@ test('parseConfigShape preserves query.cache.maintenance.compact_batch_bytes', (
       cache: {
         maintenance: {
           compact_batch_bytes: 16 * 1024 * 1024,
+          // Lowering the batch bound below the default average would leave a
+          // converged partition permanently due, so the pair moves together.
+          compact_avg_file_bytes: 16 * 1024 * 1024,
           compact_file_count: 8,
         },
       },
@@ -121,6 +124,99 @@ test('parseConfigShape rejects a negative compact_batch_bytes', () => {
     result.ok === false &&
       result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
     true
+  )
+})
+
+// @ref LLP 0312#avg-below-batch [tests]: an in-place merged file never
+// exceeds `compact_batch_bytes`, so an average-size threshold above that
+// bound is one a converged partition can never satisfy. Validation rejects
+// the pairing rather than letting a partition read as permanently due.
+test('parseConfigShape rejects compact_avg_file_bytes above compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: 32 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const error = result.ok === false &&
+    result.errors.find((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes'))
+  assert.ok(error, 'the offending key is named')
+  assert.match(error.message, /compact_batch_bytes/)
+})
+
+test('parseConfigShape rejects compact_avg_file_bytes above the default compact_batch_bytes', () => {
+  // Only the average is set, so the pairing is with the default batch bound
+  // (32 MB). Comparing the two written values alone would let this through.
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: { cache: { maintenance: { compact_avg_file_bytes: 128 * 1024 * 1024 } } },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.ok === false &&
+      result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    true
+  )
+})
+
+test('parseConfigShape accepts compact_avg_file_bytes equal to compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 8 * 1024 * 1024,
+          compact_batch_bytes: 8 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, true)
+})
+
+// @ref LLP 0312#avg-below-batch [tests]: the rule compares EFFECTIVE values,
+// which means a key that failed its own check would otherwise be paired with
+// a default the user never wrote. Reporting that pairing names a bound absent
+// from their file and blames the key that is not broken.
+test('parseConfigShape does not blame compact_avg_file_bytes for an invalid compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          // Legal against the batch bound the user actually wants; the batch
+          // bound itself is what is malformed.
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: -1,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const errors = result.ok === false ? result.errors : []
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
+    true,
+    'the key that is actually malformed is reported'
+  )
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    false,
+    'the cross-field rule stays silent rather than name a default bound the config never wrote'
   )
 })
 

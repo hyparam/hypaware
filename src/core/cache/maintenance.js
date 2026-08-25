@@ -14,6 +14,7 @@ import {
 import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
 import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
+import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
@@ -43,22 +44,8 @@ import { isPlainObject } from '../util/json_util.js'
  * @import { Dirent } from 'node:fs'
  */
 
-export const SNAPSHOT_RETENTION_DEFAULTS = Object.freeze({
-  min_snapshots_to_keep: 10,
-  max_snapshot_age_hours: 24,
-})
-
-/** @type {MaintenanceConfig} */
-const DEFAULTS = {
-  enabled: true,
-  interval_minutes: 60,
-  target_file_bytes: 128 * 1024 * 1024,
-  ...SNAPSHOT_RETENTION_DEFAULTS,
-  compact_file_count: 32,
-  compact_avg_file_bytes: 32 * 1024 * 1024,
-  compact_batch_bytes: 32 * 1024 * 1024,
-  max_tick_ms: 30_000,
-}
+/** @type {Readonly<MaintenanceConfig>} */
+const DEFAULTS = MAINTENANCE_DEFAULTS
 
 const GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
 
@@ -118,14 +105,42 @@ const ORPHAN_GRACE_MS = 60 * 60 * 1000
 const COMPACTION_WRITER_GENERATION = 3
 
 /**
- * How many in-place merge rounds one maintenance tick may run on one
+ * The most in-place merge rounds one maintenance tick may run on one
  * partition. Each round is bounded by `compact_batch_bytes` of victim
  * data (the rewrite materializes the victims' rows in memory), so the
  * cap bounds a first pass over a deeply fragmented backlog without
  * letting it consume the tick. Fragmentation left after the last round
  * drains on later ticks, once new flushes make the partition due again.
+ *
+ * A ceiling, not the cap itself: see {@link inPlaceRoundCap}, which lowers
+ * it to fit the configured snapshot retention.
  */
 const MAX_INPLACE_COMPACT_ROUNDS = 8
+
+/**
+ * How many rounds THIS config may spend on one partition.
+ *
+ * Every round commits a snapshot, and snapshot retention is the
+ * reader-safety window (LLP 0310#unreferenced-sweep): the sweep only
+ * reclaims a file once expiry has released every snapshot that could read
+ * it. So a tick that commits as many snapshots as retention keeps hands
+ * the next tick's expiry a metadata list holding nothing but this tick's
+ * own commits, and a reader that opened the table before the tick loses
+ * the snapshot it is reading out from under it. Spending strictly fewer
+ * than `min_snapshots_to_keep` keeps at least one older snapshot alive
+ * across every tick, so the window a reader gets is never shorter than a
+ * maintenance interval regardless of how the two knobs are set.
+ *
+ * Floor of one: a config that retains nothing has no window to protect,
+ * and a cap of zero would stall compaction outright rather than slow it.
+ *
+ * @ref LLP 0312#round-cap-under-retention [implements]: one tick may never spend the whole retention window.
+ * @param {MaintenanceConfig} cfg
+ * @returns {number}
+ */
+export function inPlaceRoundCap(cfg) {
+  return Math.max(1, Math.min(MAX_INPLACE_COMPACT_ROUNDS, cfg.min_snapshots_to_keep - 1))
+}
 
 /**
  * How many `vN.metadata.json` versions the unreferenced-file sweep keeps.
@@ -556,7 +571,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // size heuristics fire), so gating the expensive re-settle scan behind
     // this check means the common "recognized, nothing to scan for" tick
     // never pays for one.
-    const compactionDue = opts.force || ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats))
+    const compactionDue = opts.force || ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats, layout.kind))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
@@ -869,20 +884,38 @@ async function expireSnapshots(tableDir, cfg, opts) {
 }
 
 /**
+ * Is this generation due for routine compaction?
+ *
+ * The metadata-size trigger asks a different question from the two data
+ * heuristics, and only the generation-swap writer can answer it: it builds
+ * a fresh directory, so a bloated metadata history dies with the old one.
+ * An in-place merge commits INTO the same directory and can only add
+ * versions, so on a source table the trigger names work this path cannot
+ * do - the partition would read as due on every growth tick and collect
+ * the floor verdict instead of shrinking. Metadata on that layout has its
+ * own bound now ({@link METADATA_VERSIONS_KEPT} plus the unreferenced-file
+ * sweep, both of which run every tick regardless of dueness), so the
+ * trigger is left to the legacy epoch layout, where a rewrite clears it.
+ * `--force` still routes a source table to the generation-swap writer.
+ *
+ * @ref LLP 0312#metadata-dueness [implements]: a dueness condition routine compaction cannot clear is not routine dueness.
  * @param {string} tableDir
  * @param {MaintenanceConfig} cfg
  * @param {{ dataFiles: number, dataBytes: number } | null} [liveStats] live counts from the snapshot summary; directory counts are the fallback
+ * @param {'source-table' | 'epoch'} [layoutKind] which writer a due verdict would route to
  * @returns {boolean}
  */
-function needsCompaction(tableDir, cfg, liveStats) {
+function needsCompaction(tableDir, cfg, liveStats, layoutKind) {
   const dataFiles = liveStats ? liveStats.dataFiles : countDataFiles(tableDir)
   if (dataFiles > cfg.compact_file_count) return true
 
   const totalDataBytes = liveStats ? liveStats.dataBytes : measureDataDir(tableDir)
   if (dataFiles > 0 && totalDataBytes / dataFiles < cfg.compact_avg_file_bytes) return true
 
-  const metadataBytes = measureMetadataDir(tableDir)
-  if (metadataBytes > 64 * 1024 * 1024) return true
+  if (layoutKind !== 'source-table') {
+    const metadataBytes = measureMetadataDir(tableDir)
+    if (metadataBytes > 64 * 1024 * 1024) return true
+  }
 
   return false
 }
@@ -1296,7 +1329,8 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
   const probed = new Set()
 
   let merged = false
-  for (let round = 0; round < MAX_INPLACE_COMPACT_ROUNDS; round++) {
+  const roundCap = inPlaceRoundCap(cfg)
+  for (let round = 0; round < roundCap; round++) {
     const live = await listLiveDataFiles(liveDir)
     const committed = committedBefore ??= new Set(live.map((file) => file.filePath))
     const victims = selectInPlaceVictims(live, cfg)
@@ -1413,6 +1447,11 @@ function selectInPlaceVictims(liveFiles, cfg) {
  * surface the real error, where the failure path records the spent
  * attempt (LLP 0218).
  *
+ * Discarding the hook's answer is only safe because the enricher contract
+ * requires `settle` to be pure and idempotent: this call is speculative, on
+ * rows that may never be committed, and it repeats next tick.
+ *
+ * @ref LLP 0312#settle-purity [constrained-by]: the probe is a speculative call the hook must not notice.
  * @param {string[]} filePaths
  * @param {Resolver} resolver
  * @param {SettleContext} settle

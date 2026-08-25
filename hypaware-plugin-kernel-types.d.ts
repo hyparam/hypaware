@@ -1481,6 +1481,19 @@ export interface DatasetRegistration {
    * non-upgraded fallback against its own copy). Compaction owns the
    * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
    * dedupe assumes the rows are not yet committed.
+   *
+   * MUST be free of observable side effects and MUST be idempotent. This is
+   * the hook cache maintenance calls SPECULATIVELY, before it has picked a
+   * compaction path: it asks whether re-settlement would change a candidate
+   * file's rows, discards the rows it gets back, and may ask again on the
+   * next tick about rows it never commits. An implementation that marked a
+   * transcript line consumed, advanced a cursor, or wrote anything a later
+   * run or another process can observe would fire that effect for work which
+   * never happened. Reading logs and memoising in memory is fine. Whatever
+   * this hook fans out to inherits the requirement; for the gateway dataset
+   * that is `AiGatewaySettlementEnricher`.
+   *
+   * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
@@ -1916,6 +1929,17 @@ export interface AiGatewayRecordResult {
  * honored only by the flush-time `settleBatch`, before partition write; the
  * maintenance `resettleBatch` ignores it, so an already-committed row is never
  * purged.
+ *
+ * `settle` MUST be free of observable side effects and MUST be idempotent.
+ * Cache maintenance calls it SPECULATIVELY, on rows it may never commit and
+ * possibly on the same rows again next tick, purely to answer "would
+ * settlement change anything" before choosing a compaction path
+ * (`victimFallbacksSettleable`); it then discards the returned rows. So
+ * calling `settle` twice, or calling it and throwing the answer away, must be
+ * indistinguishable from not calling it at all. Reading logs and memoising in
+ * memory is fine; marking a transcript line consumed, advancing a cursor, or
+ * writing anything a later run or another process can observe is not. See
+ * LLP 0312#settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
