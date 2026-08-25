@@ -285,6 +285,14 @@ export interface MaintenanceOptions {
  * The dataset's flush-time settlement pass, re-used by the maintenance
  * re-settle sweep. Upgrades provisional fallback rows to native identity
  * and drops any whose `part_id` already exists in a committed partition.
+ *
+ * Maintenance resolves this from the dataset's `resettleBatch`, and calls it
+ * both for real (inside a rewrite) and speculatively (`victimFallbacksSettleable`,
+ * which discards the rows it gets back). The hook must therefore be pure and
+ * idempotent, per the contract stated on `resettleBatch` in
+ * `hypaware-plugin-kernel-types.d.ts`.
+ *
+ * @ref LLP 0312#settle-purity [constrained-by]: the probe calls this and throws the answer away.
  */
 export type DatasetSettleHook = (
   rows: Record<string, unknown>[],

@@ -772,6 +772,12 @@ export interface HypAwareV2Config {
    * listed must be unambiguously provided.
    */
   disambiguate?: Record<CapabilityName, PluginName>
+  /**
+   * Kernel self-update switch. Default true when absent; the daemon
+   * applies new HypAware releases automatically. Central wins over
+   * local when both layers set it.
+   */
+  auto_update?: boolean
 }
 
 /** Legacy alias retained only while the project rename completes. */
@@ -930,6 +936,19 @@ export interface ValidationError {
 // =============================================================================
 
 export interface CommandRegistry {
+  /**
+   * Claim a command name. `command` is an input, not the registry's
+   * storage: the registry keeps a shallow copy and fills the semantic
+   * defaults (`category`, `audience`, `bootProfile`) on that copy, so a
+   * frozen module-level registration is accepted, a registration this
+   * call rejects comes back exactly as it was passed, and editing the
+   * object afterwards does not reach what `get`/`list` return. Function
+   * members (`run`) are shared with the copy, not cloned.
+   *
+   * The copy is own enumerable properties only, and the shape checks run
+   * on it, so a registration whose members live on a prototype (a class
+   * instance) is rejected here rather than stored half-formed.
+   */
   register(command: CommandRegistration): void
   /**
    * Describe a command *group* (`graph`, `query`) so its `--help` can
@@ -1475,6 +1494,19 @@ export interface DatasetRegistration {
    * non-upgraded fallback against its own copy). Compaction owns the
    * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
    * dedupe assumes the rows are not yet committed.
+   *
+   * MUST be free of observable side effects and MUST be idempotent. This is
+   * the hook cache maintenance calls SPECULATIVELY, before it has picked a
+   * compaction path: it asks whether re-settlement would change a candidate
+   * file's rows, discards the rows it gets back, and may ask again on the
+   * next tick about rows it never commits. An implementation that marked a
+   * transcript line consumed, advanced a cursor, or wrote anything a later
+   * run or another process can observe would fire that effect for work which
+   * never happened. Reading logs and memoising in memory is fine. Whatever
+   * this hook fans out to inherits the requirement; for the gateway dataset
+   * that is `AiGatewaySettlementEnricher`.
+   *
+   * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
@@ -1910,6 +1942,17 @@ export interface AiGatewayRecordResult {
  * honored only by the flush-time `settleBatch`, before partition write; the
  * maintenance `resettleBatch` ignores it, so an already-committed row is never
  * purged.
+ *
+ * `settle` MUST be free of observable side effects and MUST be idempotent.
+ * Cache maintenance calls it SPECULATIVELY, on rows it may never commit and
+ * possibly on the same rows again next tick, purely to answer "would
+ * settlement change anything" before choosing a compaction path
+ * (`victimFallbacksSettleable`); it then discards the returned rows. So
+ * calling `settle` twice, or calling it and throwing the answer away, must be
+ * indistinguishable from not calling it at all. Reading logs and memoising in
+ * memory is fine; marking a transcript line consumed, advancing a cursor, or
+ * writing anything a later run or another process can observe is not. See
+ * LLP 0312#settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string

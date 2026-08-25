@@ -158,6 +158,22 @@ test('a command registry that predates unregister degrades, never throws', () =>
   assert.ok(legacy.get('demo verb'))
 })
 
+test('a command registry whose get() answers null degrades, never throws', () => {
+  // The projection test reads a property off whatever `get` returned, so an
+  // injected registry answering `null` where the contract says `undefined`
+  // would throw straight out of retraction. Same rule as the missing
+  // `unregister` above: a throw here takes daemon boot down, so the verb is
+  // released and the stale command is the only thing left behind.
+  /** @type {any} */
+  const offContract = createCommandRegistry()
+  offContract.get = () => null
+  const verbs = createVerbRegistry({ commandRegistry: offContract })
+  verbs.register(makeVerb())
+  assert.doesNotThrow(() => verbs.unregister('demo verb'))
+  assert.equal(verbs.get('demo verb'), undefined)
+  assert.equal(verbs.getByTool('demo_verb'), undefined)
+})
+
 test('unregister retracts a projection a different registry made over the same command registry', () => {
   // A runtime re-created over a shared command registry: the second
   // registry's own projection is skipped because the name is taken, but

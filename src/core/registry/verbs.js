@@ -132,13 +132,13 @@ function commandAlreadyRegistered(registry, name) {
 
 /**
  * Retract the CLI command a released verb name is entitled to, which is
- * whatever `verbToCommand` projected under it. The test is identity, not
- * bookkeeping: `register` skips its own projection when the name is
- * already taken, and on the real boot path it always is, because
- * `registerCoreCommands` pre-projects every core verb into the same
- * command registry so `hyp --help` renders before the kernel boots. A
- * ledger of "names *this* registry projected" is empty for exactly the
- * core verbs a host wants to displace, so it would leave `hyp query sql`
+ * whatever `verbToCommand` projected under it. The test is the mark that
+ * projection carries, not a ledger kept here: `register` skips its own
+ * projection when the name is already taken, and on the real boot path it
+ * always is, because `registerCoreCommands` pre-projects every core verb
+ * into the same command registry so `hyp --help` renders before the kernel
+ * boots. A ledger of "names *this* registry projected" is empty for exactly
+ * the core verbs a host wants to displace, so it would leave `hyp query sql`
  * running the verb the host just took the tool slot from.
  *
  * A plugin's own command that merely shares the name is not a projection

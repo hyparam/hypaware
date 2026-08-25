@@ -5,6 +5,7 @@ import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { previewPendingRows } from '../sinks/pending.js'
 import {
   clearFirstSyncHold,
   firstSyncHoldMarkerPath,
@@ -17,6 +18,7 @@ import { readClientSyncEntries, readLocalOnlyEntries } from '../usage-policy/ind
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
+ * @import { PendingVolume } from '../../../src/core/sinks/types.js'
  */
 
 const USAGE = 'usage: hyp sync [instance] [--yes] [--dry-run]'
@@ -128,7 +130,34 @@ export async function runSync(argv, ctx) {
     }
   }
 
-  ctx.stdout.write(renderPlan({ destinations, exclusions: await readExclusions(stateDir) }))
+  // "How much, and how far back?" is the first question a consent prompt has to
+  // answer, and it is the one the plan used to leave out: a machine with three
+  // queued rows and one with a quarter of a million rendered byte-identically.
+  // Counted here rather than inside `renderPlan` so the renderer stays a pure
+  // function of what it prints, and so a count that fails degrades to "unknown"
+  // instead of taking the whole prompt down with it.
+  // @ref LLP 0101#no-release [implements]: the "prints what would leave" half, in rows rather than only in destination names
+  const previewStartedAt = Date.now()
+  const volumes = await previewPendingRows({
+    handles,
+    query: ctx.query,
+    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+    stateRoot: stateDir,
+    config: ctx.config,
+  })
+  // The elapsed time is the point of this line as much as the counts are: the
+  // preview sits between the user's keystroke and the prompt, so if `hyp sync`
+  // ever feels hung again the log says whether the count was the reason.
+  log.info('sync.pending_preview', {
+    [Attr.COMPONENT]: 'cmd-sync',
+    [Attr.OPERATION]: 'sync.pending_preview',
+    hyp_elapsed_ms: Date.now() - previewStartedAt,
+    destinations: volumes.size,
+    hyp_pending_rows: sum(volumes, (v) => v.rows),
+    hyp_withheld_rows: sum(volumes, (v) => v.withheldRows),
+    hyp_exact_counts: [...volumes.values()].filter((v) => v.status === 'counted').length,
+  })
+  ctx.stdout.write(renderPlan({ destinations, volumes, exclusions: await readExclusions(stateDir) }))
   if (deadline !== null) ctx.stdout.write(renderFirstSyncWarning(deadline))
 
   if (dryRun) {
@@ -315,17 +344,20 @@ async function readExclusions(stateDir) {
 }
 
 /**
- * The pre-confirmation summary: every destination, named, with the
- * exclusions that will not travel. "Are you sure?" with nothing to be sure
- * *about* is a keystroke, not a decision.
+ * The pre-confirmation summary: every destination, named, with **how much**
+ * would leave through it, how far back that reaches, and the exclusions that
+ * will not travel. "Are you sure?" with nothing to be sure *about* is a
+ * keystroke, not a decision, and a size-free plan was exactly that: identical
+ * on a machine with three queued rows and one with a quarter of a million.
  *
  * @param {{
  *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
+ *   volumes?: Map<string, PendingVolume>,
  *   exclusions: { localOnly: number, ignore: number, clientLocalOnly?: string[] } | { error: string },
  * }} args
  * @returns {string}
  */
-function renderPlan({ destinations, exclusions }) {
+function renderPlan({ destinations, volumes, exclusions }) {
   const width = Math.max(...destinations.map((d) => d.instance.length))
   const lines = [`hyp sync: ${plural(destinations.length, 'destination')}\n`, '\n']
   for (const dest of destinations) {
@@ -335,6 +367,9 @@ function renderPlan({ destinations, exclusions }) {
         ? '  (stays on this machine)'
         : ''
     lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}${note}\n`)
+    for (const line of renderVolume(volumes?.get(dest.instance))) {
+      lines.push(`  ${' '.repeat(width)}  ${line}\n`)
+    }
   }
   // Naming a server instead of its URL is only safe if the name stays
   // auditable: R1a's second half, applied here for the same reason.
@@ -360,6 +395,74 @@ function renderPlan({ destinations, exclusions }) {
     }
   }
   return lines.join('')
+}
+
+/**
+ * The volume disclosure under one destination: what would go, how far back it
+ * reaches, and what is being held back.
+ *
+ * Three rules, all of them about not misleading the person at the prompt:
+ *
+ * - **Withheld rows get their own line.** Folding them into the pending count
+ *   would overstate the egress; dropping them entirely is how a machine that
+ *   withholds *everything* looks identical to one that withholds nothing (#958
+ *   was invisible at exactly this prompt).
+ * - **A floor says so.** A truncated count renders "at least N", never N.
+ * - **An unknown count says unknown.** Rendering it as "nothing pending" would
+ *   be a false all-clear on a consent surface, which is worse than a gap.
+ *
+ * @param {PendingVolume | undefined} volume
+ * @returns {string[]}
+ */
+function renderVolume(volume) {
+  if (!volume) return []
+  if (volume.status === 'unknown') {
+    return [`pending volume unknown${volume.reason ? ` (${volume.reason})` : ''}`]
+  }
+  const lines = []
+  if (volume.rows === 0 && volume.status === 'counted') {
+    lines.push('nothing pending')
+  } else if (volume.rows === 0) {
+    // A floor of zero is not a floor. "at least 0 rows pending" reads as a bug
+    // on the one line somebody is deciding from, and it is reachable: a
+    // destination whose whole pending range is withheld, counted short. Say the
+    // payload count is incomplete and let the withheld line below carry the
+    // magnitude that is actually known.
+    lines.push(`pending volume not fully counted${volume.reason ? ` (${volume.reason})` : ''}`)
+  } else {
+    const floor = volume.status === 'partial' ? 'at least ' : ''
+    lines.push(`${floor}${plural(volume.rows, 'row')} pending${renderResume(volume.resume)}`)
+  }
+  if (volume.withheldRows > 0) {
+    lines.push(`${plural(volume.withheldRows, 'row')} withheld by policy (not sent)`)
+  }
+  return lines
+}
+
+/**
+ * The "covering what period" half. `beginning` is the loudest of the three:
+ * nothing has ever been exported to this destination, so the range is the
+ * machine's whole captured history.
+ *
+ * @param {PendingVolume['resume']} resume
+ * @returns {string}
+ */
+function renderResume(resume) {
+  if (resume.kind === 'beginning') return ', the full local history'
+  if (resume.kind === 'since') return `, captured since ${formatResumeInstant(resume.at)}`
+  return ''
+}
+
+/**
+ * Minute-precision UTC, the resolution a person reads a resume point at.
+ *
+ * @param {string} iso
+ * @returns {string}
+ */
+function formatResumeInstant(iso) {
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return iso
+  return `${new Date(ms).toISOString().slice(0, 16)}Z`
 }
 
 /**
@@ -407,5 +510,28 @@ function describeScope(destinations) {
  * @returns {string}
  */
 function plural(n, singular, pluralForm = `${singular}s`) {
-  return `${n} ${n === 1 ? singular : pluralForm}`
+  return `${formatCount(n)} ${n === 1 ? singular : pluralForm}`
+}
+
+/**
+ * @param {Map<string, PendingVolume>} volumes
+ * @param {(volume: PendingVolume) => number} pick
+ * @returns {number}
+ */
+function sum(volumes, pick) {
+  let total = 0
+  for (const volume of volumes.values()) total += pick(volume)
+  return total
+}
+
+/**
+ * Thousands-grouped, pinned to `en-US` rather than the ambient locale: a row
+ * count is the number this prompt turns on, and it must not render as
+ * `236.650` on one machine and `236,650` on another.
+ *
+ * @param {number} n
+ * @returns {string}
+ */
+function formatCount(n) {
+  return n.toLocaleString('en-US')
 }

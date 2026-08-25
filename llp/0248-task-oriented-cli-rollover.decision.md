@@ -1,7 +1,7 @@
 # LLP 0248: Focused CLI help and journey groups
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Plugins, Onboarding
 **Author:** Phil / Codex
 **Date:** 2026-08-18

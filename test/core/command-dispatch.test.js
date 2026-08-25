@@ -547,7 +547,7 @@ test('top-level help renders journey sections and a compact operations list', as
   // `graph` is plugin-contributed (`@hypaware/context-graph`) and only
   // appears once the plugin is config-active; this dispatch has no config,
   // so only core commands show up here.
-  assert.match(out, /Additional commands:\n  daemon, config, cache, sink, plugin, remote, mcp, version, dev/)
+  assert.match(out, /Additional commands:\n  daemon, config, cache, sink, plugin, remote, mcp, version, update, dev/)
   assert.equal(out.includes('admin'), false)
   assert.equal(out.includes('fleet'), false)
   // Subcommands live in group help, not at the top level.

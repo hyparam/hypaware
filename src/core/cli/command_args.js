@@ -30,6 +30,10 @@ export const CORE_COMMAND_ARGS = {
     usage: 'hyp version',
     schema: { type: 'object', properties: {} },
   },
+  'update': {
+    usage: 'hyp update',
+    schema: { type: 'object', properties: {} },
+  },
   'status': {
     usage: 'hyp status [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },

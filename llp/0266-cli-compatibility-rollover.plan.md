@@ -1,7 +1,7 @@
 # LLP 0266: Focused CLI compatibility rollover
 
 **Type:** Plan
-**Status:** Draft
+**Status:** Active
 **Systems:** CLI, Plugins, Onboarding, Tests
 **Author:** Phil / Codex
 **Date:** 2026-08-18
