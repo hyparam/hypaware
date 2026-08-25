@@ -1920,7 +1920,7 @@ export interface AiGatewayRecordResult {
  * indistinguishable from not calling it at all. Reading logs and memoising in
  * memory is fine; marking a transcript line consumed, advancing a cursor, or
  * writing anything a later run or another process can observe is not. See
- * LLP 0311 #settle-purity.
+ * LLP 0312#settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
