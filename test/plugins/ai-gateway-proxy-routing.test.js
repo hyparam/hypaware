@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import {
+  applyPathRewrite,
   compileUpstreams,
   forwardHeaders,
   matchUpstream,
@@ -50,6 +51,62 @@ test('compileUpstreams rejects non-http(s) base_url', () => {
   assert.throws(
     () => compileUpstreams([{ name: 'bad', base_url: 'ftp://x/', path_prefix: '/' }]),
     /must use http:\/\/ or https:\/\//,
+  )
+})
+
+// @ref LLP 0313#the-rewrite-is-declarative-data [tests]: a single path-segment
+// prefix swap, applied by core, validated once at compile
+test('applyPathRewrite swaps the prefix and carries the rest verbatim', () => {
+  const rule = { from: '/backend-api/codex', to: '/v1' }
+  assert.equal(applyPathRewrite('/backend-api/codex/responses', rule), '/v1/responses')
+  assert.equal(applyPathRewrite('/backend-api/codex', rule), '/v1')
+  assert.equal(applyPathRewrite('/backend-api/codex/a/b', rule), '/v1/a/b')
+  // Segment boundary: a look-alike is not under the prefix and is untouched.
+  assert.equal(applyPathRewrite('/backend-api/codexx/responses', rule), '/backend-api/codexx/responses')
+  assert.equal(applyPathRewrite('/v1/responses', rule), '/v1/responses')
+  assert.equal(applyPathRewrite('/v1/responses', undefined), '/v1/responses')
+})
+
+test('compileUpstreams carries a valid rewrite onto the compiled upstream', () => {
+  const [compiled] = compileUpstreams([{
+    name: 'openai-codex',
+    base_url: 'https://api.openai.com',
+    path_prefix: '/backend-api/codex',
+    rewrite: { from: '/backend-api/codex', to: '/v1' },
+  }])
+  assert.deepEqual(compiled.rewrite, { from: '/backend-api/codex', to: '/v1' })
+})
+
+for (const bad of [
+  { label: 'a relative prefix', rewrite: { from: 'backend-api/codex', to: '/v1' } },
+  { label: 'a path escape', rewrite: { from: '/backend-api/codex', to: '/v1/../../etc' } },
+  { label: 'a glued-on query string', rewrite: { from: '/backend-api/codex', to: '/v1?key=leaked' } },
+  { label: 'a trailing slash', rewrite: { from: '/backend-api/codex', to: '/v1/' } },
+  { label: 'a missing field', rewrite: { from: '/backend-api/codex' } },
+  { label: 'a non-object rule', rewrite: 'from /backend-api/codex to /v1' },
+]) {
+  test(`compileUpstreams rejects ${bad.label} in a rewrite`, () => {
+    assert.throws(
+      () => compileUpstreams([{
+        name: 'bad',
+        base_url: 'https://api.openai.com',
+        path_prefix: '/backend-api/codex',
+        rewrite: /** @type {any} */ (bad.rewrite),
+      }]),
+      /upstream "bad"/,
+    )
+  })
+}
+
+test('compileUpstreams rejects a rewrite.from outside the upstream path_prefix', () => {
+  assert.throws(
+    () => compileUpstreams([{
+      name: 'bad',
+      base_url: 'https://api.openai.com',
+      path_prefix: '/backend-api/codex',
+      rewrite: { from: '/v1', to: '/v2' },
+    }]),
+    /is outside its path_prefix/,
   )
 })
 

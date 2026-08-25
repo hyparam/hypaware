@@ -4,6 +4,7 @@ import type {
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
   AiGatewaySettlementEnricher,
+  AiGatewayUpstreamPathRewrite,
   AiGatewayUpstreamPreset,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
@@ -16,6 +17,13 @@ export interface ExchangeInit {
   method: string | undefined
   path: string | undefined
   requestHeaders: Record<string, string | string[] | undefined>
+  /**
+   * The path the gateway actually forwarded on, present only when a
+   * routing rewrite moved it off the inbound path. The row's `path`
+   * stays the door the request arrived at, because that is what decides
+   * the body shape a projector reads (LLP 0313).
+   */
+  upstreamPath?: string
 }
 
 export interface ResponseStart {
@@ -79,6 +87,8 @@ export interface UpstreamConfig {
   provider?: string
   priority?: number
   match?: (input: AiGatewayRouteInput) => boolean
+  /** Declarative outbound path-prefix swap, carried from the preset (LLP 0313). */
+  rewrite?: AiGatewayUpstreamPathRewrite
   /**
    * Paths the registering adapter claims, carried from its preset when
    * operator config overrode the entry by name. Proxy mode's record anchor
@@ -123,6 +133,8 @@ export interface CompiledUpstream {
   priority: number
   seq: number
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
+  /** Validated outbound path-prefix swap, applied when the request is forwarded (LLP 0313). */
+  rewrite?: AiGatewayUpstreamPathRewrite
 }
 
 export interface ProxyOptions {
@@ -135,6 +147,7 @@ export interface ProxyOptions {
     method: string | undefined
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
+    upstreamPath?: string
   }): Exchange
   /**
    * Handle a request under the reserved `/_hypaware/` control prefix. The
