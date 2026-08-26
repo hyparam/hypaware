@@ -17,6 +17,7 @@ import {
   NPM_KILL_GRACE_MS,
   NPM_TIMEOUT_MS,
   previousBootLooksStuck,
+  PROBE_QUIET_MS,
   readLocalConfigAutoUpdate,
   readSelfUpdateState,
   resolveRegistryUrl,
@@ -56,6 +57,147 @@ test('resolveRegistryUrl honors npm_config_registry, strips trailing slash, igno
     'https://npm.corp.example'
   )
   assert.equal(resolveRegistryUrl({ npm_config_registry: 'file:///nope' }), 'https://registry.npmjs.org')
+})
+
+test('resolveRegistryUrl trusts http only on this machine', () => {
+  // A local Verdaccio over http is a normal dev and test setup and stays
+  // honored, brackets and all.
+  for (const local of [
+    'http://localhost:4873',
+    'http://127.0.0.1:4873',
+    'http://127.1.2.3:4873',
+    'http://[::1]:4873',
+    'http://npm.localhost',
+  ]) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: local + '/' }), local)
+  }
+  // Off-box plain http is not believed: the probe's answer decides
+  // whether this install ever updates again. It degrades to the public
+  // registry, the same place a .npmrc-only private registry already
+  // probes, rather than to a spoofable "you are already current".
+  for (const remote of [
+    'http://npm.corp.example',
+    'http://npm.corp.example:8080/path',
+    'http://192.168.1.9:4873',
+    'http://localhost.evil.example',
+  ]) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: remote }), 'https://registry.npmjs.org')
+  }
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'https://npm.corp.example' }),
+    'https://npm.corp.example'
+  )
+})
+
+test('a registry override npm could never speak is not trusted onto a loopback host', () => {
+  // The loopback check answers "is this host on my machine"; it is not a
+  // licence for any scheme that reaches one. npm talks http or https to a
+  // registry, and `fetch` refuses the rest, so honoring one of these would
+  // swap a working default for a permanently failing probe - which, with a
+  // probe failure now kept out of the status line, would fail in silence.
+  for (const scheme of ['ftp', 'ws', 'file', 'gopher']) {
+    assert.equal(
+      resolveRegistryUrl({ npm_config_registry: `${scheme}://localhost:4873` }),
+      'https://registry.npmjs.org'
+    )
+  }
+  // The trusted plain-http case is untouched by that guard.
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://localhost:4873' }),
+    'http://localhost:4873'
+  )
+})
+
+test('a trusted override comes back normalized, not echoed', () => {
+  // `new URL` accepts shapes the old `/^https?:\/\//` guard rejected, and
+  // returning one verbatim builds a probe address that can only fail.
+  // What comes back has to be a URL `fetch` will actually take.
+  assert.equal(resolveRegistryUrl({ npm_config_registry: 'https:evil' }), 'https://evil')
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'HTTPS://NPM.corp.example' }),
+    'https://npm.corp.example'
+  )
+  // Normalization is not a way into the loopback set: it runs on the
+  // parsed hostname, so every spelling that reaches 127.0.0.1 was already
+  // on this machine, and one that only looks like it is still refused.
+  for (const spelling of ['http://127.1', 'http://0x7f.0.0.1', 'http://2130706433']) {
+    assert.equal(resolveRegistryUrl({ npm_config_registry: spelling }), 'http://127.0.0.1')
+  }
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://evil.example#.localhost' }),
+    'https://registry.npmjs.org'
+  )
+})
+
+test('dropping an untrusted registry override is logged, not silent', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-log-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {string[]} */
+    const urls = []
+    /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+    const logged = []
+    /** @type {typeof fetch} */
+    // @ts-expect-error minimal Response shape
+    const probe = async (url) => {
+      urls.push(String(url))
+      return { ok: true, status: 200, json: async () => ({ version: '1.0.0' }) }
+    }
+    /** @type {(event: string, fields?: Record<string, unknown>) => void} */
+    const log = (event, fields) => { logged.push({ event, fields: fields ?? {} }) }
+
+    // An override that is dropped: the probe silently asks a different
+    // registry than the operator configured, and the answer decides
+    // whether this install ever updates. That decision belongs in a log.
+    await runSelfUpdatePass({
+      stateRoot: dir,
+      env: { npm_config_registry: 'http://npm.corp.example:8080' },
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+      log,
+    })
+    const ignored = logged.filter((l) => l.event === 'self_update.registry_override_ignored')
+    assert.equal(ignored.length, 1)
+    assert.equal(ignored[0]?.fields.ignored_origin, 'http://npm.corp.example:8080')
+    assert.equal(ignored[0]?.fields.probing, 'https://registry.npmjs.org')
+    assert.ok(urls[0]?.startsWith('https://registry.npmjs.org/'))
+
+    // Credentials in the override never reach the log line.
+    const withSecret = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-secret-'))
+    logged.length = 0
+    await runSelfUpdatePass({
+      stateRoot: withSecret,
+      env: { npm_config_registry: 'http://bot:hunter2@npm.corp.example' },
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+      log,
+    })
+    const redacted = logged.filter((l) => l.event === 'self_update.registry_override_ignored')
+    assert.equal(redacted.length, 1)
+    assert.equal(redacted[0]?.fields.ignored_origin, 'http://npm.corp.example')
+    assert.ok(!JSON.stringify(logged).includes('hunter2'))
+    await fsp.rm(withSecret, { recursive: true, force: true })
+
+    // A trusted override is honored, so there is nothing to report.
+    const honored = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-ok-'))
+    logged.length = 0
+    urls.length = 0
+    await runSelfUpdatePass({
+      stateRoot: honored,
+      env: { npm_config_registry: 'http://localhost:4873/' },
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+      log,
+    })
+    assert.equal(logged.filter((l) => l.event === 'self_update.registry_override_ignored').length, 0)
+    assert.ok(urls[0]?.startsWith('http://localhost:4873/'))
+    await fsp.rm(honored, { recursive: true, force: true })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('classifySelfProvenance tells npx, checkout, and global-like roots apart', async () => {
@@ -606,6 +748,454 @@ test('a held apply lock stops a second process from racing npm install -g', asyn
     const after = acquireApplyLock(dir)
     assert.ok(after)
     after?.()
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline probe failure stays out of the status text and in the json', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-probe-quiet-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    // A laptop on a plane must not grow a degraded line on every status.
+    const described = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.equal(described.line, null)
+    assert.match(String(described.json.error), /^probe_failed/)
+
+    // An apply failure is a real, sticky problem and still speaks up.
+    writeSelfUpdateState(dir, { error: 'apply_failed: npm_install_failed' })
+    assert.match(describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? '', /degraded/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unrecognized pass option cannot silently suppress the apply', async () => {
+  // `apply: false` was a dead affordance no caller ever set; it is gone,
+  // and nothing in the option bag may quietly turn an update into a
+  // no-op again.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-no-apply-opt-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('1.1.0')
+    const result = await runSelfUpdatePass(/** @type {any} */ ({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, apply: false,
+    }))
+    assert.equal(result.action, 'updated')
+    assert.ok(calls.some((c) => c.includes('install')))
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unusable run directory is a real error, not "another update is already running"', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-broken-'))
+  try {
+    // A plain file where the run directory belongs. The lock can never be
+    // taken here and no rival process exists to blame, so reporting this
+    // as contention sends an operator hunting a process that is not there.
+    const wrongType = path.join(dir, 'wrong-type')
+    await fsp.mkdir(wrongType, { recursive: true })
+    await fsp.writeFile(path.join(wrongType, 'run'), 'not a directory')
+    assert.throws(() => acquireApplyLock(wrongType), /ENOTDIR|EEXIST|ENOENT/)
+
+    // And a run directory this user cannot write: the lock open fails
+    // EACCES, which is this machine's problem, not another process's.
+    const readOnly = path.join(dir, 'read-only')
+    await fsp.mkdir(path.join(readOnly, 'run'), { recursive: true })
+    await fsp.chmod(path.join(readOnly, 'run'), 0o555)
+    try {
+      let writable = false
+      try {
+        fs.closeSync(fs.openSync(path.join(readOnly, 'run', 'probe'), 'wx'))
+        writable = true
+      } catch { /* the permission bits bite, as intended */ }
+      // Running as root ignores the bits; then there is nothing to assert.
+      if (!writable) assert.throws(() => acquireApplyLock(readOnly), /EACCES|EPERM|EROFS/)
+    } finally {
+      await fsp.chmod(path.join(readOnly, 'run'), 0o755)
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lock contention still reads as contention, and still fails closed', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-eexist-'))
+  try {
+    const held = acquireApplyLock(dir)
+    assert.ok(held)
+    assert.equal(acquireApplyLock(dir), null)
+    held?.()
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a state file with a non-string error renders instead of taking hyp status down', async () => {
+  // `readSelfUpdateState` is total by construction and validates no field
+  // type, because `describeSelfUpdate` runs inside `hyp status` with no
+  // guard of its own. A prefix test against whatever JSON.parse returned
+  // is a TypeError waiting for a hand-edited or truncated state file, and
+  // it would take the whole status report down with it.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-bad-error-'))
+  try {
+    await fsp.mkdir(path.join(dir, 'run'), { recursive: true })
+    await fsp.writeFile(
+      path.join(dir, 'run', 'self-update.json'),
+      JSON.stringify({ error: 42 })
+    )
+    const described = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.match(described.line ?? '', /degraded \(42\)/)
+    assert.equal(described.json.error, 42)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a probe that has been failing for a week stops being quiet', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-probe-entrenched-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const start = new Date('2026-01-01T00:00:00.000Z')
+    await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline, now: () => start,
+    })
+    assert.equal(readSelfUpdateState(dir).error_since, start.toISOString())
+
+    // A second failure a day later does not restart the clock: `checked_at`
+    // moves, `error_since` does not, and the line stays quiet.
+    const day = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+    await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline, force: true, now: () => day,
+    })
+    assert.equal(readSelfUpdateState(dir).error_since, start.toISOString())
+    assert.equal(readSelfUpdateState(dir).checked_at, day.toISOString())
+    const quiet = describeSelfUpdate({ stateRoot: dir, env: {}, now: () => day })
+    assert.equal(quiet.line, null)
+    // The quiet defers diagnosis to `--json`, so `--json` has to carry
+    // what decides how long the quiet lasts, not only the error.
+    assert.equal(quiet.json.error_since, start.toISOString())
+
+    // Past the reprieve it is not a flight, it is an updater that will
+    // never run again, and LLP 0309#cli-surface puts that in status.
+    const later = new Date(start.getTime() + PROBE_QUIET_MS + 1)
+    const loud = describeSelfUpdate({ stateRoot: dir, env: {}, now: () => later })
+    assert.match(loud.line ?? '', /degraded \(probe_failed/)
+
+    // And a probe that comes back clears the run, so the next failure
+    // starts its own reprieve rather than inheriting this one.
+    const probe = fetchStub('1.0.0')
+    await runSelfUpdatePass({
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, force: true, now: () => later,
+    })
+    assert.equal(readSelfUpdateState(dir).error_since, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot: dir, env: {}, now: () => later }).line, null)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an ignored registry override cannot steer the install either', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-apply-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {Array<NodeJS.ProcessEnv | undefined>} */
+    const envs = []
+    /** @type {CommandRunner} */
+    const runner = async (cmd, args, opts) => {
+      envs.push(opts.env)
+      if (args[0] === 'config') {
+        return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      }
+      const version = String(args[args.length - 1]).split('@').pop()
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version })
+      )
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    const probe = fetchStub('1.1.0')
+    // npm reads `npm_config_registry` from the environment as happily as
+    // the probe did, so handing the raw environment to `npm install -g`
+    // would pull the tarball from the very host the probe rejected. But
+    // the answer is not to pin the child to the public registry either:
+    // an org whose override names an internal mirror publishes its own
+    // build there, and a pinned install would silently swap it for the
+    // public one. Not knowing where the bytes belong means not
+    // installing.
+    const applied = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: { npm_config_registry: 'http://npm.corp.example' },
+      packageRoot,
+      runner,
+      fetchImpl: probe.impl,
+    })
+    assert.equal(applied.action, 'checked')
+    assert.equal(applied.reason, 'registry_untrusted')
+    assert.equal(applied.latest, '1.1.0')
+    // No npm child ran at all, so nothing was fetched from anywhere.
+    assert.deepEqual(envs, [])
+    // And the refusal is sticky state, not only a log line: an install
+    // that can no longer update itself says so in `hyp status`.
+    assert.equal(readSelfUpdateState(dir).error, 'registry_untrusted')
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? '',
+      /degraded \(registry_untrusted\)/
+    )
+
+    // With no override in the environment the env is passed through
+    // untouched, so an `.npmrc`-configured private registry keeps serving
+    // the install exactly as it did before any of this.
+    const plain = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-plain-'))
+    envs.length = 0
+    await fsp.writeFile(
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+    )
+    await runSelfUpdatePass({
+      stateRoot: plain, env: {}, packageRoot, runner, fetchImpl: fetchStub('1.1.0').impl,
+    })
+    assert.ok(envs.length > 0)
+    for (const env of envs) {
+      assert.equal(Object.prototype.hasOwnProperty.call(env ?? {}, 'npm_config_registry'), false)
+    }
+    await fsp.rm(plain, { recursive: true, force: true })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a trusted override is honored end to end, and its credentials never reach a log', async () => {
+  // "Was the override dropped" is the trust decision, not a string
+  // comparison of the raw value against the resolved one. `URL.href`
+  // normalizes - an explicit `:443` disappears, a host lowercases, an
+  // IDN becomes punycode - so comparing strings reports a *trusted*
+  // override as ignored. That is a false alarm on its own, and because
+  // the resolved form of a trusted override is the operator's own URL,
+  // the "probing" field it reports is their registry password. Both
+  // `hyp update` and the pre-boot daemon lane forward this event
+  // straight to stderr.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-trusted-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {string[]} */
+    const urls = []
+    /** @type {typeof fetch} */
+    // @ts-expect-error minimal Response shape
+    const probe = async (url) => {
+      urls.push(String(url))
+      return { ok: true, status: 200, json: async () => ({ version: '1.0.0' }) }
+    }
+    for (const spelling of [
+      'https://bot:hunter2@npm.corp.example:443',
+      'https://bot:hunter2@NPM.corp.example',
+      'https://bot:hunter2@npm.corp.example',
+    ]) {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-trusted-case-'))
+      /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+      const logged = []
+      urls.length = 0
+      await runSelfUpdatePass({
+        stateRoot: root,
+        env: { npm_config_registry: spelling },
+        packageRoot,
+        runner,
+        fetchImpl: probe,
+        log: (event, fields) => { logged.push({ event, fields: fields ?? {} }) },
+      })
+      // Trusted means honored: the probe went to the operator's registry,
+      // so there is nothing to report as ignored.
+      assert.ok(urls[0]?.startsWith('https://bot:hunter2@npm.corp.example/'), spelling)
+      assert.deepEqual(
+        logged.filter((l) => l.event === 'self_update.registry_override_ignored'),
+        [],
+        spelling
+      )
+      assert.ok(!JSON.stringify(logged).includes('hunter2'), spelling)
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('npm reads the registry override case-insensitively, and so does the guard', async () => {
+  // `@npmcli/config` matches its environment variables with
+  // `/^npm_config_/i`, so `NPM_CONFIG_REGISTRY` steers `npm install -g`
+  // exactly as the lowercase spelling does. A guard that reads only the
+  // lowercase name probes the public registry, sees no override to drop,
+  // hands the environment to npm untouched, and npm pulls the tarball
+  // from the plaintext host - the split the pin exists to close, reached
+  // by shift key alone.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-case-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {Array<NodeJS.ProcessEnv | undefined>} */
+    const envs = []
+    /** @type {CommandRunner} */
+    const runner = async (cmd, args, opts) => {
+      envs.push(opts.env)
+      if (args[0] === 'config') {
+        return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      }
+      const version = String(args[args.length - 1]).split('@').pop()
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version })
+      )
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    /** @param {NodeJS.ProcessEnv} env */
+    const pass = async (env) => {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-case-run-'))
+      await fsp.writeFile(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+      )
+      envs.length = 0
+      /** @type {string[]} */
+      const urls = []
+      /** @type {typeof fetch} */
+      // @ts-expect-error minimal Response shape
+      const probe = async (url) => {
+        urls.push(String(url))
+        return { ok: true, status: 200, json: async () => ({ version: '1.1.0' }) }
+      }
+      const result = await runSelfUpdatePass({
+        stateRoot: root, env, packageRoot, runner, fetchImpl: probe,
+      })
+      await fsp.rm(root, { recursive: true, force: true })
+      return { result, urls, envs: envs.slice() }
+    }
+
+    // Untrusted under the uppercase spelling: probed at the default, and
+    // the apply is refused rather than run against a registry the
+    // operator never named. A guard blind to the spelling would instead
+    // see no override, install, and let npm read the plaintext host.
+    const upper = await pass({ NPM_CONFIG_REGISTRY: 'http://npm.corp.example' })
+    assert.equal(upper.result.action, 'checked')
+    assert.equal(upper.result.reason, 'registry_untrusted')
+    assert.ok(upper.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    assert.deepEqual(upper.envs, [])
+
+    // Trusted under the uppercase spelling: honored by the probe and
+    // installed from, which is what keeps the refusal from stranding an
+    // operator who happens to shout the variable name.
+    const trusted = await pass({ NPM_CONFIG_REGISTRY: 'https://npm.corp.example' })
+    assert.equal(trusted.result.action, 'updated')
+    assert.ok(trusted.urls[0]?.startsWith('https://npm.corp.example/'))
+    assert.ok(trusted.envs.length > 0)
+    for (const env of trusted.envs) {
+      assert.equal(env?.NPM_CONFIG_REGISTRY, 'https://npm.corp.example')
+    }
+
+    // Two spellings disagreeing have no precedence npm defines, so
+    // neither is believed and nothing is installed.
+    const conflict = await pass({
+      npm_config_registry: 'https://npm.corp.example',
+      NPM_CONFIG_REGISTRY: 'http://evil.example',
+    })
+    assert.equal(conflict.result.reason, 'registry_untrusted')
+    assert.ok(conflict.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    assert.deepEqual(conflict.envs, [])
+
+    // An override set to empty is not an override: npm skips it, so
+    // nothing is dropped and the update goes through untouched.
+    const empty = await pass({ npm_config_registry: '' })
+    assert.equal(empty.result.action, 'updated')
+    assert.ok(empty.urls[0]?.startsWith('https://registry.npmjs.org/'))
+    for (const env of empty.envs) {
+      assert.equal(env?.npm_config_registry, '')
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('going offline does not silence an apply failure that was already speaking', async () => {
+  // A failed apply is sticky: an EACCES global prefix, a refused
+  // registry. It does not heal by itself and it was already rendering a
+  // degraded line. The offline reprieve is for a probe failure, and a
+  // probe failure overwriting `error` would inherit that reprieve for
+  // the sticky failure too, taking a permanently broken updater off the
+  // status line for a week - the one case LLP 0309#cli-surface most
+  // wants heard.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-sticky-'))
+  try {
+    const { packageRoot } = await fakeGlobalInstall(dir)
+    /** @type {CommandRunner} */
+    const failingInstall = async (cmd, args) => {
+      if (args[0] === 'config') {
+        return { exitCode: 0, stdout: `${path.join(dir, 'prefix')}\n`, stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'EACCES' }
+    }
+    const start = new Date('2026-01-01T00:00:00.000Z')
+    await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner: failingInstall,
+      fetchImpl: fetchStub('1.1.0').impl,
+      now: () => start,
+    })
+    assert.equal(readSelfUpdateState(dir).error, 'apply_failed: npm_install_failed')
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {}, now: () => start }).line ?? '',
+      /degraded \(apply_failed/
+    )
+
+    // Now the machine goes offline. The probe failure is real, but it
+    // does not get to speak over a failure that is still outstanding.
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const later = new Date(start.getTime() + 60 * 60 * 1000)
+    await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner: failingInstall,
+      fetchImpl: offline,
+      force: true,
+      now: () => later,
+    })
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.error, 'apply_failed: npm_install_failed')
+    assert.equal(state.error_since, undefined)
+    assert.equal(state.checked_at, later.toISOString())
+    assert.match(
+      describeSelfUpdate({ stateRoot: dir, env: {}, now: () => later }).line ?? '',
+      /degraded \(apply_failed/
+    )
+
+    // A probe that comes back clears the sticky error and the apply is
+    // retried, so nothing here makes a real failure permanent.
+    const healed = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-sticky-heal-'))
+    await fsp.writeFile(
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+    )
+    const { runner: workingInstall } = await fakeGlobalInstall(dir)
+    const result = await runSelfUpdatePass({
+      stateRoot: healed,
+      env: {},
+      packageRoot,
+      runner: workingInstall,
+      fetchImpl: fetchStub('1.1.0').impl,
+      now: () => later,
+    })
+    assert.equal(result.action, 'updated')
+    assert.equal(readSelfUpdateState(healed).error, undefined)
+    await fsp.rm(healed, { recursive: true, force: true })
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

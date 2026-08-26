@@ -23,6 +23,13 @@ import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
+// How long a run of failing probes stays out of the status line. A probe
+// failure is usually a laptop off the network and clears itself, so the
+// quiet is worth having; but it is quiet, not silence. Past this the
+// updater is not offline, it is broken (a renamed package, a proxy that
+// always refuses), and an install that will never update again has to
+// say so where a human looks. A week clears any plausible trip.
+export const PROBE_QUIET_MS = 7 * 24 * 60 * 60 * 1000
 const PROBE_TIMEOUT_MS = 5000
 export const NPM_TIMEOUT_MS = 120_000
 // How long a timed-out npm gets to honor SIGTERM before SIGKILL.
@@ -191,19 +198,101 @@ function parseSemver(value) {
 }
 
 /**
+ * Is this registry override safe to believe, and in what form? https
+ * always is. Plain http is trusted only on this machine, where a local
+ * Verdaccio is a normal dev and test setup and nothing sits on the wire.
+ * Off-box http is not: the probe's answer decides whether this install
+ * ever updates again, so a spoofable "you are already current" is a mute
+ * button for anyone on the path.
+ *
+ * Returns the parsed URL rather than a boolean so the caller can build
+ * the probe address from it. `new URL` accepts shapes the old
+ * `/^https?:\/\//` guard rejected (`https:evil` parses, protocol and
+ * all), and echoing those back verbatim builds a probe URL that can only
+ * fail.
+ *
+ * @param {string} raw
+ * @returns {URL | null}
+ */
+function trustedRegistryUrl(raw) {
+  /** @type {URL} */
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    return null
+  }
+  // npm speaks http or https to a registry and nothing else. Letting a
+  // third scheme through on a loopback host would not open a hole, but it
+  // would trade a working default for a probe that can never succeed:
+  // `fetch` refuses the URL, the pass records `probe_failed`, and after
+  // the quieting below that failure no longer reaches the status line.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (url.protocol === 'https:') return url
+  // `hostname` keeps the brackets on an IPv6 literal.
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  const loopback = host === 'localhost' || host.endsWith('.localhost') ||
+    host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
+  return loopback ? url : null
+}
+
+/**
+ * The registry override as npm itself reads it. npm matches its config
+ * environment variables case-insensitively (`@npmcli/config` tests
+ * `/^npm_config_/i` and lowercases the key), so `NPM_CONFIG_REGISTRY`
+ * steers `npm install -g` exactly as the lowercase spelling does.
+ * Reading only the lowercase name would leave the probe looking at one
+ * registry while the install pulled its tarball from another, which is
+ * the split this whole guard exists to close.
+ *
+ * `keys` is every spelling actually carrying a value, so the caller can
+ * clear all of them when it pins the child. Spellings that disagree have
+ * no defined precedence (npm keeps whichever it enumerates last), so
+ * they resolve to no usable override rather than a guess.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{ keys: string[], raw: string | null }}
+ */
+function readRegistryOverride(env) {
+  const keys = Object.keys(env).filter((key) =>
+    /^npm_config_registry$/i.test(key) && typeof env[key] === 'string' && env[key] !== '')
+  const values = new Set(keys.map((key) => String(env[key])))
+  return { keys, raw: values.size === 1 ? String([...values][0]) : null }
+}
+
+/**
  * The npm registry to probe: the standard `npm_config_registry` env
- * override when set, the public registry otherwise. Reading `.npmrc`
- * is deliberately out of scope for this import-light module.
+ * override when set and trusted, the public registry otherwise.
+ * Reading `.npmrc` is deliberately out of scope for this import-light
+ * module, so a private registry configured only there already probes
+ * the default; an untrusted override degrading to that same default is
+ * a path the module already walks, not a new failure mode.
  *
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
 export function resolveRegistryUrl(env) {
-  const raw = env.npm_config_registry
-  if (typeof raw === 'string' && /^https?:\/\//.test(raw)) {
-    return raw.replace(/\/+$/, '')
-  }
+  const raw = readRegistryOverride(env).raw
+  const trusted = raw === null ? null : trustedRegistryUrl(raw)
+  if (trusted) return trusted.href.replace(/\/+$/, '')
   return DEFAULT_REGISTRY
+}
+
+/**
+ * Scheme and host of a registry URL, for logs. Deliberately drops the
+ * path, the query and above all the userinfo: a registry URL is a normal
+ * place for an operator to keep a token.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function registryOrigin(raw) {
+  try {
+    const url = new URL(raw)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return 'unparseable'
+  }
 }
 
 /**
@@ -417,7 +506,11 @@ function readVersionAt(root) {
  * same moment, and two npm global installs racing over one package
  * directory is the single failure that can leave a machine with no
  * runnable kernel at all. Returns a release function, or null when another
- * process holds the lock.
+ * process holds the lock. Anything that is not lock contention (an
+ * unwritable run directory, a read-only filesystem) throws instead of
+ * returning null: it still fails closed, but reporting it as "another
+ * update is already running" sends the operator looking for a process
+ * that does not exist.
  *
  * @param {string} stateRoot
  * @returns {(() => void) | null}
@@ -425,11 +518,7 @@ function readVersionAt(root) {
 export function acquireApplyLock(stateRoot) {
   const runDir = daemonRunDir(stateRoot)
   const lockPath = path.join(runDir, 'self-update.lock')
-  try {
-    fs.mkdirSync(runDir, { recursive: true })
-  } catch {
-    return null
-  }
+  fs.mkdirSync(runDir, { recursive: true })
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -449,7 +538,10 @@ export function acquireApplyLock(stateRoot) {
         } catch { return }
         try { fs.unlinkSync(lockPath) } catch { /* already gone */ }
       }
-    } catch {
+    } catch (err) {
+      // Only EEXIST means somebody else holds it. EACCES, EROFS and the
+      // rest are this machine's problem and belong in front of a human.
+      if (errnoCode(err) !== 'EEXIST') throw err
       if (attempt > 0) return null
       /** @type {number | null} */
       let ageMs = null
@@ -459,6 +551,15 @@ export function acquireApplyLock(stateRoot) {
     }
   }
   return null
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string | undefined}
+ */
+function errnoCode(err) {
+  const code = /** @type {{ code?: unknown }} */ (err)?.code
+  return typeof code === 'string' ? code : undefined
 }
 
 /**
@@ -487,7 +588,6 @@ function realpathOrSelf(p) {
  *   configPath?: string,
  *   autoUpdate?: boolean,
  *   force?: boolean,
- *   apply?: boolean,
  *   packageRoot?: string,
  *   runner?: CommandRunner,
  *   fetchImpl?: typeof fetch,
@@ -531,19 +631,59 @@ export async function runSelfUpdatePass(opts = {}) {
     }
 
     const identity = readSelfPackageIdentity(opts.packageRoot)
+    const registryUrl = resolveRegistryUrl(env)
+    // Dropping an untrusted override is otherwise a silent decision: the
+    // probe asks the public registry about a package that may only exist
+    // on the private one, and that 404 lands as `probe_failed`, which no
+    // longer reaches the status line.
+    //
+    // "Was it dropped" is the trust decision itself, not a comparison of
+    // the raw string against the resolved one. `URL.href` normalizes
+    // (an explicit `:443` disappears, a host lowercases, an IDN becomes
+    // punycode), so a *trusted* override can differ from its own resolved
+    // form - and reporting that as ignored both lies and, since the
+    // resolved form of a trusted override is the operator's own URL,
+    // prints their registry password. Every field here is an origin:
+    // scheme and host, never a path, a query, or userinfo.
+    const override = readRegistryOverride(env)
+    const registryOverrideIgnored = override.keys.length > 0 &&
+      (override.raw === null || trustedRegistryUrl(override.raw) === null)
+    if (registryOverrideIgnored) {
+      log('self_update.registry_override_ignored', {
+        error_kind: override.raw === null ? 'registry_ambiguous' : 'registry_untrusted',
+        ignored_origin: override.raw === null ? 'conflicting' : registryOrigin(override.raw),
+        probing: registryOrigin(registryUrl),
+      })
+    }
     /** @type {string} */
     let latest
     try {
       latest = await fetchLatestVersion({
         name: identity.name,
-        registryUrl: resolveRegistryUrl(env),
+        registryUrl,
         fetchImpl: opts.fetchImpl,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      // `checked_at` moves on every failed probe, so it cannot say how
+      // long this has been going on. `error_since` is the first failure
+      // of the current unbroken run, and it is what bounds the quiet in
+      // `describeSelfUpdate`; a successful probe clears it below.
+      const since = typeof state.error_since === 'string' && state.error
+        ? state.error_since
+        : new Date(nowMs).toISOString()
+      // A failure that is not a probe failure is sticky: a global prefix
+      // this user cannot write, a refused registry. It was already
+      // speaking in the status line, and it does not heal by itself.
+      // Overwriting it with a transient probe failure would hand a
+      // permanently broken updater the offline reprieve and silence it
+      // for a week, which is the one case #cli-surface most wants heard.
+      // The probe failure still reaches the log; the next successful
+      // probe clears the sticky error and the apply is retried.
+      const sticky = typeof state.error === 'string' && !state.error.startsWith('probe_failed')
       writeSelfUpdateState(stateRoot, {
         checked_at: new Date(nowMs).toISOString(),
-        error: `probe_failed: ${message}`,
+        ...(sticky ? {} : { error: `probe_failed: ${message}`, error_since: since }),
       })
       log('self_update.probe_failed', { error_kind: 'probe_failed', detail: message })
       return { action: 'checked', reason: 'probe_failed' }
@@ -555,16 +695,43 @@ export async function runSelfUpdatePass(opts = {}) {
       latest_version: latest,
       available,
       error: undefined,
+      error_since: undefined,
     })
     log('self_update.checked', { latest_version: latest, available })
     if (!available) return { action: 'checked', latest }
-    if (opts.apply === false) return { action: 'checked', reason: 'update_available', latest }
     if (provenance !== 'global-candidate') {
       return { action: 'checked', reason: provenance, latest }
     }
+    // A dropped override means this pass cannot say where the bytes
+    // should come from, so it does not install at all.
+    //
+    // Pinning the child to the probed registry instead looks like the
+    // conservative move and is the opposite of one. An org whose
+    // `npm_config_registry` names an internal mirror over plain http
+    // (an Artifactory on a VPN is the ordinary shape) publishes its own
+    // build of this package there; probing the public registry then
+    // finds a higher `latest` and the pinned install silently replaces
+    // the internal build with a public one nobody chose. That is a
+    // cross-registry package swap performed unattended - the supply-chain
+    // direction this guard exists to prevent, not one it is licensed to
+    // take. The version answer is safe to take from the public registry
+    // because it only decides what status reports; where the bytes come
+    // from is a different question, and the honest answer here is that
+    // the updater does not know.
+    if (registryOverrideIgnored) {
+      writeSelfUpdateState(stateRoot, { error: 'registry_untrusted' })
+      log('self_update.apply_refused', {
+        error_kind: 'registry_untrusted',
+        latest_version: latest,
+      })
+      return { action: 'checked', reason: 'registry_untrusted', latest }
+    }
 
     // Single-flight across processes, not just within one: the daemon's
-    // lane and a hand-typed `hyp update` can arrive together.
+    // lane and a hand-typed `hyp update` can arrive together. A lock this
+    // cannot take for a reason other than contention throws, landing on
+    // the outer catch with its errno in the log rather than reporting a
+    // rival process that does not exist.
     const releaseLock = acquireApplyLock(stateRoot)
     if (!releaseLock) {
       log('self_update.apply_locked', { latest_version: latest })
@@ -577,6 +744,12 @@ export async function runSelfUpdatePass(opts = {}) {
         name: identity.name,
         version: latest,
         packageRoot: opts.packageRoot,
+        // Untouched: the only override that reaches here is one the probe
+        // believed, so npm resolving the tarball through it is the same
+        // answer this pass already used for the version. An untrusted one
+        // never reaches here at all (the refusal above), and an env with
+        // no override leaves an `.npmrc`-configured private registry
+        // serving the install exactly as it always has.
         env,
         runner: opts.runner,
       })
@@ -614,7 +787,7 @@ export async function runSelfUpdatePass(opts = {}) {
  * carries the full picture for `--json`.
  *
  * @ref LLP 0309#cli-surface [implements]: an install that cannot self-update says so in status, never only in logs
- * @param {{ stateRoot: string, env: NodeJS.ProcessEnv }} opts
+ * @param {{ stateRoot: string, env: NodeJS.ProcessEnv, now?: () => Date }} opts
  * @returns {{ line: string | null, json: Record<string, unknown> }}
  */
 export function describeSelfUpdate(opts) {
@@ -653,6 +826,12 @@ export function describeSelfUpdate(opts) {
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
     ...(available !== undefined ? { available } : {}),
     ...(state.error ? { error: state.error } : {}),
+    // The quiet below defers diagnosis to `--json`, and `error_since` is
+    // what decides how much longer the quiet lasts. Reporting the error
+    // without it leaves the one question a diagnosing operator has (why
+    // is this not in the status line, and when will it be) unanswerable
+    // from the surface that exists to answer it.
+    ...(state.error_since ? { error_since: state.error_since } : {}),
   }
   // The text line derives only from the shared state file: the process
   // rendering status (an npx run, a checkout) is not necessarily the
@@ -661,7 +840,19 @@ export function describeSelfUpdate(opts) {
   if (autoUpdate === false) {
     return { line: 'self-update: off (auto_update is false)', json }
   }
-  if (state.error) {
+  // A probe failure is usually just a laptop off the network, and it
+  // clears itself on the next successful check. Rendering it would put
+  // a degraded line on every `hyp status` for the length of a flight.
+  // It stays in `json` for anyone actually diagnosing the updater. The
+  // reprieve is bounded: past `PROBE_QUIET_MS` this is not a trip, it is
+  // an updater that will never run again, and #cli-surface says status
+  // is where that has to show. A non-string `error` (the state file is
+  // read total, never validated) is not a probe failure and must not
+  // throw here: `hyp status` renders it rather than dying on it.
+  const quietProbeFailure = typeof state.error === 'string' &&
+    state.error.startsWith('probe_failed') &&
+    !probeFailureIsEntrenched(state, (opts.now ?? (() => new Date()))().getTime())
+  if (state.error && !quietProbeFailure) {
     return {
       line: `self-update: degraded (${state.error}); run 'hyp update' or 'npm install -g ${identity.name}@latest'`,
       json,
@@ -671,6 +862,23 @@ export function describeSelfUpdate(opts) {
     return { line: `self-update: ${state.latest_version} available (running ${identity.version})`, json }
   }
   return { line: null, json }
+}
+
+/**
+ * Has this run of probe failures outlived the reprieve? Unknown or
+ * unparseable `error_since` reads as "just started": a state file written
+ * by an older kernel has no such field, and nagging on the strength of a
+ * missing timestamp is the failure mode this reprieve exists to avoid.
+ *
+ * @param {SelfUpdateState} state
+ * @param {number} nowMs
+ * @returns {boolean}
+ */
+function probeFailureIsEntrenched(state, nowMs) {
+  if (typeof state.error_since !== 'string') return false
+  const since = Date.parse(state.error_since)
+  if (Number.isNaN(since)) return false
+  return nowMs - since >= PROBE_QUIET_MS
 }
 
 /** @type {CommandRunner} */
