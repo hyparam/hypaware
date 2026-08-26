@@ -220,17 +220,57 @@ export function planSystemdInstall(options) {
 }
 
 /**
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function defaultSleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms) })
+}
+
+const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
+const SPAWN_POLL_INTERVAL_MS = 100
+
+/**
+ * Poll `systemctl --user show <unit>` until it reports a live MainPID, or
+ * the bound elapses. `restart` returning 0 on a `Type=simple` unit means
+ * systemd accepted the job, not that a process is running, so the pid is
+ * the only thing that answers "is the daemon up".
+ *
+ * @param {SystemctlAdapter} systemctl
+ * @param {string} unitName
+ * @param {(ms: number) => Promise<void>} sleep
+ * @returns {Promise<number | undefined>} the MainPID, or undefined if it never ran
+ */
+async function waitForMainPid(systemctl, unitName, sleep) {
+  for (let i = 0; i < SPAWN_POLL_ATTEMPTS; i += 1) {
+    const res = await systemctl.show(unitName)
+    if (res.exitCode === 0) {
+      const pid = parsePid(parseShowOutput(res.stdout).MainPID)
+      if (pid !== undefined) return pid
+    }
+    await sleep(SPAWN_POLL_INTERVAL_MS)
+  }
+  return undefined
+}
+
+/**
  * Install or refresh a HypAware systemd user unit. Writes the unit
  * file atomically, runs `daemon-reload` so systemd picks up the new
  * content, then `enable` for persistence and `restart` to (re)start
  * the service.
  *
- * @param {PlanSystemdInstallOptions & { systemctl?: SystemctlAdapter }} options
+ * The install does not return until the unit is observably running: it
+ * polls for a MainPID and re-issues `start` once before giving up, so
+ * "install succeeded" carries the same promise it does on macOS.
+ *
+ * @param {PlanSystemdInstallOptions & { systemctl?: SystemctlAdapter, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<SystemdInstallPlan>}
+ * @ref LLP 0317#install-means-running [implements]: a started unit with no MainPID is a failed install, not a successful one
  */
 export async function installSystemdUnit(options) {
   const plan = planSystemdInstall(options)
   const systemctl = options.systemctl ?? realSystemctl
+  const sleep = options.sleep ?? defaultSleep
 
   fs.mkdirSync(plan.unitDir, { recursive: true })
   fs.mkdirSync(plan.logDir, { recursive: true })
@@ -240,6 +280,20 @@ export async function installSystemdUnit(options) {
   ensure(await systemctl.daemonReload(), 'systemctl --user daemon-reload')
   ensure(await systemctl.enable(plan.unitName), `enable ${plan.unitName}`)
   ensure(await systemctl.restart(plan.unitName), `restart ${plan.unitName}`)
+
+  let pid = await waitForMainPid(systemctl, plan.unitName, sleep)
+  if (pid === undefined) {
+    // `start` on an already-active unit is a no-op, so this costs nothing
+    // when the restart did take and is the one retry worth spending.
+    const startRes = await systemctl.start(plan.unitName)
+    pid = await waitForMainPid(systemctl, plan.unitName, sleep)
+    if (pid === undefined) {
+      throw new SystemdUnitError(
+        `started ${plan.unitName} but systemd never reported a running process`,
+        { exitCode: startRes.exitCode, stderr: startRes.stderr },
+      )
+    }
+  }
 
   return plan
 }

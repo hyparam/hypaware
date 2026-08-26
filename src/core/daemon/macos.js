@@ -241,6 +241,8 @@ const UNLOAD_POLL_ATTEMPTS = 30 // ~3s ceiling at 100ms each
 const UNLOAD_POLL_INTERVAL_MS = 100
 const BOOTSTRAP_MAX_RETRIES = 3
 const BOOTSTRAP_RETRY_PAUSE_MS = 150
+const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
+const SPAWN_POLL_INTERVAL_MS = 100
 
 /**
  * Poll `launchctl print <target>` until the agent is gone (non-zero exit)
@@ -262,6 +264,29 @@ async function waitUntilUnloaded(launchctl, target, sleep) {
 }
 
 /**
+ * Poll `launchctl print <target>` until launchd reports a running pid, or
+ * the bound elapses. This answers "did the job actually spawn", which is a
+ * different question from "is the job loaded": a bootstrapped job whose
+ * initial spawn launchd left pended prints fine and has no pid.
+ *
+ * @param {LaunchctlAdapter} launchctl
+ * @param {string} target
+ * @param {(ms: number) => Promise<void>} sleep
+ * @returns {Promise<number | undefined>} the pid, or undefined if it never ran
+ */
+async function waitForRunningPid(launchctl, target, sleep) {
+  for (let i = 0; i < SPAWN_POLL_ATTEMPTS; i += 1) {
+    const res = await launchctl.print([target])
+    if (res.exitCode === 0) {
+      const pid = parsePrintedPid(res.stdout)
+      if (pid !== undefined) return pid
+    }
+    await sleep(SPAWN_POLL_INTERVAL_MS)
+  }
+  return undefined
+}
+
+/**
  * Is a failed bootstrap the transient EIO launchd returns while a prior
  * instance is still being released (`Bootstrap failed: 5: Input/output
  * error`)? Those are safe to retry; a genuine config/load error is not.
@@ -280,6 +305,10 @@ function isTransientBootstrapError(res) {
  * Bootstrap retries the transient EIO (`error 5`) launchd raises while an
  * unfinished teardown still holds the label, so a reinstall over a live
  * agent doesn't fail; genuine load errors still surface immediately.
+ *
+ * The install does not return until the agent is observably running: it
+ * kickstarts the bootstrapped label and polls for a pid, because a
+ * bootstrap alone can leave the initial RunAtLoad spawn pended forever.
  *
  * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<LaunchAgentInstallPlan>}
@@ -312,6 +341,21 @@ export async function installLaunchAgent(options) {
     bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
   }
   ensure(bootstrapRes, `bootstrap LaunchAgent ${plan.label}`)
+
+  // A plist written with RunAtLoad=false describes a deliberately dormant
+  // job; starting it here would override what the caller asked for.
+  if (options.runAtLoad !== false) {
+    // @ref LLP 0317#kickstart-then-verify [implements]: bootstrap only registers the job, so force the spawn and prove a pid before reporting success
+    const kickRes = await launchctl.kickstart([target])
+    const pid = await waitForRunningPid(launchctl, target, sleep)
+    if (pid === undefined) {
+      throw new LaunchAgentError(
+        `bootstrapped LaunchAgent ${plan.label} but launchd never started it`,
+        { exitCode: kickRes.exitCode, stderr: kickRes.stderr },
+      )
+    }
+  }
+
   return plan
 }
 
