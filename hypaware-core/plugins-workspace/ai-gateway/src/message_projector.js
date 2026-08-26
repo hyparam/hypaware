@@ -1424,6 +1424,11 @@ function buildGatewayAttributes(exchange) {
     upstream: stringValue(exchange.upstream),
     method: stringValue(exchange.method ?? undefined),
     path: stringValue(exchange.path ?? undefined),
+    // Set iff the gateway rerouted the request off the path it arrived on,
+    // which makes the reroute a queryable fact on the message row rather
+    // than something only the exchange log knew.
+    // @ref LLP 0313#the-row-records-where-the-request-was-sent [implements]
+    upstream_path: readMetadataString(exchange, 'upstream_path'),
     status_code: exchange.status_code ?? undefined,
     request_bytes: exchange.request_bytes ?? undefined,
     response_bytes: exchange.response_bytes ?? undefined,
@@ -1493,6 +1498,17 @@ function utcDate(value) {
   const date = new Date(typeof value === 'bigint' ? Number(value) : /** @type {any} */ (value))
   if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 10)
   return date.toISOString().slice(0, 10)
+}
+
+/**
+ * @param {AiGatewayExchangeInput} exchange
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function readMetadataString(exchange, key) {
+  const metadata = parseMaybeJson(exchange.metadata)
+  if (!isPlainObject(metadata)) return undefined
+  return stringValue(metadata[key])
 }
 
 /** @param {AiGatewayExchangeInput} exchange */

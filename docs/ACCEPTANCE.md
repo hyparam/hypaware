@@ -1055,6 +1055,193 @@ two-layer drift detection this discharges),
 
 ---
 
+## `codex_login_switch_reroute`
+
+**What it proves:** that a Codex user can switch login mode (ChatGPT
+subscription to API key) and the very next turn works, with no re-attach, no
+daemon restart, and no `codex` restart, because the gateway routes on the
+credential the request carries (LLP 0313). It also proves the half a fixture
+cannot: that `api.openai.com/v1/responses` accepts the body Codex builds for
+the neutral provider block, and that the rewritten path is one the OpenAI
+platform actually serves.
+
+**What it does not prove:** anything about a machine still pinned at the old
+`/v1` `base_url` (an install that has not re-attached since the upgrade). A
+subscription token arriving on `/v1` is not recoverable from the request, per
+LLP 0313 #sk-never-reaches-chatgpt: only re-running `hyp client attach codex`
+moves such a machine onto the neutral prefix, and it has to be run with the
+daemon up (with no live endpoint to compare against, attach reports
+`already attached` and rewrites nothing).
+
+That re-attach is **manual**. The reconciler will not do it for you: an attach
+marker goes stale on gateway-endpoint drift, on the asset set, and on Claude's
+attach mode, and a route change moves none of the three, so an already-enrolled
+machine keeps whatever `base_url` its last attach wrote. Machines attached in
+subscription mode were already on `/backend-api/codex` and are unaffected;
+machines attached in API-key mode sit at `/v1` until someone re-attaches them
+by hand. Do not read a passing run of this procedure as evidence that enrolled
+fleets migrated. Step 8 below exercises the
+API-key-back-to-subscription switch, which IS covered once the neutral prefix
+is in place. Nor does it prove anything about Codex Desktop, which shares
+`config.toml` and is covered by `codex_desktop_capture`.
+
+**Requires:** a machine with the Codex CLI installed and **both** credentials
+available: a ChatGPT account you can `codex login` with, and an OpenAI
+platform API key. HypAware installed from the package under test. Note the
+`codex --version` you ran against and record it in the release notes: this
+procedure is a check against upstream drift, so a passing run is only
+evidence about the version it was run on.
+
+**Related:** [LLP 0313](../llp/0313-codex-routes-by-credential.decision.md),
+[LLP 0099](../llp/0099-codex-attach-auth-route.decision.md) (superseded).
+
+### Steps
+
+1. Log in with the **subscription** and attach:
+
+   ```sh
+   codex login                       # the ChatGPT subscription flow
+   hyp client attach codex
+   grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml"
+   hyp status
+   ```
+
+   The provider block must read exactly:
+
+   ```toml
+   name = "HypAware Codex Gateway"
+   base_url = "http://127.0.0.1:<port>/backend-api/codex"
+   ```
+
+   If `base_url` ends in `/v1`, or `name` mentions ChatGPT or OpenAI, you are
+   not running the build under test. Stop.
+
+2. Mark the window and note the row count, so later steps measure only new
+   traffic. `$SINCE` has to be taken BEFORE step 3, because step 6 compares
+   the subscription rows and the rerouted ones in one result:
+
+   ```sh
+   SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   hyp query sql "select count(*) from ai_gateway_messages"
+   ```
+
+3. Hold a short conversation with `codex` and let it answer. **This is the
+   half that must not regress**: subscription traffic is forwarded byte for
+   byte, unrewritten, exactly as before.
+
+   ```sh
+   hyp query sql "select provider, count(*) from ai_gateway_messages group by provider"
+   ```
+
+   Pass: new rows, and they carry `provider = 'chatgpt'`.
+
+4. Now switch credentials **without touching anything else**. Do not
+   re-attach, do not restart the daemon, and leave `config.toml` alone:
+
+   Save the provider block in step 1 first, so there is something to compare
+   against:
+
+   ```sh
+   # ...before step 4, right after the grep in step 1:
+   grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" > /tmp/codex-provider-before
+
+   codex login --api-key "sk-..."    # or however this Codex spells it
+   grep -A4 'model_providers.hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+     | diff /tmp/codex-provider-before -
+   ```
+
+   Confirm `config.toml` is unchanged from step 1 (`diff` prints nothing and
+   exits 0). If HypAware rewrote it,
+   the neutral URL is not doing its job and this procedure is measuring the
+   old repair path instead of the new routing.
+
+5. Hold another short conversation with `codex`. **Do not restart `codex`
+   first** if you can avoid it: the point of routing per request is that a
+   running client keeps working. Note whether you restarted, and record it.
+
+   Pass: the turn completes normally, with a real answer. A 401 mentioning
+   scopes means the request still went to `chatgpt.com`; a 404 means it
+   reached OpenAI at the wrong path.
+
+6. Confirm the reroute was recorded, and recorded honestly:
+
+   ```sh
+   hyp query sql "
+     select provider,
+            json_extract_string(attributes, '$.gateway.path')          as arrived_at,
+            json_extract_string(attributes, '$.gateway.upstream_path')  as sent_to,
+            count(*)
+     from ai_gateway_messages
+     where message_created_at >= '$SINCE'
+     group by 1, 2, 3
+     order by 4 desc"
+   ```
+
+   Pass, all three together:
+
+   - the new rows carry `provider = 'openai'`, not `chatgpt`. The column
+     names the wire the request was sent on;
+   - `arrived_at` is `/backend-api/codex/responses`, the door it came in at;
+   - `sent_to` is `/v1/responses`, the wire it left on. This is the queryable
+     reroute marker, and it is null for every row from step 3.
+
+7. Confirm the message content actually projected, rather than landing as an
+   unparsed exchange:
+
+   ```sh
+   hyp query sql "
+     select role, left(content_text, 60)
+     from ai_gateway_messages
+     where provider = 'openai' and message_created_at >= '$SINCE'
+     order by message_created_at desc limit 6"
+   ```
+
+   Pass: both a `user` and an `assistant` row with real text. The projector
+   reads the **inbound** path to choose the body shape, so this is what
+   proves the reroute did not confuse it.
+
+8. Switch back to the subscription and hold one more conversation, to prove
+   the move is not one-way:
+
+   ```sh
+   codex login
+   ```
+
+   Pass: the turn completes and its rows carry `provider = 'chatgpt'` with a
+   null `sent_to`.
+
+### If it fails
+
+- **Step 5 returns a 401 about missing scopes.** The request still reached
+  `chatgpt.com`, so the credential rung did not fire. Check the gateway saw
+  the key at all - the gateway facts live in `attributes`, not in columns of
+  their own, so read them with `json_extract_string(attributes,
+  '$.gateway.path')` and `json_extract_string(attributes,
+  '$.gateway.status_code')`.
+  The likeliest causes are an operator config that declares an upstream named
+  `openai-codex` (it must not), and a Codex that sends its key in something
+  other than the `Authorization` header - the credential test reads that
+  header only, though it does tolerate a missing or malformed scheme within
+  it. Never paste the key itself into an issue, a log, or a query.
+- **Step 5 returns a 404.** The host was right and the path was wrong, so the
+  rewrite did not apply. Check `aigw.path_rewritten` in the daemon log: it
+  names the upstream and both pathnames, and its absence means the matched
+  upstream carried no rewrite.
+- **Step 5 fails with a body or schema error from OpenAI.** This is the
+  residual the design named and could not settle offline: the body Codex
+  builds for this provider block is not one `/v1/responses` accepts. That is
+  a real finding, not a flake. Record the exact error, the `codex --version`,
+  and the request body shape, and treat it as a blocker for the release.
+- **Step 6 shows `provider = 'chatgpt'` on rows that succeeded.** Routing
+  worked and recording did not. The row must describe the wire it was sent
+  on; a wrong value here yields a confident wrong number in cost attribution
+  rather than an error, so do not wave it through.
+- **Step 3 regresses (subscription traffic stops working).** Stop and revert.
+  The neutral prefix exists precisely so the working direction is never
+  rewritten, and a break there is worse than the bug being fixed.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

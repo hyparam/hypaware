@@ -1981,6 +1981,26 @@ export interface AiGatewayUpstreamPreset {
   path_prefix?: string
   priority?: number
   match?(input: AiGatewayRouteInput): boolean
+  /**
+   * Rewrite the inbound path prefix before the request is forwarded, for
+   * an upstream whose own path shape differs from the door the request
+   * arrived on. Declarative data rather than a callback so core can print
+   * the whole routing rule, validate it at registration, and fix it at
+   * startup (LLP 0313).
+   */
+  rewrite?: AiGatewayUpstreamPathRewrite
+}
+
+/**
+ * A single path-prefix swap. `from` must be a path-segment prefix the
+ * upstream owns (equal to, or under, its `path_prefix` when it declares
+ * one); `to` replaces it and the rest of the path is carried verbatim,
+ * query string included. A request whose path is not under `from` is
+ * forwarded unchanged.
+ */
+export interface AiGatewayUpstreamPathRewrite {
+  from: string
+  to: string
 }
 
 /**

@@ -125,6 +125,11 @@ Written acceptance procedures:
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
   attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+- `codex_login_switch_reroute`: opt-in/manual, needs the Codex CLI and both a
+  ChatGPT subscription and an OpenAI API key. Proves a login switch needs no
+  re-attach, no daemon restart, and no client restart, and proves the half a
+  fixture cannot: that `api.openai.com/v1/responses` accepts the body Codex
+  builds for the neutral provider block. See `docs/ACCEPTANCE.md`.
 - `openclaw_capture`: opt-in/manual, needs OpenClaw with both `anthropic` and
   `openai` credentials. Proves both capture lanes (live gateway and the
   scheduled transcript sweep) and that a turn both lanes observe settles to
