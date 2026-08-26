@@ -1747,18 +1747,66 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
  * regardless. A data file's grep sidecar dies with it.
  *
  * Metadata staging names a crashed publish left behind are reclaimed here
- * too: they are referenced by nothing, so the referenced-set walk cannot
- * see them, and the grace window is the whole of their safety.
+ * too, in a pass that runs BEFORE the referenced-set walk: nothing
+ * references them, so the walk has nothing to say about them and its early
+ * returns must not take the one reclaimer they have with them. The grace
+ * window is the whole of their safety.
  *
  * @param {string} tableDir
  * @returns {Promise<number>} files removed
  */
 async function sweepUnreferencedTableFiles(tableDir) {
   if (!tableExists(tableDir)) return 0
+
+  let removed = 0
+  const now = Date.now()
+  /** @param {string} filePath */
+  const removeStale = (filePath) => {
+    try {
+      if (now - fs.statSync(filePath).mtimeMs <= ORPHAN_GRACE_MS) return
+      fs.rmSync(filePath, { force: true })
+      removed++
+    } catch { /* stat/remove race: a later tick retries */ }
+  }
+
+  const metadataDir = path.join(tableDir, 'metadata')
+  /** @type {string[]} */
+  let metaNames
+  try {
+    metaNames = fs.readdirSync(metadataDir)
+  } catch {
+    metaNames = []
+  }
+
+  // A staged write that never got to publish, or published and then lost the
+  // race to unlink its own staging name. On the source-table layout no
+  // generation directory is ever retired out from under it, so this sweep is
+  // the only reclaimer it has, and nothing else in the tree even looks at the
+  // name: it survives every clause of the metadata loop below by falling
+  // through all of them.
+  //
+  // It runs HERE, ahead of the referenced-set walk, rather than in that loop.
+  // Every other candidate the sweep weighs is a file some snapshot might
+  // name, so the walk returns early rather than guess when it cannot build
+  // the set. A staging name is unreferenced by construction, so the set has
+  // nothing to say about it, and the reachable early return is the ordinary
+  // one: a table whose metadata is on disk with no snapshot committed yet
+  // never reaches the metadata loop at all.
+  //
+  // `removeStale`'s grace window is what keeps this off a write still in
+  // flight, and it is sufficient HERE and only here: every publish into
+  // `metadata/` holds its staged file open for milliseconds. The one writer
+  // that stays open across a whole rewrite with a stale mtime (LLP 0209
+  // #descriptor-parking) stages under `data/`, which this pass never reads.
+  // @ref LLP 0316#staged-writes-are-reclaimed [implements]: the only reclaimer the leak has must not be gated on a referenced set it does not need.
+  for (const name of metaNames) {
+    if (isStagedWriteName(name)) removeStale(path.join(metadataDir, name))
+  }
+
   const { resolver, lister } = await createLocalIcebergIO()
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
   const snapshots = metadata.snapshots ?? []
-  if (snapshots.length === 0) return 0
+  if (snapshots.length === 0) return removed
 
   /** @type {Set<string>} */
   const referenced = new Set()
@@ -1775,7 +1823,9 @@ async function sweepUnreferencedTableFiles(tableDir) {
     } catch {
       // An unreadable manifest list means an unknown referenced set: keep
       // everything rather than delete a file a snapshot may still name.
-      return 0
+      // `removed`, not 0: the staging pass above answers to no referenced
+      // set and has already run.
+      return removed
     }
     for (const manifest of manifests) {
       referenced.add(path.basename(manifest.manifest_path))
@@ -1788,24 +1838,13 @@ async function sweepUnreferencedTableFiles(tableDir) {
           await fetchAvroRecords(manifest.manifest_path, resolver, Number(manifest.manifest_length))
         )
       } catch {
-        return 0
+        return removed
       }
       // Every status, including DELETED: an entry that still appears in a
       // retained snapshot's manifest names a file a time-travel read of
       // that snapshot's ancestors may resolve. Conservative is cheap here.
       for (const entry of entries) referenced.add(path.basename(entry.data_file.file_path))
     }
-  }
-
-  let removed = 0
-  const now = Date.now()
-  /** @param {string} filePath */
-  const removeStale = (filePath) => {
-    try {
-      if (now - fs.statSync(filePath).mtimeMs <= ORPHAN_GRACE_MS) return
-      fs.rmSync(filePath, { force: true })
-      removed++
-    } catch { /* stat/remove race: a later tick retries */ }
   }
 
   const dataDir = path.join(tableDir, 'data')
@@ -1834,14 +1873,6 @@ async function sweepUnreferencedTableFiles(tableDir) {
     if (dataNames.has(sidecar)) removeStale(path.join(dataDir, sidecar))
   }
 
-  const metadataDir = path.join(tableDir, 'metadata')
-  /** @type {string[]} */
-  let metaNames
-  try {
-    metaNames = fs.readdirSync(metadataDir)
-  } catch {
-    metaNames = []
-  }
   const versions = metaNames
     .map((name) => ({ name, version: /^v(\d+)\.metadata\.json$/.exec(name)?.[1] }))
     .filter((entry) => entry.version !== undefined)
@@ -1849,19 +1880,8 @@ async function sweepUnreferencedTableFiles(tableDir) {
   const keptVersions = new Set(versions.slice(0, METADATA_VERSIONS_KEPT).map((entry) => entry.name))
   for (const name of metaNames) {
     if (name === 'version-hint.text') continue
-    // A staged write that never got to publish, or published and then lost
-    // the race to unlink its own staging name. Nothing reads it - it names
-    // no version and no manifest - so it survives every other clause in this
-    // loop by falling through them, which is precisely why it needed a
-    // clause of its own: on the source-table layout no generation directory
-    // is ever retired out from under it, so this sweep is the only reclaimer
-    // it has. `removeStale`'s grace window is what keeps the clause off a
-    // write that is still in flight.
-    // @ref LLP 0316#staged-writes-are-reclaimed [implements]: an in-place layout retires no directory, so the leak needs a sweep.
-    if (isStagedWriteName(name)) {
-      removeStale(path.join(metadataDir, name))
-      continue
-    }
+    // Already offered to the sweep above, before the referenced-set walk.
+    if (isStagedWriteName(name)) continue
     if (/\.metadata\.json$/.test(name)) {
       if (!/^v\d+\.metadata\.json$/.test(name)) continue
       if (keptVersions.has(name)) continue

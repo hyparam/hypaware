@@ -533,3 +533,49 @@ test('the sweep reclaims a staged metadata write a crashed publish left behind',
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: every other candidate the
+// sweep considers needs the referenced set, so the walk that builds it returns
+// early rather than delete a file a snapshot might name. A staging name needs
+// nothing from that set, and a table with no snapshots at all is the reachable
+// case where gating it behind the walk means the leak's only reclaimer never
+// runs: `hyp` created the table and died before the first append committed.
+test('a staged metadata write is reclaimed on a table that has no snapshots yet', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-nosnap-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+
+    // Wind the table back to the shape a created-but-never-appended table
+    // has: metadata on disk, no snapshot to walk.
+    const hint = (await fs.readFile(path.join(metadataDir, 'version-hint.text'), 'utf8')).trim()
+    const currentVersion = `v${hint}.metadata.json`
+    const meta = JSON.parse(await fs.readFile(path.join(metadataDir, currentVersion), 'utf8'))
+    meta.snapshots = []
+    meta['snapshot-log'] = []
+    meta['current-snapshot-id'] = -1
+    meta.refs = {}
+    await fs.writeFile(path.join(metadataDir, currentVersion), JSON.stringify(meta))
+
+    const leak = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(leak, 'staged bytes that never published')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(leak, stale, stale)
+
+    const swept = await maintainCache({ cacheRoot })
+
+    assert.equal(swept.partitions[0].failed ?? false, false, 'the tick reaches the sweep')
+    assert.equal(await pathExists(leak), false, 'the staged leak is reclaimed with no referenced set to consult')
+    assert.equal(
+      await pathExists(path.join(metadataDir, 'version-hint.text')), true,
+      'the version hint survives'
+    )
+    assert.equal(
+      await pathExists(path.join(metadataDir, currentVersion)), true,
+      `${currentVersion} survives`
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

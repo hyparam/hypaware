@@ -105,12 +105,33 @@ generation-swap rewrite did.
 
 The unreferenced-file sweep therefore recognizes the staging suffix and
 reclaims it, under the same `ORPHAN_GRACE_MS` window it applies to every
-other candidate. The window is the whole of the safety argument: a staging
-file younger than the grace may belong to a write still in flight (a parked
-streaming writer holds one open across a whole rewrite), and a file older
-than it cannot, because no publish path leaves one open that long. The
-pattern lives with the writer that mints the name, so producer and
-recognizer cannot drift apart.
+other candidate. The pattern lives with the writer that mints the name, so
+producer and recognizer cannot drift apart.
+
+Two things bound that clause, and both are load-bearing.
+
+It runs BEFORE the referenced-set walk, not inside the metadata loop after
+it. Every other candidate the sweep weighs is a file some snapshot might
+name, so the walk returns early and deletes nothing rather than guess when
+it cannot build the set. A staging name is unreferenced by construction, so
+the set has nothing to say about it, and the reachable early return is the
+most ordinary one there is: a table with metadata on disk and no snapshot
+committed yet - `hyp` created it and died before the first append - returns
+before the metadata loop ever runs. That is also precisely the table most
+likely to be carrying a stranded staging name from the create that made it.
+Gated behind the walk, the leak's only reclaimer never runs there at all.
+
+It reads only `metadata/`. There the grace window is enough on its own:
+every publish into that directory opens its staged file and links it within
+milliseconds, so a staged name an hour old cannot belong to a live write.
+That is not true of `data/`, and the difference is not a detail. A parked
+streaming writer (LLP 0209#descriptor-parking) holds a staged data file
+across a whole rewrite with its descriptor returned and no writes landing on
+it, so its mtime goes stale while the write is very much in flight; unlinking
+it would not fail the write, because `openTmp` reopens the name in append
+mode and recreates it empty, and `finish` would then publish a truncated
+data file and commit it with no error. The `data/` staging leak is real and
+wants its own reclaimer, but it wants a liveness test, not this grace window.
 
 ## Consequences {#consequences}
 
@@ -123,6 +144,9 @@ recognizer cannot drift apart.
 - The metadata directory has one fewer unbounded growth term. It was small
   in absolute size, but it was the only leak in that directory with no
   reclaimer at all.
+- The sweep now has two passes with different preconditions. Reordering the
+  staging pass behind the referenced-set walk, or reusing its grace window
+  for `data/`, each reintroduces a defect this doc names.
 - Anything that later wants to publish cache metadata by another route
   (a different writer, a remote catalog) has to state which of `link`'s two
   jobs it is taking over. Taking over the "move it into place" half alone
@@ -137,8 +161,9 @@ recognizer cannot drift apart.
   `#metadata-dueness` for the metadata-size trigger now being the epoch
   layout's alone.
 - [LLP 0209](./0209-compaction-file-size.decision.md): `#row-groups` and
-  `#descriptor-parking` for why a staged file can stay open across a whole
-  rewrite, which is what the sweep's grace window has to outlast.
+  `#descriptor-parking` for the parked writer that can hold a staged
+  `data/` file open across a whole rewrite, which is why the sweep's grace
+  window is sufficient in `metadata/` and would not be in `data/`.
 - [LLP 0022](./0022-iceberg-export-partitioning.spec.md): the export path's
   conditional-commit and `412` behavior, which this is the cache-local
   counterpart of.
