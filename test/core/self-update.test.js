@@ -95,10 +95,18 @@ test('a *.localhost registry over plain http is not on this machine on the stren
   // off-box registry whose answer decides whether this install ever
   // updates again. Only the literal name and the IP literals are decided
   // from the name alone.
+  //
+  // The rooted spelling `localhost.` is refused for the same reason, not
+  // as collateral: a trailing dot is precisely what stops glibc answering
+  // the name from `/etc/hosts` (`getent hosts localhost.` is empty on a
+  // box where `getent hosts localhost` answers `::1`), so it is decided by
+  // DNS exactly like the suffix case.
   for (const suffixed of [
     'http://npm.localhost',
     'http://npm.localhost:4873',
     'http://evil.localhost.',
+    'http://localhost.',
+    'http://LOCALHOST./',
   ]) {
     assert.equal(
       resolveRegistryUrl({ npm_config_registry: suffixed }),
@@ -122,9 +130,9 @@ test('a *.localhost registry over plain http is not on this machine on the stren
 test('the loopback set is matched in the form URL leaves it in', () => {
   // `URL` re-serializes an IPv4-mapped literal in hex, so a spelling
   // check on the raw text refuses a mapped-loopback Verdaccio that is
-  // plainly on this machine; a trailing root dot names the same host and
-  // survives parsing. Both fail closed, so this is a usability fix, not
-  // a hole.
+  // plainly on this machine. This one is safe to match because the
+  // address decides its own destination: no resolver is consulted, which
+  // is what separates it from the rooted `localhost.` refused above.
   assert.equal(
     resolveRegistryUrl({ npm_config_registry: 'http://[::ffff:127.0.0.1]:4873' }),
     'http://[::ffff:7f00:1]:4873'
@@ -133,13 +141,18 @@ test('the loopback set is matched in the form URL leaves it in', () => {
     resolveRegistryUrl({ npm_config_registry: 'http://[::ffff:127.1.2.3]' }),
     'http://[::ffff:7f01:203]'
   )
-  assert.equal(
-    resolveRegistryUrl({ npm_config_registry: 'http://localhost./' }),
-    'http://localhost.'
-  )
   // Mapped is not a way off the machine: only 127.0.0.0/8 in a v6 coat
-  // counts, and a mapped public address stays refused.
-  for (const remote of ['http://[::ffff:8.8.8.8]', 'http://[::ffff:192.168.1.9]']) {
+  // counts, and the high byte is read from the whole 16-bit group, so a
+  // short first group (`::ffff:7f:1` is 0.127.0.1) is not 127-anything.
+  for (const remote of [
+    'http://[::ffff:8.8.8.8]',
+    'http://[::ffff:192.168.1.9]',
+    'http://[::ffff:126.255.255.255]',
+    'http://[::ffff:128.0.0.1]',
+    'http://[::ffff:7f:1]',
+    'http://[::ffff:0:1]',
+    'http://[::]',
+  ]) {
     assert.equal(
       resolveRegistryUrl({ npm_config_registry: remote }),
       'https://registry.npmjs.org',
@@ -1321,13 +1334,50 @@ test('the degraded line for a refused registry does not hand back the refused re
     assert.match(line, /degraded \(registry_untrusted\)/)
     assert.ok(!line.includes('npm install -g'), line)
     assert.match(line, /npm_config_registry/)
-    assert.match(line, /https URL/)
+    // Two refusals share this one error string: an override the updater
+    // will not install from, and two spellings of the variable that
+    // disagree (logged as `registry_ambiguous`, stored as this). Telling
+    // the second to "set it to an https URL" is unactionable, because its
+    // two values are usually https already; "a single https URL" repairs
+    // either one.
+    assert.match(line, /single https URL/)
 
     // Every other error keeps the generic advice, which is right for them.
     writeSelfUpdateState(dir, { error: 'apply_failed: npm exited 1' })
     const generic = describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? ''
     assert.match(generic, /degraded \(apply_failed: npm exited 1\)/)
     assert.match(generic, /npm install -g .+@latest/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('redacting a probe error takes the credential, not the rest of the message', async () => {
+  // The redaction also runs over the outer catch's arbitrary errors, which
+  // reach the service log and `hyp update`'s stderr, so it has to leave a
+  // diagnostic still readable. A URL body that ran to the next space would
+  // swallow whatever the message glued on after the closing quote and turn
+  // a structured error into a truncated one.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-tail-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const probe = async () => {
+      throw new Error('refused {"registry":"https://bot:hunter2@npm.corp.example/x","attempt":2}')
+    }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.ok(!error.includes('hunter2'), error)
+    assert.match(error, /npm\.corp\.example/)
+    // The tail survives: everything after the URL is still there.
+    assert.match(error, /"attempt":2\}$/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

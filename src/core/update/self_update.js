@@ -248,19 +248,29 @@ function trustedRegistryUrl(raw) {
  * degrades to the public registry with the `registry_untrusted` surface,
  * and `http://localhost` is right there.
  *
- * The names that do count are matched in the form `URL` leaves them in:
- * a trailing root dot survives parsing (`localhost.`), and an
- * IPv4-mapped literal is re-serialized in hex (`[::ffff:127.0.0.1]`
- * becomes `[::ffff:7f00:1]`), so a spelling check on the raw text would
- * refuse a mapped-loopback Verdaccio that is plainly on this machine.
+ * The rooted spelling `localhost.` does not count either, for the same
+ * reason and not merely by omission. A trailing dot is what stops glibc
+ * satisfying the name from `/etc/hosts` at all: `nss_files` compares the
+ * name literally, misses, and `nss_dns` then queries the absolute name,
+ * so `getent hosts localhost.` comes back empty on a box where
+ * `getent hosts localhost` answers `::1`. Accepting it would hand back
+ * exactly the DNS-decided plain-http trust the `*.localhost` refusal
+ * above exists to remove, and buy nothing for it: on that same box the
+ * probe cannot reach a rooted `localhost.` anyway (`ENOTFOUND`).
+ *
+ * What is matched in the form `URL` leaves it in is the IPv4-mapped
+ * literal, which is re-serialized in hex (`[::ffff:127.0.0.1]` becomes
+ * `[::ffff:7f00:1]`), so a spelling check on the raw text would refuse a
+ * mapped-loopback Verdaccio that is plainly on this machine. That one is
+ * safe to accept because the address decides its own destination: no
+ * resolver is consulted, and only 127.0.0.0/8 in a v6 coat matches.
  *
  * @param {string} hostname
  * @returns {boolean}
  */
 function isLoopbackHost(hostname) {
-  // `hostname` keeps the brackets on an IPv6 literal. A single trailing
-  // dot is the DNS root and names the same host.
-  const host = hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
+  // `hostname` keeps the brackets on an IPv6 literal.
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (host === 'localhost' || host === '::1') return true
   if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true
   // `::ffff:7f00:1` and friends: an IPv4-mapped address whose first
@@ -284,10 +294,17 @@ function isLoopbackHost(hostname) {
  * @returns {string}
  */
 function redactUrls(message) {
-  return message.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, (match) => {
+  // The URL body stops at whitespace and at the characters a serialized
+  // URL can never contain, because `URL` percent-encodes all of them
+  // (`"` `'` `<` `>` `` ` `` `\`). Running to the next space instead
+  // would swallow whatever the message glued on after a closing quote,
+  // and this also redacts the outer catch's arbitrary errors: a
+  // `{"registry":"<url>","attempt":2}` would lose its tail and stop
+  // being the diagnostic it was written to be.
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`\\]+/gi, (match) => {
     // Trailing sentence punctuation is not part of the URL; keep it so
     // the message still reads as a sentence.
-    const trail = /[.,;:!?)\]}'"]+$/.exec(match)?.[0] ?? ''
+    const trail = /[.,;:!?)\]}]+$/.exec(match)?.[0] ?? ''
     const body = trail ? match.slice(0, -trail.length) : match
     try {
       const url = new URL(body)
@@ -929,9 +946,17 @@ export function describeSelfUpdate(opts) {
     // be handing the operator the supply-chain swap the refusal exists
     // to prevent. `hyp update` already says the right thing here; this
     // says it too, shorter.
+    //
+    // The wording has to cover both refusals that land on this one error
+    // string: an override the updater will not fetch a tarball from, and
+    // two spellings of the variable that disagree (`registry_ambiguous`
+    // in the log, `registry_untrusted` in the state). "Set it to an https
+    // URL" is unactionable for the second, whose two values are usually
+    // https already; "a single https URL" is the instruction that repairs
+    // either one.
     const advice = state.error === 'registry_untrusted'
-      ? 'npm_config_registry points at a registry this updater will not install from; ' +
-        "set it to an https URL, or configure the registry in .npmrc, then run 'hyp update'"
+      ? 'npm_config_registry does not name a registry this updater will install from; ' +
+        "point it at a single https URL, or configure the registry in .npmrc, then run 'hyp update'"
       : `run 'hyp update' or 'npm install -g ${identity.name}@latest'`
     return { line: `self-update: degraded (${state.error}); ${advice}`, json }
   }
