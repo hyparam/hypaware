@@ -377,9 +377,11 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && /\[model_providers\.hypaware\]/.test(v)
     )
     expect.that(
-      'codex config: base_url points at the local gateway /v1',
+      // One neutral prefix in both auth modes, so a login switch cannot leave
+      // this line disagreeing with the credential Codex sends (LLP 0313).
+      'codex config: base_url points at the local gateway /backend-api/codex',
       afterFirstCodex,
-      (v) => typeof v === 'string' && /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\d+\/v1"/.test(v)
+      (v) => typeof v === 'string' && /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\d+\/backend-api\/codex"/.test(v)
     )
     expect.that(
       'codex config: wire_api = "responses" (Responses API support)',
@@ -480,9 +482,9 @@ export async function run({ harness, expect }) {
       (v) => v === 'attach'
     )
     expect.that(
-      'codex attach --json: base_url echoes gateway /v1 endpoint',
+      'codex attach --json: base_url echoes the neutral gateway endpoint',
       codexAttachJson?.base_url,
-      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(v)
+      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/backend-api\/codex$/.test(v)
     )
 
     await kernel.sources.stop('ai-gateway')

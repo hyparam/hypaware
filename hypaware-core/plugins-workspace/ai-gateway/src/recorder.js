@@ -132,6 +132,14 @@ export class Exchange {
     this.method = init.method
     /** @type {string | undefined} */
     this.path = init.path
+    /**
+     * The path the gateway forwarded on, set only when a routing rewrite
+     * moved it off `path`. Two genuinely different facts share this row:
+     * what shape the message was (the door it arrived at) and where the
+     * bytes went. @ref LLP 0313#the-row-records-where-the-request-was-sent
+     * @type {string | undefined}
+     */
+    this.upstreamPath = init.upstreamPath
     /** @type {Record<string, string | string[] | undefined>} */
     this.requestHeaders = redactHeaders(init.requestHeaders, redactSet)
     /** @type {Record<string, string | string[] | undefined>} */
@@ -354,6 +362,10 @@ export class Exchange {
     /** @type {Record<string, unknown>} */
     const metadata = {}
     if (devRunId) metadata.dev_run_id = devRunId
+    // Present iff the gateway rerouted this request, so "how many requests
+    // did the gateway reroute" is a query rather than an inference from a
+    // path/provider mismatch. @ref LLP 0313#the-row-records-where-the-request-was-sent
+    if (this.upstreamPath) metadata.upstream_path = this.upstreamPath
 
     /** @type {FinishedRow} */
     const row = {

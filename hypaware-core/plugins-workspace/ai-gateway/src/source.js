@@ -657,6 +657,12 @@ export function mergeUpstreams(configUpstreams, state) {
     if (hasPathPrefix) entry.path_prefix = preset.path_prefix
     if (typeof preset.priority === 'number') entry.priority = preset.priority
     if (hasMatch) entry.match = preset.match
+    // The outbound path swap travels with the preset that declared it, but
+    // NOT onto an operator's same-named config entry below: unlike
+    // `record_prefix` (a persistence anchor) a rewrite decides where the
+    // bytes go, which is the routing question config owns outright.
+    // @ref LLP 0313#the-rewrite-is-declarative-data [implements]
+    if (preset.rewrite) entry.rewrite = preset.rewrite
     const existing = merged.get(preset.name)
     if (!existing) {
       merged.set(preset.name, entry)

@@ -424,7 +424,7 @@ test('codex undo strips the managed blocks and restores model_provider byte-for-
     const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)
     assert.equal(result.restoredValue, 'openai')
-    assert.equal(result.removed, 'http://127.0.0.1:4388/v1')
+    assert.equal(result.removed, 'http://127.0.0.1:4388/backend-api/codex')
     assert.equal(result.settingsPath, configPath)
 
     assert.equal(await fs.readFile(configPath, 'utf8'), original)

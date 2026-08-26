@@ -35,6 +35,7 @@ import {
 } from './schema.js'
 import {
   partitionSpecForDeclaration,
+  sortColumnsForDeclaration,
   validatePartitionSpecStability,
 } from '../../iceberg/partition-spec.js'
 import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
@@ -128,6 +129,12 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
     const partitionSpec = declaration
       ? partitionSpecForDeclaration(declaration, schema)
       : options?.partitionSpec
+    // A declaration's lookup columns double as the table's sort order, so a
+    // column demoted from partitioning to sortOnly keeps its rows clustered
+    // and file/row-group bounds on it stay tight for pruning (LLP 0311).
+    const schemaNames = new Set(schema.fields.map((f) => f.name))
+    const sortColumns = options?.sortOrder ??
+      (declaration ? sortColumnsForDeclaration(declaration).filter((c) => schemaNames.has(c.column)) : undefined)
     try {
       await icebergCreateTable({
         catalog,
@@ -135,7 +142,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
         schema,
         formatVersion: 3,
         partitionSpec,
-        sortOrder: options?.sortOrder ? sortOrderForColumns(options.sortOrder, schema) : undefined,
+        sortOrder: sortColumns?.length ? sortOrderForColumns(sortColumns, schema) : undefined,
       })
     } catch (err) {
       if (!isCommitCollision(err)) throw err

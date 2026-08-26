@@ -372,6 +372,9 @@ export async function runQueryMaintain(argv, ctx) {
     // committed fallback rows too, so a manual sweep also closes the race.
     storage: ctx.storage,
     getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
+    // @ref LLP 0311#migration: the manual path runs the same one-time
+    // re-partition the daemon tick would.
+    getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')
@@ -382,6 +385,10 @@ export async function runQueryMaintain(argv, ctx) {
     const actions = []
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (p.repartitioned) actions.push('re-partitioned to the declared layout')
+    // @ref LLP 0311#migration: a deferred migration leaves the partition on
+    // its recorded layout, so the run must not read as "nothing to migrate".
+    if (p.repartitionDeferred) actions.push('re-partition deferred (target layout not derivable)')
     // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
     // rewrite; without this line the run reads as "nothing due".
     if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)

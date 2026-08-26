@@ -865,6 +865,59 @@ async function commitForeignReplace(tableDir) {
   await icebergRewrite({ catalog, tableUrl: tableUrlForDir(tableDir), targetFileRows: 100_000 })
 }
 
+/**
+ * The id of a table's current snapshot.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<string>}
+ */
+async function currentSnapshotId(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({
+    tableUrl: tableUrlForDir(tableDir), resolver, lister,
+  })
+  return String(metadata['current-snapshot-id'])
+}
+
+// A `replace` the kernel's own in-place compactor committed is not foreign.
+// Before LLP 0311 no cache table declared a sort order, so "replace +
+// declared sort order" could only be the server's compactor; the cache table
+// declares one now, and LLP 0310's in-place merge commits `replace` on it.
+// The cursor's recorded snapshot id is what still tells them apart.
+test('a replace this kernel committed in place is not recognized as foreign', async () => {
+  const cacheRoot = await makeTmpDir('maint-own-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same on-disk shape as the foreign case above; the only difference is
+    // that the cursor claims this snapshot as ours.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: {
+        compactedAt: '2026-08-08T00:00:00.000Z',
+        resettleBaselineFiles: 99,
+        inPlaceSnapshotId: await currentSnapshotId(epoch0),
+      },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalRebaselined, 0, 'our own replace must not be blessed as a foreign layout')
+    assert.equal(report.totalCompacted, 1, 'the partition gets the rewrite it is due')
+    assert.equal(readCursorSync(partDir).epoch, 1)
+    assert.equal((await readRowsFromTable(path.join(partDir, 'epoch=1'))).length, 3, 'lossless')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('a foreign sorted replace re-baselines the cursor instead of being rewritten', async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-replace')
   try {
