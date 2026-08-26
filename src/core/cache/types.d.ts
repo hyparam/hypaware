@@ -271,6 +271,14 @@ export interface MaintenanceOptions {
    * (LLP 0027 "Re-settle sweep").
    */
   getSettleHook?: (dataset: string) => DatasetSettleHook | undefined
+  /**
+   * Resolve a dataset's current `cachePartitioning` declaration, so the
+   * tick can detect a table whose recorded partition spec still carries a
+   * column the declaration has demoted to sortOnly, and run the one-time
+   * generation-swap re-partition (LLP 0311). Absent when the caller has no
+   * registry (tests, bare CLI paths); no migration runs without it.
+   */
+  getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined
 }
 
 /**
@@ -311,6 +319,15 @@ export interface MaintenancePartitionReport {
   // cursor baseline was moved to the live file count instead of rewriting
   // (LLP 0207). Mutually exclusive with `compacted`.
   rebaselined?: boolean
+  // The compaction was the one-time re-partition migration: the generation
+  // swap wrote the new generation under the declaration's partition spec
+  // and sort order instead of carrying the recorded ones (LLP 0311).
+  repartitioned?: boolean
+  // The re-partition was due but its target layout could not be derived
+  // from the table's metadata, so this tick deferred it. The partition
+  // still compacts in place under its recorded spec; the layout has not
+  // moved and the mismatch stands until a tick can read the metadata.
+  repartitionDeferred?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number

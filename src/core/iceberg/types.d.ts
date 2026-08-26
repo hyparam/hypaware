@@ -24,4 +24,12 @@ export interface CachePartitionField {
   column: string
   transform: 'identity' | 'day' | 'month' | 'year' | string
   required?: boolean
+  /**
+   * The column is a lookup/sort column only: it stays in the declared field
+   * order (seeding the export's within-partition sort and the cache table's
+   * sort order) but is excluded from the cache table's partition spec. A
+   * recorded spec that still partitions on a now-sortOnly column is a
+   * pending re-partition migration, not drift (LLP 0311).
+   */
+  sortOnly?: boolean
 }

@@ -782,12 +782,44 @@ export async function runDaemon(opts = {}) {
             // their uuid twin.
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
+            // @ref LLP 0311#migration: let the tick detect and run the
+            // one-time re-partition when a dataset's declaration demoted
+            // partition columns to sortOnly.
+            getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately
           // left fragmented was, until now, a span attribute and nothing
           // else, so an operator who did not have tracing on when the tick
           // ran had no way to find it at all.
+          // @ref LLP 0311#migration [implements]: the swap rewrites the
+          // user's live cache under a layout it has never held before, and
+          // it happens once per partition, ever. `repartitioned` is set on
+          // the span, but a tracer nobody was running when the tick fired
+          // records nothing, so the migration also gets a durable line: it
+          // is the only evidence afterwards that the layout moved, and when.
+          for (const p of report.partitions) {
+            if (!p.repartitioned) continue
+            fileLog.info('daemon.cache_repartitioned', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files_before: p.dataFilesBefore,
+              data_files_after: p.dataFilesAfter,
+              row_count: p.rowCount,
+            })
+          }
+          // The same argument, for the case where the layout did NOT move.
+          // A deferred migration is the state that most needs durable
+          // evidence: the mismatch stands, and without a line here the only
+          // record is a span attribute nobody was collecting.
+          for (const p of report.partitions) {
+            if (!p.repartitionDeferred) continue
+            fileLog.warn('daemon.cache_repartition_deferred', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files: p.dataFilesAfter,
+            })
+          }
           const skips = summarizeMaintenanceSkips(report)
           persist({ maintenance: skips })
           span.setAttribute('partitions_visited', skips.partitionsVisited)

@@ -292,16 +292,17 @@ export function aiGatewayDatasetRegistration(state) {
         fallback: 'unknown',
       },
       iceberg: {
-        // @ref LLP 0030#breaking: the required identity partition field
-        // is session_id (always present), not conversation_id (now
-        // nullable). @ref LLP 0022#within-partition-sort: these identity
-        // fields, in declared order, also seed the export sort order, so
-        // session_id leads the clustering and conversation_id rides along
-        // as a secondary thread-lookup sort key.
+        // @ref LLP 0311#date-partition [implements]: the cache partitions on
+        // date alone; the identity columns are sortOnly lookup columns, so
+        // the table sorts by them without the one-file-per-session floor.
+        // @ref LLP 0022#within-partition-sort: these identity fields, in
+        // declared order, still seed the export sort order (sortOnly does
+        // not affect the export), so session_id leads the clustering and
+        // conversation_id rides along as a secondary thread-lookup sort key.
         fields: [
-          { column: 'session_id', transform: 'identity', required: true },
-          { column: 'conversation_id', transform: 'identity' },
-          { column: 'cwd', transform: 'identity' },
+          { column: 'session_id', transform: 'identity', required: true, sortOnly: true },
+          { column: 'conversation_id', transform: 'identity', sortOnly: true },
+          { column: 'cwd', transform: 'identity', sortOnly: true },
           { column: 'date', transform: 'identity', required: true },
         ],
       },
