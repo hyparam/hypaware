@@ -122,8 +122,10 @@ likely to be carrying a stranded staging name from the create that made it.
 Gated behind the walk, the leak's only reclaimer never runs there at all.
 
 It reads only `metadata/`. There the grace window is enough on its own:
-every publish into that directory opens its staged file and links it within
-milliseconds, so a staged name an hour old cannot belong to a live write.
+every write into that directory opens its staged file and publishes it
+within milliseconds - by `link` for a conditional metadata version, by
+`rename` for a manifest, a manifest list, or the version hint - so a staged
+name an hour old cannot belong to a live write.
 That is not true of `data/`, and the difference is not a detail. A parked
 streaming writer (LLP 0209#descriptor-parking) holds a staged data file
 across a whole rewrite with its descriptor returned and no writes landing on
