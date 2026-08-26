@@ -187,18 +187,40 @@ test('install kickstarts the bootstrapped agent instead of trusting RunAtLoad', 
 
 test('install fails loudly when launchd never spawns the agent', async () => {
   const home = tmpHome('la-dead')
-  // Bootstrap and kickstart both report success; nothing ever runs.
-  const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
+  // Bootstrap and kickstart both answer; nothing ever runs. launchctl's own
+  // complaint is the only clue there is, so it has to reach the user.
+  const lc = fakeLaunchd({
+    spawnOnBootstrap: false,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Could not find service "com.hyperparam.hypaware" in domain for user',
+  })
 
   await assert.rejects(
     () => installLaunchAgent(darwinOpts(home, lc)),
     (err) => err instanceof Error
       && /never started it/.test(err.message)
-      // The CLI prints the message and nothing else, so the message is
-      // where "and here is the log that says why" has to live.
+      // The CLI prints the message and nothing else, so the message is where
+      // "why" and "here is the log that says more" both have to live.
+      && /Could not find service/.test(err.message)
       && /daemon\.err\.log/.test(err.message),
   )
   assert.equal(count(lc.calls, 'kickstart'), 1, 'tried to force the spawn before giving up')
+})
+
+test('a kickstart that errors over a job launchd did start is not a failed install', async () => {
+  const home = tmpHome('la-kick-noisy')
+  // kickstart exits non-zero and complains, but RunAtLoad already spawned the
+  // job. The pid is the gate, not the kickstart's exit code, so this installs.
+  const lc = fakeLaunchd({
+    spawnOnBootstrap: true,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Operation already in progress',
+  })
+
+  const plan = await installLaunchAgent(darwinOpts(home, lc))
+
+  assert.ok(fs.existsSync(plan.targetPath), 'plist written')
+  assert.equal(count(lc.calls, 'kickstart'), 1, 'forced the spawn without raising on its exit code')
 })
 
 test('an agent RunAtLoad already spawned installs cleanly and is not killed', async () => {
