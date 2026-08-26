@@ -12,6 +12,18 @@ import process from 'node:process'
  */
 
 /**
+ * Wait `ms` milliseconds. The delay both platform installers poll with,
+ * shared so they wait the same way and both take the same `options.sleep`
+ * test seam that makes those polls instant under the suite.
+ *
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+export function defaultSleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms) })
+}
+
+/**
  * Error raised when a service-manager operation (launchctl, systemctl)
  * fails. The platform modules subclass this so callers can still match
  * on the platform-specific name.

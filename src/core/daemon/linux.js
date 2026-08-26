@@ -10,7 +10,7 @@ import {
   defaultUnitDir,
   unitFileName,
 } from './platform.js'
-import { ServiceOpError, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -219,14 +219,6 @@ export function planSystemdInstall(options) {
   }
 }
 
-/**
- * @param {number} ms
- * @returns {Promise<void>}
- */
-function defaultSleep(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms) })
-}
-
 const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
 const SPAWN_POLL_INTERVAL_MS = 100
 
@@ -288,8 +280,14 @@ export async function installSystemdUnit(options) {
     const startRes = await systemctl.start(plan.unitName)
     pid = await waitForMainPid(systemctl, plan.unitName, sleep)
     if (pid === undefined) {
+      // Say why, and where to look next: `hyp daemon install` prints only
+      // the message, so a reason carried on the error alone never reaches
+      // the person this failure exists to tell (`ensureOk` folds it in too).
+      const why = (startRes.stderr || '').trim()
       throw new SystemdUnitError(
-        `started ${plan.unitName} but systemd never reported a running process`,
+        `started ${plan.unitName} but systemd never reported a running process`
+          + `${why ? `: ${why}` : ''}`
+          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')})`,
         { exitCode: startRes.exitCode, stderr: startRes.stderr },
       )
     }

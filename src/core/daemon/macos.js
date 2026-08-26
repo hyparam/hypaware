@@ -10,7 +10,7 @@ import {
   defaultPlistDir,
   plistFileName,
 } from './platform.js'
-import { ServiceOpError, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -229,14 +229,6 @@ export function planLaunchAgentInstall(options) {
   }
 }
 
-/**
- * @param {number} ms
- * @returns {Promise<void>}
- */
-function defaultSleep(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms) })
-}
-
 const UNLOAD_POLL_ATTEMPTS = 30 // ~3s ceiling at 100ms each
 const UNLOAD_POLL_INTERVAL_MS = 100
 const BOOTSTRAP_MAX_RETRIES = 3
@@ -342,15 +334,23 @@ export async function installLaunchAgent(options) {
   }
   ensure(bootstrapRes, `bootstrap LaunchAgent ${plan.label}`)
 
-  // A plist written with RunAtLoad=false describes a deliberately dormant
-  // job; starting it here would override what the caller asked for.
+  // RunAtLoad=false is the caller asking the installer not to start the
+  // job, so it does not force a spawn and does not demand a pid. Whether
+  // launchd runs it anyway is launchd's business: KeepAlive (this module's
+  // default) keeps a loaded job running whatever RunAtLoad says.
   if (options.runAtLoad !== false) {
     // @ref LLP 0317#kickstart-then-verify [implements]: bootstrap only registers the job, so force the spawn and prove a pid before reporting success
     const kickRes = await launchctl.kickstart([target])
     const pid = await waitForRunningPid(launchctl, target, sleep)
     if (pid === undefined) {
+      // Say why, and where to look next. `hyp daemon install` prints only
+      // the message, so a reason left on the error alone never reaches the
+      // person this failure exists to tell (`ensureOk` folds it in too).
+      const why = (kickRes.stderr || '').trim()
       throw new LaunchAgentError(
-        `bootstrapped LaunchAgent ${plan.label} but launchd never started it`,
+        `bootstrapped LaunchAgent ${plan.label} but launchd never started it`
+          + `${why ? `: ${why}` : ''}`
+          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')})`,
         { exitCode: kickRes.exitCode, stderr: kickRes.stderr },
       )
     }

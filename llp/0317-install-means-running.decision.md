@@ -1,7 +1,7 @@
 # LLP 0317: A daemon install that returns success has a running daemon
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Daemon
 **Generated-by:** neutral
 **Date:** 2026-08-26
@@ -65,10 +65,13 @@ already-active unit) and one more bounded poll before the install fails. One
 retry, not a loop: a unit that will not come up on two explicit starts is a
 broken unit, and `Restart=always` already owns recovery for anything transient.
 
-<a id="dormant-stays-dormant"></a>**D4: `RunAtLoad: false` is honored.** A plist
-written with `RunAtLoad` off describes a deliberately dormant job, so macOS skips
-D1 and D2 entirely for it. Starting it would override the only thing the flag
-asks for.
+<a id="dormant-stays-dormant"></a>**D4: `RunAtLoad: false` is honored.** The flag
+is the caller asking the installer not to start the job, so macOS skips D1 and D2
+entirely for it: no forced spawn, and no pid demanded. It is not a claim that the
+job stays dormant - `KeepAlive` (this installer's default) keeps a loaded job
+running whatever `RunAtLoad` says, and that stays launchd's call, not the
+installer's. What D4 rules out is the installer overriding the one thing the flag
+asks of it.
 
 ## Consequences {#consequences}
 

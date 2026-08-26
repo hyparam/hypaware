@@ -24,10 +24,10 @@ const RUNNING_PID = 4242
  * *loaded* (bootstrapped, `print` succeeds) and *running* (has a pid).
  * `spawnOnBootstrap: false` is the pended-spawn state from #1036.
  *
- * @param {{ loadedAtStart?: boolean, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean }} [opts]
+ * @param {{ loadedAtStart?: boolean, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string }} [opts]
  */
 function fakeLaunchd(opts) {
-  const { loadedAtStart = false, spawnOnBootstrap = false, spawnOnKickstart = true } = opts ?? {}
+  const { loadedAtStart = false, spawnOnBootstrap = false, spawnOnKickstart = true, kickstartStderr } = opts ?? {}
   /** @type {string[][]} */
   const calls = []
   let loaded = loadedAtStart
@@ -63,6 +63,9 @@ function fakeLaunchd(opts) {
     kickstart(args) {
       calls.push(['kickstart', ...args])
       if (spawnOnKickstart) pid = RUNNING_PID
+      if (kickstartStderr !== undefined) {
+        return Promise.resolve({ exitCode: 3, stdout: '', stderr: kickstartStderr })
+      }
       return Promise.resolve(OK)
     },
   }
@@ -73,10 +76,10 @@ function fakeLaunchd(opts) {
  * has actually been spawned. `spawnOnRestart: false` is the `Type=simple`
  * shape where `restart` exits 0 and no process ends up running.
  *
- * @param {{ spawnOnRestart?: boolean, spawnOnStart?: boolean }} [opts]
+ * @param {{ spawnOnRestart?: boolean, spawnOnStart?: boolean, startStderr?: string }} [opts]
  */
 function fakeSystemd(opts) {
-  const { spawnOnRestart = true, spawnOnStart = true } = opts ?? {}
+  const { spawnOnRestart = true, spawnOnStart = true, startStderr } = opts ?? {}
   /** @type {string[][]} */
   const calls = []
   let pid = 0
@@ -91,6 +94,9 @@ function fakeSystemd(opts) {
     start(unit) {
       calls.push(['start', unit])
       if (spawnOnStart) pid = RUNNING_PID
+      if (startStderr !== undefined) {
+        return Promise.resolve({ exitCode: 5, stdout: '', stderr: startStderr })
+      }
       return Promise.resolve(OK)
     },
     /** @param {string} unit */
@@ -186,7 +192,11 @@ test('install fails loudly when launchd never spawns the agent', async () => {
 
   await assert.rejects(
     () => installLaunchAgent(darwinOpts(home, lc)),
-    (err) => err instanceof Error && /never started it/.test(err.message),
+    (err) => err instanceof Error
+      && /never started it/.test(err.message)
+      // The CLI prints the message and nothing else, so the message is
+      // where "and here is the log that says why" has to live.
+      && /daemon\.err\.log/.test(err.message),
   )
   assert.equal(count(lc.calls, 'kickstart'), 1, 'tried to force the spawn before giving up')
 })
@@ -205,22 +215,25 @@ test('an agent RunAtLoad already spawned installs cleanly and is not killed', as
   )
 })
 
-test('RunAtLoad=false installs a dormant agent without starting it', async () => {
+test('RunAtLoad=false leaves the starting to launchd, and demands no pid', async () => {
   const home = tmpHome('la-dormant')
   const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
 
   await installLaunchAgent(darwinOpts(home, lc, { runAtLoad: false }))
 
-  assert.equal(count(lc.calls, 'kickstart'), 0, 'a deliberately dormant job is left dormant')
+  assert.equal(count(lc.calls, 'kickstart'), 0, 'the installer never overrides the flag it was handed')
 })
 
 test('systemd install fails loudly when the started unit has no MainPID', async () => {
   const home = tmpHome('sd-dead')
-  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false })
+  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false, startStderr: 'Unit hypaware.service not found.' })
 
   await assert.rejects(
     () => installSystemdUnit(linuxOpts(home, sc)),
-    (err) => err instanceof Error && /never reported a running process/.test(err.message),
+    (err) => err instanceof Error
+      && /never reported a running process/.test(err.message)
+      && /Unit hypaware\.service not found/.test(err.message)
+      && /daemon\.err\.log/.test(err.message),
   )
   assert.ok(count(sc.calls, 'show') > 0, 'verified the running state through systemctl show')
   assert.equal(count(sc.calls, 'start'), 1, 'spent its one retry before giving up')
