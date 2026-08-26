@@ -49,7 +49,24 @@ const BINARY_EXTENSIONS = new Set([
 ])
 
 /**
- * Every raw NUL in the tracked text of `repoRoot`, as `file:line:column`.
+ * How much of an offending line to echo, and how many offences to report from
+ * any one file.
+ *
+ * Failing is this gate's first-class path: a new kind of binary lands, the gate
+ * fails, and someone reads the sentence telling them to declare it above. That
+ * path has to survive the file that triggers it. A zero-padded binary carries no
+ * newline and a NUL at nearly every offset, so one whole-line echo per NUL is
+ * quadratic in it: at 1 MB that is a million entries of two million characters,
+ * and the runner dies of heap exhaustion before it can print anything. Both
+ * bounds sit on the report, never on the scan, so every tracked file is still
+ * read end to end and no NUL goes unnoticed.
+ */
+const ECHO_LIMIT = 120
+const PER_FILE_LIMIT = 3
+
+/**
+ * Every raw NUL in the tracked text of `repoRoot`, as `file:line:column`, up to
+ * `PER_FILE_LIMIT` per file.
  *
  * The offending line is echoed with each NUL rendered as an escape, so the
  * failure report cannot itself become an unsearchable blob.
@@ -66,12 +83,18 @@ function nulOffenders(repoRoot) {
     if (fs.statSync(abs).isDirectory()) continue
     const buf = fs.readFileSync(abs)
     if (!buf.includes(0)) continue
-    buf.toString('utf8').split('\n').forEach((line, index) => {
-      const shown = line.replaceAll(NUL, '\\0').trim()
-      for (let column = line.indexOf(NUL); column !== -1; column = line.indexOf(NUL, column + 1)) {
+    let reported = 0
+    const lines = buf.toString('utf8').split('\n')
+    for (let index = 0; index < lines.length && reported < PER_FILE_LIMIT; index++) {
+      const line = lines[index]
+      if (!line.includes(NUL)) continue
+      const clipped = line.length > ECHO_LIMIT
+      const shown = line.slice(0, ECHO_LIMIT).replaceAll(NUL, '\\0').trim() + (clipped ? '...' : '')
+      for (let column = line.indexOf(NUL); column !== -1 && reported < PER_FILE_LIMIT; column = line.indexOf(NUL, column + 1)) {
         found.push(`${file}:${index + 1}:${column + 1}  ${shown}`)
+        reported++
       }
-    })
+    }
   }
   return found
 }
@@ -79,8 +102,8 @@ function nulOffenders(repoRoot) {
 test('no tracked text file carries a raw NUL byte', () => {
   const found = nulOffenders(REPO_ROOT)
   const shown = found.slice(0, 40)
-  assert.deepEqual(found, [], `${found.length} raw NUL bytes make their file invisible to grep; ` +
-    'write the escape instead, or declare the path binary:\n  ' + shown.join('\n  ') +
+  assert.deepEqual(found, [], `${found.length} raw NUL bytes make their file invisible to grep ` +
+    `(at most ${PER_FILE_LIMIT} reported per file); write the escape instead, or declare the path binary:\n  ` + shown.join('\n  ') +
     (found.length > shown.length ? `\n  ...and ${found.length - shown.length} more` : ''))
 })
 
@@ -104,6 +127,28 @@ test('the scan catches a NUL that plain grep would hide', () => {
     execFileSync('git', ['init', '--quiet'], { cwd: root })
     execFileSync('git', ['add', '--all'], { cwd: root })
     assert.deepEqual(nulOffenders(root), ['dirty.js:1:18  const key = `${a}\\0${b}`'])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a binary that forgot its extension fails with a message, not a heap OOM', () => {
+  // The message is the whole product of a failure here, so the file most likely
+  // to cause one has to be a file the report can survive. A zero-padded binary
+  // is that file: no newline anywhere, and a NUL at nearly every offset.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nul-byte-gate-binary-'))
+  try {
+    fs.writeFileSync(path.join(root, 'fixture.parquet'), Buffer.alloc(1024 * 1024))
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    execFileSync('git', ['add', '--all'], { cwd: root })
+    const found = nulOffenders(root)
+    assert.equal(found.length, PER_FILE_LIMIT, 'expected one file to contribute no more than its share')
+    for (const entry of found) {
+      assert.match(entry, /^fixture\.parquet:1:\d+ {2}/, `expected a located offence, got ${entry.slice(0, 80)}`)
+      // A fixed ceiling, not one phrased in ECHO_LIMIT: an assertion written in
+      // terms of the constant it is checking passes whatever that constant becomes.
+      assert.ok(entry.length < 500, `expected a clipped echo, got ${entry.length} characters`)
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
