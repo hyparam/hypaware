@@ -89,10 +89,10 @@ function asyncBufferFromBytes(bytes) {
 }
 
 /**
- * Build a `hyparquet-writer` Writer that finalizes onto the local
- * filesystem with an atomic rename. `ifNoneMatch === '*'` is honored
- * to surface `412` collisions on concurrent commits, matching the
- * conditional-write semantics `icebird`'s file catalog expects.
+ * Build a `hyparquet-writer` Writer that publishes onto the local
+ * filesystem in one syscall. `ifNoneMatch === '*'` is honored to surface
+ * `412` collisions on concurrent commits, matching the conditional-write
+ * semantics `icebird`'s file catalog expects.
  *
  * The writer implements the optional `flush()` hook, which
  * `hyparquet-writer` calls after every row group: buffered bytes are
@@ -203,24 +203,87 @@ function localWriter(ByteWriter, filePath, options) {
   }
 
   writer.finish = async function () {
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      if (fd !== null) {
-        fs.closeSync(fd)
-        fs.rmSync(/** @type {string} */ (tmp), { force: true })
-        fd = null
-      }
-      throw collision(filePath)
-    }
     openTmp()
     if (writer.index) fs.writeSync(/** @type {number} */ (fd), writer.getBytes())
     fs.closeSync(/** @type {number} */ (fd))
     fd = null
     writer.index = 0
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      fs.rmSync(/** @type {string} */ (tmp), { force: true })
-      throw collision(filePath)
+    const staged = /** @type {string} */ (tmp)
+    if (options?.ifNoneMatch !== '*') {
+      fs.renameSync(staged, filePath)
+      tmp = null
+      return
     }
-    fs.renameSync(/** @type {string} */ (tmp), filePath)
+    // `ifNoneMatch: '*'` is a create-only precondition, so the publish
+    // itself has to be the thing that refuses to overwrite. `rename`
+    // cannot be: POSIX rename replaces the destination silently, so an
+    // `existsSync` in front of it is check-then-act and two committers
+    // racing the same `v(N+1).metadata.json` can both find it absent,
+    // both publish, and the loser's snapshot is lost with no error for
+    // the retry loop to catch. `link` fails with EEXIST when the
+    // destination exists, atomically and with no window, which is
+    // exactly the guarantee the precondition promises. The cache has no
+    // external catalog to arbitrate for it, so this one call is the whole
+    // of its concurrency control.
+    try {
+      fs.linkSync(staged, filePath)
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code
+      // The link did not land, so the staged name is dead weight. Reclaiming
+      // it is best-effort for the same reason it is on the success path: an
+      // `rmSync` that throws here would replace the reason the publish
+      // failed, and an `EEXIST` that reaches `commitWithRetry` as anything
+      // other than a 412 is rethrown rather than reloaded, turning the
+      // retryable race this call exists to expose back into a hard failure.
+      try {
+        fs.rmSync(staged, { force: true })
+      } catch {
+        // The publish already failed; a leftover temp name is the lesser
+        // problem, and clearing `tmp` stops `abort()` retrying the same rm.
+      }
+      tmp = null
+      if (code === 'EEXIST') throw collision(filePath)
+      // `staged` is a sibling of `filePath`, so this can never be EXDEV.
+      // What it can be is a filesystem with no hard links at all (FAT and
+      // exFAT volumes, and some FUSE or cloud-sync mounts), which answers
+      // every `link` with EPERM/ENOSYS/ENOTSUP. libuv has no name for POSIX
+      // `EOPNOTSUPP`, so that spelling never reaches JS on the platforms
+      // Node maps - `util.getSystemErrorMap()` carries `ENOTSUP` and not
+      // `EOPNOTSUPP` - and it stays listed only for a runtime that passes it
+      // through. Any of them wedges every conditional commit, and a bare
+      // errno does not say why, so name the cause. Falling back to a
+      // check-then-act `rename` is not on the table: that is the defect this
+      // call exists to remove. Supporting such a filesystem would mean
+      // publishing through `open(filePath, 'wx')` instead, trading atomic
+      // content for atomic creation, which is the trade the `local-fs` blob
+      // store makes.
+      if (code === 'EPERM' || code === 'ENOSYS' || code === 'ENOTSUP' || code === 'EOPNOTSUPP') {
+        const unsupported = /** @type {Error & { code?: string }} */ (
+          new Error(
+            `local iceberg conditional commit needs hard links: link() failed with ${code} on ` +
+              `${filePath}. The cache directory must be on a filesystem that supports link(2).`,
+            { cause: err }
+          )
+        )
+        unsupported.code = code
+        throw unsupported
+      }
+      throw err
+    }
+    // The link is the commit point: the file is published, and `staged` is
+    // now just a second name for the same inode that nothing reads.
+    // Dropping that name is cleanup, so a failure here must not be reported
+    // as a failed commit - the caller would be told its snapshot did not
+    // land when it did, and `commitWithRetry` does not retry a non-412.
+    // The leftover is inert: `v<N>.metadata.json.tmp.*` matches neither
+    // icebird's anchored version regex nor the maintenance sweep's
+    // suffixes, so it costs one directory entry and nothing else.
+    try {
+      fs.rmSync(staged, { force: true })
+    } catch {
+      // Already published; the temp name is the only thing left behind.
+    }
+    tmp = null
   }
   return writer
 }
