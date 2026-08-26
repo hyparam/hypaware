@@ -73,6 +73,11 @@ actually shipped in V1.
 - No em dashes (the U+2014 character) anywhere: code, comments, JSDoc, strings,
   or docs. In prose, use the punctuation the sentence wants (a comma, colon,
   parentheses, or a sentence split); in runtime strings, prefer `-`.
+- No raw NUL bytes (U+0000) in tracked text. grep classifies a file holding one
+  as binary and silently skips it, so the file drops out of every text search
+  with no error to say so. When a string genuinely needs a NUL (a dedup-key
+  separator, say), write the escape `\0`: it yields the same value and keeps the
+  bytes on disk searchable.
 - Types are defined in JSDoc comments, not TypeScript.
 - Never use inline `import('...')` types. Declare type imports at the top of
   the file with `@import` JSDoc comments, then reference the bare names.

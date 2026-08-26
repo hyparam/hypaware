@@ -222,7 +222,7 @@ function cloneShallow(cfg) {
  * @returns {string}
  */
 function signatureOf(e) {
-  return `${e.errorKind} ${e.pointer ?? ''}`
+  return `${e.errorKind}\0${e.pointer ?? ''}`
 }
 
 /**
