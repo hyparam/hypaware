@@ -18,7 +18,7 @@ import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
-import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
+import { createLocalIcebergIO, isStagedWriteName, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { partitionSpecForDeclaration, partitionSpecMigrationDue, sortColumnsForDeclaration } from '../iceberg/partition-spec.js'
@@ -1746,6 +1746,10 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
  * and metadata versions keep their newest {@link METADATA_VERSIONS_KEPT}
  * regardless. A data file's grep sidecar dies with it.
  *
+ * Metadata staging names a crashed publish left behind are reclaimed here
+ * too: they are referenced by nothing, so the referenced-set walk cannot
+ * see them, and the grace window is the whole of their safety.
+ *
  * @param {string} tableDir
  * @returns {Promise<number>} files removed
  */
@@ -1845,6 +1849,19 @@ async function sweepUnreferencedTableFiles(tableDir) {
   const keptVersions = new Set(versions.slice(0, METADATA_VERSIONS_KEPT).map((entry) => entry.name))
   for (const name of metaNames) {
     if (name === 'version-hint.text') continue
+    // A staged write that never got to publish, or published and then lost
+    // the race to unlink its own staging name. Nothing reads it - it names
+    // no version and no manifest - so it survives every other clause in this
+    // loop by falling through them, which is precisely why it needed a
+    // clause of its own: on the source-table layout no generation directory
+    // is ever retired out from under it, so this sweep is the only reclaimer
+    // it has. `removeStale`'s grace window is what keeps the clause off a
+    // write that is still in flight.
+    // @ref LLP 0316#staged-writes-are-reclaimed [implements]: an in-place layout retires no directory, so the leak needs a sweep.
+    if (isStagedWriteName(name)) {
+      removeStale(path.join(metadataDir, name))
+      continue
+    }
     if (/\.metadata\.json$/.test(name)) {
       if (!/^v\d+\.metadata\.json$/.test(name)) continue
       if (keptVersions.has(name)) continue

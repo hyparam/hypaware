@@ -73,6 +73,44 @@ export function urlToPath(url) {
 }
 
 /**
+ * The name {@link localWriter} stages a write under before it publishes:
+ * `<final name>.tmp.<pid>.<epoch ms>.<random>`. Unique per attempt, so two
+ * writers racing the same destination never share a staging file.
+ *
+ * @param {string} filePath
+ * @returns {string}
+ */
+function stagedNameFor(filePath) {
+  return `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+}
+
+/**
+ * Anchored to the end because the staged name is a SUFFIX on the final one,
+ * so `v3.metadata.json.tmp.1.2.ab` is staged and `v3.metadata.json` is not.
+ * The random tail is base-36 and can come out short, or empty when
+ * `Math.random()` returns a value with no fractional digits to spare, so it
+ * is `*` and not `+`.
+ */
+const STAGED_NAME_RE = /\.tmp\.\d+\.\d+\.[a-z0-9]*$/
+
+/**
+ * Is `name` a staged write {@link localWriter} left behind?
+ *
+ * A crash between staging and publish, or between the publishing `link` and
+ * the `rm` that drops the staged name, leaves one of these in the table
+ * directory. Nothing reads it, but nothing reclaims it either unless a sweep
+ * can recognize it, which is why the maintenance sweep imports this instead
+ * of carrying its own copy of the pattern.
+ *
+ * @ref LLP 0316#staged-writes-are-reclaimed [implements]: the writer that mints the name owns the pattern that recognizes it.
+ * @param {string} name  a basename, or a full path
+ * @returns {boolean}
+ */
+export function isStagedWriteName(name) {
+  return STAGED_NAME_RE.test(name)
+}
+
+/**
  * @param {Uint8Array} bytes
  * @returns {AsyncBuffer}
  */
@@ -138,7 +176,7 @@ function localWriter(ByteWriter, filePath, options) {
     if (fd !== null) return
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     if (tmp === null) {
-      tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+      tmp = stagedNameFor(filePath)
       fd = fs.openSync(tmp, 'w')
       return
     }
@@ -202,6 +240,7 @@ function localWriter(ByteWriter, filePath, options) {
     writer.index = 0
   }
 
+  // @ref LLP 0316#link-is-the-commit-point [implements]: the create-only publish is one `link`, and that call is the whole of the cache's concurrency control.
   writer.finish = async function () {
     openTmp()
     if (writer.index) fs.writeSync(/** @type {number} */ (fd), writer.getBytes())
@@ -275,9 +314,15 @@ function localWriter(ByteWriter, filePath, options) {
     // Dropping that name is cleanup, so a failure here must not be reported
     // as a failed commit - the caller would be told its snapshot did not
     // land when it did, and `commitWithRetry` does not retry a non-412.
-    // The leftover is inert: `v<N>.metadata.json.tmp.*` matches neither
-    // icebird's anchored version regex nor the maintenance sweep's
-    // suffixes, so it costs one directory entry and nothing else.
+    // The leftover is unreadable rather than free: `v<N>.metadata.json.tmp.*`
+    // matches neither icebird's anchored version regex nor any path the
+    // table's own metadata carries, so nothing resolves it - but
+    // `measureMetadataDir` sizes the WHOLE metadata directory, so its bytes
+    // are counted by the metadata figure `hyp query status` reports and by
+    // the epoch layout's metadata-size compaction trigger. The
+    // unreferenced-file sweep recognizes the staged suffix
+    // ({@link isStagedWriteName}) and reclaims it once it is past the orphan
+    // grace window.
     try {
       fs.rmSync(staged, { force: true })
     } catch {
