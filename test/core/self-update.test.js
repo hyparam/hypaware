@@ -1382,3 +1382,61 @@ test('redacting a probe error takes the credential, not the rest of the message'
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })
+
+test('an apostrophe in the registry password does not cut the redaction short', async () => {
+  // The URL body stops at the characters `URL` percent-encodes out of a
+  // userinfo, so the match can never end inside a credential - except
+  // that `URL` does *not* encode an apostrophe. Stopping there would end
+  // the match mid-password and print the remainder verbatim, which is
+  // the leak the redaction exists to close. The real global `fetch` is
+  // used deliberately: the message that carries the password is the one
+  // `fetch` writes, so a stub here would only agree with itself.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-quote-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    // Pinned: the whole finding is that this survives serialization.
+    assert.match(new URL("https://bot:hunter2'tail@npm.corp.example").href, /hunter2'tail/)
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: { npm_config_registry: "https://bot:hunter2'tail@npm.corp.example" },
+      packageRoot,
+      runner,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.ok(!error.includes('hunter2'), error)
+    assert.ok(!error.includes('tail@'), error)
+    assert.ok(!error.includes('bot:'), error)
+    // Still says which registry went wrong, rather than collapsing to
+    // `[url]` because the truncated body would not parse.
+    assert.match(error, /https:\/\/npm\.corp\.example/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a bare bracketed IPv6 origin survives the trailing-punctuation strip', async () => {
+  // `]` is stripped as sentence punctuation for a `(http://h/x])`-shaped
+  // tail, but it is also the last character of the loopback literals this
+  // updater newly trusts, so a message ending on one used to redact to
+  // `[url]]` - losing exactly the "which registry went wrong" the
+  // redaction is supposed to keep.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-v6-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const probe = async () => { throw new Error('connect ECONNREFUSED http://[::1]') }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.match(error, /connect ECONNREFUSED http:\/\/\[::1\]$/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})

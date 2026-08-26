@@ -294,24 +294,42 @@ function isLoopbackHost(hostname) {
  * @returns {string}
  */
 function redactUrls(message) {
-  // The URL body stops at whitespace and at the characters a serialized
-  // URL can never contain, because `URL` percent-encodes all of them
-  // (`"` `'` `<` `>` `` ` `` `\`). Running to the next space instead
+  // The URL body stops at whitespace and at the characters `URL`
+  // percent-encodes out of a userinfo, so none of them can appear
+  // between the scheme and the `@` that ends a credential: `"`, `<`,
+  // `>`, `` ` `` and `\` (a backslash becomes `/` in a username and is
+  // rejected outright in a password). Running to the next space instead
   // would swallow whatever the message glued on after a closing quote,
   // and this also redacts the outer catch's arbitrary errors: a
   // `{"registry":"<url>","attempt":2}` would lose its tail and stop
   // being the diagnostic it was written to be.
-  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`\\]+/gi, (match) => {
+  //
+  // `'` is deliberately not in that set even though it reads like one of
+  // the quotes. `URL` leaves an apostrophe literal in a userinfo
+  // (`new URL("https://u:tok'en@h/").href` keeps it), so stopping there
+  // would cut the match mid-credential and print the remainder of the
+  // token verbatim into all three sinks, which is the leak this function
+  // exists to close. It is peeled as trailing punctuation below instead,
+  // which still handles a `'...'`-quoted URL without ever splitting a
+  // userinfo.
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"<>`\\]+/gi, (match) => {
     // Trailing sentence punctuation is not part of the URL; keep it so
-    // the message still reads as a sentence.
-    const trail = /[.,;:!?)\]}]+$/.exec(match)?.[0] ?? ''
-    const body = trail ? match.slice(0, -trail.length) : match
-    try {
-      const url = new URL(body)
-      return `${url.protocol}//${url.host}${trail}`
-    } catch {
-      return `[url]${trail}`
+    // the message still reads as a sentence. `]` has to be in that set
+    // for a `(http://h/x])`-shaped tail, but it is also the last
+    // character of a bracketed IPv6 origin, so peel one character less
+    // until something parses rather than losing a bare `http://[::1]`
+    // to `[url]]`. Whatever is handed back unpeeled is punctuation by
+    // construction, and a userinfo is always followed by `@host`, so no
+    // credential can hide in it.
+    const trail = /[.,;:!?)\]}']+$/.exec(match)?.[0] ?? ''
+    for (let cut = trail.length; cut >= 0; cut -= 1) {
+      const body = cut ? match.slice(0, -cut) : match
+      try {
+        const url = new URL(body)
+        return `${url.protocol}//${url.host}${match.slice(body.length)}`
+      } catch { /* peel one character less and try again */ }
     }
+    return `[url]${trail}`
   })
 }
 
