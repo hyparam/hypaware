@@ -229,11 +229,73 @@ function trustedRegistryUrl(raw) {
   // the quieting below that failure no longer reaches the status line.
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
   if (url.protocol === 'https:') return url
-  // `hostname` keeps the brackets on an IPv6 literal.
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  const loopback = host === 'localhost' || host.endsWith('.localhost') ||
-    host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
-  return loopback ? url : null
+  return isLoopbackHost(url.hostname) ? url : null
+}
+
+/**
+ * Does this hostname name *this machine*, decided from the name alone?
+ *
+ * Only the literal `localhost` and the loopback IP literals count. A
+ * `*.localhost` subdomain does not, even though RFC 6761 says resolvers
+ * must send it to loopback: glibc without systemd-resolved does not, it
+ * asks DNS, so a hostile search domain plus someone on the path turns an
+ * operator's `http://npm.localhost` into an off-box registry that decides
+ * whether this install ever updates again. Resolving the name here and
+ * requiring the answer to be loopback would close that, at the cost of
+ * putting DNS inside a trust check (a second lookup npm never has to
+ * agree with, in an import-light module, on the pre-boot path). Refusing
+ * the suffix is the smaller answer, and it fails closed: the override
+ * degrades to the public registry with the `registry_untrusted` surface,
+ * and `http://localhost` is right there.
+ *
+ * The names that do count are matched in the form `URL` leaves them in:
+ * a trailing root dot survives parsing (`localhost.`), and an
+ * IPv4-mapped literal is re-serialized in hex (`[::ffff:127.0.0.1]`
+ * becomes `[::ffff:7f00:1]`), so a spelling check on the raw text would
+ * refuse a mapped-loopback Verdaccio that is plainly on this machine.
+ *
+ * @param {string} hostname
+ * @returns {boolean}
+ */
+function isLoopbackHost(hostname) {
+  // `hostname` keeps the brackets on an IPv6 literal. A single trailing
+  // dot is the DNS root and names the same host.
+  const host = hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
+  if (host === 'localhost' || host === '::1') return true
+  if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true
+  // `::ffff:7f00:1` and friends: an IPv4-mapped address whose first
+  // 16-bit group starts with 127 is 127.0.0.0/8 wearing an IPv6 coat.
+  const mapped = /^::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/.exec(host)
+  return mapped ? Number.parseInt(mapped[1], 16) >>> 8 === 127 : false
+}
+
+/**
+ * Reduce every URL in an error message to scheme and host.
+ *
+ * Probe errors are quoted verbatim into the state file, the `hyp status`
+ * degraded line, and the daemon service log, and the message is not ours
+ * to trust: Node's `fetch` refuses a credentialed URL with one that
+ * embeds the whole URL, userinfo included, so an operator whose
+ * `npm_config_registry` carries a token has it copied into three
+ * durable places by the act of failing. Nothing downstream needs more
+ * than the origin to say which registry went wrong.
+ *
+ * @param {string} message
+ * @returns {string}
+ */
+function redactUrls(message) {
+  return message.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, (match) => {
+    // Trailing sentence punctuation is not part of the URL; keep it so
+    // the message still reads as a sentence.
+    const trail = /[.,;:!?)\]}'"]+$/.exec(match)?.[0] ?? ''
+    const body = trail ? match.slice(0, -trail.length) : match
+    try {
+      const url = new URL(body)
+      return `${url.protocol}//${url.host}${trail}`
+    } catch {
+      return `[url]${trail}`
+    }
+  })
 }
 
 /**
@@ -664,7 +726,11 @@ export async function runSelfUpdatePass(opts = {}) {
         fetchImpl: opts.fetchImpl,
       })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      // Redacted before it is used at all, not at each of the three
+      // sinks: this message is persisted, rendered by `hyp status`, and
+      // logged to the service log, and a credentialed override reaches
+      // every one of them through the text `fetch` refuses it with.
+      const message = redactUrls(err instanceof Error ? err.message : String(err))
       // `checked_at` moves on every failed probe, so it cannot say how
       // long this has been going on. `error_since` is the first failure
       // of the current unbroken run, and it is what bounds the quiet in
@@ -774,7 +840,9 @@ export async function runSelfUpdatePass(opts = {}) {
     return { action: 'updated', latest }
   } catch (err) {
     // The updater must never take the daemon down with it.
-    const message = err instanceof Error ? err.message : String(err)
+    // Redacted for the same reason as the probe failure above: this
+    // detail reaches the service log and, through `hyp update`, stderr.
+    const message = redactUrls(err instanceof Error ? err.message : String(err))
     log('self_update.error', { error_kind: 'unexpected', detail: message })
     return { action: 'skipped', reason: 'unexpected_error' }
   }
@@ -853,10 +921,19 @@ export function describeSelfUpdate(opts) {
     state.error.startsWith('probe_failed') &&
     !probeFailureIsEntrenched(state, (opts.now ?? (() => new Date()))().getTime())
   if (state.error && !quietProbeFailure) {
-    return {
-      line: `self-update: degraded (${state.error}); run 'hyp update' or 'npm install -g ${identity.name}@latest'`,
-      json,
-    }
+    // The generic advice is "do it by hand", which is right for a failed
+    // install and wrong for exactly one error: a refused registry
+    // override. `npm install -g` typed into the same environment reads
+    // the same `npm_config_registry` and installs from the very host the
+    // updater declined to fetch a tarball from, so the status line would
+    // be handing the operator the supply-chain swap the refusal exists
+    // to prevent. `hyp update` already says the right thing here; this
+    // says it too, shorter.
+    const advice = state.error === 'registry_untrusted'
+      ? 'npm_config_registry points at a registry this updater will not install from; ' +
+        "set it to an https URL, or configure the registry in .npmrc, then run 'hyp update'"
+      : `run 'hyp update' or 'npm install -g ${identity.name}@latest'`
+    return { line: `self-update: degraded (${state.error}); ${advice}`, json }
   }
   if (available && state.latest_version) {
     return { line: `self-update: ${state.latest_version} available (running ${identity.version})`, json }
