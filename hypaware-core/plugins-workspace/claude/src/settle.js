@@ -6,9 +6,10 @@ import {
   agentScopedKey,
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
-  loadTranscriptIndex,
+  indexTranscriptEntries,
   withToolUseResult,
 } from './transcripts.js'
+import { sharedTranscriptLoader } from './transcript-cache.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { getLogger } from '../../../../src/core/observability/index.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
@@ -16,7 +17,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionContextRecord, TranscriptEntry } from './types.js'
+ * @import { SessionContextRecord, TranscriptEntry, TranscriptLoader } from './types.js'
  * @import { ResolveResult, UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -58,6 +59,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  *   clientName?: string,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   transcriptLoader?: TranscriptLoader,
  *   logger?: { info(message: string, fields?: Record<string, unknown>): void, warn(message: string, fields?: Record<string, unknown>): void },
  * }} opts
  * @returns {AiGatewaySettlementEnricher}
@@ -74,6 +76,9 @@ export function createClaudeSettlementEnricher(opts) {
   // cwd resolving to a `--private` (`ignore`) dir still drops at settle.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
   const logger = opts.logger ?? getLogger('plugin.claude')
+  // @ref LLP 0312#settle-purity [constrained-by]: process-local memoisation is
+  // allowed because a speculative settle call has no externally visible state.
+  const transcriptLoader = opts.transcriptLoader ?? sharedTranscriptLoader
 
   return {
     name: 'claude-settlement',
@@ -117,14 +122,15 @@ export function createClaudeSettlementEnricher(opts) {
         // INDEPENDENT of the cwd late-resolution below (they read different
         // files), so an empty/unreadable transcript must NOT skip cwd
         // settlement for the session (that would re-open the #258 hole).
-        /** @type {Awaited<ReturnType<typeof loadTranscriptIndex>> | undefined} */
+        /** @type {ReturnType<typeof indexTranscriptEntries> | undefined} */
         let index
         try {
-          index = await loadTranscriptIndex({
+          const entries = await transcriptLoader.load({
             projectsDir,
             sessionId,
             transcriptPath: sessionRecord?.transcript_path,
           })
+          index = indexTranscriptEntries(entries)
         } catch {
           index = undefined
         }

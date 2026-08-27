@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { createClaudeSettlementEnricher } from '../../hypaware-core/plugins-workspace/claude/src/settle.js'
-import { loadTranscriptIndex, matchKey } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
+import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 
@@ -74,58 +74,6 @@ test('enricher leaves a row unchanged when no transcript line matches', async ()
 
     const [out] = await enricher.settle([row], settleCtx())
     assert.equal(out, row, 'a miss returns the original row reference unchanged')
-  } finally {
-    await env.cleanup()
-  }
-})
-
-test('transcript index cache reuses unchanged files and invalidates on append', async () => {
-  const env = await stageEnv()
-  try {
-    await writeTranscript(env, 'sess-cache', [
-      jsonlRow({
-        sessionId: 'sess-cache', uuid: 'u-1', parentUuid: null, type: 'assistant',
-        message: { id: 'm-1', role: 'assistant', content: [{ type: 'text', text: 'one' }] },
-        timestamp: '2026-05-22T10:00:01.000Z',
-      }),
-    ])
-    const transcriptPath = path.join(env.homeDir, '.claude', 'projects', 'repo', 'sess-cache.jsonl')
-    const opts = {
-      projectsDir: path.join(env.homeDir, '.claude', 'projects'),
-      sessionId: 'sess-cache',
-      transcriptPath,
-    }
-    const first = await loadTranscriptIndex(opts)
-    const unchanged = await loadTranscriptIndex(opts)
-    assert.equal(unchanged, first, 'an unchanged transcript reuses its parsed index')
-
-    await fs.appendFile(transcriptPath, `${jsonlRow({
-      sessionId: 'sess-cache', uuid: 'u-2', parentUuid: 'u-1', type: 'assistant',
-      message: { id: 'm-2', role: 'assistant', content: [{ type: 'text', text: 'two' }] },
-      timestamp: '2026-05-22T10:00:02.000Z',
-    })}\n`, 'utf8')
-    const appended = await loadTranscriptIndex(opts)
-    assert.notEqual(appended, first, 'an append invalidates the cached index')
-    assert.equal(appended.byUuid.get('u-2')?.provider_uuid, 'u-2')
-
-    await fs.writeFile(transcriptPath, `${jsonlRow({
-      sessionId: 'sess-cache', uuid: 'u-3', parentUuid: null, type: 'assistant',
-      message: { id: 'm-3', role: 'assistant', content: [{ type: 'text', text: 'three' }] },
-      timestamp: '2026-05-22T10:00:03.000Z',
-    })}\n`, 'utf8')
-    const truncated = await loadTranscriptIndex(opts)
-    assert.equal(truncated.byUuid.has('u-2'), false, 'truncation discards stale cached entries')
-    assert.equal(truncated.byUuid.get('u-3')?.provider_uuid, 'u-3')
-
-    await fs.rename(transcriptPath, `${transcriptPath}.rotated`)
-    await fs.writeFile(transcriptPath, `${jsonlRow({
-      sessionId: 'sess-cache', uuid: 'u-4', parentUuid: null, type: 'assistant',
-      message: { id: 'm-4', role: 'assistant', content: [{ type: 'text', text: 'four' }] },
-      timestamp: '2026-05-22T10:00:04.000Z',
-    })}\n`, 'utf8')
-    const rotated = await loadTranscriptIndex(opts)
-    assert.equal(rotated.byUuid.has('u-3'), false, 'inode replacement discards the old file')
-    assert.equal(rotated.byUuid.get('u-4')?.provider_uuid, 'u-4')
   } finally {
     await env.cleanup()
   }

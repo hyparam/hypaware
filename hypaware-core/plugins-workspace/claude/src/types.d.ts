@@ -210,8 +210,36 @@ export interface TranscriptEntry {
    * both the live and backfill paths so it survives transcript pruning.
    */
   tool_use_result: unknown
-  raw_frame: unknown
   timestampMs: number | undefined
+}
+
+export interface TranscriptLoader {
+  load(opts: {
+    projectsDir: string
+    sessionId: string
+    transcriptPath?: string
+    homeDir?: string
+  }): Promise<TranscriptEntry[]>
+}
+
+/**
+ * One transcript file's incremental-read state, held by
+ * `createTranscriptLoader`. `consumed` is a byte offset that always sits
+ * immediately after a newline, so it may only be resumed from while the
+ * file still looks append-only (`ino` / `size` / `mtimeMs` are the
+ * freshness witnesses). `entries` are the parsed lines below `consumed`;
+ * `tail` is the re-derived parse of a complete-but-unterminated final
+ * line, which is deliberately never consumed.
+ */
+export interface TranscriptFileState {
+  ino: number
+  size: number
+  mtimeMs: number
+  consumed: number
+  entries: TranscriptEntry[]
+  tail: TranscriptEntry[]
+  lastUsedMs: number
+  chain: Promise<void>
 }
 
 export interface ClaudeAttachOptions {

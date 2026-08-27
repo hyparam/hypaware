@@ -1,5 +1,6 @@
 // @ts-check
 
+import syncFs from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -14,8 +15,10 @@ import {
   SESSION_INDEX_REBUILD_MS,
   createAiGatewayMessageProjector,
 } from '../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { createClaudeExchangeProjector } from '../hypaware-core/plugins-workspace/claude/src/projector.js'
 import { createClaudeSettlementEnricher } from '../hypaware-core/plugins-workspace/claude/src/settle.js'
-import { matchKey } from '../hypaware-core/plugins-workspace/claude/src/transcripts.js'
+import { createTranscriptLoader } from '../hypaware-core/plugins-workspace/claude/src/transcript-cache.js'
+import { loadTranscript, matchKey } from '../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 import { createQueryStorageService } from '../src/core/cache/storage.js'
 
 const PROFILES = Object.freeze({
@@ -26,6 +29,11 @@ const PROFILES = Object.freeze({
     transcriptRows: 3_000,
     settlementCalls: 3,
     settlementRows: 8,
+    subagentFiles: 3,
+    subagentRows: 100,
+    projectorWarmCalls: 3,
+    concurrentSessions: 0,
+    concurrentRows: 0,
   },
   normal: {
     cacheRows: 300_000,
@@ -34,6 +42,11 @@ const PROFILES = Object.freeze({
     transcriptRows: 30_000,
     settlementCalls: 6,
     settlementRows: 8,
+    subagentFiles: 30,
+    subagentRows: 1_000,
+    projectorWarmCalls: 6,
+    concurrentSessions: 4,
+    concurrentRows: 30_000,
   },
   stress: {
     cacheRows: 1_000_000,
@@ -42,6 +55,11 @@ const PROFILES = Object.freeze({
     transcriptRows: 100_000,
     settlementCalls: 12,
     settlementRows: 8,
+    subagentFiles: 50,
+    subagentRows: 2_000,
+    projectorWarmCalls: 12,
+    concurrentSessions: 10,
+    concurrentRows: 100_000,
   },
 })
 
@@ -61,12 +79,15 @@ const CACHE_COLUMNS = Object.freeze([
 const args = parseArgs(process.argv.slice(2))
 const profile = { ...PROFILES[args.profile], ...args.overrides }
 const scenarios = args.scenario === 'all'
-  ? ['otel-dedupe', 'session-index', 'settlement']
+  ? ['otel-dedupe', 'session-index', 'settlement', 'projector']
   : [args.scenario]
+const devRunId = process.env.DEV_RUN_ID ?? `normal-cpu-${Date.now()}-${process.pid}`
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-normal-cpu-'))
 const output = {
   benchmark: 'hypaware_normal_usage_cpu',
+  smoke_name: 'normal_usage_cpu',
+  dev_run_id: devRunId,
   profile: args.profile,
   config: profile,
   runtime: {
@@ -96,6 +117,9 @@ try {
   }
   if (scenarios.includes('settlement')) {
     output.scenarios.settlement = await measureSettlement(root, profile)
+  }
+  if (scenarios.includes('projector')) {
+    output.scenarios.projector = await measureProjector(root, profile)
   }
 
   output.target = assessTarget(output.scenarios)
@@ -313,6 +337,344 @@ async function measureSettlement(root, profile) {
   }
 }
 
+/**
+ * Exercise the real Claude projector and gateway dispatcher against a main
+ * transcript plus its subagent tree. Each implementation sees the same
+ * fixture, so this is a differential old-vs-fixed measurement of PR 1046's
+ * live-capture hot path.
+ *
+ * @param {string} root
+ * @param {typeof PROFILES.normal} profile
+ */
+async function measureProjector(root, profile) {
+  const fixture = await stageProjectorFixture(path.join(root, 'projector'), profile)
+  /** @type {Record<string, any>} */
+  const implementations = {}
+  for (const implementation of ['uncached', 'incremental']) {
+    implementations[implementation] = await measureProjectorImplementation(
+      fixture,
+      profile,
+      implementation,
+    )
+  }
+  return {
+    smoke_step: 'projector',
+    setup: fixture.setup,
+    implementations,
+    comparison: compareProjectorImplementations(implementations),
+  }
+}
+
+/**
+ * @param {string} root
+ * @param {typeof PROFILES.normal} profile
+ */
+async function stageProjectorFixture(root, profile) {
+  const homeDir = path.join(root, 'home')
+  const projectsDir = path.join(homeDir, '.claude', 'projects', 'bench')
+  const stateFile = path.join(root, 'state', 'session-context.jsonl')
+  const sessionId = 'projector-session'
+  const transcriptPath = path.join(projectsDir, `${sessionId}.jsonl`)
+  await fs.mkdir(projectsDir, { recursive: true })
+  await fs.mkdir(path.dirname(stateFile), { recursive: true })
+
+  const started = performance.now()
+  await writeProjectorTranscript(transcriptPath, sessionId, profile.transcriptRows)
+  const subagentDir = path.join(projectsDir, sessionId, 'subagents')
+  await fs.mkdir(subagentDir, { recursive: true })
+  for (let file = 0; file < profile.subagentFiles; file++) {
+    await writeProjectorTranscript(
+      path.join(subagentDir, `agent-${file}.jsonl`),
+      sessionId,
+      profile.subagentRows,
+      { agentId: `agent-${file}`, start: profile.transcriptRows + file * profile.subagentRows },
+    )
+  }
+
+  const concurrent = []
+  for (let index = 0; index < profile.concurrentSessions; index++) {
+    const concurrentSessionId = `projector-cold-${index}`
+    const filePath = path.join(projectsDir, `${concurrentSessionId}.jsonl`)
+    await writeProjectorTranscript(filePath, concurrentSessionId, profile.concurrentRows)
+    concurrent.push({ sessionId: concurrentSessionId, transcriptPath: filePath })
+  }
+  const records = [
+    { session_id: sessionId, transcript_path: transcriptPath, cwd: '/benchmark', ts: '2026-08-27T00:00:00.000Z' },
+    ...concurrent.map((entry, index) => ({
+      session_id: entry.sessionId,
+      transcript_path: entry.transcriptPath,
+      cwd: '/benchmark',
+      ts: new Date(Date.UTC(2026, 7, 27, 0, 0, index + 1)).toISOString(),
+    })),
+  ]
+  await fs.writeFile(stateFile, records.map((record) => JSON.stringify(record)).join('\n') + '\n')
+
+  const sessionFiles = (await listJsonlFiles(projectsDir)).filter((file) =>
+    file === transcriptPath || file.startsWith(path.join(projectsDir, sessionId) + path.sep)
+  )
+  return {
+    homeDir,
+    projectsDir,
+    stateFile,
+    transcriptRoot: projectsDir,
+    sessionId,
+    transcriptPath,
+    originalTranscriptSize: (await fs.stat(transcriptPath)).size,
+    concurrent,
+    setup: {
+      smoke_step: 'projector_stage',
+      transcript_rows: profile.transcriptRows,
+      subagent_files: profile.subagentFiles,
+      subagent_rows: profile.subagentFiles * profile.subagentRows,
+      transcript_bytes: await totalBytes(sessionFiles),
+      concurrent_sessions: profile.concurrentSessions,
+      concurrent_rows_per_session: profile.concurrentRows,
+      elapsed_ms: round(performance.now() - started, 1),
+    },
+  }
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof stageProjectorFixture>>} fixture
+ * @param {typeof PROFILES.normal} profile
+ * @param {string} implementation
+ */
+async function measureProjectorImplementation(fixture, profile, implementation) {
+  const transcriptLoader = implementation === 'uncached'
+    ? { load: (opts) => loadTranscript(opts) }
+    : createTranscriptLoader()
+  const claudeProjector = createClaudeExchangeProjector({
+    homeDir: fixture.homeDir,
+    projectsDir: fixture.projectsDir,
+    stateFile: fixture.stateFile,
+    transcriptLoader,
+  })
+  const dispatcher = createAiGatewayMessageProjector({
+    gatewayId: `cpu-benchmark-${implementation}`,
+    projectors: [{ ...claudeProjector, _seq: 0 }],
+  })
+
+  const coldIndex = profile.transcriptRows - profile.projectorWarmCalls - 1
+  const cold = await probeTranscriptStep(fixture.transcriptRoot, 'projector_cold', () =>
+    dispatcher.projectExchange(projectorExchange(fixture.sessionId, coldIndex)))
+  assertNativeIdentity(cold.value, fixture.sessionId, coldIndex, 'cold')
+
+  const warmSamples = []
+  let warmBytes = 0
+  for (let call = 0; call < profile.projectorWarmCalls; call++) {
+    const rowIndex = coldIndex + call + 1
+    const warm = await probeTranscriptStep(fixture.transcriptRoot, 'projector_warm', () =>
+      dispatcher.projectExchange(projectorExchange(fixture.sessionId, rowIndex)))
+    assertNativeIdentity(warm.value, fixture.sessionId, rowIndex, `warm-${call}`)
+    warmSamples.push(warm.sample)
+    warmBytes += warm.read.bytes
+  }
+
+  const appendedIndex = profile.transcriptRows
+  const appendedLine = `${JSON.stringify(projectorTranscriptLine(fixture.sessionId, appendedIndex))}\n`
+  await fs.appendFile(fixture.transcriptPath, appendedLine)
+  const appended = await probeTranscriptStep(fixture.transcriptRoot, 'projector_append', () =>
+    dispatcher.projectExchange(projectorExchange(fixture.sessionId, appendedIndex)))
+  assertNativeIdentity(appended.value, fixture.sessionId, appendedIndex, 'append')
+  await fs.truncate(fixture.transcriptPath, fixture.originalTranscriptSize)
+
+  let concurrent = null
+  if (fixture.concurrent.length > 0) {
+    const probed = await probeTranscriptStep(fixture.transcriptRoot, 'projector_concurrent', () =>
+      Promise.all(fixture.concurrent.map((entry) =>
+        dispatcher.projectExchange(projectorExchange(entry.sessionId, profile.concurrentRows - 1))
+      )))
+    for (let index = 0; index < probed.value.length; index++) {
+      assertNativeIdentity(
+        probed.value[index],
+        fixture.concurrent[index].sessionId,
+        profile.concurrentRows - 1,
+        `concurrent-${index}`,
+      )
+    }
+    concurrent = {
+      smoke_step: 'projector_concurrent',
+      sessions: fixture.concurrent.length,
+      transcript_bytes_read: probed.read.bytes,
+      max_concurrent_reads: probed.read.maxConcurrent,
+      wall_ms: round(probed.sample.wallMs, 2),
+      cpu_ms: round(probed.sample.cpuMs, 2),
+    }
+  }
+
+  const warmCpu = summarize(warmSamples.map((sample) => sample.cpuMs))
+  return {
+    implementation,
+    cold: projectorStep(cold),
+    warm: {
+      smoke_step: 'projector_warm',
+      calls: profile.projectorWarmCalls,
+      transcript_bytes_read: warmBytes,
+      timing_ms: summarize(warmSamples.map((sample) => sample.wallMs)),
+      cpu_ms: warmCpu,
+      median_to_cold_cpu_ratio: ratio(warmCpu.median, cold.sample.cpuMs),
+    },
+    append: {
+      ...projectorStep(appended),
+      appended_bytes: Buffer.byteLength(appendedLine),
+      cpu_to_cold_ratio: ratio(appended.sample.cpuMs, cold.sample.cpuMs),
+    },
+    concurrent,
+  }
+}
+
+/**
+ * Count bytes crossing the real transcript stream boundary while the real
+ * projector and gateway dispatcher run.
+ *
+ * @template T
+ * @param {string} transcriptRoot
+ * @param {string} smokeStep
+ * @param {() => Promise<T>} fn
+ */
+async function probeTranscriptStep(transcriptRoot, smokeStep, fn) {
+  const realCreateReadStream = syncFs.createReadStream
+  let bytes = 0
+  let active = 0
+  let maxConcurrent = 0
+  syncFs.createReadStream = (/** @type {any[]} */ ...streamArgs) => {
+    const stream = Reflect.apply(realCreateReadStream, syncFs, streamArgs)
+    const filePath = String(streamArgs[0])
+    if (!filePath.startsWith(transcriptRoot + path.sep) || !filePath.endsWith('.jsonl')) return stream
+    active++
+    maxConcurrent = Math.max(maxConcurrent, active)
+    let finished = false
+    const finish = () => {
+      if (finished) return
+      finished = true
+      active--
+    }
+    stream.on('data', (chunk) => { bytes += chunk.length })
+    stream.once('end', finish)
+    stream.once('close', finish)
+    stream.once('error', finish)
+    return stream
+  }
+  try {
+    const measured = await measure(fn)
+    return { ...measured, smokeStep, read: { bytes, maxConcurrent } }
+  } finally {
+    syncFs.createReadStream = realCreateReadStream
+  }
+}
+
+/** @param {Awaited<ReturnType<typeof probeTranscriptStep>>} step */
+function projectorStep(step) {
+  return {
+    smoke_step: step.smokeStep,
+    transcript_bytes_read: step.read.bytes,
+    max_concurrent_reads: step.read.maxConcurrent,
+    wall_ms: round(step.sample.wallMs, 2),
+    cpu_ms: round(step.sample.cpuMs, 2),
+  }
+}
+
+/** @param {Record<string, any>} implementations */
+function compareProjectorImplementations(implementations) {
+  const uncached = implementations.uncached
+  const incremental = implementations.incremental
+  return {
+    warm_transcript_read_reduction: ratio(
+      uncached.warm.transcript_bytes_read - incremental.warm.transcript_bytes_read,
+      uncached.warm.transcript_bytes_read,
+    ),
+    warm_median_cpu_speedup: ratio(uncached.warm.cpu_ms.median, incremental.warm.cpu_ms.median),
+    append_transcript_read_reduction: ratio(
+      uncached.append.transcript_bytes_read - incremental.append.transcript_bytes_read,
+      uncached.append.transcript_bytes_read,
+    ),
+    append_cpu_speedup: ratio(uncached.append.cpu_ms, incremental.append.cpu_ms),
+  }
+}
+
+/**
+ * @param {string} filePath
+ * @param {string} sessionId
+ * @param {number} rows
+ * @param {{ agentId?: string, start?: number }} [opts]
+ */
+async function writeProjectorTranscript(filePath, sessionId, rows, opts) {
+  const handle = await fs.open(filePath, 'w')
+  try {
+    for (let offset = 0; offset < rows; offset++) {
+      const index = (opts?.start ?? 0) + offset
+      await handle.write(`${JSON.stringify(projectorTranscriptLine(sessionId, index, opts?.agentId))}\n`)
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+/** @param {string} sessionId @param {number} index @param {string} [agentId] */
+function projectorTranscriptLine(sessionId, index, agentId) {
+  return {
+    sessionId,
+    uuid: projectorNativeId(sessionId, index),
+    parentUuid: index > 0 ? projectorNativeId(sessionId, index - 1) : null,
+    type: 'assistant',
+    ...(agentId ? { agentId, isSidechain: true } : {}),
+    message: {
+      id: `api-${index}`,
+      role: 'assistant',
+      content: [{ type: 'text', text: `answer-${index}` }],
+    },
+    timestamp: new Date(1_777_500_000_000 + index).toISOString(),
+  }
+}
+
+/** @param {string} sessionId @param {number} index */
+function projectorExchange(sessionId, index) {
+  return {
+    exchange_id: `exchange-${sessionId}-${index}`,
+    ts_start: '2026-08-27T00:00:00.000Z',
+    ts_end: '2026-08-27T00:00:00.100Z',
+    duration_ms: 100,
+    upstream: 'anthropic',
+    provider: null,
+    method: 'POST',
+    path: '/v1/messages',
+    status_code: 200,
+    request_bytes: 100,
+    response_bytes: 200,
+    is_sse: false,
+    stream_event_count: 0,
+    request_headers: JSON.stringify({ 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/1.0' }),
+    request_body: JSON.stringify({
+      model: 'claude-3-opus',
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [],
+    }),
+    response_headers: JSON.stringify({ 'content-type': 'application/json' }),
+    response_body: JSON.stringify({
+      id: `api-${index}`,
+      role: 'assistant',
+      content: [{ type: 'text', text: `answer-${index}` }],
+      stop_reason: 'end_turn',
+    }),
+    error: null,
+    metadata: JSON.stringify({ dev_run_id: devRunId, smoke_name: 'normal_usage_cpu' }),
+    stream_events: [],
+  }
+}
+
+/** @param {string} sessionId @param {number} index */
+function projectorNativeId(sessionId, index) {
+  return `native-${sessionId}-${index}`
+}
+
+/** @param {Record<string, unknown>[]} rows @param {string} sessionId @param {number} index @param {string} step */
+function assertNativeIdentity(rows, sessionId, index, step) {
+  const expected = projectorNativeId(sessionId, index)
+  if (!rows.some((row) => row.message_id === expected)) {
+    throw new Error(`${step}: projector did not preserve transcript identity ${expected}`)
+  }
+}
+
 /** @param {number} index */
 function transcriptLine(index) {
   return {
@@ -357,6 +719,24 @@ function settlementRow(index) {
 function benchmarkDate(index) {
   const day = 29 + (index % 30)
   return new Date(Date.UTC(2026, 6, day)).toISOString().slice(0, 10)
+}
+
+/** @param {string} root */
+async function listJsonlFiles(root) {
+  const found = []
+  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+    const filePath = path.join(root, entry.name)
+    if (entry.isDirectory()) found.push(...await listJsonlFiles(filePath))
+    else if (entry.isFile() && entry.name.endsWith('.jsonl')) found.push(filePath)
+  }
+  return found
+}
+
+/** @param {string[]} files */
+async function totalBytes(files) {
+  let bytes = 0
+  for (const file of files) bytes += (await fs.stat(file)).size
+  return bytes
 }
 
 function benchmarkProjector() {
@@ -536,6 +916,30 @@ function assessTarget(measured) {
       pass: settlement.appended_row_upgraded && settlement.appended_tail_to_cold_cpu_ratio <= 0.25,
     })
   }
+  const projector = measured.projector
+  const incremental = projector?.implementations?.incremental
+  if (incremental) {
+    checks.push({
+      name: 'projector_unchanged_transcript_reads_zero_bytes',
+      actual: incremental.warm.transcript_bytes_read,
+      limit: 0,
+      pass: incremental.warm.transcript_bytes_read === 0,
+    })
+    checks.push({
+      name: 'projector_append_reads_only_the_appended_tail',
+      actual: incremental.append.transcript_bytes_read,
+      limit: incremental.append.appended_bytes,
+      pass: incremental.append.transcript_bytes_read === incremental.append.appended_bytes,
+    })
+    if (incremental.concurrent) {
+      checks.push({
+        name: 'projector_large_cold_transcript_reads_are_gated',
+        actual: incremental.concurrent.max_concurrent_reads,
+        limit: 2,
+        pass: incremental.concurrent.max_concurrent_reads <= 2,
+      })
+    }
+  }
   return { pass: checks.every((check) => check.pass), checks }
 }
 
@@ -557,6 +961,11 @@ function parseArgs(argv) {
     else if (arg === '--transcript-rows') overrides.transcriptRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--settlement-calls') overrides.settlementCalls = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--settlement-rows') overrides.settlementRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--subagent-files') overrides.subagentFiles = nonNegativeInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--subagent-rows') overrides.subagentRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--projector-warm-calls') overrides.projectorWarmCalls = positiveInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--concurrent-sessions') overrides.concurrentSessions = nonNegativeInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--concurrent-rows') overrides.concurrentRows = nonNegativeInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--keep') keep = true
     else if (arg === '--assert-target') assertTarget = true
     else if (arg === '--help') {
@@ -569,8 +978,8 @@ function parseArgs(argv) {
   if (!Object.hasOwn(PROFILES, profile)) {
     throw new Error(`--profile must be one of ${Object.keys(PROFILES).join('|')}`)
   }
-  if (!['all', 'otel-dedupe', 'session-index', 'settlement'].includes(scenario)) {
-    throw new Error('--scenario must be one of all|otel-dedupe|session-index|settlement')
+  if (!['all', 'otel-dedupe', 'session-index', 'settlement', 'projector'].includes(scenario)) {
+    throw new Error('--scenario must be one of all|otel-dedupe|session-index|settlement|projector')
   }
   return { profile, scenario, keep, assertTarget, overrides }
 }
@@ -589,6 +998,13 @@ function positiveInteger(value, flag) {
   return parsed
 }
 
+/** @param {string} value @param {string} flag */
+function nonNegativeInteger(value, flag) {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${flag} requires a non-negative integer`)
+  return parsed
+}
+
 /** @param {number} numerator @param {number} denominator */
 function ratio(numerator, denominator) {
   return denominator === 0 ? 0 : round(numerator / denominator, 3)
@@ -603,13 +1019,18 @@ function round(value, digits) {
 function usage() {
   return `Usage: node benchmarks/normal-usage-cpu.mjs [options]\n\n` +
     `  --profile NAME           quick|normal|stress (default: normal)\n` +
-    `  --scenario NAME          all|otel-dedupe|session-index|settlement\n` +
+    `  --scenario NAME          all|otel-dedupe|session-index|settlement|projector\n` +
     `  --cache-rows N           override committed cache rows\n` +
     `  --ingest-batches N       override OTEL batches\n` +
     `  --incoming-rows N        override rows per OTEL batch\n` +
     `  --transcript-rows N      override Claude transcript rows\n` +
     `  --settlement-calls N     override bounded settlement calls\n` +
     `  --settlement-rows N      override rows per settlement call\n` +
+    `  --subagent-files N       override projector subagent file count\n` +
+    `  --subagent-rows N        override projector rows per subagent file\n` +
+    `  --projector-warm-calls N override projector warm calls\n` +
+    `  --concurrent-sessions N  override concurrent cold projector sessions\n` +
+    `  --concurrent-rows N      override rows per concurrent projector session\n` +
     `  --assert-target          exit 1 until structural scan targets pass\n` +
     `  --keep                   preserve the generated fixture\n`
 }

@@ -25,10 +25,10 @@ import {
   findTranscriptMatch,
   indexTranscriptEntries,
   loadAgentMeta,
-  loadTranscriptIndex,
   matchKey,
   withToolUseResult,
 } from './transcripts.js'
+import { sharedTranscriptLoader } from './transcript-cache.js'
 import {
   createSessionContextReader,
   pickLatestMatching,
@@ -38,7 +38,7 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { TranscriptEntry } from './types.js'
+ * @import { TranscriptEntry, TranscriptLoader } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -85,6 +85,7 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
  *   logger?: { warn(message: string, fields?: Record<string, unknown>): void, debug?: (m: string, f?: Record<string, unknown>) => void },
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   transcriptLoader?: TranscriptLoader,
  * }} opts
  * @returns {AiGatewayExchangeProjector}
  */
@@ -111,6 +112,10 @@ export function createClaudeExchangeProjector(opts) {
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
   // source, so a `--private` (`ignore`) dir drops at capture, not just export.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // Incremental transcript reads for the projector's lifetime: the
+  // per-exchange full reload was the daemon's dominant steady-state CPU
+  // cost (and, held concurrently, its OOM), growing with session size.
+  const transcriptLoader = opts.transcriptLoader ?? sharedTranscriptLoader
 
   return {
     name: 'claude-anthropic-messages',
@@ -218,8 +223,8 @@ export function createClaudeExchangeProjector(opts) {
         return USAGE_POLICY_DROP
       }
 
-      const transcriptIndex = sessionId
-        ? await loadTranscriptIndexSafe({
+      const transcriptEntries = sessionId
+        ? await loadTranscriptSafe(transcriptLoader, {
           projectsDir,
           sessionId,
           transcriptPath: sessionContextRecord?.transcript_path,
@@ -227,7 +232,8 @@ export function createClaudeExchangeProjector(opts) {
           // transcripts live outside projectsDir (see loadTranscript).
           homeDir: opts.homeDir,
         }, logger)
-        : indexTranscriptEntries([])
+        : []
+      const transcriptIndex = indexTranscriptEntries(transcriptEntries)
       const identityFromTranscript = transcriptIndex.ordered.length > 0
       // @ref LLP 0030#decision: a Claude session is a container of many
       // threads (main loop, subagents, side chats), so the session id is
@@ -642,18 +648,19 @@ export function anthropicUpstreamPreset() {
 }
 
 /**
+ * @param {TranscriptLoader} loader
  * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
  * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
  */
-async function loadTranscriptIndexSafe(opts, logger) {
+async function loadTranscriptSafe(loader, opts, logger) {
   try {
-    return await loadTranscriptIndex(opts)
+    return await loader.load(opts)
   } catch (err) {
     logger?.warn('plugin.claude.transcript_read_failed', {
       session_id: opts.sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
-    return indexTranscriptEntries([])
+    return []
   }
 }
 
