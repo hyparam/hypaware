@@ -312,17 +312,30 @@ function isSpaceByte(byte) {
 }
 
 /**
+ * Parse one line into `entries`, or skip it. Total by construction:
+ * `transcriptEntryFromRow` hashes the content key through a recursive
+ * canonicalizer, so a JSON-parseable but pathologically nested line
+ * (an MCP `toolUseResult` is arbitrary third-party JSON) throws a
+ * RangeError, and both call sites must survive it. The uncached
+ * `readTranscriptFile` contains such a throw to its own file; here an
+ * escape would be worse in both directions: from {@link parseTail} it
+ * would reject `advance` and, since the witnesses are only stamped on
+ * success, reject every later load too, so `loadTranscriptSafe` would
+ * return nothing for the WHOLE session, forever, with only a warn to
+ * show for it; from {@link parseAppended} it would be read as a short
+ * read and wedge the file into a from-zero re-read on every exchange.
+ * A bad line is neither of those: its bytes were read fine, so the
+ * offset should pass over it exactly like a malformed one.
+ *
  * @param {Buffer} line
  * @param {TranscriptEntry[]} entries
  */
 function parseLine(line, entries) {
   if (line.length === 0) return
-  let row
   try {
-    row = JSON.parse(line.toString('utf8'))
+    const entry = transcriptEntryFromRow(JSON.parse(line.toString('utf8')))
+    if (entry) entries.push(entry)
   } catch {
-    return
+    // Unparseable, or unprojectable: skip the line, consume its bytes.
   }
-  const entry = transcriptEntryFromRow(row)
-  if (entry) entries.push(entry)
 }

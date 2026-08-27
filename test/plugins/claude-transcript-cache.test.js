@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createTranscriptLoader } from '../../hypaware-core/plugins-workspace/claude/src/transcript-cache.js'
-import { loadTranscript } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
+import { loadTranscript, transcriptEntryFromRow } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
 /**
  * The incremental transcript loader: parse work per load must track
@@ -258,6 +258,71 @@ test('overlapping loads of one session consume appended bytes exactly once', asy
     const [a, b] = await Promise.all([loader.load(opts), loader.load(opts)])
     assert.deepEqual(a.map((e) => e.provider_uuid), ['u-1', 'u-2'])
     assert.deepEqual(b.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * A JSON-parseable line that `transcriptEntryFromRow` cannot project:
+ * its content key is hashed through a recursive canonicalizer, so deep
+ * nesting (a `toolUseResult` is arbitrary third-party JSON) throws a
+ * RangeError rather than returning undefined. The uncached reader
+ * contains that to its own file; the cache must not turn it into a
+ * whole-session loss or a permanent re-read.
+ */
+function pathologicalLine(uuid) {
+  let inner = '{"type":"text","text":"x"}'
+  for (let i = 0; i < 12_000; i++) inner = '{"a":' + inner + '}'
+  return `{"sessionId":"${SESSION}","uuid":"${uuid}","type":"user",` +
+    `"message":{"role":"user","content":[${inner}]}}`
+}
+
+/** @param {string} raw */
+function assertUnprojectable(raw) {
+  const row = JSON.parse(raw)
+  assert.throws(() => transcriptEntryFromRow(row), RangeError, 'precondition: the line must be JSON but unprojectable')
+}
+
+test('an unprojectable final line is skipped, not rejected for the whole session', async () => {
+  const env = await stage()
+  try {
+    const bad = pathologicalLine('u-bad')
+    assertUnprojectable(bad)
+    const loader = createTranscriptLoader()
+    // Unterminated, so it is the re-derived tail: an escape from there
+    // rejects `advance`, and the witnesses are only stamped on success,
+    // so it would reject on every later load too.
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + bad)
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    assert.deepEqual((await loadTranscript(opts)).map((e) => e.provider_uuid), ['u-1'])
+    for (const attempt of [0, 1, 2]) {
+      const got = await loader.load(opts)
+      assert.deepEqual(got.map((e) => e.provider_uuid), ['u-1'], `load ${attempt} still yields the good entries`)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unprojectable mid-file line is consumed, not read as a short read', async () => {
+  const env = await stage()
+  try {
+    const bad = pathologicalLine('u-bad')
+    assertUnprojectable(bad)
+    const loader = createTranscriptLoader()
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + bad + '\n' + line('u-2', 'two', 2) + '\n')
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    const first = await loader.load(opts)
+    assert.deepEqual(first.map((e) => e.provider_uuid), ['u-1', 'u-2'], 'the good lines after it still land')
+
+    await fsp.appendFile(env.file, line('u-3', 'three', 3) + '\n')
+    const second = await loader.load(opts)
+    assert.deepEqual(second.map((e) => e.provider_uuid), ['u-1', 'u-2', 'u-3'])
+    // Treating the line as a failed read would poison the witnesses and
+    // re-read the file from byte zero on every exchange, forever.
+    assert.equal(second[0], first[0], 'the consumed region was not re-parsed')
+    assert.equal(second[1], first[1], 'the consumed region was not re-parsed')
   } finally {
     await env.cleanup()
   }
