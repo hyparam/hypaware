@@ -1601,14 +1601,6 @@ export interface ReadRowsOptions {
    * post-upgrade, so excluding them after the first export never skips live data.
    */
   includeLegacy?: boolean
-  /**
-   * Best-effort file-pruning hint: {partition column: allowed values}. Data
-   * files whose partition tuple or column bounds prove no row can match are
-   * never opened. Name only required (never-null) partition columns. A caller
-   * must not rely on the hint for row filtering: when it cannot be pushed
-   * down it silently degrades to the full scan.
-   */
-  partitionWhere?: Record<string, string[]>
 }
 
 /**
@@ -1635,6 +1627,16 @@ export interface QueryStorageService {
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
+  /**
+   * Exact equality-list read for lookup paths. The predicate is applied by
+   * the cache data source, allowing Iceberg file and row-group bounds to prune
+   * sorted lookup columns before rows are materialized.
+   */
+  readRowsWhere?(
+    tablePath: string,
+    columns: string[] | undefined,
+    whereIn: Record<string, string[]>,
+  ): AsyncIterable<Record<string, unknown>>
   /**
    * Cursor-aware sibling of `readRows` for sinks that must advance a
    * per-(sink instance, partition) watermark. Pairs each internal-stripped row

@@ -349,6 +349,12 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
  * @returns {Promise<void>}
  */
 async function seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex) {
+  // @ref LLP 0311#context [implements]: the real cache probes the leading
+  // session sort key directly instead of rebuilding a global session index
+  if (typeof storage?.readRowsWhere === 'function') {
+    await scanCommittedMessageIds(sessionId, state, storage, log)
+    return
+  }
   if (sessionIndex && !(await sessionIndex.mightHaveCommittedRows(sessionId))) return
   await scanCommittedMessageIds(sessionId, state, storage, log)
 }
@@ -574,7 +580,14 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
     const partitionSession = part.partition?.session_id
     if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
+      const rows = typeof storage.readRowsWhere === 'function'
+        ? storage.readRowsWhere(
+            tablePath,
+            ['message_id', 'session_id'],
+            { session_id: [sessionId] },
+          )
+        : storage.readRows(tablePath, ['message_id', 'session_id'])
+      for await (const row of rows) {
         if (stringValue(row.session_id) !== sessionId) continue
         const messageId = stringValue(row.message_id)
         if (messageId) state.seenMessages.add(messageId)

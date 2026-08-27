@@ -225,11 +225,19 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRows(tablePath, columns, opts) {
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanOpts = {
-        ...(since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : {}),
-        ...(opts?.partitionWhere ? { partitionWhere: opts.partitionWhere } : {}),
-      }
+      const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        yield row
+      }
+    },
+
+    // Exact lookup sibling for plugin hot paths. Keeping this separate from
+    // the incremental read options prevents a pruning hint from being
+    // confused with a predicate whose result callers rely on.
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { whereIn })) {
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield row
       }

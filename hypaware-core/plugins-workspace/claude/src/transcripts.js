@@ -21,10 +21,9 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBloc
  * {"sessionId":"...","uuid":"u-2","parentUuid":"u-1","type":"assistant","message":{...},"timestamp":"..."}
  * ```
  *
- * The projector calls `loadTranscript()` per exchange. The reader is
- * best-effort: a missing directory, a missing file, or a truncated
- * line never throws: projection falls back to gateway-computed
- * identity in that case.
+ * The projector loads a transcript index per exchange. The underlying reader
+ * is best-effort: a missing directory, a missing file, or a truncated line
+ * never throws, and projection falls back to gateway-computed identity.
  */
 
 /**
@@ -153,6 +152,25 @@ export function createDesktop3pDirsCache(opts) {
 /** Shared instance for the live path; keyed by home dir, so one is enough. */
 const desktop3pDirsCache = createDesktop3pDirsCache()
 
+const TRANSCRIPT_INDEX_CACHE_MAX_ENTRIES = 64
+const TRANSCRIPT_INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024
+/**
+ * @type {Map<string, {
+ *   bytes: number,
+ *   index: ReturnType<typeof indexTranscriptEntries>,
+ *   files: Map<string, {
+ *     dev: number,
+ *     ino: number,
+ *     observedSize: number,
+ *     mtimeMs: number,
+ *     offset: number,
+ *     entries: TranscriptEntry[],
+ *   }>,
+ * }>}
+ */
+const transcriptIndexCache = new Map()
+let transcriptIndexCacheBytes = 0
+
 /**
  * @param {string} dir
  * @param {number} depth
@@ -244,6 +262,226 @@ export async function loadTranscript(opts) {
   }
   entries.sort(byTimestampAsc)
   return entries
+}
+
+/**
+ * Load and index a transcript, reusing the parsed result while the exact main
+ * and subagent file set is unchanged. The process-local LRU is bounded by both
+ * entry count and source bytes. Its signature covers path, device/inode, size,
+ * and mtime, so append, truncation, replacement, rotation, and subagent-file
+ * creation invalidate it. A projects-wide or Desktop-container search remains
+ * uncached until the session-context record supplies an exact transcript path.
+ *
+ * @ref LLP 0312#settle-purity [constrained-by]: settlement memoization is
+ * local, bounded, and idempotent, with no state another process can observe
+ * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
+ */
+export async function loadTranscriptIndex(opts) {
+  if (!opts.transcriptPath) return indexTranscriptEntries(await loadTranscript(opts))
+  const paths = [
+    opts.transcriptPath,
+    ...walkJsonlFiles(
+      path.join(path.dirname(opts.transcriptPath), path.basename(opts.transcriptPath, '.jsonl')),
+      undefined,
+    ),
+  ]
+  const key = opts.transcriptPath
+  const snapshots = transcriptFileSnapshots(paths)
+  const snapshotBytes = snapshots.reduce((sum, snapshot) => sum + snapshot.stat.size, 0)
+  if (snapshotBytes > TRANSCRIPT_INDEX_CACHE_MAX_BYTES) {
+    dropTranscriptIndexCache(key)
+    return indexTranscriptEntries(await loadTranscript(opts))
+  }
+  const cached = transcriptIndexCache.get(key)
+  if (cached && cacheFilesCanAdvance(cached.files, snapshots)) {
+    const changed = snapshots.some(({ filePath, stat }) => {
+      const prior = cached.files.get(filePath)
+      return prior?.observedSize !== stat.size || prior.mtimeMs !== stat.mtimeMs
+    })
+    if (!changed) {
+      touchTranscriptIndexCache(key, cached)
+      return cached.index
+    }
+    const advanced = advanceTranscriptFiles(cached.files, snapshots)
+    if (advanced) {
+      const index = indexTranscriptEntries(entriesFromCachedFiles(advanced))
+      cacheTranscriptIndex(key, snapshots, advanced, index)
+      return index
+    }
+  }
+
+  const loaded = loadTranscriptFiles(snapshots)
+  if (!loaded) {
+    dropTranscriptIndexCache(key)
+    return indexTranscriptEntries(await loadTranscript(opts))
+  }
+  const index = indexTranscriptEntries(entriesFromCachedFiles(loaded))
+  cacheTranscriptIndex(key, snapshots, loaded, index)
+  return index
+}
+
+/**
+ * @param {string[]} paths
+ */
+function transcriptFileSnapshots(paths) {
+  /** @type {{ filePath: string, stat: fs.Stats }[]} */
+  const snapshots = []
+  for (const filePath of [...new Set(paths)].sort()) {
+    try {
+      const stat = fs.statSync(filePath)
+      if (!stat.isFile()) continue
+      snapshots.push({ filePath, stat })
+    } catch { /* a missing file contributes no entries */ }
+  }
+  return snapshots
+}
+
+/**
+ * @param {Map<string, { dev: number, ino: number, observedSize: number, mtimeMs: number, offset: number, entries: TranscriptEntry[] }>} files
+ * @param {{ filePath: string, stat: fs.Stats }[]} snapshots
+ */
+function cacheFilesCanAdvance(files, snapshots) {
+  if (files.size !== snapshots.length) return false
+  for (const { filePath, stat } of snapshots) {
+    const prior = files.get(filePath)
+    if (!prior || prior.dev !== stat.dev || prior.ino !== stat.ino) return false
+    if (stat.size < prior.observedSize) return false
+    if (stat.size === prior.observedSize && stat.mtimeMs !== prior.mtimeMs) return false
+  }
+  return true
+}
+
+/**
+ * @param {Map<string, { dev: number, ino: number, observedSize: number, mtimeMs: number, offset: number, entries: TranscriptEntry[] }>} files
+ * @param {{ filePath: string, stat: fs.Stats }[]} snapshots
+ */
+function advanceTranscriptFiles(files, snapshots) {
+  const advanced = new Map(files)
+  for (const { filePath, stat } of snapshots) {
+    const prior = files.get(filePath)
+    if (!prior) return undefined
+    if (stat.size === prior.observedSize && stat.mtimeMs === prior.mtimeMs) continue
+    const tail = readTranscriptRange(filePath, prior.offset, stat.size)
+    if (!tail) return undefined
+    advanced.set(filePath, {
+      dev: stat.dev,
+      ino: stat.ino,
+      observedSize: stat.size,
+      mtimeMs: stat.mtimeMs,
+      offset: tail.offset,
+      entries: [...prior.entries, ...tail.entries],
+    })
+  }
+  return advanced
+}
+
+/** @param {{ filePath: string, stat: fs.Stats }[]} snapshots */
+function loadTranscriptFiles(snapshots) {
+  const files = new Map()
+  for (const { filePath, stat } of snapshots) {
+    const loaded = readTranscriptRange(filePath, 0, stat.size)
+    if (!loaded) return undefined
+    files.set(filePath, {
+      dev: stat.dev,
+      ino: stat.ino,
+      observedSize: stat.size,
+      mtimeMs: stat.mtimeMs,
+      offset: loaded.offset,
+      entries: loaded.entries,
+    })
+  }
+  return files
+}
+
+/**
+ * Parse complete JSONL lines in one byte range. `offset` stops after the last
+ * newline, so a truncated tail is reread and completed by a later append.
+ *
+ * @param {string} filePath
+ * @param {number} start
+ * @param {number} end
+ * @returns {{ offset: number, entries: TranscriptEntry[] } | undefined}
+ */
+function readTranscriptRange(filePath, start, end) {
+  if (end <= start) return { offset: start, entries: [] }
+  let fd
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buffer = Buffer.allocUnsafe(end - start)
+    let read = 0
+    while (read < buffer.length) {
+      const count = fs.readSync(fd, buffer, read, buffer.length - read, start + read)
+      if (count === 0) break
+      read += count
+    }
+    const completeEnd = buffer.lastIndexOf(10, read - 1)
+    if (completeEnd < 0) return { offset: start, entries: [] }
+    const entries = []
+    for (const line of buffer.toString('utf8', 0, completeEnd + 1).split('\n')) {
+      if (!line) continue
+      let row
+      try { row = JSON.parse(line) } catch { continue }
+      const entry = transcriptEntryFromRow(row)
+      if (entry) entries.push(entry)
+    }
+    return { offset: start + completeEnd + 1, entries }
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch { /* best-effort reader */ }
+    }
+  }
+}
+
+/**
+ * @param {Map<string, { entries: TranscriptEntry[] }>} files
+ */
+function entriesFromCachedFiles(files) {
+  const entries = []
+  for (const file of files.values()) entries.push(...file.entries)
+  entries.sort(byTimestampAsc)
+  return entries
+}
+
+/**
+ * @param {string} key
+ * @param {{ filePath: string, stat: fs.Stats }[]} snapshots
+ * @param {Map<string, { dev: number, ino: number, observedSize: number, mtimeMs: number, offset: number, entries: TranscriptEntry[] }>} files
+ * @param {ReturnType<typeof indexTranscriptEntries>} index
+ */
+function cacheTranscriptIndex(key, snapshots, files, index) {
+  dropTranscriptIndexCache(key)
+  const bytes = snapshots.reduce((sum, snapshot) => sum + snapshot.stat.size, 0)
+  if (bytes > TRANSCRIPT_INDEX_CACHE_MAX_BYTES) return
+  while (
+    transcriptIndexCache.size >= TRANSCRIPT_INDEX_CACHE_MAX_ENTRIES ||
+    transcriptIndexCacheBytes + bytes > TRANSCRIPT_INDEX_CACHE_MAX_BYTES
+  ) {
+    const oldestKey = transcriptIndexCache.keys().next().value
+    if (oldestKey === undefined) break
+    dropTranscriptIndexCache(oldestKey)
+  }
+  const cached = { bytes, files, index }
+  transcriptIndexCache.set(key, cached)
+  transcriptIndexCacheBytes += bytes
+}
+
+/** @param {string} key */
+function dropTranscriptIndexCache(key) {
+  const cached = transcriptIndexCache.get(key)
+  if (!cached) return
+  transcriptIndexCache.delete(key)
+  transcriptIndexCacheBytes -= cached.bytes
+}
+
+/**
+ * @param {string} key
+ * @param {{ bytes: number, index: ReturnType<typeof indexTranscriptEntries>, files: Map<string, any> }} cached
+ */
+function touchTranscriptIndexCache(key, cached) {
+  transcriptIndexCache.delete(key)
+  transcriptIndexCache.set(key, cached)
 }
 
 /**
@@ -765,4 +1003,3 @@ function timestampMs(value) {
   }
   return undefined
 }
-

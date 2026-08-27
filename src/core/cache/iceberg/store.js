@@ -565,18 +565,10 @@ export async function listLiveDataFiles(tablePath) {
  * filter as the fallback; a future null-aware icebird filter can layer the
  * file-skip optimization on top without changing this contract.
  *
- * `opts.partitionWhere` is a best-effort pruning HINT ({column: allowed
- * values}): it compiles to a `col IN (...)` WHERE that icebird uses to skip
- * whole data files (partition tuples + manifest column bounds) before they
- * are opened. The null-drop hazard above is why it is a hint restricted to
- * partition columns, which are required (never null) in every declaration:
- * on those the pushed-down row match is exact, but a caller must not rely
- * on it, because an unconvertible hint silently degrades to the full scan.
- *
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
- * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata, partitionWhere?: Record<string, string[]> }} [opts]
+ * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata, whereIn?: Record<string, string[]> }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 export async function* scanRowsFromTable(tablePath, columns, opts) {
@@ -597,7 +589,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  const scan = source.scan({ columns: projected, where: partitionWhereExpr(opts?.partitionWhere) })
+  const scan = source.scan({ columns: projected, where: whereInExpr(source, opts?.whereIn) })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
     if (filtering) {
@@ -615,19 +607,27 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
 }
 
 /**
- * Compile a `partitionWhere` hint into the squirreling WHERE AST
- * `source.scan` prunes with: one `IN` list per column, AND-ed together.
+ * Build the exact `column IN (...) AND ...` predicate used by targeted cache
+ * reads. This is a row filter, not a hint: callers may rely on the returned
+ * rows matching it. Iceberg also uses the same expression to prune files and
+ * row groups from bounds on sorted lookup columns.
  *
- * @param {Record<string, string[]> | undefined} partitionWhere
+ * @ref LLP 0311#context [implements]: session lookups prune through bounds on
+ * the leading `session_id` sort key after date becomes the only partition key
+ * @param {ScannableDataSource} source
+ * @param {Record<string, string[]> | undefined} whereIn
  * @returns {ExprNode | undefined}
  */
-function partitionWhereExpr(partitionWhere) {
-  if (!partitionWhere) return undefined
-  // Source positions are parser provenance; a synthesized expression has none.
+function whereInExpr(source, whereIn) {
+  if (!whereIn) return undefined
   const at = { positionStart: 0, positionEnd: 0 }
   /** @type {ExprNode | undefined} */
   let expr
-  for (const [name, values] of Object.entries(partitionWhere)) {
+  for (const [name, values] of Object.entries(whereIn)) {
+    if (!source.columns.includes(name)) throw new Error(`cache lookup column not found: ${name}`)
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`cache lookup values must be non-empty: ${name}`)
+    }
     /** @type {ExprNode} */
     const node = {
       ...at,

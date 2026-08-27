@@ -507,7 +507,7 @@ async function dedupeByPartId(rows, ctx) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys)
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
@@ -552,7 +552,7 @@ export async function dedupeStoredPartIds(rows, storage) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys, batchPartitionDates(rows))
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   await scanSpooledPartIds(storage, seen, batchKeys)
   /** @type {Record<string, unknown>[]} */
   const fresh = []
@@ -567,44 +567,21 @@ export async function dedupeStoredPartIds(rows, storage) {
 }
 
 /**
- * The `date` partition values that can hold a committed copy of these rows:
- * each row's own date plus the day on EITHER side of it, absorbing producer
- * timestamp skew around midnight (the proxy, backfill and OTEL stamp `date`
- * from timestamps they each observe for the same message). Returns undefined
- * (no pruning) when any row lacks a date, rather than guessing.
+ * Return every session scope represented by a batch. If a malformed or legacy
+ * row lacks its required session id, disable targeting and preserve the
+ * original full scan.
  *
- * The window is symmetric because the skew has no guaranteed sign. The rows
- * being deduped are the OTEL listener's, stamped from the client-emitted
- * event timestamp; the committed copy they must find was stamped by another
- * producer from a DIFFERENT observation of the same message, and that one can
- * fall on either side of midnight relative to it: the proxy prefers a
- * provider-supplied message timestamp (the API server's clock, which can run
- * ahead of the client's) over its own `tsStart`, and Claude's backfill reads
- * the transcript entry's timestamp, written when the message finalized, i.e.
- * at or after the OTEL event for it. A one-sided window silently misses those,
- * and nothing downstream catches the miss: a prune miss means the two copies
- * disagree on `date`, so they are not byte-identical and compaction's
- * content-hash dedupe cannot collapse them.
- *
- * @ref LLP 0311#date-partition [constrained-by]: pruning on `date` is exact
- *   only because the cache's partition spec is identity on that column
  * @param {Record<string, unknown>[]} rows
  * @returns {string[] | undefined}
  */
-function batchPartitionDates(rows) {
-  /** @type {Set<string>} */
-  const dates = new Set()
+function batchSessionIds(rows) {
+  const ids = new Set()
   for (const row of rows) {
-    const date = row.date
-    if (typeof date !== 'string' || date.length === 0) return undefined
-    const midnight = Date.parse(`${date}T00:00:00Z`)
-    if (Number.isNaN(midnight)) return undefined
-    dates.add(date)
-    for (const offset of [-86_400_000, 86_400_000]) {
-      dates.add(new Date(midnight + offset).toISOString().slice(0, 10))
-    }
+    const sessionId = row.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    ids.add(sessionId)
   }
-  return [...dates]
+  return [...ids]
 }
 
 /** @param {Record<string, unknown>} row */
@@ -760,26 +737,16 @@ function canScanExistingRows(storage) {
  * holds O(batch) memory; backfill omits it because its per-run memo
  * legitimately needs the full committed set (see createBackfillDedupe).
  *
- * `dates` prunes the scan to the date partitions that can hold the batch
- * being deduped (`readRows`'s `partitionWhere` hint). Without it every
- * telemetry batch re-read the whole table: on a months-deep cache a
- * multi-second scan per POST, arriving every few seconds.
- *
- * The hint is an optimization with respect to the SCAN, not with respect to
- * the answer: a partition the batch can reach but the hint omits produces
- * exactly the duplicate this dedupe exists to prevent, and that one survives
- * downstream. Compaction's content-hash layer only collapses byte-identical
- * rows, and a prune miss implies the two copies disagree on `date`. So the
- * window `batchPartitionDates` computes has to cover every partition a
- * committed copy can be in, and it hands back undefined (full scan) rather
- * than narrow a batch it cannot bound.
+ * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
+ * is sorted by `session_id`, so Iceberg can prune unrelated files while the
+ * lookup still searches every date that may contain that session.
  *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
- * @param {string[]} [dates]
+ * @param {string[]} [sessionIds]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage, restrictTo, dates) {
+async function scanExistingPartIds(storage, restrictTo, sessionIds) {
   /** @type {Set<string>} */
   const seen = new Set()
   if (restrictTo && restrictTo.size === 0) return seen
@@ -790,12 +757,20 @@ async function scanExistingPartIds(storage, restrictTo, dates) {
   } catch {
     return seen
   }
-  const readOpts = dates ? { partitionWhere: { date: dates } } : undefined
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'], readOpts)) {
+      // @ref LLP 0311#context [implements]: session_id leads the table sort,
+      // so a session-scoped read prunes cold files while searching every date
+      const rows = sessionIds && typeof storage.readRowsWhere === 'function'
+        ? storage.readRowsWhere(
+            tablePath,
+            ['part_id', 'message_id', 'part_index'],
+            { session_id: sessionIds },
+          )
+        : storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])
+      for await (const row of rows) {
         const key = partIdKey(row)
         if (key === undefined) continue
         if (restrictTo) {

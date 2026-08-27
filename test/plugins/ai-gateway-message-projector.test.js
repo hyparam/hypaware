@@ -807,6 +807,43 @@ test('seeding: sessions with no committed rows share one index build and skip th
   assert.equal(messageScanReads, 0, 'no fresh session pays the per-session committed-row scan')
 })
 
+test('seeding uses a targeted session read when storage supports it', async () => {
+  const targeted = []
+  let fullReads = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 100_000 }]
+    },
+    async *readRows() {
+      fullReads++
+      yield { session_id: 'some-other-session', message_id: 'old' }
+    },
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      targeted.push({ tablePath, columns, whereIn })
+    },
+  }))
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-targeted',
+        messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-fresh' }],
+      }),
+    })],
+    storage,
+  })
+
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1)
+  assert.equal(fullReads, 0, 'the global committed-session scan is bypassed')
+  assert.deepEqual(targeted, [{
+    tablePath: '/p',
+    columns: ['message_id', 'session_id'],
+    whereIn: { session_id: ['sess-targeted'] },
+  }])
+})
+
 function freshSessionIndexStorage() {
   let discoverCalls = 0
   const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({

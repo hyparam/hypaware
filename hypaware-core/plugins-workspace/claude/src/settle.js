@@ -6,8 +6,7 @@ import {
   agentScopedKey,
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
-  indexTranscriptEntries,
-  loadTranscript,
+  loadTranscriptIndex,
   withToolUseResult,
 } from './transcripts.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
@@ -118,18 +117,17 @@ export function createClaudeSettlementEnricher(opts) {
         // INDEPENDENT of the cwd late-resolution below (they read different
         // files), so an empty/unreadable transcript must NOT skip cwd
         // settlement for the session (that would re-open the #258 hole).
-        /** @type {Awaited<ReturnType<typeof loadTranscript>>} */
-        let entries = []
+        /** @type {Awaited<ReturnType<typeof loadTranscriptIndex>> | undefined} */
+        let index
         try {
-          entries = await loadTranscript({
+          index = await loadTranscriptIndex({
             projectsDir,
             sessionId,
             transcriptPath: sessionRecord?.transcript_path,
           })
         } catch {
-          entries = []
+          index = undefined
         }
-        const index = entries.length > 0 ? indexTranscriptEntries(entries) : undefined
 
         for (const i of indices) {
           let row = rows[i]
@@ -438,4 +436,3 @@ async function readSessionContextSafe(stateFile) {
 function safeParseJson(value) {
   try { return JSON.parse(value) } catch { return undefined }
 }
-
