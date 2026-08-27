@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import v8 from 'node:v8'
 
 import {
   DEFAULT_RUNTIME_METRICS_INTERVAL_MS,
@@ -86,6 +87,13 @@ test('every runtime attribute comes from a small closed vocabulary', () => {
   const sampler = installRuntimeMetrics({ env, provider })
   try {
     const allowedKeys = new Set(['area', 'space', 'statistic', 'kind', 'window', 'resource'])
+    // `space` values come straight from v8.getHeapSpaceStatistics(), a
+    // genuinely closed vocabulary whose members V8 has been widening (a
+    // shared_trusted_large_object_space landed in Node 24). Check membership
+    // against the live set instead of guessing a length bound that the next
+    // V8 revision can bust; every other dimension keeps the generic
+    // short-enum length rule.
+    const heapSpaceNames = new Set(v8.getHeapSpaceStatistics().map((space) => space.space_name))
     for (const metric of batches.flat()) {
       const entries = Object.entries(metric.attributes)
       assert.ok(entries.length <= 2, `${metric.name} carries ${entries.length} attributes`)
@@ -93,11 +101,15 @@ test('every runtime attribute comes from a small closed vocabulary', () => {
         assert.ok(allowedKeys.has(key), `unexpected runtime attribute key ${key}`)
         assert.equal(typeof value, 'string', `${key} must be an enum string, got ${typeof value}`)
         const text = String(value)
-        assert.ok(text.length > 0 && text.length <= 32, `${key}=${text} is not a short enum value`)
         // A path, a url, or a timestamp fails the shape check; a bare pid or
         // any other numeric per-process identifier fails the digits check.
         assert.match(text, /^[A-Za-z0-9][A-Za-z0-9_]*$/, `${key}=${text} does not look like an enum member`)
         assert.doesNotMatch(text, /^[0-9]+$/, `${key}=${text} looks like a per-process identifier`)
+        if (key === 'space') {
+          assert.ok(heapSpaceNames.has(text), `space=${text} is not a real v8 heap space name`)
+        } else {
+          assert.ok(text.length > 0 && text.length <= 32, `${key}=${text} is not a short enum value`)
+        }
       }
     }
     assert.ok(batches.flat().some((metric) => metric.attributes.area === 'heap_used'))
