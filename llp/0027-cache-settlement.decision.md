@@ -134,11 +134,10 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
    `part_id` now collides with one already emitted from this partition (its
    native twin) is dropped: the native twin wins. A row whose identity did not
    change is never dropped.
-4. **Force the rewrite when needed, but only on new data.** A cheap
-   `attributes`-only scan gates the sweep: a partition holding any
-   `identity_source = 'gateway_fallback'` row is rewritten even when file-count
-   heuristics say compaction isn't due, so a split pair in a small,
-   never-compacted partition still gets collapsed. To avoid forcing that rewrite
+4. **Force the rewrite when needed, but only on new data.** A partition
+   holding any `identity_source = 'gateway_fallback'` row is rewritten even
+   when file-count heuristics say compaction isn't due, so a split pair in a
+   small, never-compacted partition still gets collapsed. To avoid forcing that rewrite
    *every* tick, the gate also requires the partition's live data-file count to
    have moved off the **re-settle baseline**: the file count recorded in the
    cursor's `compaction` block at the previous sweep. A fallback row whose
@@ -152,6 +151,20 @@ The sweep's in-memory shape is extended by
 [LLP 0301](./0301-bounded-compaction-resettle.issue.md): native identity keys
 are discovered in a narrow pass, then fallback rows are settled in
 `compact_batch_bytes`-bounded batches instead of one generation-sized buffer.
+
+Point 4's gate originally answered "does this partition hold a marker row?"
+with an `attributes`-only scan of the live table, run each tick the baseline
+gate let through. On a large gateway cache that decoded gigabytes of recorded
+exchanges per tick and OOMed the daemon hourly, and the happy path paid the
+most: a partition with no fallback rows re-derived the same "no" forever. The
+count is now maintained where it is already known, in the partition cursor's
+`pendingFallbacks` field: the flush path tallies marker rows as they land
+(they arrive post-settle, so a surviving marker is genuinely unsettled) and
+every settle-bearing rewrite resets the field to the exact remainder it
+counted. The gate is a cursor read. A cursor written before the field existed
+pays the legacy scan once and caches the verdict, so the scan runs at most
+once per partition. What point 4 decided is unchanged: the same two conditions
+still gate the same forced rewrite.
 
 Conservative and bounded: an enricher miss/failure leaves the fallback row
 untouched for a later sweep; a matchable second sweep collapses the twin and the

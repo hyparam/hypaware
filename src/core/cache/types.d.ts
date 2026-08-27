@@ -15,6 +15,15 @@ export interface PartitionCursor {
   compaction: unknown | null
   layout?: 'epoch' | 'source-table'
   tableDir?: string
+  // Committed rows still carrying the gateway provisional-identity marker
+  // (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027).
+  // Incremented by the flush path as marker rows land and reset to the exact
+  // remainder by each generation rewrite, so maintenance gates the re-settle
+  // sweep on this field instead of scanning the table's attributes column
+  // every tick. Absent means unknown (a cursor written before the field
+  // existed): maintenance answers with one legacy scan and writes the
+  // verdict back, so the scan runs at most once per partition.
+  pendingFallbacks?: number
   retention?: {
     lastCutoffDate?: string
     lastCutoffMs?: number
