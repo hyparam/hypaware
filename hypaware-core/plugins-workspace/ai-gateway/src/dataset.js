@@ -735,12 +735,22 @@ function canScanExistingRows(storage) {
  * scanned), and past a crossover it is slower than the scan it exists to
  * avoid, by an unbounded factor rather than a bounded one. Measured against
  * a 200k-row committed partition: 0.93x the full read at 200 sessions, 1.9x
- * at 500, 5.4x at 1,000, 13.8x at 4,000. The cap sits under that crossover,
- * so the worst case here is the full read, not a multiple of it.
+ * at 500, 5.4x at 1,000, 13.8x at 4,000, crossing over near 220.
+ *
+ * The cap sits under that measured crossover, but the number it caps is the
+ * linear term, not the crossover: the shape is O(sessions) on every layout,
+ * while where it crosses 1x moves with file count, row width, and how tight
+ * the per-file `session_id` bounds are. So the guarantee the cap buys is
+ * bounded cost, not a specific multiple. On a layout whose crossover sits
+ * below the cap, a batch at the cap costs a small multiple of the full read
+ * instead of slightly less than it, and above the cap it IS the full read.
+ * Read the numbers as calibration, not as a portable constant.
  *
  * Choosing the full read is always safe: it answers the same membership
- * question over a superset of the rows, and it is the shape this scan already
- * takes for a batch with no usable session ids.
+ * question over a superset of the rows, so its seen-set is a superset of the
+ * scoped one and it can only find MORE committed twins, never fewer. It
+ * cannot miss a duplicate the scoped read would have caught, and it is the
+ * shape this scan already takes for a batch with no usable session ids.
  *
  * @ref LLP 0311#context [constrained-by]: bounds on the leading `session_id`
  * sort key prune a session lookup, which is a claim about ONE narrow lookup;

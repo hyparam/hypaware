@@ -202,22 +202,35 @@ test('a committed partition with no session_id column degrades to a full read', 
  * optimization, it is slower than the scan it replaced without bound.
  *
  * Timing cannot be asserted, so this pins the decision instead: past the cap
- * the scan issues the unrestricted read, and answers the same question.
+ * the scan issues the unrestricted read. It also pins the half that makes the
+ * fallback safe rather than merely cheap, and the half a `[]`-vs-`[]` check
+ * cannot see: both shapes must DROP the committed twins and KEEP the fresh
+ * rows. A fallback that read the wrong thing and dropped everything is data
+ * loss, not a slow dedupe, so the batch carries survivors on purpose.
  */
 test('a batch too wide to prune reverts to the unrestricted read', async () => {
   const env = await stageStorage()
+  const sess = (/** @type {number} */ i) => `sess-${String(i).padStart(4, '0')}`
+  const WIDEST = 201
   try {
-    await env.storage.appendRows(env.tablePath, COLUMNS, [
-      row('sess-0000', '2026-08-27', 'm-committed'),
-    ])
+    // One committed row per session, on a date no batch row carries, so the
+    // twin is only reachable by a read that spans dates (either shape).
+    await env.storage.appendRows(env.tablePath, COLUMNS,
+      Array.from({ length: WIDEST }, (_, i) => row(sess(i), '2026-05-01', `m-old-${i}`)))
     await env.storage.flushTable(env.tablePath, { force: true })
 
     /** @param {number} count */
     const batchOf = (count) => {
+      /** @type {Record<string, unknown>[]} */
       const rows = []
-      for (let i = 0; i < count; i++) rows.push(row(`sess-${String(i).padStart(4, '0')}`, '2026-08-27', 'm-committed'))
+      for (let i = 0; i < count; i++) {
+        rows.push(row(sess(i), '2026-08-27', `m-old-${i}`)) // committed: must drop
+        rows.push(row(sess(i), '2026-08-27', `m-new-${i}`)) // never written: must survive
+      }
       return rows
     }
+    /** @param {number} count */
+    const expectedSurvivors = (count) => Array.from({ length: count }, (_, i) => `m-new-${i}#0`)
 
     /** @param {Record<string, unknown>[]} batch */
     const dedupeWithSpy = async (batch) => {
@@ -243,15 +256,17 @@ test('a batch too wide to prune reverts to the unrestricted read', async () => {
     const narrow = await dedupeWithSpy(batchOf(200))
     assert.equal(narrow.unscopedReads, 0, 'a list the cache can prune on still takes the scoped read')
     assert.equal(narrow.wheres.length, 1)
+    assert.equal(narrow.wheres[0]?.session_id?.length, 200, 'the whole batch is pushed down, not a prefix of it')
 
-    const wide = await dedupeWithSpy(batchOf(201))
+    const wide = await dedupeWithSpy(batchOf(WIDEST))
     assert.equal(wide.wheres.length, 0, 'a list too wide to prune on is never pushed down')
     assert.ok(wide.unscopedReads > 0, 'it reads the partition unrestricted instead')
 
-    for (const { fresh } of [narrow, wide]) {
-      assert.deepEqual(fresh.map((r) => r.session_id), [],
-        'either read answers the same membership question: every batch row twins the committed part_id')
-    }
+    // The equivalence the fallback rests on: the full read answers the same
+    // membership question over a superset of the rows, so neither shape may
+    // miss a committed twin (a silent duplicate) or drop a fresh row.
+    assert.deepEqual(narrow.fresh.map((r) => r.part_id), expectedSurvivors(200))
+    assert.deepEqual(wide.fresh.map((r) => r.part_id), expectedSurvivors(WIDEST))
   } finally {
     await env.cleanup()
   }
