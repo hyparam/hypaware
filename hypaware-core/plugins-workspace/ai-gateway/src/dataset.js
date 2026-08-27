@@ -507,7 +507,7 @@ async function dedupeByPartId(rows, ctx) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys)
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
@@ -552,7 +552,7 @@ export async function dedupeStoredPartIds(rows, storage) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys)
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   await scanSpooledPartIds(storage, seen, batchKeys)
   /** @type {Record<string, unknown>[]} */
   const fresh = []
@@ -564,6 +564,24 @@ export async function dedupeStoredPartIds(rows, storage) {
     fresh.push(row)
   }
   return fresh
+}
+
+/**
+ * Return every session scope represented by a batch. If a malformed or legacy
+ * row lacks its required session id, disable targeting and preserve the
+ * original full scan.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {string[] | undefined}
+ */
+function batchSessionIds(rows) {
+  const ids = new Set()
+  for (const row of rows) {
+    const sessionId = row.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    ids.add(sessionId)
+  }
+  return [...ids]
 }
 
 /** @param {Record<string, unknown>} row */
@@ -719,11 +737,19 @@ function canScanExistingRows(storage) {
  * holds O(batch) memory; backfill omits it because its per-run memo
  * legitimately needs the full committed set (see createBackfillDedupe).
  *
+ * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
+ * is sorted by `session_id`, so Iceberg can prune unrelated files while the
+ * lookup still searches every date that may contain that session. A partition
+ * that cannot answer the scoped read (a schema with no `session_id` column)
+ * degrades to the full read rather than being skipped: skipping it would
+ * report a committed row as fresh and write a duplicate.
+ *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
+ * @param {string[]} [sessionIds]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage, restrictTo) {
+async function scanExistingPartIds(storage, restrictTo, sessionIds) {
   /** @type {Set<string>} */
   const seen = new Set()
   if (restrictTo && restrictTo.size === 0) return seen
@@ -734,27 +760,72 @@ async function scanExistingPartIds(storage, restrictTo) {
   } catch {
     return seen
   }
+  const targeted = !!sessionIds && typeof storage.readRowsWhere === 'function'
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
-        const key = partIdKey(row)
-        if (key === undefined) continue
-        if (restrictTo) {
-          if (!restrictTo.has(key)) continue
-          seen.add(key)
-          if (seen.size >= restrictTo.size) return seen
-        } else {
-          seen.add(key)
-        }
+      if (await collectPartIds(storage, tablePath, targeted ? sessionIds : undefined, seen, restrictTo)) {
+        return seen
       }
     } catch {
-      // Skip an unreadable partition; other partitions still contribute.
+      // A TARGETED read can fail where the unrestricted one succeeds: the
+      // predicate names `session_id`, and a partition whose schema predates
+      // that column (LLP 0030 bumped the label to `proxy_messages_v5`, but a
+      // cache upgraded rather than recreated still carries the older table)
+      // rejects it outright. Skipping the partition would answer "not
+      // committed" for a row that IS committed, and the caller writes a
+      // duplicate on that answer, so degrade to the full read before giving up
+      // on the partition.
+      if (targeted) {
+        try {
+          if (await collectPartIds(storage, tablePath, undefined, seen, restrictTo)) return seen
+        } catch {
+          // Genuinely unreadable; other partitions still contribute.
+        }
+      }
       continue
     }
   }
   return seen
+}
+
+/**
+ * Fold one partition's `part_id`s into `seen`, honouring `restrictTo`.
+ * Returns true once every restricted key has been found, so the caller can
+ * stop opening partitions. Re-running it over a partition is harmless (`seen`
+ * is a set), which is what lets the caller retry a failed targeted read as an
+ * unrestricted one.
+ *
+ * @param {QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string[] | undefined} sessionIds
+ * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
+ * @returns {Promise<boolean>}
+ */
+async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) {
+  // @ref LLP 0311#context [implements]: session_id leads the table sort,
+  // so a session-scoped read prunes cold files while searching every date
+  const rows = sessionIds && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(
+        tablePath,
+        ['part_id', 'message_id', 'part_index'],
+        { session_id: sessionIds },
+      )
+    : storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])
+  for await (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) continue
+    if (restrictTo) {
+      if (!restrictTo.has(key)) continue
+      seen.add(key)
+      if (seen.size >= restrictTo.size) return true
+    } else {
+      seen.add(key)
+    }
+  }
+  return false
 }
 
 /**

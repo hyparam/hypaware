@@ -1,0 +1,192 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { aiGatewayDatasetRegistration, DATASET_NAME, dedupeStoredPartIds } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
+import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+
+/**
+ * The telemetry dedupe's committed scan and the `readRowsWhere` lookup it
+ * rides on. The dedupe question "is this `part_id` already committed?" is
+ * answered by reading only the batch's own `session_id`s, which the cache
+ * sorts on (LLP 0311#context), instead of re-reading the whole table per
+ * telemetry POST.
+ *
+ * A pruned dedupe fails SILENTLY: a scan that does not look where the
+ * committed twin lives reports it as fresh and the caller appends a second
+ * copy. So these tests pin the two halves separately: that the scope is real
+ * (an unrelated session's rows are never materialized) and that everything it
+ * must still reach is reached (any date, and every degraded shape).
+ *
+ * @import { ColumnSpec, QueryStorageService } from '../../hypaware-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
+ */
+
+/** @type {ColumnSpec[]} */
+const COLUMNS = [
+  { name: 'session_id', type: 'STRING', nullable: false },
+  { name: 'date', type: 'STRING', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: true },
+  { name: 'role', type: 'STRING', nullable: false },
+  { name: 'message_id', type: 'STRING', nullable: false },
+  { name: 'part_id', type: 'STRING', nullable: false },
+  { name: 'part_index', type: 'INT32', nullable: false },
+  { name: 'content_text', type: 'STRING', nullable: true },
+]
+
+/** Same shape minus `session_id`: the pre-LLP-0030 (`proxy_messages_v4`) table. */
+const LEGACY_COLUMNS = COLUMNS.filter((c) => c.name !== 'session_id')
+
+/**
+ * @param {string} sessionId
+ * @param {string} date
+ * @param {string} messageId
+ */
+function row(sessionId, date, messageId) {
+  return {
+    session_id: sessionId,
+    date,
+    client_name: 'claude',
+    role: 'assistant',
+    message_id: messageId,
+    part_id: `${messageId}#0`,
+    part_index: 0,
+    content_text: `content of ${messageId}`,
+  }
+}
+
+/**
+ * @param {{ legacy?: boolean }} [opts]
+ * @returns {Promise<{ storage: ReturnType<typeof createQueryStorageService>, tablePath: string, cleanup: () => Promise<void> }>}
+ */
+async function stageStorage(opts = {}) {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sess-dedupe-'))
+  const registration = aiGatewayDatasetRegistration(createGatewayState())
+  /** @type {CachePartitioningDeclaration | undefined} */
+  const declaration = opts.legacy
+    ? {
+      source: { columns: ['client_name'], fallback: 'unknown' },
+      iceberg: { fields: [{ column: 'date', transform: 'identity', required: true }] },
+    }
+    : registration.cachePartitioning
+  const storage = createQueryStorageService({
+    cacheRoot,
+    getDeclaration: (dataset) => dataset === DATASET_NAME ? declaration : undefined,
+  })
+  const tablePath = storage.cacheTablePath(DATASET_NAME, [opts.legacy ? 'proxy_messages_v4' : 'proxy_messages_v5'])
+  return {
+    storage,
+    tablePath,
+    cleanup: async () => { await fs.rm(cacheRoot, { recursive: true, force: true }) },
+  }
+}
+
+test('the telemetry dedupe catches a same-session duplicate committed on any date', async () => {
+  const env = await stageStorage()
+  try {
+    await env.storage.appendRows(env.tablePath, COLUMNS, [
+      row('sess-1', '2026-05-01', 'm-ancient'),
+      row('sess-1', '2026-07-14', 'm-old'),
+      row('sess-1', '2026-08-27', 'm-recent'),
+    ])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    const batch = [
+      row('sess-1', '2026-08-27', 'm-ancient'), // months earlier: no date window can reach it
+      row('sess-1', '2026-08-27', 'm-old'),
+      row('sess-1', '2026-08-27', 'm-recent'),
+      row('sess-1', '2026-08-27', 'm-fresh'),
+    ]
+    const fresh = await dedupeStoredPartIds(batch, env.storage)
+    assert.deepEqual(fresh.map((r) => r.message_id), ['m-fresh'],
+      'every committed copy of this session is found regardless of its date; only the new row survives')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * The assertion that can tell the scoped scan apart from the unscoped one:
+ * an unrelated session's committed rows are never materialized. Without it
+ * every test here would also pass against a full-table scan.
+ */
+test('the committed scan is scoped to the batch\'s sessions', async () => {
+  const env = await stageStorage()
+  try {
+    await env.storage.appendRows(env.tablePath, COLUMNS, [
+      row('sess-mine', '2026-08-27', 'm-mine'),
+      row('sess-theirs', '2026-08-27', 'm-theirs'),
+    ])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    /** @type {Record<string, string[]>[]} */
+    const wheres = []
+    /** @type {unknown[]} */
+    const materialized = []
+    let unscopedReads = 0
+    const spy = /** @type {QueryStorageService} */ (/** @type {unknown} */ ({
+      ...env.storage,
+      discoverCachePartitions: (scope) => env.storage.discoverCachePartitions(scope),
+      async *readRows(tablePath, columns, readOpts) {
+        unscopedReads++
+        yield* env.storage.readRows(tablePath, columns, readOpts)
+      },
+      async *readRowsWhere(tablePath, columns, whereIn) {
+        wheres.push(whereIn)
+        for await (const r of /** @type {NonNullable<typeof env.storage.readRowsWhere>} */ (env.storage.readRowsWhere)(tablePath, columns, whereIn)) {
+          materialized.push(r)
+          yield r
+        }
+      },
+    }))
+
+    const fresh = await dedupeStoredPartIds([row('sess-mine', '2026-08-27', 'm-mine')], spy)
+    assert.deepEqual(fresh, [], 'the committed copy in this session is found')
+    assert.equal(unscopedReads, 0, 'the hot path never falls back to the full scan when it does not have to')
+    assert.deepEqual(wheres, [{ session_id: ['sess-mine'] }])
+    assert.deepEqual(materialized.map((r) => /** @type {Record<string, unknown>} */ (r).part_id), ['m-mine#0'],
+      'the other session\'s rows are pruned, not read and discarded')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a batch row without a session id disables scoping rather than guessing', async () => {
+  const env = await stageStorage()
+  try {
+    await env.storage.appendRows(env.tablePath, COLUMNS, [row('sess-1', '2026-05-01', 'm-old')])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    const sessionless = { ...row('sess-1', '2026-08-27', 'm-old'), session_id: undefined }
+    const fresh = await dedupeStoredPartIds([sessionless], env.storage)
+    assert.equal(fresh.length, 0, 'the unscoped fallback scan still finds the committed part_id')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * A committed table whose schema predates `session_id` (LLP 0030 bumped the
+ * label, but a cache upgraded rather than recreated still carries the older
+ * one) rejects the scoped predicate outright. Skipping such a partition would
+ * report a committed row as fresh, so the scan degrades to the full read.
+ */
+test('a committed partition with no session_id column degrades to a full read', async () => {
+  const env = await stageStorage({ legacy: true })
+  try {
+    const legacyRow = { ...row('sess-1', '2026-05-01', 'm-legacy') }
+    delete (/** @type {Record<string, unknown>} */ (legacyRow)).session_id
+    await env.storage.appendRows(env.tablePath, LEGACY_COLUMNS, [legacyRow])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    const fresh = await dedupeStoredPartIds([row('sess-1', '2026-08-27', 'm-legacy')], env.storage)
+    assert.equal(fresh.length, 0, 'the legacy partition is still scanned, so the duplicate is caught')
+  } finally {
+    await env.cleanup()
+  }
+})

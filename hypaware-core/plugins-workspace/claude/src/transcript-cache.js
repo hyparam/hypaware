@@ -256,6 +256,13 @@ export function createTranscriptLoader(opts) {
 }
 
 /**
+ * One process-wide transcript view shared by live projection and flush-time
+ * settlement. Both paths observe the same append offsets and parsed entries,
+ * avoiding a second retained copy of every active Claude transcript.
+ */
+export const sharedTranscriptLoader = createTranscriptLoader()
+
+/**
  * Minimal counting gate: at most `limit` callers inside `fn` at once.
  *
  * @param {number} limit

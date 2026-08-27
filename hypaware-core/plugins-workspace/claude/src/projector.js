@@ -28,7 +28,7 @@ import {
   matchKey,
   withToolUseResult,
 } from './transcripts.js'
-import { createTranscriptLoader } from './transcript-cache.js'
+import { sharedTranscriptLoader } from './transcript-cache.js'
 import {
   createSessionContextReader,
   pickLatestMatching,
@@ -115,7 +115,7 @@ export function createClaudeExchangeProjector(opts) {
   // Incremental transcript reads for the projector's lifetime: the
   // per-exchange full reload was the daemon's dominant steady-state CPU
   // cost (and, held concurrently, its OOM), growing with session size.
-  const transcriptLoader = opts.transcriptLoader ?? createTranscriptLoader()
+  const transcriptLoader = opts.transcriptLoader ?? sharedTranscriptLoader
 
   return {
     name: 'claude-anthropic-messages',
