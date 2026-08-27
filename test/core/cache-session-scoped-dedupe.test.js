@@ -194,12 +194,13 @@ test('a committed partition with no session_id column degrades to a full read', 
 /**
  * The scoped read is only cheaper than the full read while the list stays
  * narrow. Iceberg prunes on an `IN` list only when EVERY listed value falls
- * outside a chunk bound, so a wide list opens every file anyway, and then
- * hyparquet matches each surviving row by walking the whole list: the scoped
- * read becomes O(rows x sessions) against the full read O(rows). Measured on
- * a 200k-row committed partition it crosses over near 220 sessions and
- * reaches 13.8x the full read at 4,000, so an uncapped list is not a weaker
- * optimization, it is slower than the scan it replaced without bound.
+ * outside a chunk bound, so pruning decays toward nothing as the list widens,
+ * and hyparquet then matches each surviving row by walking the whole list:
+ * the scoped read becomes O(rows x sessions) against the full read O(rows).
+ * Measured on a 200k-row committed partition it crosses over near 220
+ * sessions and reaches 13.8x the full read at 4,000, so an uncapped list is
+ * not a weaker optimization, it is slower than the scan it replaced without
+ * bound.
  *
  * Timing cannot be asserted, so this pins the decision instead: past the cap
  * the scan issues the unrestricted read. It also pins the half that makes the

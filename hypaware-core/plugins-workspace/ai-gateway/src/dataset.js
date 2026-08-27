@@ -729,11 +729,12 @@ function canScanExistingRows(storage) {
  *
  * A scoped read is not an index probe. Iceberg prunes a file or row group on
  * an `IN` list only when EVERY listed value falls outside the chunk
- * `session_id` bounds, which a wide list never does, and hyparquet then
- * matches each surviving row by walking the whole value list. So the scoped
- * read costs O(rows scanned x sessions) where the full read costs O(rows
- * scanned), and past a crossover it is slower than the scan it exists to
- * avoid, by an unbounded factor rather than a bounded one. Measured against
+ * `session_id` bounds, so each value added is another chance to keep the
+ * chunk and pruning decays toward nothing as the list widens. Every row that
+ * survives is then matched by hyparquet walking the whole value list. So the
+ * scoped read costs O(rows scanned x sessions) where the full read costs
+ * O(rows scanned), and past a crossover it is slower than the scan it exists
+ * to avoid, by an unbounded factor rather than a bounded one. Measured against
  * a 200k-row committed partition: 0.93x the full read at 200 sessions, 1.9x
  * at 500, 5.4x at 1,000, 13.8x at 4,000, crossing over near 220.
  *
