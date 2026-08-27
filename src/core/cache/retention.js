@@ -16,7 +16,7 @@ import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stag
 import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
-import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { physicalProjection, readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
  * @import { DatasetRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -411,8 +411,14 @@ async function scanFileForExpiredRows(filePath, cutoffMs, resolver, timestampCol
   const positions = []
   try {
     const file = await Promise.resolve(resolver.reader(filePath))
+    // `timestampColumns` is a candidate list (`extractTimestampMs` takes the
+    // first one the row carries) already narrowed to the TABLE schema, so a
+    // file written before one of them was added still has to be narrowed
+    // again: since hyparquet 1.29 an absent projected name throws, and the
+    // catch below would read that as an unreadable file and silently stop
+    // expiring its rows.
     const rows = /** @type {Record<string, unknown>[]} */ (
-      await parquetReadObjects({ file, columns: timestampColumns })
+      await parquetReadObjects({ file, ...await physicalProjection(file, timestampColumns) })
     )
     for (let i = 0; i < rows.length; i++) {
       if (deletedPositions?.has(BigInt(i))) continue

@@ -18,6 +18,23 @@ const FORMAT = 'parquet'
 const EXTENSION = 'parquet'
 const DEFAULT_CODEC = 'SNAPPY'
 const DEFAULT_ZSTD_LEVEL = 3
+// One compressor for the process. `snappyCompressor()` instantiates a WASM
+// module and returns a closure over its instance, so building one per encode
+// (or per page) would recompile the module every time and give the speedup
+// back. The instance is safe to share: compression is synchronous with no
+// await inside, so two encodes can never interleave in it, and the hash table
+// it carries between calls is re-validated against the current input rather
+// than trusted.
+//
+// The cost of sharing it is a memory FLOOR, and it is worth stating because
+// nothing else in this file leaks: a WASM memory only ever grows, so the
+// instance ends up sized to the largest page it has ever seen (roughly twice
+// that page, input copy plus output room) and holds it for the life of the
+// daemon. Pages are usually `pageSize`, but a page is cut AFTER the value that
+// overflowed it, so one fat cell (a big `tools` or `content_text` blob) sets
+// the floor for every later sync. That is bounded by the same fat-row limit
+// `DEFAULT_MAX_GROUP_BYTES` bounds the encoder's peak heap with, not unbounded,
+// and it is one instance per process (nothing here runs on a worker thread).
 const SNAPPY_COMPRESSOR = snappyCompressor()
 
 // Row-group clustering. Originally this existed because hyparquet-writer

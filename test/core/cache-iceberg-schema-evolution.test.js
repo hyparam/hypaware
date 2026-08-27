@@ -13,6 +13,7 @@ import os from 'node:os'
 
 import {
   appendRowsToTable,
+  deleteMatchingRows,
   readRowsFromTable,
   currentSchema,
 } from '../../src/core/cache/iceberg/store.js'
@@ -283,6 +284,34 @@ test('a rejected append does not advance the table schema (coerce before any com
     const rows = await readRowsFromTable(dir)
     assert.equal(rows.length, 1)
     assert.equal(rows[0].conversation_id, 'c1')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('purge deletes rows from a data file narrower than the evolved schema', async () => {
+  // Regression for the hyparquet 1.29 projection rule. `deleteMatchingRows`
+  // narrows the predicate's columns to the table's CURRENT schema, and the
+  // file written before the evolution does not carry all of them. hyparquet
+  // used to drop the absent name; 1.29 throws, and the per-file `catch`
+  // reads that as "nothing to delete here", so `hyp purge` reported success
+  // while sparing every pre-evolution row.
+  const dir = await makeTmpDir('purge-drift')
+  try {
+    await appendRowsToTable(dir, V1_COLUMNS, [
+      { conversation_id: 'c1', client_name: 'claude', date: '2026-06-16', message: 'old' },
+    ], { declaration: DECLARATION })
+    await appendRowsToTable(dir, V2_COLUMNS, [
+      { conversation_id: 'c2', client_name: 'claude', date: '2026-06-16', message: 'new', agent_id: 'agent-7' },
+    ], { declaration: DECLARATION })
+    assert.equal(await tableHasColumn(dir, 'agent_id'), true, 'schema evolved')
+
+    // `hyp purge`-shaped call: delete everything, projecting a column only the
+    // newer data file physically carries.
+    const purged = await deleteMatchingRows(dir, () => true, { columns: ['agent_id'] })
+    assert.equal(purged.rowsDeleted, 2, 'both data files are purged, not only the wide one')
+    assert.equal(purged.filesAffected, 2)
+    assert.deepEqual(await readRowsFromTable(dir), [])
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
