@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { parquetReadObjects } from 'hyparquet'
+import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
   fileCatalog,
   icebergAppend,
@@ -45,6 +45,7 @@ import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow, ExprNode } from 'squirreling'
+ * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
  */
 
 /**
@@ -372,7 +373,9 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
 
   // Only project columns that exist in the current schema; a predicate column
   // absent from an older partition reads as `undefined`, which the caller's
-  // predicate must tolerate (the additive-schema contract, LLP 0032).
+  // predicate must tolerate (the additive-schema contract, LLP 0029). The
+  // table schema is the OUTER bound only: an older data file can be narrower
+  // still, so the per-file read below narrows this list again.
   const schema = currentSchema(metadata)
   const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
   const projected = opts.columns.filter((c) => schemaColumns.has(c))
@@ -410,6 +413,44 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
 }
 
 /**
+ * Narrow a projection to the columns one data file PHYSICALLY carries, and
+ * hand back the footer that proved it so the caller reads it once.
+ *
+ * A table's current schema is the union of every generation written under it,
+ * so a file written before an additive evolution is narrower than the schema
+ * that describes it. hyparquet used to drop a projected name the file lacked;
+ * since 1.29 it throws `parquet column not found`. Both callers (the purge
+ * scan below and retention's expiry scan) read inside a `catch` that treats a
+ * failed read as "this file has nothing to contribute", so an unnarrowed
+ * projection never surfaces as an error: a purge silently spares the older
+ * file's rows and retention silently stops expiring them. Narrowing here
+ * keeps the pre-1.29 reading, where an absent column simply resolves to
+ * `undefined` on the row.
+ *
+ * The narrowing can reach EMPTY, and that case is load-bearing rather than
+ * degenerate: a data file predating every projected column is exactly the file
+ * `hyp purge --all` must still empty, and its unconditional predicate only
+ * fires if the read still yields a row per row. It does, because hyparquet
+ * reads `columns: []` as "no COLUMNS", handing back one bare `{}` per physical
+ * row, not as "no rows" or "every column". That is the one library behaviour
+ * this helper cannot re-derive from the footer, and icebird's own reader routes
+ * around the same shape rather than relying on it (`icebird/src/read.js`), so a
+ * hyparquet that reinterpreted it would silently restore the under-delete this
+ * helper exists to close. `cache-iceberg-schema-evolution.test.js` pins it at
+ * this seam so the bump that changed it names itself.
+ *
+ * @ref LLP 0029#in-place-evolution [constrained-by]: evolution leaves older data files narrower than the table schema
+ * @param {AsyncBuffer} file
+ * @param {string[]} columns the projection the caller wants
+ * @returns {Promise<{ metadata: FileMetaData, columns: string[] }>}
+ */
+export async function physicalProjection(file, columns) {
+  const metadata = await parquetMetadataAsync(file)
+  const physical = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
+  return { metadata, columns: columns.filter((column) => physical.has(column)) }
+}
+
+/**
  * Scan one Iceberg data file and return the row positions of live rows that
  * satisfy `predicate`. Rows already covered by a committed position-delete are
  * skipped so re-purges never re-plan the same delete.
@@ -426,7 +467,9 @@ async function scanFileForMatchingRows(filePath, resolver, predicate, columns, d
   const positions = []
   try {
     const file = await Promise.resolve(resolver.reader(filePath))
-    const readOpts = columns.length > 0 ? { file, columns } : { file }
+    const readOpts = columns.length > 0
+      ? { file, ...await physicalProjection(file, columns) }
+      : { file }
     const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
     for (let i = 0; i < rows.length; i++) {
       if (deletedPositions?.has(BigInt(i))) continue

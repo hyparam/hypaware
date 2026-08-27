@@ -40,9 +40,11 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
  */
 export function parquetDataSource(file, metadata) {
   const schema = parquetSchema(metadata)
+  const columns = schema.children.map((c) => c.element.name)
+  const physicalColumns = new Set(columns)
   return {
     numRows: Number(metadata.num_rows),
-    columns: schema.children.map((c) => c.element.name),
+    columns,
     /**
      * @param {ScanOptions} hints
      * @returns {ScanResults}
@@ -65,7 +67,11 @@ export function parquetDataSource(file, metadata) {
       // the predicate over rows this scan already returned, as `unionSources`
       // does) must include the predicate's columns in `columns`, or the
       // engine has nothing to re-filter on.
-      const readColumns = hints.columns
+      // hyparquet >= 1.29 rejects a projected name absent from the physical
+      // schema. Keep the scan physical here; the union pads requested columns
+      // the partition lacks after this source yields its rows.
+      // @ref LLP 0241#alignment [constrained-by]: drifted columns are padded above the physical parquet read
+      const readColumns = hints.columns?.filter((column) => physicalColumns.has(column))
 
       return {
         appliedWhere,

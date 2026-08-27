@@ -76,30 +76,31 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1109.0",
-    "@aws-sdk/credential-provider-ini": "3.973.13",
-    "hyparquet": "1.28.2",
+    "@aws-sdk/client-s3": "3.1120.0",
+    "@aws-sdk/credential-provider-ini": "3.973.15",
+    "hyparquet": "1.29.2",
     "hyparquet-compressors": "1.1.1",
     "hypgrep": "0.5.1",
+    "hysnappy": "1.1.1",
     "icebird": "0.8.26",
-    "marked": "18.0.9",
+    "marked": "18.0.11",
     "squirreling": "0.16.2"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.6",
+    "hyparquet-writer": "0.16.8",
     "hypvector": "0.2.2"
   },
   "overrides": {
     "icebird": {
-      "hyparquet-writer": "0.16.6"
+      "hyparquet-writer": "0.16.8"
     },
     "hypgrep": {
-      "hyparquet": "1.28.2",
-      "hyparquet-writer": "0.16.6"
+      "hyparquet": "1.29.2",
+      "hyparquet-writer": "0.16.8"
     }
   },
   "devDependencies": {
-    "@types/node": "26.3.0",
+    "@types/node": "26.4.0",
     "typescript": "7.0.2"
   }
 }

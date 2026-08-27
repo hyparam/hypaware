@@ -1,6 +1,6 @@
 // @ts-check
 
-import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import { parquetFind } from 'hypgrep'
 
 import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
@@ -79,6 +79,7 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * @import { GrepSearchHit, GrepSearchMatcher, GrepSearchParams, GrepSearchResult } from '../../../src/core/search/types.js'
  * @import { LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
+ * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
  */
 
 const DATASET = GREP_DATASET
@@ -330,9 +331,12 @@ export async function executeGrepSearch(args) {
        * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
        * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
        * @param {string} sidecarUrl
+       * @param {AsyncBuffer} sourceFile
+       * @param {FileMetaData} sourceMetadata
+       * @param {string[]} scanColumns
        * @returns {Promise<boolean>}
        */
-      const searchIndexed = async (file, indexFile, sidecarUrl) => {
+      const searchIndexed = async (file, indexFile, sidecarUrl, sourceFile, sourceMetadata, scanColumns) => {
         /** @type {GrepSearchHit[]} */
         const found = []
         let withheldHere = 0
@@ -357,16 +361,17 @@ export async function executeGrepSearch(args) {
           // 90.8% measurement `SCAN_COLUMNS` cites). Safe because every
           // reader downstream of here - `accept`, the `withheld` predicate's
           // `cwd`, and `toHit`'s locators - names only columns inside the
-          // projection, and hyparquet ignores a projected name the file
-          // lacks, exactly as the scan tier already relies on.
+          // projection. `scanColumns` intersects that shared projection with
+          // this file's physical schema because hyparquet >= 1.29 rejects an
+          // absent projected name.
           const rows = parquetFind({
             query: matcher.hypQuery,
             url: file.filePath,
             indexFile,
-            // hypgrep opens the SOURCE data file through this factory, so
-            // a candidate range fetches the byte ranges its row group
-            // needs rather than coming out of a whole-file resident
-            // buffer. It then wraps the result in its own
+            // The SOURCE data file is handle-backed, so a candidate range
+            // fetches the byte ranges its row group needs rather than coming
+            // out of a whole-file resident buffer. hypgrep then wraps it in
+            // its own
             // `cachedAsyncBuffer`, which holds every slice for the life of
             // this generator, so the residency here is the union of the
             // candidate ranges and NOT one row group: strictly less than
@@ -375,8 +380,9 @@ export async function executeGrepSearch(args) {
             // is deliberately NOT read this way (see `searchFile`).
             // @ref LLP 0303#memory-bound [implements]: the source is opened per slice rather than read whole
             // @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep memoizes the slices, so this tier's raw bound is the candidate ranges
-            asyncBufferFactory: async ({ url }) => await asyncBufferFromFile(urlToPath(url)),
-            columns: SCAN_COLUMNS,
+            sourceFile,
+            sourceMetadata,
+            columns: scanColumns,
             rowFilter: accept,
             signal,
           })
@@ -416,12 +422,12 @@ export async function executeGrepSearch(args) {
           // index state.
           if (err instanceof LocalOnlyListUnreadableError) throw err
           // Both files are named, because the read that failed spans both:
-          // `parquetFind` opens the source data file through the same
-          // factory as the sidecar and runs the row filter per row, so a
-          // torn source parquet reaches this line too and then fails the
-          // rescan below. Deleting the sidecar is the usual remedy and this
-          // warning is its only notice (nothing rebuilds one in place), but
-          // the line must not claim to have proved which file is at fault.
+          // `parquetFind` reads the source data file alongside the sidecar
+          // and runs the row filter per row, so a torn source parquet reaches
+          // this line too and then fails the rescan below. Deleting the
+          // sidecar is the usual remedy and this warning is its only notice
+          // (nothing rebuilds one in place), but the line must not claim to
+          // have proved which file is at fault.
           getLogger('query').warn('grep_search.indexed_read_failed', {
             [Attr.COMPONENT]: 'query',
             [Attr.OPERATION]: 'query.grep_search',
@@ -471,7 +477,6 @@ export async function executeGrepSearch(args) {
           if (isAbort(err, signal)) throw err
           indexFile = null
         }
-        if (indexFile && await searchIndexed(file, indexFile, sidecarUrl)) return
         const sourceFile = await asyncBufferFromFile(urlToPath(file.filePath))
         // One ROW GROUP at a time, not the whole file. A compacted data
         // file runs to `target_file_bytes` (128 MiB by default) and the
@@ -500,6 +505,17 @@ export async function executeGrepSearch(args) {
         // once, so the total decode is unchanged and only the peak drops.
         // A single-row-group file therefore reads exactly as it did.
         const metadata = await parquetMetadataAsync(sourceFile)
+        const physicalColumns = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
+        // @ref LLP 0264#shared [constrained-by]: both tiers keep the shared narrow projection across physical schema drift
+        const scanColumns = SCAN_COLUMNS.filter((column) => physicalColumns.has(column))
+        if (indexFile && await searchIndexed(
+          file,
+          indexFile,
+          sidecarUrl,
+          sourceFile,
+          metadata,
+          scanColumns
+        )) return
         let groupStart = 0
         for (const group of metadata.row_groups) {
           const groupRows = Number(group.num_rows)
@@ -508,7 +524,7 @@ export async function executeGrepSearch(args) {
           const rows = await parquetReadObjects({
             file: sourceFile,
             metadata,
-            columns: SCAN_COLUMNS,
+            columns: scanColumns,
             rowStart: groupStart,
             rowEnd: groupStart + groupRows,
           })
