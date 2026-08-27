@@ -15,6 +15,7 @@ import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
 import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
+import { isGatewayFallbackRow } from './gateway_fallback.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
@@ -486,6 +487,9 @@ function generationLayout(cursor) {
         layout: 'source-table',
         tableDir: nextDir,
         retention: cursor.retention,
+        // Carried over as the default; a settle-bearing rewrite overrides
+        // this with the exact remainder it counted (compactGeneration).
+        ...(cursor.pendingFallbacks !== undefined ? { pendingFallbacks: cursor.pendingFallbacks } : {}),
       }),
     }
   }
@@ -504,6 +508,7 @@ function generationLayout(cursor) {
         compactedAt: new Date().toISOString(),
         ...compactionOutcomeRecord(outcome),
       },
+      ...(cursor.pendingFallbacks !== undefined ? { pendingFallbacks: cursor.pendingFallbacks } : {}),
     }),
   }
 }
@@ -598,12 +603,14 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // full rewrite every tick, and skips the attributes scan entirely when
     // nothing new has flushed.
     // @ref LLP 0207#outranks-resettle [constrained-by]: when the cheap check
-    // above already made compaction due, the scan's answer can never
-    // change the outcome (recognition, tested below, still outranks it),
-    // so skip it: only run the scan when it might be the sole reason to
-    // compact.
+    // above already made compaction due, the answer can never change the
+    // outcome (recognition, tested below, still outranks it), so skip it:
+    // only ask when it might be the sole reason to compact. The answer
+    // itself is a cursor read - the flush path counts marker rows as they
+    // land - with one legacy full scan for a cursor from before the count
+    // existed (`hasPendingFallbacks`).
     const hasResettle = !compactionDue && settle
-      ? grewSinceCompaction && await hasResettleCandidate(liveDir)
+      ? grewSinceCompaction && await hasPendingFallbacks(r.path, cursor, liveDir)
       : false
     const shouldCompact = compactionDue || hasResettle
     if (!shouldCompact && compactionKnownIneffective(cursor)) {
@@ -1297,6 +1304,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   /** @type {Record<string, unknown>[]} */
   let fallbackBatch = []
   let fallbackBatchBytes = 0
+  let remainingFallbacks = 0
 
   /** @type {{ current: StreamingTableAppend | null }} */
   const sink = { current: null }
@@ -1316,9 +1324,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     batchBytes = 0
   }
 
+  // Returns whether the row was accepted (false: dropped as a dedup twin),
+  // so the fallback path below can count only rows that actually land in
+  // the new generation.
   const emit = async (/** @type {Record<string, unknown>} */ row) => {
     const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) return
+    if (typeof rowId === 'string' && seen.has(rowId)) return false
     if (typeof rowId === 'string') seen.add(rowId)
     if (emittedPartIds) {
       const key = rowPartId(row)
@@ -1329,6 +1340,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
       await flushBatch()
     }
+    return true
   }
 
   const flushFallbackBatch = async () => {
@@ -1337,7 +1349,10 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     fallbackBatch = []
     fallbackBatchBytes = 0
     for (const row of await resettleFallbackRows(pending, settle, emittedPartIds)) {
-      await emit(row)
+      // A row the settle hook could not upgrade still carries the marker;
+      // tally it so the cursor this rewrite writes records the exact count
+      // of fallbacks left in the new generation.
+      if (await emit(row) && isGatewayFallbackRow(row)) remainingFallbacks++
     }
   }
 
@@ -1393,7 +1408,11 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
 
   if (!columns) {
     if (!layout.commitEmpty) return null
-    await writeCursor(partitionDir, layout.cursorAfter(newDirName, 0, { dataFilesBefore, dataFilesAfter: 0 }))
+    // An empty generation holds no rows at all, so no fallbacks either.
+    await writeCursor(partitionDir, {
+      ...layout.cursorAfter(newDirName, 0, { dataFilesBefore, dataFilesAfter: 0 }),
+      pendingFallbacks: 0,
+    })
     const retiredMarker = path.join(oldDir, '.retired')
     await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
     return {
@@ -1413,9 +1432,14 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // pre-rewrite count rides along, so a later tick can tell a rewrite that
   // converged from one that reproduced its own fragmentation (LLP 0217).
   const newDataFiles = countDataFiles(newDir)
+  // A settle-bearing rewrite examined every fallback row, so its remainder
+  // count is exact - record it, resetting whatever the flush path had
+  // accumulated. Without a settle context no row was classified; the
+  // cursorAfter default carries the old count forward unchanged.
+  const cursorNext = layout.cursorAfter(newDirName, totalRows, { dataFilesBefore, dataFilesAfter: newDataFiles })
   await writeCursor(
     partitionDir,
-    layout.cursorAfter(newDirName, totalRows, { dataFilesBefore, dataFilesAfter: newDataFiles })
+    settle ? { ...cursorNext, pendingFallbacks: remainingFallbacks } : cursorNext
   )
 
   const retiredMarker = path.join(oldDir, '.retired')
@@ -1499,7 +1523,12 @@ async function compactLiveFilesInPlace(partitionDir, liveDir, cursor, cfg, settl
     const committed = committedBefore ??= new Set(live.map((file) => file.filePath))
     const victims = selectInPlaceVictims(live, cfg)
     if (victims.length === 0) break
-    if (settle) {
+    // The probe loads victim files whole to offer their fallback rows to
+    // the hook, so a cursor that says the partition holds none
+    // (`pendingFallbacks: 0`, maintained by the flush path and reset by
+    // every settle-bearing rewrite) skips it outright. An absent count
+    // (legacy cursor) still probes: unknown is not zero.
+    if (settle && cursor.pendingFallbacks !== 0) {
       const unprobed = victims.filter((file) => committed.has(file) && !probed.has(file))
       for (const file of unprobed) probed.add(file)
       if (unprobed.length > 0 && await victimFallbacksSettleable(unprobed, resolver, settle)) {
@@ -2005,14 +2034,47 @@ function rowPartId(row) {
 }
 
 /**
- * Does the table hold at least one committed gateway fallback row? Used
- * to force a compaction rewrite even when the file-count heuristics say
- * compaction isn't due: otherwise a split twin pair in a small,
- * never-compacted partition would never get re-settled. Scans only the
- * `attributes` column and short-circuits on the first hit, so the cost is
- * bounded and paid only for settle-eligible datasets.
+ * Does the partition hold at least one committed gateway fallback row?
+ * Used to force a compaction rewrite even when the file-count heuristics
+ * say compaction isn't due: otherwise a split twin pair in a small,
+ * never-compacted partition would never get re-settled.
  *
- * @ref LLP 0027#re-settle-sweep: gate the sweep on a cheap fallback scan.
+ * Answered from `cursor.pendingFallbacks` when present: the flush path
+ * counts marker rows as they land and every generation rewrite records the
+ * exact remainder, so this is a field read - no attributes decode. A
+ * cursor from before the count existed pays the legacy full scan
+ * ({@link hasResettleCandidate}) ONCE and caches the verdict: a hit seeds
+ * the count as "at least one" (the rewrite it triggers restores the exact
+ * number), a miss seeds zero so a clean table never re-scans. Measured
+ * live, the uncached scan decoded every recorded exchange in the table
+ * every tick and OOMed the daemon hourly on a large gateway cache.
+ *
+ * @ref LLP 0027#re-settle-sweep: gate the sweep on the flush-maintained count.
+ * @param {string} partitionDir
+ * @param {PartitionCursor} cursor
+ * @param {string} tableDir
+ * @returns {Promise<boolean>}
+ */
+async function hasPendingFallbacks(partitionDir, cursor, tableDir) {
+  if (typeof cursor.pendingFallbacks === 'number') return cursor.pendingFallbacks > 0
+  const found = await hasResettleCandidate(tableDir)
+  // Seed under the mutation lock, and only if a flush has not concretized
+  // the count while the scan ran: a concurrent append's tally must win over
+  // this coarse verdict.
+  await withPartitionMutationLock(partitionDir, async () => {
+    const current = tryReadCursorSync(partitionDir)
+    if (!current || typeof current.pendingFallbacks === 'number') return
+    await writeCursor(partitionDir, { ...current, pendingFallbacks: found ? 1 : 0 })
+  })
+  return found
+}
+
+/**
+ * Legacy seeding scan behind {@link hasPendingFallbacks}: scans only the
+ * `attributes` column and short-circuits on the first hit. Runs at most
+ * once per partition, to classify a cursor written before
+ * `pendingFallbacks` existed.
+ *
  * @param {string} tableDir
  * @returns {Promise<boolean>}
  */
@@ -2026,25 +2088,6 @@ async function hasResettleCandidate(tableDir) {
     return false
   }
   return false
-}
-
-/**
- * A committed row is a re-settle candidate when it carries the gateway's
- * provisional-identity marker. This is the documented contract
- * (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027
- * "Decision") - a dataset-agnostic predicate, so the marker is the only
- * coupling between core compaction and the gateway plugin. Tolerates the
- * `attributes` column whether stored as an object or a JSON string.
- *
- * @param {Record<string, unknown>} row
- * @returns {boolean}
- */
-function isGatewayFallbackRow(row) {
-  const attrs = row?.attributes
-  const parsed = typeof attrs === 'string' ? safeParseJson(attrs) : attrs
-  if (!isPlainObject(parsed)) return false
-  const gateway = parsed.gateway
-  return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
 }
 
 /**
@@ -2278,11 +2321,6 @@ function rebaselineCursor(cursor, liveDataFiles) {
   // partition is skipped (LLP 0218#report-the-spent-attempt).
   delete next.attemptFailedAt
   return { ...cursor, compaction: next }
-}
-
-/** @param {string} value */
-function safeParseJson(value) {
-  try { return JSON.parse(value) } catch { return undefined }
 }
 
 /**

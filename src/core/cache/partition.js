@@ -5,6 +5,7 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot } from './paths.js'
 
@@ -90,6 +91,9 @@ export function tryReadCursorSync(partitionDir) {
     if (parsed.retention && typeof parsed.retention === 'object') {
       cursor.retention = parsed.retention
     }
+    if (typeof parsed.pendingFallbacks === 'number') {
+      cursor.pendingFallbacks = parsed.pendingFallbacks
+    }
     return cursor
   } catch {
     return null
@@ -129,8 +133,14 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
+  // Counted at write time so maintenance can gate the re-settle sweep on the
+  // cursor instead of re-scanning the table's attributes column every tick
+  // (LLP 0027). Rows arrive here after the flush-time settle hook has run,
+  // so a marker still present is a genuinely unsettled row.
+  const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
-    const cursor = readCursorSync(partitionDir)
+    const cursorOnDisk = tryReadCursorSync(partitionDir)
+    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
     const tableDir = cursor.tableDir ?? 'table'
     const icebergDir = path.join(partitionDir, tableDir)
     const declaration = options?.declaration
@@ -142,6 +152,7 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
       layout: 'source-table',
       tableDir,
       retention: cursor.retention,
+      ...pendingFallbacksAfterAppend(cursor, cursorOnDisk !== null, fallbackAppended),
     })
     return result
   })
@@ -164,17 +175,42 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, partitionSegments)
+  const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
-    const cursor = readCursorSync(partitionDir)
+    const cursorOnDisk = tryReadCursorSync(partitionDir)
+    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
     const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
     const result = await appendRowsToTable(epochDir, columns, rows)
     await writeCursor(partitionDir, {
       epoch: cursor.epoch,
       rowCount: cursor.rowCount + rows.length,
       compaction: cursor.compaction,
+      ...pendingFallbacksAfterAppend(cursor, cursorOnDisk !== null, fallbackAppended),
     })
     return result
   })
+}
+
+/**
+ * The `pendingFallbacks` entry an append should write, as a spreadable
+ * fragment. A first write to a fresh partition starts the count at the
+ * appended tally, so tables born after the field existed always carry a
+ * concrete number. On an existing cursor an absent count means "unknown"
+ * (written before the field existed, over a table that may hold old marker
+ * rows), and an append of zero marker rows must preserve that: claiming
+ * zero would let maintenance skip the legacy table's one seeding scan and
+ * strand its split twins. Once a marker row lands the count turns concrete
+ * regardless - an undercount only until the next rewrite records the exact
+ * remainder, and any positive value routes to that rewrite.
+ *
+ * @param {PartitionCursor} cursor
+ * @param {boolean} cursorExisted
+ * @param {number} fallbackAppended
+ * @returns {{ pendingFallbacks?: number }}
+ */
+function pendingFallbacksAfterAppend(cursor, cursorExisted, fallbackAppended) {
+  if (cursorExisted && cursor.pendingFallbacks === undefined && fallbackAppended === 0) return {}
+  return { pendingFallbacks: (cursor.pendingFallbacks ?? 0) + fallbackAppended }
 }
 
 /**
