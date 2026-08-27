@@ -2180,7 +2180,15 @@ async function hasResettleCandidate(tableDir) {
     // EACCES from a permanently torn data file or a bug in this scan, and
     // only the first of those clears itself. Without this the recurring
     // whole-table decode is the only symptom, with nothing naming its cause.
-    getActiveSpan()?.setAttribute('resettle_scan_error', err instanceof Error ? err.message : String(err))
+    // Bounded here because `setAttribute` skips `buildAttrs`, which is what
+    // applies the 512-char cap to every other emission. This is the only
+    // kernel attribute whose value is authored elsewhere (hyparquet, or the
+    // OS on an fs error), so the emitter cannot vouch for its length: a
+    // decoder that quotes the bytes it choked on would put recorded
+    // exchange content on a span, and the cap is the backstop against that.
+    // @ref LLP 0021#the-attribute-contract [constrained-by]: bound the value the helper would have bounded.
+    const scanError = err instanceof Error ? err.message : String(err)
+    getActiveSpan()?.setAttribute('resettle_scan_error', scanError.slice(0, 512))
     return undefined
   }
   return false
