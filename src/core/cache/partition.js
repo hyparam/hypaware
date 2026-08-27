@@ -144,6 +144,9 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
     const tableDir = cursor.tableDir ?? 'table'
     const icebergDir = path.join(partitionDir, tableDir)
+    // Asked BEFORE the append, which creates the table on first use: after
+    // it every partition looks like one that already held rows.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
     const declaration = options?.declaration
     const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
     await writeCursor(partitionDir, {
@@ -153,7 +156,7 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
       layout: 'source-table',
       tableDir,
       retention: cursor.retention,
-      ...pendingFallbacksAfterAppend(cursor, cursorFileExists(partitionDir), fallbackAppended),
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
   })
@@ -184,52 +187,61 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     const cursorOnDisk = tryReadCursorSync(partitionDir)
     const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
     const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the epoch's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
     const result = await appendRowsToTable(epochDir, columns, rows)
     await writeCursor(partitionDir, {
       epoch: cursor.epoch,
       rowCount: cursor.rowCount + rows.length,
       compaction: cursor.compaction,
-      ...pendingFallbacksAfterAppend(cursor, cursorFileExists(partitionDir), fallbackAppended),
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
   })
 }
 
 /**
- * Is there a `cursor.json` for this partition at all? Deliberately NOT
- * "did {@link tryReadCursorSync} return a cursor": that also answers null
- * for a file that exists but cannot be parsed, and a partition whose
- * cursor is unreadable is not a fresh one - its table may already hold
- * committed marker rows. Only the absence of the file proves the partition
- * is new, which is what lets an append claim a concrete zero.
+ * May this partition already hold committed rows that no cursor count
+ * covers? Yes whenever a `cursor.json` is present - deliberately NOT "did
+ * {@link tryReadCursorSync} return a cursor", which also answers null for a
+ * file that exists but cannot be parsed, and a partition whose cursor is
+ * unreadable is not a fresh one. Yes also when the cursor is gone but the
+ * Iceberg table is not: that is what a crash between an append and its
+ * cursor write leaves behind, and a source-table partition in that state is
+ * invisible to {@link discoverCachePartitions} until an append restores its
+ * cursor, so nothing else would ever re-derive the count for it.
+ *
+ * Only when NEITHER exists is the partition provably new, and only then may
+ * an append claim a concrete zero.
  *
  * @param {string} partitionDir
+ * @param {string} tableDir  the Iceberg table this append writes into
  * @returns {boolean}
  */
-function cursorFileExists(partitionDir) {
-  return fs.existsSync(path.join(partitionDir, CURSOR_FILE))
+function partitionHasCommittedRows(partitionDir, tableDir) {
+  return fs.existsSync(path.join(partitionDir, CURSOR_FILE)) || icebergTableExists(tableDir)
 }
 
 /**
  * The `pendingFallbacks` entry an append should write, as a spreadable
- * fragment. A first write to a fresh partition starts the count at the
- * appended tally, so tables born after the field existed always carry a
- * concrete number. On an existing cursor an absent count means "unknown"
- * (written before the field existed, or unreadable, over a table that may
- * hold old marker rows), and an append of zero marker rows must preserve
- * that: claiming zero would let maintenance skip the legacy table's one
- * seeding scan and strand its split twins. Once a marker row lands the
- * count turns concrete regardless - an undercount only until the next
- * rewrite records the exact remainder, and any positive value routes to
- * that rewrite.
+ * fragment. A first write to a provably new partition starts the count at
+ * the appended tally, so tables born after the field existed always carry a
+ * concrete number. Over anything that may already hold committed rows an
+ * absent count means "unknown" (a cursor written before the field existed,
+ * an unreadable one, or a table whose cursor was lost), and an append of
+ * zero marker rows must preserve that: claiming zero would let maintenance
+ * skip that table's one seeding scan and strand its split twins. Once a
+ * marker row lands the count turns concrete regardless - an undercount only
+ * until the next rewrite records the exact remainder, and any positive
+ * value routes to that rewrite.
  *
  * @param {PartitionCursor} cursor
- * @param {boolean} cursorExisted whether a cursor FILE is present, not whether it parsed
+ * @param {boolean} mayHoldUncountedRows see {@link partitionHasCommittedRows}
  * @param {number} fallbackAppended
  * @returns {{ pendingFallbacks?: number }}
  */
-function pendingFallbacksAfterAppend(cursor, cursorExisted, fallbackAppended) {
-  if (cursorExisted && cursor.pendingFallbacks === undefined && fallbackAppended === 0) return {}
+function pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended) {
+  if (mayHoldUncountedRows && cursor.pendingFallbacks === undefined && fallbackAppended === 0) return {}
   return { pendingFallbacks: (cursor.pendingFallbacks ?? 0) + fallbackAppended }
 }
 

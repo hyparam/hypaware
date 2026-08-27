@@ -674,8 +674,16 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           // again - forever, on exactly the partitions that DO hold a
           // fallback row, which is the hourly decode this gate exists to
           // retire (the compaction paths below all re-read under the lock
-          // already; this write is the one that did not).
-          await writeCursor(r.path, rebaselineCursor(tryReadCursorSync(r.path) ?? cursor, dataFilesBefore))
+          // already; this write did neither).
+          // Under the lock for the same reason: re-reading only narrows the
+          // window, it does not close it. The append path holds this lock
+          // across its own read-modify-write, so an unserialized one here
+          // still drops a concurrent flush's increment - and a lost
+          // increment is the failure direction that strands provisional
+          // rows, where a lost `rowCount` was only cosmetic.
+          await withPartitionMutationLock(r.path, async () => {
+            await writeCursor(r.path, rebaselineCursor(tryReadCursorSync(r.path) ?? cursor, dataFilesBefore))
+          })
           // Set only once the cursor write that persists it has succeeded:
           // a throw here must not leave the report (and `totalRebaselined`)
           // claiming a rebaseline that never landed on disk.
@@ -797,8 +805,13 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // rewrite again, which is the pre-existing behaviour rather than
             // a regression.
             try {
-              const stamped = stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor, new Date().toISOString())
-              await writeCursor(r.path, stamped)
+              // Under the lock, as the rebaseline write above: this is a
+              // read-modify-write of the same cursor a flush may be
+              // incrementing.
+              await withPartitionMutationLock(r.path, async () => {
+                const stamped = stampWriterGeneration(tryReadCursorSync(r.path) ?? cursor, new Date().toISOString())
+                await writeCursor(r.path, stamped)
+              })
             } catch { /* see above */ }
           }
           throw err

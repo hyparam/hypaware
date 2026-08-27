@@ -249,6 +249,32 @@ test('an unreadable cursor is unknown, not a fresh partition claiming zero', asy
   }
 })
 
+test('a lost cursor over a live table is unknown too, not a fresh partition', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const part = await partitionDir(storage)
+
+    // A crash between an append and its cursor write leaves the Iceberg
+    // table committed and no cursor.json at all. The absence of the file is
+    // not proof the partition is new: the marker row is still down there,
+    // and a source-table partition without a cursor is not even discovered,
+    // so nothing but the next append can restore one.
+    await fs.rm(path.join(part.path, 'cursor.json'))
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'the restored cursor claims no count it cannot vouch for')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 /** @param {ReturnType<typeof createQueryStorageService>} storage */
