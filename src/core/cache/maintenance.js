@@ -2110,6 +2110,10 @@ function rowPartId(row) {
  * live, the uncached scan decoded every recorded exchange in the table
  * every tick and OOMed the daemon hourly on a large gateway cache.
  *
+ * Only a scan that completed is a verdict. One that could not read the
+ * table answers "no sweep this tick" and caches nothing, so the next tick
+ * classifies the partition again.
+ *
  * @ref LLP 0027#re-settle-sweep: gate the sweep on the flush-maintained count.
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
@@ -2120,6 +2124,18 @@ function rowPartId(row) {
 async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   if (typeof cursor.pendingFallbacks === 'number') return cursor.pendingFallbacks > 0
   const found = await hasResettleCandidate(tableDir)
+  // The scan could not read the table (an EACCES on a live data file, a
+  // half-written parquet). Unknown, not zero: the seed is permanent, so
+  // writing one here for a scan that never looked would strand this
+  // partition's marker rows until an append happened to flip the count off
+  // zero, or a human ran `hyp query maintain --force`. Unknown keeps the
+  // conservative direction the rest of this gate takes - it costs another
+  // scan next tick, which is the cost the whole field exists to bound,
+  // paid only while the table stays unreadable.
+  if (found === undefined) {
+    getActiveSpan()?.setAttribute('resettle_scan_unreadable', true)
+    return false
+  }
   // A dry run reports what a real run WOULD do and writes nothing - the
   // rebaseline and the rewrite are both guarded the same way. A preview
   // that persisted the seed would also make itself unrepeatable: the next
@@ -2143,8 +2159,12 @@ async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
  * once per partition, to classify a cursor written before
  * `pendingFallbacks` existed.
  *
+ * Three answers, not two: `true` found one, `false` read the whole column
+ * and found none, and `undefined` could not read it. The caller caches a
+ * verdict forever, so "could not look" must not arrive as "found none".
+ *
  * @param {string} tableDir
- * @returns {Promise<boolean>}
+ * @returns {Promise<boolean | undefined>}
  */
 async function hasResettleCandidate(tableDir) {
   if (!tableExists(tableDir)) return false
@@ -2152,8 +2172,24 @@ async function hasResettleCandidate(tableDir) {
     for await (const row of scanRowsFromTable(tableDir, ['attributes'])) {
       if (isGatewayFallbackRow(row)) return true
     }
-  } catch {
-    return false
+  } catch (err) {
+    // Not rethrown: an unreadable table must not fail the partition's whole
+    // tick, and the caller's `undefined` already keeps the verdict uncached.
+    // But unknown re-scans on every growth tick until the read succeeds, so
+    // record WHAT failed - the caller's boolean cannot separate a transient
+    // EACCES from a permanently torn data file or a bug in this scan, and
+    // only the first of those clears itself. Without this the recurring
+    // whole-table decode is the only symptom, with nothing naming its cause.
+    // Bounded here because `setAttribute` skips `buildAttrs`, which is what
+    // applies the 512-char cap to every other emission. This is the only
+    // kernel attribute whose value is authored elsewhere (hyparquet, or the
+    // OS on an fs error), so the emitter cannot vouch for its length: a
+    // decoder that quotes the bytes it choked on would put recorded
+    // exchange content on a span, and the cap is the backstop against that.
+    // @ref LLP 0021#the-attribute-contract [constrained-by]: bound the value the helper would have bounded.
+    const scanError = err instanceof Error ? err.message : String(err)
+    getActiveSpan()?.setAttribute('resettle_scan_error', scanError.slice(0, 512))
+    return undefined
   }
   return false
 }

@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -275,7 +276,76 @@ test('a lost cursor over a live table is unknown too, not a fresh partition', as
   }
 })
 
+test('a seeding scan that could not read the table caches no verdict; a later tick still sweeps', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    // A committed, settleable marker row and its transcript, under a cursor
+    // from before the count existed: this partition is owed a seeding scan,
+    // and the sweep that scan would force.
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+    const part = await partitionDir(storage)
+    const cursor = readCursorSync(part.path)
+    delete cursor.pendingFallbacks
+    await writeCursor(part.path, cursor)
+
+    // The seeding tick cannot read the data files: the manifest still lists
+    // them, but reading one throws (an EACCES on a live file, a torn write,
+    // a half-copied cache). "Could not look" is not "looked and found
+    // none", and only the second may be cached: the cached verdict is
+    // permanent, so a zero written here strands the provisional row until
+    // some later append happens to flip the count off zero.
+    const dataFiles = await parquetFiles(part.path)
+    assert.ok(dataFiles.length > 0, 'the flush committed at least one data file')
+    const saved = new Map(dataFiles.map((file) => [file, fsSync.readFileSync(file)]))
+    for (const file of dataFiles) await fs.writeFile(file, 'not a parquet file')
+    /** @type {Awaited<ReturnType<typeof maintainCache>>} */
+    let report
+    try {
+      report = await maintainCache({
+        cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+        config: NO_NATURAL_COMPACTION,
+      })
+    } finally {
+      for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
+    }
+    assert.equal(report.totalCompacted, 0, 'an unreadable table is not rewritten')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'a scan that failed must not be cached at all, as a zero or as anything else')
+
+    // Nothing about the partition changed, so the next tick still owes it
+    // that scan - which now succeeds and routes to the sweep.
+    const after = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.ok(after.totalCompacted > 0, 'the retried scan finds the marker and forces the sweep')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, 0,
+      'the rewrite settles the row and records the exact remainder')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
+
+/**
+ * Every committed parquet data file under a partition directory.
+ * @param {string} partitionPath
+ * @returns {Promise<string[]>}
+ */
+async function parquetFiles(partitionPath) {
+  /** @type {string[]} */
+  const found = []
+  for (const entry of await fs.readdir(partitionPath, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.parquet')) found.push(path.join(entry.parentPath, entry.name))
+  }
+  return found
+}
 
 /** @param {ReturnType<typeof createQueryStorageService>} storage */
 async function partitionDir(storage) {

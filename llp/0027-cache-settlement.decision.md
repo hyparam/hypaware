@@ -163,8 +163,13 @@ count is now maintained where it is already known, in the partition cursor's
 every settle-bearing rewrite resets the field to the exact remainder it
 counted. The gate is a cursor read. A cursor written before the field existed
 pays the legacy scan once and caches the verdict, so the scan runs at most
-once per partition. What point 4 decided is unchanged: the same two conditions
-still gate the same forced rewrite.
+once per partition. Only a scan that *completed* is a verdict: one that could
+not read the table (an EACCES on a live data file, a half-written parquet)
+leaves the field unknown, because a cached zero is permanent and a false one
+strands that partition's marker rows until an append happens to flip the count
+off zero. Unknown costs another scan next tick, which is the direction every
+other unknown in this gate takes. What point 4 decided is unchanged: the same
+two conditions still gate the same forced rewrite.
 
 Conservative and bounded: an enricher miss/failure leaves the fallback row
 untouched for a later sweep; a matchable second sweep collapses the twin and the
