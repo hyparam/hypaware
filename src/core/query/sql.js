@@ -399,7 +399,11 @@ export async function executeQuerySql(args) {
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
           if (!dataset) {
-            throw new Error(`SQL query references unknown dataset: ${name}`)
+            const available = registry.listDatasets().map((dataset) => dataset.name)
+            const suffix = available.length > 0
+              ? `. Available datasets: ${available.join(', ')}`
+              : ''
+            throw new Error(`SQL query references unknown dataset: ${name}${suffix}`)
           }
           datasetsUsed.push(name)
 

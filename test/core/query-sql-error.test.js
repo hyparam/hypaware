@@ -9,10 +9,13 @@ import { executeQuerySql } from '../../src/core/query/sql.js'
 const registry = { getDataset: () => null, listDatasets: () => [] }
 const storage = { cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) }
 
-/** @param {string} query */
-async function runExpectError(query) {
+/**
+ * @param {string} query
+ * @param {any} [queryRegistry]
+ */
+async function runExpectError(query, queryRegistry = registry) {
   try {
-    await executeQuerySql({ query, registry: /** @type {any} */ (registry), storage: /** @type {any} */ (storage) })
+    await executeQuerySql({ query, registry: queryRegistry, storage: /** @type {any} */ (storage) })
   } catch (err) {
     return err instanceof Error ? err.message : String(err)
   }
@@ -34,4 +37,20 @@ test('non-SELECT statements surface the parser message without extra framing', a
 test('empty SQL is reported as required', async () => {
   const message = await runExpectError('   ')
   assert.match(message, /SQL query is required/)
+})
+
+test('unknown datasets list the registered datasets', async () => {
+  const message = await runExpectError('SELECT * FROM missing', {
+    getDataset: () => null,
+    listDatasets: () => [
+      { name: 'ai_gateway_messages' },
+      { name: 'edge' },
+      { name: 'node' },
+    ],
+  })
+
+  assert.equal(
+    message,
+    'SQL query references unknown dataset: missing. Available datasets: ai_gateway_messages, edge, node'
+  )
 })
