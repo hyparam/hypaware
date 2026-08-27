@@ -83,12 +83,21 @@ export async function runUpdate(argv, ctx) {
   // package's supply out from under whoever configured that registry.
   // The generic branch below would blame the install and tell the
   // operator to rerun npm by hand with the same variable still set.
+  //
+  // Two refusals land on this one reason: an override the updater will
+  // not fetch a tarball from, and two spellings of the variable that
+  // disagree (`registry_ambiguous` in the log). Naming plain http as the
+  // cause, and "an https URL" as the repair, is false and unactionable
+  // for the second, whose two values are usually https already; the
+  // `self_update.registry_override_ignored` line already on stderr says
+  // which of the two happened.
   if (result.reason === 'registry_untrusted') {
     ctx.stderr.write(
-      `hyp update: ${result.latest ?? 'an update'} is available, but npm_config_registry points at ` +
-      'a registry this updater will not install from (plain http off this machine), and it will ' +
-      'not silently install from a different one instead.\n' +
-      "  set it to an https URL, or configure the registry in .npmrc, then run 'hyp update' again\n"
+      `hyp update: ${result.latest ?? 'an update'} is available, but npm_config_registry does not ` +
+      'name a registry this updater will install from, and it will not silently install from a ' +
+      'different one instead.\n' +
+      "  point it at a single https URL, or configure the registry in .npmrc, " +
+      "then run 'hyp update' again\n"
     )
     return 1
   }

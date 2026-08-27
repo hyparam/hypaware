@@ -67,7 +67,6 @@ test('resolveRegistryUrl trusts http only on this machine', () => {
     'http://127.0.0.1:4873',
     'http://127.1.2.3:4873',
     'http://[::1]:4873',
-    'http://npm.localhost',
   ]) {
     assert.equal(resolveRegistryUrl({ npm_config_registry: local + '/' }), local)
   }
@@ -87,6 +86,79 @@ test('resolveRegistryUrl trusts http only on this machine', () => {
     resolveRegistryUrl({ npm_config_registry: 'https://npm.corp.example' }),
     'https://npm.corp.example'
   )
+})
+
+test('a *.localhost registry over plain http is not on this machine on the strength of its name', () => {
+  // RFC 6761 says a resolver must send `*.localhost` to loopback, but
+  // glibc without systemd-resolved asks DNS anyway, so a hostile search
+  // domain plus someone on the path turns `http://npm.localhost` into an
+  // off-box registry whose answer decides whether this install ever
+  // updates again. Only the literal name and the IP literals are decided
+  // from the name alone.
+  //
+  // The rooted spelling `localhost.` is refused for the same reason, not
+  // as collateral: a trailing dot is precisely what stops glibc answering
+  // the name from `/etc/hosts` (`getent hosts localhost.` is empty on a
+  // box where `getent hosts localhost` answers `::1`), so it is decided by
+  // DNS exactly like the suffix case.
+  for (const suffixed of [
+    'http://npm.localhost',
+    'http://npm.localhost:4873',
+    'http://evil.localhost.',
+    'http://localhost.',
+    'http://LOCALHOST./',
+  ]) {
+    assert.equal(
+      resolveRegistryUrl({ npm_config_registry: suffixed }),
+      'https://registry.npmjs.org',
+      suffixed
+    )
+  }
+  // The refusal is the narrow one: over https the same host is fine
+  // (nobody on the path can answer for it), and plain `localhost` is
+  // still the ordinary local-Verdaccio setup.
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'https://npm.localhost' }),
+    'https://npm.localhost'
+  )
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://localhost:4873' }),
+    'http://localhost:4873'
+  )
+})
+
+test('the loopback set is matched in the form URL leaves it in', () => {
+  // `URL` re-serializes an IPv4-mapped literal in hex, so a spelling
+  // check on the raw text refuses a mapped-loopback Verdaccio that is
+  // plainly on this machine. This one is safe to match because the
+  // address decides its own destination: no resolver is consulted, which
+  // is what separates it from the rooted `localhost.` refused above.
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://[::ffff:127.0.0.1]:4873' }),
+    'http://[::ffff:7f00:1]:4873'
+  )
+  assert.equal(
+    resolveRegistryUrl({ npm_config_registry: 'http://[::ffff:127.1.2.3]' }),
+    'http://[::ffff:7f01:203]'
+  )
+  // Mapped is not a way off the machine: only 127.0.0.0/8 in a v6 coat
+  // counts, and the high byte is read from the whole 16-bit group, so a
+  // short first group (`::ffff:7f:1` is 0.127.0.1) is not 127-anything.
+  for (const remote of [
+    'http://[::ffff:8.8.8.8]',
+    'http://[::ffff:192.168.1.9]',
+    'http://[::ffff:126.255.255.255]',
+    'http://[::ffff:128.0.0.1]',
+    'http://[::ffff:7f:1]',
+    'http://[::ffff:0:1]',
+    'http://[::]',
+  ]) {
+    assert.equal(
+      resolveRegistryUrl({ npm_config_registry: remote }),
+      'https://registry.npmjs.org',
+      remote
+    )
+  }
 })
 
 test('a registry override npm could never speak is not trusted onto a loopback host', () => {
@@ -1196,6 +1268,174 @@ test('going offline does not silence an apply failure that was already speaking'
     assert.equal(result.action, 'updated')
     assert.equal(readSelfUpdateState(healed).error, undefined)
     await fsp.rm(healed, { recursive: true, force: true })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("a credentialed registry's token does not survive a failed probe into state, status, or the log", async () => {
+  // `resolveRegistryUrl` trusts a credentialed https override, and Node's
+  // `fetch` then refuses it with a message that quotes the whole URL back,
+  // userinfo included. That message is persisted as `probe_failed:`, read
+  // out by `hyp status`, and logged as `self_update.probe_failed`, so
+  // failing once copies an operator's registry password into three durable
+  // places. The real global `fetch` is used deliberately: it is the source
+  // of the message, and it refuses a credentialed URL before any DNS or
+  // socket, so this stays offline and deterministic.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-creds-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+    const logged = []
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: { npm_config_registry: 'https://bot:hunter2@npm.corp.example' },
+      packageRoot,
+      runner,
+      log: (event, fields) => { logged.push({ event, fields: fields ?? {} }) },
+    })
+    assert.equal(result.reason, 'probe_failed')
+
+    const state = readSelfUpdateState(dir)
+    const error = String(state.error)
+    assert.match(error, /^probe_failed/)
+    assert.ok(!error.includes('hunter2'), error)
+    assert.ok(!error.includes('bot:'), error)
+    // Redacted, not blanked: which registry went wrong is the whole point
+    // of recording the failure at all.
+    assert.match(error, /npm\.corp\.example/)
+
+    const probeFailures = logged.filter((l) => l.event === 'self_update.probe_failed')
+    assert.equal(probeFailures.length, 1)
+    assert.ok(!JSON.stringify(probeFailures).includes('hunter2'), JSON.stringify(probeFailures))
+
+    // A probe failure is quiet for a week; past that it reaches the
+    // status line, which is the third place the token would land.
+    const later = new Date(Date.parse(String(state.error_since)) + PROBE_QUIET_MS + 1000)
+    const described = describeSelfUpdate({ stateRoot: dir, env: {}, now: () => later })
+    assert.match(described.line ?? '', /degraded \(probe_failed/)
+    assert.ok(!(described.line ?? '').includes('hunter2'), described.line ?? '')
+    assert.ok(!JSON.stringify(described.json).includes('hunter2'), JSON.stringify(described.json))
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the degraded line for a refused registry does not hand back the refused registry', async () => {
+  // Every other degraded error ends in "run it by hand". For
+  // `registry_untrusted` that advice reads the same `npm_config_registry`
+  // the updater just declined to fetch a tarball from, so following the
+  // status line performs the cross-registry swap the refusal exists to
+  // prevent.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-advice-'))
+  try {
+    writeSelfUpdateState(dir, { error: 'registry_untrusted' })
+    const line = describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? ''
+    assert.match(line, /degraded \(registry_untrusted\)/)
+    assert.ok(!line.includes('npm install -g'), line)
+    assert.match(line, /npm_config_registry/)
+    // Two refusals share this one error string: an override the updater
+    // will not install from, and two spellings of the variable that
+    // disagree (logged as `registry_ambiguous`, stored as this). Telling
+    // the second to "set it to an https URL" is unactionable, because its
+    // two values are usually https already; "a single https URL" repairs
+    // either one.
+    assert.match(line, /single https URL/)
+
+    // Every other error keeps the generic advice, which is right for them.
+    writeSelfUpdateState(dir, { error: 'apply_failed: npm exited 1' })
+    const generic = describeSelfUpdate({ stateRoot: dir, env: {} }).line ?? ''
+    assert.match(generic, /degraded \(apply_failed: npm exited 1\)/)
+    assert.match(generic, /npm install -g .+@latest/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('redacting a probe error takes the credential, not the rest of the message', async () => {
+  // The redaction also runs over the outer catch's arbitrary errors, which
+  // reach the service log and `hyp update`'s stderr, so it has to leave a
+  // diagnostic still readable. A URL body that ran to the next space would
+  // swallow whatever the message glued on after the closing quote and turn
+  // a structured error into a truncated one.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-tail-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const probe = async () => {
+      throw new Error('refused {"registry":"https://bot:hunter2@npm.corp.example/x","attempt":2}')
+    }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.ok(!error.includes('hunter2'), error)
+    assert.match(error, /npm\.corp\.example/)
+    // The tail survives: everything after the URL is still there.
+    assert.match(error, /"attempt":2\}$/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an apostrophe in the registry password does not cut the redaction short', async () => {
+  // The URL body stops at the characters `URL` percent-encodes out of a
+  // userinfo, so the match can never end inside a credential - except
+  // that `URL` does *not* encode an apostrophe. Stopping there would end
+  // the match mid-password and print the remainder verbatim, which is
+  // the leak the redaction exists to close. The real global `fetch` is
+  // used deliberately: the message that carries the password is the one
+  // `fetch` writes, so a stub here would only agree with itself.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-quote-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    // Pinned: the whole finding is that this survives serialization.
+    assert.match(new URL("https://bot:hunter2'tail@npm.corp.example").href, /hunter2'tail/)
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: { npm_config_registry: "https://bot:hunter2'tail@npm.corp.example" },
+      packageRoot,
+      runner,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.ok(!error.includes('hunter2'), error)
+    assert.ok(!error.includes('tail@'), error)
+    assert.ok(!error.includes('bot:'), error)
+    // Still says which registry went wrong, rather than collapsing to
+    // `[url]` because the truncated body would not parse.
+    assert.match(error, /https:\/\/npm\.corp\.example/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a bare bracketed IPv6 origin survives the trailing-punctuation strip', async () => {
+  // `]` is stripped as sentence punctuation for a `(http://h/x])`-shaped
+  // tail, but it is also the last character of the loopback literals this
+  // updater newly trusts, so a message ending on one used to redact to
+  // `[url]]` - losing exactly the "which registry went wrong" the
+  // redaction is supposed to keep.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-redact-v6-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const probe = async () => { throw new Error('connect ECONNREFUSED http://[::1]') }
+    const result = await runSelfUpdatePass({
+      stateRoot: dir,
+      env: {},
+      packageRoot,
+      runner,
+      fetchImpl: probe,
+    })
+    assert.equal(result.reason, 'probe_failed')
+    const error = String(readSelfUpdateState(dir).error)
+    assert.match(error, /connect ECONNREFUSED http:\/\/\[::1\]$/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
