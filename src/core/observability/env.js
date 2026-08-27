@@ -9,6 +9,12 @@ const HYP_STATE_SUBDIR = 'hypaware'
 
 export const DEFAULT_RUNTIME_METRICS_INTERVAL_MS = 30_000
 export const MIN_RUNTIME_METRICS_INTERVAL_MS = 5_000
+// Node stores a timer delay in a signed 32-bit integer. A larger delay raises
+// TimeoutOverflowWarning and is silently reset to 1ms, so an operator asking
+// for an absurdly long interval would get roughly a thousand samples a second:
+// exactly the tight sampling loop the five-second floor exists to prevent.
+// @ref LLP 0318#activation [constrained-by]: the interval knob must not be able to undo the floor
+export const MAX_RUNTIME_METRICS_INTERVAL_MS = 2_147_483_647
 
 /**
  * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
@@ -30,7 +36,10 @@ export function readObservabilityEnv(env = process.env) {
     env.HYP_OTEL_RUNTIME_METRICS === 'true'
   const requestedRuntimeInterval = Number(env.HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS)
   const runtimeMetricsIntervalMs = Number.isFinite(requestedRuntimeInterval) && requestedRuntimeInterval > 0
-    ? Math.max(MIN_RUNTIME_METRICS_INTERVAL_MS, Math.floor(requestedRuntimeInterval))
+    ? Math.min(
+      MAX_RUNTIME_METRICS_INTERVAL_MS,
+      Math.max(MIN_RUNTIME_METRICS_INTERVAL_MS, Math.floor(requestedRuntimeInterval)),
+    )
     : DEFAULT_RUNTIME_METRICS_INTERVAL_MS
   return {
     devTelemetry,

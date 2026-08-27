@@ -6,6 +6,7 @@ import v8 from 'node:v8'
 
 import {
   DEFAULT_RUNTIME_METRICS_INTERVAL_MS,
+  MAX_RUNTIME_METRICS_INTERVAL_MS,
   MIN_RUNTIME_METRICS_INTERVAL_MS,
   readObservabilityEnv,
 } from '../../src/core/observability/env.js'
@@ -33,6 +34,35 @@ test('runtime metric env parsing defaults, clamps, and rejects malformed interva
   })
   assert.equal(malformed.runtimeMetrics, true)
   assert.equal(malformed.runtimeMetricsIntervalMs, DEFAULT_RUNTIME_METRICS_INTERVAL_MS)
+
+  const absurd = readObservabilityEnv({
+    HYP_OTEL_RUNTIME_METRICS: '1',
+    HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS: '99999999999',
+  })
+  assert.equal(absurd.runtimeMetricsIntervalMs, MAX_RUNTIME_METRICS_INTERVAL_MS)
+})
+
+// An interval past Node's 32-bit timer range does not schedule a very slow
+// timer: Node warns and resets the delay to 1ms. Without the ceiling the knob
+// meant to slow sampling down turns it into the tight loop the floor forbids.
+test('an out-of-range interval still samples once, not on a 1ms loop', async () => {
+  /** @type {MetricRecord[][]} */
+  const batches = []
+  const provider = new MeterProvider({
+    resource: { attributes: { 'service.name': 'hypaware-runtime-metrics-test' } },
+    exporters: [{ exportBatch(records) { batches.push(records) } }],
+  })
+  const env = readObservabilityEnv({
+    HYP_OTEL_RUNTIME_METRICS: '1',
+    HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS: '99999999999',
+  })
+  const sampler = installRuntimeMetrics({ env, provider })
+  try {
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+    assert.equal(batches.length, 1, `sampler ticked ${batches.length} times in 100ms`)
+  } finally {
+    sampler?.stop()
+  }
 })
 
 test('runtime metrics do no work when no meter exporter is installed', async () => {
@@ -105,6 +135,12 @@ test('every runtime attribute comes from a small closed vocabulary', () => {
         // any other numeric per-process identifier fails the digits check.
         assert.match(text, /^[A-Za-z0-9][A-Za-z0-9_]*$/, `${key}=${text} does not look like an enum member`)
         assert.doesNotMatch(text, /^[0-9]+$/, `${key}=${text} looks like a per-process identifier`)
+        // The shape check alone still admits an identifier concatenated onto
+        // an enum prefix (`Timeout_1234`). No member of this vocabulary runs
+        // three digits together - `p50`, `15m` and `Http2Session` are the
+        // longest digit sequences it has - so a pid, port, or timestamp
+        // smuggled into any dimension fails here.
+        assert.doesNotMatch(text, /[0-9]{3}/, `${key}=${text} embeds a numeric identifier`)
         if (key === 'space') {
           assert.ok(heapSpaceNames.has(text), `space=${text} is not a real v8 heap space name`)
         } else {
