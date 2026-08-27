@@ -610,7 +610,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // land - with one legacy full scan for a cursor from before the count
     // existed (`hasPendingFallbacks`).
     const hasResettle = !compactionDue && settle
-      ? grewSinceCompaction && await hasPendingFallbacks(r.path, cursor, liveDir)
+      ? grewSinceCompaction && await hasPendingFallbacks(r.path, cursor, liveDir, opts.dryRun === true)
       : false
     const shouldCompact = compactionDue || hasResettle
     if (!shouldCompact && compactionKnownIneffective(cursor)) {
@@ -664,7 +664,18 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         // write that follows throws, so the intent is still worth recording.
         getActiveSpan()?.setAttribute('rebaselined', true)
         if (!opts.dryRun) {
-          await writeCursor(r.path, rebaselineCursor(cursor, dataFilesBefore))
+          // Re-read rather than spread the cursor this tick opened with, for
+          // the same reason the failure stamp below does: that object is a
+          // pre-lock snapshot and the file has moved under it.
+          // `hasPendingFallbacks` seeds `pendingFallbacks` onto the partition
+          // it just classified, and a flush may have incremented it since.
+          // Spreading the snapshot writes "unknown" back over that verdict,
+          // so the next growth tick pays the whole-table attributes scan
+          // again - forever, on exactly the partitions that DO hold a
+          // fallback row, which is the hourly decode this gate exists to
+          // retire (the compaction paths below all re-read under the lock
+          // already; this write is the one that did not).
+          await writeCursor(r.path, rebaselineCursor(tryReadCursorSync(r.path) ?? cursor, dataFilesBefore))
           // Set only once the cursor write that persists it has succeeded:
           // a throw here must not leave the report (and `totalRebaselined`)
           // claiming a rebaseline that never landed on disk.
@@ -2053,11 +2064,18 @@ function rowPartId(row) {
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
  * @param {string} tableDir
+ * @param {boolean} dryRun
  * @returns {Promise<boolean>}
  */
-async function hasPendingFallbacks(partitionDir, cursor, tableDir) {
+async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   if (typeof cursor.pendingFallbacks === 'number') return cursor.pendingFallbacks > 0
   const found = await hasResettleCandidate(tableDir)
+  // A dry run reports what a real run WOULD do and writes nothing - the
+  // rebaseline and the rewrite are both guarded the same way. A preview
+  // that persisted the seed would also make itself unrepeatable: the next
+  // run, dry or not, would read the cached verdict instead of classifying
+  // the partition, so the preview would have changed what it previewed.
+  if (dryRun) return found
   // Seed under the mutation lock, and only if a flush has not concretized
   // the count while the scan ran: a concurrent append's tally must win over
   // this coarse verdict.

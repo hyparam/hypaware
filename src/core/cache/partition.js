@@ -133,10 +133,11 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  // Counted at write time so maintenance can gate the re-settle sweep on the
-  // cursor instead of re-scanning the table's attributes column every tick
-  // (LLP 0027). Rows arrive here after the flush-time settle hook has run,
-  // so a marker still present is a genuinely unsettled row.
+  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
+  // count, so the write path is where it is maintained - maintenance reading
+  // the cursor is only cheap because nothing here forgets to tally. Rows
+  // arrive after the flush-time settle hook has run, so a marker still
+  // present is a genuinely unsettled row.
   const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
     const cursorOnDisk = tryReadCursorSync(partitionDir)
@@ -152,7 +153,7 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
       layout: 'source-table',
       tableDir,
       retention: cursor.retention,
-      ...pendingFallbacksAfterAppend(cursor, cursorOnDisk !== null, fallbackAppended),
+      ...pendingFallbacksAfterAppend(cursor, cursorFileExists(partitionDir), fallbackAppended),
     })
     return result
   })
@@ -175,6 +176,9 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, partitionSegments)
+  // @ref LLP 0027#re-settle-sweep [implements]: as above - the legacy epoch
+  // layout is not settle-eligible today, but a cursor field maintained on
+  // only one of two write paths is a count that drifts the day it is.
   const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
     const cursorOnDisk = tryReadCursorSync(partitionDir)
@@ -185,10 +189,25 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
       epoch: cursor.epoch,
       rowCount: cursor.rowCount + rows.length,
       compaction: cursor.compaction,
-      ...pendingFallbacksAfterAppend(cursor, cursorOnDisk !== null, fallbackAppended),
+      ...pendingFallbacksAfterAppend(cursor, cursorFileExists(partitionDir), fallbackAppended),
     })
     return result
   })
+}
+
+/**
+ * Is there a `cursor.json` for this partition at all? Deliberately NOT
+ * "did {@link tryReadCursorSync} return a cursor": that also answers null
+ * for a file that exists but cannot be parsed, and a partition whose
+ * cursor is unreadable is not a fresh one - its table may already hold
+ * committed marker rows. Only the absence of the file proves the partition
+ * is new, which is what lets an append claim a concrete zero.
+ *
+ * @param {string} partitionDir
+ * @returns {boolean}
+ */
+function cursorFileExists(partitionDir) {
+  return fs.existsSync(path.join(partitionDir, CURSOR_FILE))
 }
 
 /**
@@ -196,15 +215,16 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
  * fragment. A first write to a fresh partition starts the count at the
  * appended tally, so tables born after the field existed always carry a
  * concrete number. On an existing cursor an absent count means "unknown"
- * (written before the field existed, over a table that may hold old marker
- * rows), and an append of zero marker rows must preserve that: claiming
- * zero would let maintenance skip the legacy table's one seeding scan and
- * strand its split twins. Once a marker row lands the count turns concrete
- * regardless - an undercount only until the next rewrite records the exact
- * remainder, and any positive value routes to that rewrite.
+ * (written before the field existed, or unreadable, over a table that may
+ * hold old marker rows), and an append of zero marker rows must preserve
+ * that: claiming zero would let maintenance skip the legacy table's one
+ * seeding scan and strand its split twins. Once a marker row lands the
+ * count turns concrete regardless - an undercount only until the next
+ * rewrite records the exact remainder, and any positive value routes to
+ * that rewrite.
  *
  * @param {PartitionCursor} cursor
- * @param {boolean} cursorExisted
+ * @param {boolean} cursorExisted whether a cursor FILE is present, not whether it parsed
  * @param {number} fallbackAppended
  * @returns {{ pendingFallbacks?: number }}
  */

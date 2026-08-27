@@ -163,6 +163,92 @@ test('a legacy cursor over a marker row still routes to the sweep', async () => 
   }
 })
 
+test('the cursor is the gate: a count of zero skips the sweep the table would otherwise earn', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    // A committed, settleable marker row and its transcript: the old
+    // attributes scan would find it and force a rewrite on every growth
+    // tick. Flushed before the transcript lands so flush-time settle cannot
+    // upgrade it away.
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const part = await partitionDir(storage)
+
+    // Now say the partition holds none. Nothing but the cursor changes, so
+    // a tick that still consulted the table would compact; one that reads
+    // the count does not. This is the whole point of the field, and the
+    // reason a count that can drift low is the failure mode to fear.
+    await writeCursor(part.path, { ...readCursorSync(part.path), pendingFallbacks: 0 })
+
+    const report = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.equal(report.totalCompacted, 0, 'the cursor answered, the attributes column was never read')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a dry run classifies a legacy cursor without persisting the verdict', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const part = await partitionDir(storage)
+    const cursor = readCursorSync(part.path)
+    delete cursor.pendingFallbacks
+    await writeCursor(part.path, cursor)
+
+    // A preview writes nothing, exactly as the rebaseline and the rewrite
+    // do not. Seeding here would also make the preview unrepeatable: the
+    // next run would read the cached answer instead of classifying.
+    await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, dryRun: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'the dry run left the cursor exactly as it found it')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unreadable cursor is unknown, not a fresh partition claiming zero', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const part = await partitionDir(storage)
+
+    // A torn or truncated cursor.json reads back as null, same as a missing
+    // one. The table underneath still holds the marker row, so an append
+    // that treated this as a brand-new partition would write a concrete
+    // zero over it and strand the row: the seeding scan never runs again.
+    await fs.writeFile(path.join(part.path, 'cursor.json'), '{ not json', 'utf8')
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'unknown survives the append; maintenance still owes this partition its one scan')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 /** @param {ReturnType<typeof createQueryStorageService>} storage */
