@@ -190,3 +190,69 @@ test('a committed partition with no session_id column degrades to a full read', 
     await env.cleanup()
   }
 })
+
+/**
+ * The scoped read is only cheaper than the full read while the list stays
+ * narrow. Iceberg prunes on an `IN` list only when EVERY listed value falls
+ * outside a chunk bound, so a wide list opens every file anyway, and then
+ * hyparquet matches each surviving row by walking the whole list: the scoped
+ * read becomes O(rows x sessions) against the full read O(rows). Measured on
+ * a 200k-row committed partition it crosses over near 220 sessions and
+ * reaches 13.8x the full read at 4,000, so an uncapped list is not a weaker
+ * optimization, it is slower than the scan it replaced without bound.
+ *
+ * Timing cannot be asserted, so this pins the decision instead: past the cap
+ * the scan issues the unrestricted read, and answers the same question.
+ */
+test('a batch too wide to prune reverts to the unrestricted read', async () => {
+  const env = await stageStorage()
+  try {
+    await env.storage.appendRows(env.tablePath, COLUMNS, [
+      row('sess-0000', '2026-08-27', 'm-committed'),
+    ])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    /** @param {number} count */
+    const batchOf = (count) => {
+      const rows = []
+      for (let i = 0; i < count; i++) rows.push(row(`sess-${String(i).padStart(4, '0')}`, '2026-08-27', 'm-committed'))
+      return rows
+    }
+
+    /** @param {Record<string, unknown>[]} batch */
+    const dedupeWithSpy = async (batch) => {
+      /** @type {(Record<string, string[]> | undefined)[]} */
+      const wheres = []
+      let unscopedReads = 0
+      const spy = /** @type {QueryStorageService} */ (/** @type {unknown} */ ({
+        ...env.storage,
+        discoverCachePartitions: (scope) => env.storage.discoverCachePartitions(scope),
+        async *readRows(tablePath, columns, readOpts) {
+          unscopedReads++
+          yield* env.storage.readRows(tablePath, columns, readOpts)
+        },
+        async *readRowsWhere(tablePath, columns, whereIn) {
+          wheres.push(whereIn)
+          yield* /** @type {NonNullable<typeof env.storage.readRowsWhere>} */ (env.storage.readRowsWhere)(tablePath, columns, whereIn)
+        },
+      }))
+      const fresh = await dedupeStoredPartIds(batch, spy)
+      return { fresh, wheres, unscopedReads }
+    }
+
+    const narrow = await dedupeWithSpy(batchOf(200))
+    assert.equal(narrow.unscopedReads, 0, 'a list the cache can prune on still takes the scoped read')
+    assert.equal(narrow.wheres.length, 1)
+
+    const wide = await dedupeWithSpy(batchOf(201))
+    assert.equal(wide.wheres.length, 0, 'a list too wide to prune on is never pushed down')
+    assert.ok(wide.unscopedReads > 0, 'it reads the partition unrestricted instead')
+
+    for (const { fresh } of [narrow, wide]) {
+      assert.deepEqual(fresh.map((r) => r.session_id), [],
+        'either read answers the same membership question: every batch row twins the committed part_id')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
