@@ -11,6 +11,10 @@ at or below `compact_batch_bytes`" rule is now enforced by config validation;
 #unreferenced-sweep: the round cap is clamped so one tick cannot spend the
 retention window it calls the reader-safety window; the metadata-size dueness
 trigger is left to the epoch layout, whose writer can clear it)
+**Extended-by:** LLP 0316 (#unreferenced-sweep: the sweep also reclaims the
+`.tmp.*` staging name a crashed conditional publish strands, in a pass that
+runs before the referenced-set walk - nothing references it, so the walk's
+early returns must not take its only reclaimer with them)
 
 > Routine compaction dueness on a source-table generation is served by an
 > in-place subset rewrite: icebird's files-scoped `icebergRewrite` merges only

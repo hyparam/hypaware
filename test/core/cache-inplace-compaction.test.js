@@ -65,6 +65,16 @@ function partitionDir(cacheRoot) {
   return path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
 }
 
+/** @param {string} p @returns {Promise<boolean>} */
+async function pathExists(p) {
+  try {
+    await fs.access(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** @param {string} dir @returns {string} */
 function liveTableDir(dir) {
   return path.join(dir, readCursorSync(dir).tableDir ?? 'table')
@@ -461,6 +471,109 @@ test('a fat metadata directory alone does not make a source table due', async ()
     assert.ok(
       !report.partitions[0].compacted,
       'metadata bytes routine compaction cannot shrink must not schedule a rewrite'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: a crashed publish leaves
+// its staging name behind, and on the in-place layout no generation directory
+// is ever retired to take it with it, so the sweep is the only thing that can
+// reclaim it. The failure is silent (bytes, not an error), so pin it here.
+test('the sweep reclaims a staged metadata write a crashed publish left behind', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-leak-'))
+  try {
+    await seedFragmented(cacheRoot, 2, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+
+    const liveVersions = (await fs.readdir(metadataDir)).filter((n) => /^v\d+\.metadata\.json$/.test(n))
+    assert.ok(liveVersions.length > 0, 'fixture invariant: the table has committed metadata versions')
+
+    // Exactly the name `localWriter` stages under, for two of the shapes a
+    // crash can strand: a metadata version and a manifest.
+    const leaked = [
+      path.join(metadataDir, `${liveVersions[0]}.tmp.4242.1756200000000.k3f9zq`),
+      path.join(metadataDir, 'snap-1234567890-1-abc.avro.tmp.4242.1756200000000.q1'),
+    ]
+    for (const p of leaked) await fs.writeFile(p, 'staged bytes that never published')
+
+    // Past the orphan grace window: a staged file younger than that may still
+    // belong to a write in flight, which is the guard the sweep leans on.
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    for (const p of leaked) await fs.utimes(p, stale, stale)
+
+    // A staging name minted just now stands in for that in-flight write.
+    const inFlight = path.join(metadataDir, `${liveVersions[0]}.tmp.${process.pid}.${Date.now()}.zz9`)
+    await fs.writeFile(inFlight, 'still being written')
+
+    const swept = await maintainCache({ cacheRoot })
+
+    for (const p of leaked) {
+      assert.equal(await pathExists(p), false, `the sweep reclaims the staged leak ${path.basename(p)}`)
+    }
+    assert.ok(
+      (swept.partitions[0].unreferencedFilesRemoved ?? 0) >= leaked.length,
+      'the reclaimed staging names are reported as released files'
+    )
+    assert.equal(await pathExists(inFlight), true, 'a staging name inside the grace window is left alone')
+
+    // Live metadata is untouched, and the table still reads.
+    for (const name of liveVersions) {
+      assert.equal(await pathExists(path.join(metadataDir, name)), true, `${name} survives`)
+    }
+    assert.equal(
+      await pathExists(path.join(metadataDir, 'version-hint.text')), true,
+      'the version hint survives'
+    )
+    const rows = await readRowsFromTable(liveTableDir(dir))
+    assert.equal(rows.length, 2, 'the sweep never touches what the table still references')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: every other candidate the
+// sweep considers needs the referenced set, so the walk that builds it returns
+// early rather than delete a file a snapshot might name. A staging name needs
+// nothing from that set, and a table with no snapshots at all is the reachable
+// case where gating it behind the walk means the leak's only reclaimer never
+// runs: `hyp` created the table and died before the first append committed.
+test('a staged metadata write is reclaimed on a table that has no snapshots yet', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-nosnap-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+
+    // Wind the table back to the shape a created-but-never-appended table
+    // has: metadata on disk, no snapshot to walk.
+    const hint = (await fs.readFile(path.join(metadataDir, 'version-hint.text'), 'utf8')).trim()
+    const currentVersion = `v${hint}.metadata.json`
+    const meta = JSON.parse(await fs.readFile(path.join(metadataDir, currentVersion), 'utf8'))
+    meta.snapshots = []
+    meta['snapshot-log'] = []
+    meta['current-snapshot-id'] = -1
+    meta.refs = {}
+    await fs.writeFile(path.join(metadataDir, currentVersion), JSON.stringify(meta))
+
+    const leak = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(leak, 'staged bytes that never published')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(leak, stale, stale)
+
+    const swept = await maintainCache({ cacheRoot })
+
+    assert.equal(swept.partitions[0].failed ?? false, false, 'the tick reaches the sweep')
+    assert.equal(await pathExists(leak), false, 'the staged leak is reclaimed with no referenced set to consult')
+    assert.equal(
+      await pathExists(path.join(metadataDir, 'version-hint.text')), true,
+      'the version hint survives'
+    )
+    assert.equal(
+      await pathExists(path.join(metadataDir, currentVersion)), true,
+      `${currentVersion} survives`
     )
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
