@@ -87,16 +87,16 @@
     "squirreling": "0.16.2"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.7",
+    "hyparquet-writer": "0.16.8",
     "hypvector": "0.2.2"
   },
   "overrides": {
     "icebird": {
-      "hyparquet-writer": "0.16.7"
+      "hyparquet-writer": "0.16.8"
     },
     "hypgrep": {
       "hyparquet": "1.29.2",
-      "hyparquet-writer": "0.16.7"
+      "hyparquet-writer": "0.16.8"
     }
   },
   "devDependencies": {
