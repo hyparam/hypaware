@@ -44,7 +44,7 @@ import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
  * @import { ColumnSpec, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
- * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ * @import { AsyncDataSource, AsyncRow, ExprNode } from 'squirreling'
  */
 
 /**
@@ -568,7 +568,7 @@ export async function listLiveDataFiles(tablePath) {
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
- * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata }} [opts]
+ * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata, whereIn?: Record<string, string[]> }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 export async function* scanRowsFromTable(tablePath, columns, opts) {
@@ -589,7 +589,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  const scan = source.scan({ columns: projected })
+  const scan = source.scan({ columns: projected, where: whereInExpr(source, opts?.whereIn) })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
     if (filtering) {
@@ -604,6 +604,40 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
     }
     yield resolved
   }
+}
+
+/**
+ * Build the exact `column IN (...) AND ...` predicate used by targeted cache
+ * reads. This is a row filter, not a hint: callers may rely on the returned
+ * rows matching it. Iceberg also uses the same expression to prune files and
+ * row groups from bounds on sorted lookup columns.
+ *
+ * @ref LLP 0311#context [implements]: session lookups prune through bounds on
+ * the leading `session_id` sort key after date becomes the only partition key
+ * @param {ScannableDataSource} source
+ * @param {Record<string, string[]> | undefined} whereIn
+ * @returns {ExprNode | undefined}
+ */
+function whereInExpr(source, whereIn) {
+  if (!whereIn) return undefined
+  const at = { positionStart: 0, positionEnd: 0 }
+  /** @type {ExprNode | undefined} */
+  let expr
+  for (const [name, values] of Object.entries(whereIn)) {
+    if (!source.columns.includes(name)) throw new Error(`cache lookup column not found: ${name}`)
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`cache lookup values must be non-empty: ${name}`)
+    }
+    /** @type {ExprNode} */
+    const node = {
+      ...at,
+      type: 'in valuelist',
+      expr: { ...at, type: 'identifier', name },
+      values: values.map((value) => ({ ...at, type: 'literal', value })),
+    }
+    expr = expr ? { ...at, type: 'binary', op: 'AND', left: expr, right: node } : node
+  }
+  return expr
 }
 
 /**

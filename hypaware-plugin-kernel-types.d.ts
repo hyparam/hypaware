@@ -1628,6 +1628,16 @@ export interface QueryStorageService {
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
   /**
+   * Exact equality-list read for lookup paths. The predicate is applied by
+   * the cache data source, allowing Iceberg file and row-group bounds to prune
+   * sorted lookup columns before rows are materialized.
+   */
+  readRowsWhere?(
+    tablePath: string,
+    columns: string[] | undefined,
+    whereIn: Record<string, string[]>,
+  ): AsyncIterable<Record<string, unknown>>
+  /**
    * Cursor-aware sibling of `readRows` for sinks that must advance a
    * per-(sink instance, partition) watermark. Pairs each internal-stripped row
    * with the `after` continuation to persist ONCE that row is durably exported.

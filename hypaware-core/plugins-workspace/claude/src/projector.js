@@ -25,7 +25,7 @@ import {
   findTranscriptMatch,
   indexTranscriptEntries,
   loadAgentMeta,
-  loadTranscript,
+  loadTranscriptIndex,
   matchKey,
   withToolUseResult,
 } from './transcripts.js'
@@ -218,8 +218,8 @@ export function createClaudeExchangeProjector(opts) {
         return USAGE_POLICY_DROP
       }
 
-      const transcriptEntries = sessionId
-        ? await loadTranscriptSafe({
+      const transcriptIndex = sessionId
+        ? await loadTranscriptIndexSafe({
           projectsDir,
           sessionId,
           transcriptPath: sessionContextRecord?.transcript_path,
@@ -227,8 +227,7 @@ export function createClaudeExchangeProjector(opts) {
           // transcripts live outside projectsDir (see loadTranscript).
           homeDir: opts.homeDir,
         }, logger)
-        : []
-      const transcriptIndex = indexTranscriptEntries(transcriptEntries)
+        : indexTranscriptEntries([])
       const identityFromTranscript = transcriptIndex.ordered.length > 0
       // @ref LLP 0030#decision: a Claude session is a container of many
       // threads (main loop, subagents, side chats), so the session id is
@@ -646,15 +645,15 @@ export function anthropicUpstreamPreset() {
  * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
  * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
  */
-async function loadTranscriptSafe(opts, logger) {
+async function loadTranscriptIndexSafe(opts, logger) {
   try {
-    return await loadTranscript(opts)
+    return await loadTranscriptIndex(opts)
   } catch (err) {
     logger?.warn('plugin.claude.transcript_read_failed', {
       session_id: opts.sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
-    return []
+    return indexTranscriptEntries([])
   }
 }
 
@@ -691,4 +690,3 @@ function parseHeaders(raw) {
     return undefined
   }
 }
-

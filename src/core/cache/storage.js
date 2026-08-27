@@ -232,6 +232,17 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       }
     },
 
+    // Exact lookup sibling for plugin hot paths. Keeping this separate from
+    // the incremental read options prevents a pruning hint from being
+    // confused with a predicate whose result callers rely on.
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { whereIn })) {
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        yield row
+      }
+    },
+
     // @ref LLP 0040#storage-api-extension [implements]: cursor-aware sibling
     // for sinks that advance a per-(sink, partition) watermark. `_hyp_ingest_seq`
     // is an INTERNAL_FIELD stripped from the row, so a sink reading `readRows`

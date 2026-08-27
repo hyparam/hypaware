@@ -335,11 +335,12 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
 }
 
 /**
- * Seed one session's seen-set, consulting the committed-session index
- * first: a session with no committed rows anywhere has nothing to seed,
- * so the (whole-table) per-session scan is skipped. Same best-effort
- * posture as the scan itself: an index that cannot answer errs toward
- * scanning.
+ * Seed one session's seen-set. A storage that can push `session_id` down
+ * (the real cache) probes the sort key directly, so there is nothing for the
+ * index to save. Anything else consults the committed-session index first: a
+ * session with no committed rows anywhere has nothing to seed, so the
+ * (whole-table) per-session scan is skipped. Same best-effort posture as the
+ * scan itself: an index that cannot answer errs toward scanning.
  *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
@@ -349,6 +350,12 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
  * @returns {Promise<void>}
  */
 async function seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex) {
+  // @ref LLP 0311#context [implements]: the real cache probes the leading
+  // session sort key directly instead of rebuilding a global session index
+  if (typeof storage?.readRowsWhere === 'function') {
+    await scanCommittedMessageIds(sessionId, state, storage, log)
+    return
+  }
   if (sessionIndex && !(await sessionIndex.mightHaveCommittedRows(sessionId))) return
   await scanCommittedMessageIds(sessionId, state, storage, log)
 }
@@ -573,16 +580,45 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
     // that don't carry the key in their path.
     const partitionSession = part.partition?.session_id
     if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
+    const targeted = typeof storage.readRowsWhere === 'function'
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
-        if (stringValue(row.session_id) !== sessionId) continue
-        const messageId = stringValue(row.message_id)
-        if (messageId) state.seenMessages.add(messageId)
-      }
+      await collectSeenMessageIds(storage, tablePath, targeted ? sessionId : undefined, sessionId, state)
     } catch {
-      // Skip an unreadable partition; others still contribute.
+      // A scoped read can fail where an unrestricted one succeeds (a partition
+      // whose schema predates `session_id`). An unseeded message replays as a
+      // fresh row, so fall back to the full read before skipping the
+      // partition; only a genuinely unreadable one contributes nothing.
+      if (targeted) {
+        try {
+          await collectSeenMessageIds(storage, tablePath, undefined, sessionId, state)
+        } catch { /* unreadable partition; others still contribute */ }
+      }
       continue
     }
+  }
+}
+
+/**
+ * Fold one partition's committed `message_id`s for `sessionId` into
+ * `state.seenMessages`. `scopeTo` selects the pushed-down read; leaving it
+ * undefined reads the partition unrestricted. The row-level `session_id`
+ * check is the correctness backstop either way, so both shapes agree.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string | undefined} scopeTo
+ * @param {string} sessionId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @returns {Promise<void>}
+ */
+async function collectSeenMessageIds(storage, tablePath, scopeTo, sessionId, state) {
+  const rows = scopeTo !== undefined && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(tablePath, ['message_id', 'session_id'], { session_id: [scopeTo] })
+    : storage.readRows(tablePath, ['message_id', 'session_id'])
+  for await (const row of rows) {
+    if (stringValue(row.session_id) !== sessionId) continue
+    const messageId = stringValue(row.message_id)
+    if (messageId) state.seenMessages.add(messageId)
   }
 }
 

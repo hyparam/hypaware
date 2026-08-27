@@ -48,6 +48,52 @@ test('storage.appendRowsToPartition writes data without error', async () => {
   }
 })
 
+test('storage.readRowsWhere filters on a sorted lookup column across date partitions', async () => {
+  const cacheRoot = await makeTmpDir('read-rows-where')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: { columns: ['client_name'], fallback: 'unknown' },
+      iceberg: {
+        fields: [
+          { column: 'session_id', transform: 'identity', required: true, sortOnly: true },
+          { column: 'date', transform: 'identity', required: true },
+        ],
+      },
+    }
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'session_id', type: 'STRING', nullable: false },
+      { name: 'date', type: 'STRING', nullable: false },
+      { name: 'client_name', type: 'STRING', nullable: false },
+      { name: 'part_id', type: 'STRING', nullable: false },
+    ]
+    const storage = createQueryStorageService({
+      cacheRoot,
+      getDeclaration: (dataset) => dataset === 'messages' ? declaration : undefined,
+    })
+    const tablePath = storage.cacheTablePath('messages', ['proxy'])
+    await storage.appendRows(tablePath, columns, [
+      { session_id: 'wanted', date: '2026-07-01', client_name: 'claude', part_id: 'old#0' },
+      { session_id: 'other', date: '2026-08-27', client_name: 'claude', part_id: 'other#0' },
+      { session_id: 'wanted', date: '2026-08-27', client_name: 'claude', part_id: 'new#0' },
+    ])
+    await storage.flushTable(tablePath, { force: true })
+    const [partition] = await storage.discoverCachePartitions({ datasets: ['messages'] })
+    assert.ok(partition)
+    const readRowsWhere = storage.readRowsWhere
+    assert.ok(readRowsWhere)
+
+    const found = []
+    for await (const row of readRowsWhere(partition.path, ['part_id'], { session_id: ['wanted'] })) {
+      found.push(row.part_id)
+    }
+    assert.deepEqual(found.sort(), ['new#0', 'old#0'])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('spool flush groups rows by source and creates source-table layout', async () => {
   const cacheRoot = await makeTmpDir('flush-source')
   try {
