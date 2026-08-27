@@ -552,7 +552,7 @@ export async function dedupeStoredPartIds(rows, storage) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys)
+  const seen = await scanExistingPartIds(storage, batchKeys, batchPartitionDates(rows))
   await scanSpooledPartIds(storage, seen, batchKeys)
   /** @type {Record<string, unknown>[]} */
   const fresh = []
@@ -564,6 +564,30 @@ export async function dedupeStoredPartIds(rows, storage) {
     fresh.push(row)
   }
   return fresh
+}
+
+/**
+ * The `date` partition values that can hold a committed copy of these rows:
+ * each row's own date plus the day before it, absorbing producer timestamp
+ * skew around midnight (the proxy, backfill and OTEL stamp `date` from
+ * timestamps they each observe for the same message). Returns undefined
+ * (no pruning) when any row lacks a date, rather than guessing.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {string[] | undefined}
+ */
+function batchPartitionDates(rows) {
+  /** @type {Set<string>} */
+  const dates = new Set()
+  for (const row of rows) {
+    const date = row.date
+    if (typeof date !== 'string' || date.length === 0) return undefined
+    dates.add(date)
+    const prev = new Date(Date.parse(`${date}T00:00:00Z`) - 86_400_000)
+    if (Number.isNaN(prev.getTime())) return undefined
+    dates.add(prev.toISOString().slice(0, 10))
+  }
+  return [...dates]
 }
 
 /** @param {Record<string, unknown>} row */
@@ -719,11 +743,19 @@ function canScanExistingRows(storage) {
  * holds O(batch) memory; backfill omits it because its per-run memo
  * legitimately needs the full committed set (see createBackfillDedupe).
  *
+ * `dates` prunes the scan to the date partitions that can hold the batch
+ * being deduped (`readRows`'s `partitionWhere` hint). Without it every
+ * telemetry batch re-read the whole table: on a months-deep cache a
+ * multi-second scan per POST, arriving every few seconds. The hint is an
+ * optimization only: a prune miss risks just the duplicate this dedupe
+ * exists to prevent, which compaction's content-hash layer still collapses.
+ *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
+ * @param {string[]} [dates]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage, restrictTo) {
+async function scanExistingPartIds(storage, restrictTo, dates) {
   /** @type {Set<string>} */
   const seen = new Set()
   if (restrictTo && restrictTo.size === 0) return seen
@@ -734,11 +766,12 @@ async function scanExistingPartIds(storage, restrictTo) {
   } catch {
     return seen
   }
+  const readOpts = dates ? { partitionWhere: { date: dates } } : undefined
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
+      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'], readOpts)) {
         const key = partIdKey(row)
         if (key === undefined) continue
         if (restrictTo) {

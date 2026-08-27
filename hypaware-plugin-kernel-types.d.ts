@@ -1601,6 +1601,14 @@ export interface ReadRowsOptions {
    * post-upgrade, so excluding them after the first export never skips live data.
    */
   includeLegacy?: boolean
+  /**
+   * Best-effort file-pruning hint: {partition column: allowed values}. Data
+   * files whose partition tuple or column bounds prove no row can match are
+   * never opened. Name only required (never-null) partition columns. A caller
+   * must not rely on the hint for row filtering: when it cannot be pushed
+   * down it silently degrades to the full scan.
+   */
+  partitionWhere?: Record<string, string[]>
 }
 
 /**

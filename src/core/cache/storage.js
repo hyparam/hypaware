@@ -225,7 +225,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRows(tablePath, columns, opts) {
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
+      const scanOpts = {
+        ...(since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : {}),
+        ...(opts?.partitionWhere ? { partitionWhere: opts.partitionWhere } : {}),
+      }
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield row
