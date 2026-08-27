@@ -202,13 +202,17 @@ function collectNestedProjectsDirs(dir, depth, out) {
  *   transcriptPath?: string,
  *   homeDir?: string,
  * }} opts
+ * @param {typeof readTranscriptFile} [readFile]  per-file reader; the
+ *   incremental loader (`createTranscriptLoader`) injects one that
+ *   serves cached entries and parses only appended bytes, reusing this
+ *   function's file resolution unchanged
  * @returns {Promise<TranscriptEntry[]>}
  */
-export async function loadTranscript(opts) {
+export async function loadTranscript(opts, readFile = readTranscriptFile) {
   /** @type {TranscriptEntry[]} */
   const entries = []
   if (opts.transcriptPath) {
-    await readTranscriptFile(opts.transcriptPath, entries)
+    await readFile(opts.transcriptPath, entries)
     // Subagent transcripts live next to the session file in a directory
     // named for the session, not inside it: without this walk every
     // sidechain message misses transcript identity and lands as a
@@ -218,11 +222,11 @@ export async function loadTranscript(opts) {
       path.basename(opts.transcriptPath, '.jsonl')
     )
     for (const filePath of walkJsonlFiles(sessionDir, undefined)) {
-      await readTranscriptFile(filePath, entries)
+      await readFile(filePath, entries)
     }
   } else {
     for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
-      await readTranscriptFile(filePath, entries)
+      await readFile(filePath, entries)
     }
     // The 3p roots are only scanned on a primary miss: a session lives in
     // exactly one tree, and the common CLI case must not pay the extra
@@ -231,14 +235,14 @@ export async function loadTranscript(opts) {
     // the whole container per exchange.
     if (entries.length === 0 && opts.homeDir) {
       const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
-      await readSessionFromDirs(dirs, opts.sessionId, entries)
+      await readSessionFromDirs(dirs, opts.sessionId, entries, readFile)
       // A new sandbox home appears exactly when a session starts, so a
       // cached list cannot contain the newest session's root. One forced
       // re-sweep on a miss keeps the cache invisible to correctness: the
       // cached path never finds less than the uncached walk did.
       if (entries.length === 0 && cached) {
         const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
-        await readSessionFromDirs(refreshed.dirs, opts.sessionId, entries)
+        await readSessionFromDirs(refreshed.dirs, opts.sessionId, entries, readFile)
       }
     }
   }
@@ -254,11 +258,12 @@ export async function loadTranscript(opts) {
  * @param {string[]} projectsDirs
  * @param {string} sessionId
  * @param {TranscriptEntry[]} entries
+ * @param {typeof readTranscriptFile} readFile
  */
-async function readSessionFromDirs(projectsDirs, sessionId, entries) {
+async function readSessionFromDirs(projectsDirs, sessionId, entries, readFile) {
   for (const projectsDir of projectsDirs) {
     for (const filePath of walkJsonlFiles(projectsDir, sessionId)) {
-      await readTranscriptFile(filePath, entries)
+      await readFile(filePath, entries)
     }
     if (entries.length > 0) return
   }
@@ -655,10 +660,14 @@ async function readTranscriptFile(filePath, entries) {
 }
 
 /**
+ * Parse one transcript line's already-JSON-parsed row into an entry.
+ * Exported for the incremental loader, which does its own line
+ * splitting (byte offsets) but must produce identical entries.
+ *
  * @param {unknown} row
  * @returns {TranscriptEntry | undefined}
  */
-function transcriptEntryFromRow(row) {
+export function transcriptEntryFromRow(row) {
   if (!isPlainObject(row)) return undefined
   const sessionId = stringValue(row.sessionId)
   if (!sessionId) return undefined
@@ -699,7 +708,6 @@ function transcriptEntryFromRow(row) {
     // backfill surfaces it as attributes.usage to match live capture.
     usage: readKey(message, 'usage'),
     tool_use_result: readKey(row, 'toolUseResult'),
-    raw_frame: row,
   }
   if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined
   return entry

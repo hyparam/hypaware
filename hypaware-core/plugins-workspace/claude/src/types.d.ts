@@ -210,7 +210,6 @@ export interface TranscriptEntry {
    * both the live and backfill paths so it survives transcript pruning.
    */
   tool_use_result: unknown
-  raw_frame: unknown
   timestampMs: number | undefined
 }
 

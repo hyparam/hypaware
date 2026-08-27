@@ -25,10 +25,10 @@ import {
   findTranscriptMatch,
   indexTranscriptEntries,
   loadAgentMeta,
-  loadTranscript,
   matchKey,
   withToolUseResult,
 } from './transcripts.js'
+import { createTranscriptLoader } from './transcript-cache.js'
 import {
   createSessionContextReader,
   pickLatestMatching,
@@ -111,6 +111,10 @@ export function createClaudeExchangeProjector(opts) {
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
   // source, so a `--private` (`ignore`) dir drops at capture, not just export.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // Incremental transcript reads for the projector's lifetime: the
+  // per-exchange full reload was the daemon's dominant steady-state CPU
+  // cost (and, held concurrently, its OOM), growing with session size.
+  const transcriptLoader = createTranscriptLoader()
 
   return {
     name: 'claude-anthropic-messages',
@@ -219,7 +223,7 @@ export function createClaudeExchangeProjector(opts) {
       }
 
       const transcriptEntries = sessionId
-        ? await loadTranscriptSafe({
+        ? await loadTranscriptSafe(transcriptLoader, {
           projectsDir,
           sessionId,
           transcriptPath: sessionContextRecord?.transcript_path,
@@ -643,12 +647,13 @@ export function anthropicUpstreamPreset() {
 }
 
 /**
+ * @param {ReturnType<typeof createTranscriptLoader>} loader
  * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
  * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
  */
-async function loadTranscriptSafe(opts, logger) {
+async function loadTranscriptSafe(loader, opts, logger) {
   try {
-    return await loadTranscript(opts)
+    return await loader.load(opts)
   } catch (err) {
     logger?.warn('plugin.claude.transcript_read_failed', {
       session_id: opts.sessionId,

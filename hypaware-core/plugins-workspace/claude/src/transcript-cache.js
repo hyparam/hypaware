@@ -1,0 +1,268 @@
+// @ts-check
+
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import { loadTranscript, transcriptEntryFromRow } from './transcripts.js'
+
+/**
+ * Incremental transcript loader for the live capture path.
+ *
+ * `loadTranscript` re-reads and re-parses every byte of a session's
+ * transcript (plus its subagent files) on EVERY finished exchange, so
+ * per-exchange cost grows with session size: a long session keeps a
+ * core busy and concurrent finalizations each hold a full parsed copy.
+ * Transcripts are append-only JSONL, so this loader remembers, per
+ * file, the byte offset after the last complete line it consumed plus
+ * the entries parsed so far, and each load stats the file and parses
+ * only the appended bytes. Work per exchange is then proportional to
+ * new lines, not session length, and concurrent finalizations share
+ * one parsed copy instead of holding one each.
+ *
+ * Trust model: the offset is only reused while the file still looks
+ * append-only: same inode, size not below the consumed offset, and no
+ * mtime change without growth. Anything else (rotation, truncation,
+ * in-place rewrite) discards the state and re-reads from byte zero, so
+ * the worst case is exactly the old behavior. Only complete
+ * (newline-terminated) lines are consumed; a partially-written tail is
+ * left for the next load, matching the reader's best-effort contract.
+ *
+ * Memory: parsed entries are retained per file and evicted
+ * least-recently-used once total consumed bytes exceed the budget,
+ * except files touched within {@link EVICT_IDLE_MS} (the active
+ * session must not thrash out of its own cache).
+ */
+
+/**
+ * @import { TranscriptEntry } from './types.js'
+ */
+
+/**
+ * Retained-bytes budget, measured in consumed file bytes (a proxy for
+ * entry memory, which runs a small multiple of it). Generous enough to
+ * hold a handful of active sessions; far below the heap sizes the
+ * uncached loader's concurrent full copies reached.
+ */
+const DEFAULT_MAX_RETAINED_BYTES = 256 * 1024 * 1024
+
+/** Files used this recently are evicted only under the hard cap. */
+const EVICT_IDLE_MS = 60_000
+
+/**
+ * A from-scratch parse of at least this many bytes takes the cold-parse
+ * gate: with the cache, each session pays a full parse once, but the
+ * proxy fires finalizations without awaiting, so several sessions' first
+ * loads can land together, and each holds a session-sized entry array.
+ * That unbounded pile-up is the OOM in Diego's crash dumps; staggering
+ * the big parses bounds it without slowing the (cheap) cached path.
+ */
+const COLD_PARSE_GATE_BYTES = 4 * 1024 * 1024
+
+/** Cold parses allowed to run concurrently. */
+const COLD_PARSE_CONCURRENCY = 2
+
+/**
+ * @typedef {{
+ *   ino: number,
+ *   size: number,
+ *   mtimeMs: number,
+ *   consumed: number,
+ *   entries: TranscriptEntry[],
+ *   lastUsedMs: number,
+ *   chain: Promise<void>,
+ * }} FileState
+ */
+
+/**
+ * @param {{ maxRetainedBytes?: number, now?: () => number }} [opts]  injectable for tests
+ */
+export function createTranscriptLoader(opts) {
+  const maxRetainedBytes = opts?.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
+  const now = opts?.now ?? Date.now
+  /** @type {Map<string, FileState>} */
+  const files = new Map()
+  const coldGate = createGate(COLD_PARSE_CONCURRENCY)
+
+  /**
+   * Drop-in for `loadTranscript`: same resolution (session file,
+   * subagent walk, Desktop 3p fallback), incremental per-file reads.
+   *
+   * @param {Parameters<typeof loadTranscript>[0]} loadOpts
+   */
+  async function load(loadOpts) {
+    const entries = await loadTranscript(loadOpts, readCachedFile)
+    evict()
+    return entries
+  }
+
+  /**
+   * The injected per-file reader: append this file's cached entries,
+   * advancing the cache over any newly appended bytes first.
+   *
+   * @param {string} filePath
+   * @param {TranscriptEntry[]} out
+   */
+  async function readCachedFile(filePath, out) {
+    let state = files.get(filePath)
+    if (!state) {
+      state = { ino: -1, size: 0, mtimeMs: 0, consumed: 0, entries: [], lastUsedMs: 0, chain: Promise.resolve() }
+      files.set(filePath, state)
+    }
+    // The proxy fires exchange finalizations without awaiting, so two
+    // loads of one session overlap: serialize per file so appended
+    // bytes are consumed exactly once.
+    const turn = state.chain.then(() => advance(filePath, /** @type {FileState} */ (state)))
+    state.chain = turn.then(() => undefined, () => undefined)
+    await turn
+    state.lastUsedMs = now()
+    for (const entry of state.entries) out.push(entry)
+  }
+
+  /**
+   * Bring one file's state current: no-op when size+mtime are
+   * unchanged, tail-parse when the file only grew, full reset when it
+   * stopped looking append-only.
+   *
+   * @param {string} filePath
+   * @param {FileState} state
+   */
+  async function advance(filePath, state) {
+    let stat
+    try {
+      stat = await fsp.stat(filePath)
+    } catch {
+      // Missing/unreadable: forget it, mirroring the uncached reader's
+      // yield-nothing behavior.
+      files.delete(filePath)
+      return
+    }
+    const fresh = stat.ino === state.ino && stat.size === state.size && stat.mtimeMs === state.mtimeMs
+    if (fresh) return
+    const appendOnly = stat.ino === state.ino && stat.size > state.size
+    if (!appendOnly && !(stat.ino === state.ino && stat.size === state.size)) {
+      // Rotated, truncated, or first sight: start over from byte zero.
+      state.ino = stat.ino
+      state.consumed = 0
+      state.entries = []
+    } else if (!appendOnly) {
+      // Same size, new mtime: an in-place rewrite we cannot diff.
+      state.consumed = 0
+      state.entries = []
+    }
+    const toParse = stat.size - state.consumed
+    if (toParse >= COLD_PARSE_GATE_BYTES) {
+      await coldGate(() => parseAppended(filePath, state, stat.size))
+    } else {
+      await parseAppended(filePath, state, stat.size)
+    }
+    state.size = stat.size
+    state.mtimeMs = stat.mtimeMs
+    state.ino = stat.ino
+  }
+
+  /**
+   * Parse `[state.consumed, sizeSnapshot)` into entries, consuming only
+   * complete lines. `\n` (0x0A) never occurs inside a UTF-8 sequence,
+   * so byte-splitting before decoding is safe.
+   *
+   * @param {string} filePath
+   * @param {FileState} state
+   * @param {number} sizeSnapshot
+   */
+  async function parseAppended(filePath, state, sizeSnapshot) {
+    if (sizeSnapshot <= state.consumed) return
+    /** @type {fs.ReadStream} */
+    let stream
+    try {
+      stream = fs.createReadStream(filePath, { start: state.consumed, end: sizeSnapshot - 1 })
+    } catch {
+      return
+    }
+    stream.on('error', () => {})
+    /** @type {Buffer} */
+    let carry = Buffer.alloc(0)
+    let seen = 0
+    try {
+      for await (const chunk of stream) {
+        const data = carry.length > 0 ? Buffer.concat([carry, /** @type {Buffer} */ (chunk)]) : /** @type {Buffer} */ (chunk)
+        seen += chunk.length
+        let start = 0
+        let nl
+        while ((nl = data.indexOf(10, start)) !== -1) {
+          parseLine(data.subarray(start, nl), state.entries)
+          start = nl + 1
+        }
+        carry = data.subarray(start)
+      }
+    } catch { /* truncated mid-read: keep what parsed; offset advances only past complete lines */ }
+    state.consumed += seen - carry.length
+  }
+
+  /**
+   * Reclaim least-recently-used files once the retained budget is
+   * exceeded: idle files first, then recent ones too (concurrent big
+   * sessions must not accumulate without bound), always sparing the
+   * single most-recent file so the active session cannot thrash itself
+   * straight out of its own cache.
+   */
+  function evict() {
+    let retained = 0
+    for (const state of files.values()) retained += state.consumed
+    if (retained <= maxRetainedBytes) return
+    const idleBefore = now() - EVICT_IDLE_MS
+    const byAge = [...files.entries()].sort(([, a], [, b]) => a.lastUsedMs - b.lastUsedMs)
+    for (const pass of ['idle', 'hard']) {
+      for (const [filePath, state] of byAge) {
+        if (retained <= maxRetainedBytes) return
+        if (!files.has(filePath)) continue
+        if (pass === 'idle' && state.lastUsedMs >= idleBefore) continue
+        if (files.size === 1) return
+        retained -= state.consumed
+        files.delete(filePath)
+      }
+    }
+  }
+
+  return { load }
+}
+
+/**
+ * Minimal counting gate: at most `limit` callers inside `fn` at once.
+ *
+ * @param {number} limit
+ */
+function createGate(limit) {
+  let active = 0
+  /** @type {(() => void)[]} */
+  const waiters = []
+  /**
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  return async function run(fn) {
+    while (active >= limit) await new Promise((resolve) => waiters.push(() => resolve(undefined)))
+    active++
+    try {
+      return await fn()
+    } finally {
+      active--
+      waiters.shift()?.()
+    }
+  }
+}
+
+/**
+ * @param {Buffer} line
+ * @param {TranscriptEntry[]} entries
+ */
+function parseLine(line, entries) {
+  if (line.length === 0) return
+  let row
+  try {
+    row = JSON.parse(line.toString('utf8'))
+  } catch {
+    return
+  }
+  const entry = transcriptEntryFromRow(row)
+  if (entry) entries.push(entry)
+}
