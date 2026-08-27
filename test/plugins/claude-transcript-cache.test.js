@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createTranscriptLoader } from '../../hypaware-core/plugins-workspace/claude/src/transcript-cache.js'
+import { loadTranscript } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
 /**
  * The incremental transcript loader: parse work per load must track
@@ -128,6 +129,101 @@ test('files over the retained budget are evicted once idle, and reload correctly
     clock += 120_000
     const third = await loader.load({ projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file })
     assert.deepEqual(third.map((e) => e.provider_uuid), ['u-1'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a complete final line with no trailing newline is returned, exactly like the uncached reader', async () => {
+  const env = await stage()
+  try {
+    const loader = createTranscriptLoader()
+    // Claude Code newline-terminates its writes, but the readline-based
+    // reader also yields an unterminated final line, and a session that
+    // has stopped growing would otherwise lose its newest entry forever.
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + line('u-2', 'two', 2))
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    const uncached = await loadTranscript(opts)
+    assert.deepEqual(uncached.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+
+    const first = await loader.load(opts)
+    assert.deepEqual(first.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+    // Nothing changed on disk: the tail must still be reported, and the
+    // repeat must not double it.
+    const second = await loader.load(opts)
+    assert.deepEqual(second.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+
+    // Once its newline lands the line is consumed for real, still once.
+    await fsp.appendFile(env.file, '\n' + line('u-3', 'three', 3) + '\n')
+    const third = await loader.load(opts)
+    assert.deepEqual(third.map((e) => e.provider_uuid), ['u-1', 'u-2', 'u-3'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a read that fails partway is re-read from zero on the next load, not left truncated', async () => {
+  const env = await stage()
+  try {
+    const loader = createTranscriptLoader()
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + line('u-2', 'two', 2) + '\n')
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+
+    const patchable = /** @type {any} */ (fs)
+    const realCreate = patchable.createReadStream
+    let failed = false
+    // Fail the first read outright: a transient error must not pin a
+    // short view of the file for the loader's lifetime.
+    patchable.createReadStream = (/** @type {any[]} */ ...args) => {
+      if (!failed) {
+        failed = true
+        throw new Error('EIO')
+      }
+      return realCreate(...args)
+    }
+    let first
+    try {
+      first = await loader.load(opts)
+    } finally {
+      patchable.createReadStream = realCreate
+    }
+    assert.deepEqual(first.map((e) => e.provider_uuid), [], 'the failed read yields nothing')
+
+    const second = await loader.load(opts)
+    assert.deepEqual(second.map((e) => e.provider_uuid), ['u-1', 'u-2'], 'the next load recovers the whole file')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a vanished file yields nothing rather than a last stale copy', async () => {
+  const env = await stage()
+  try {
+    const loader = createTranscriptLoader()
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n')
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    assert.equal((await loader.load(opts)).length, 1)
+
+    await fsp.rm(env.file)
+    assert.deepEqual(await loader.load(opts), [], 'the pruned file contributes nothing')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('overlapping loads of one session consume appended bytes exactly once', async () => {
+  const env = await stage()
+  try {
+    const loader = createTranscriptLoader()
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n')
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    await loader.load(opts)
+
+    await fsp.appendFile(env.file, line('u-2', 'two', 2) + '\n')
+    // The proxy fires exchange finalizations without awaiting them.
+    const [a, b] = await Promise.all([loader.load(opts), loader.load(opts)])
+    assert.deepEqual(a.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+    assert.deepEqual(b.map((e) => e.provider_uuid), ['u-1', 'u-2'])
   } finally {
     await env.cleanup()
   }

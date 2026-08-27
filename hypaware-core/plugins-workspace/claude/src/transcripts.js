@@ -21,10 +21,13 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBloc
  * {"sessionId":"...","uuid":"u-2","parentUuid":"u-1","type":"assistant","message":{...},"timestamp":"..."}
  * ```
  *
- * The projector calls `loadTranscript()` per exchange. The reader is
- * best-effort: a missing directory, a missing file, or a truncated
- * line never throws: projection falls back to gateway-computed
- * identity in that case.
+ * The projector loads a transcript per exchange, through the
+ * incremental loader in `transcript-cache.js`, which injects its own
+ * per-file reader into `loadTranscript` and leaves file resolution
+ * here. Backfill and flush-time settlement call `loadTranscript`
+ * directly. The reader is best-effort either way: a missing directory,
+ * a missing file, or a truncated line never throws: projection falls
+ * back to gateway-computed identity in that case.
  */
 
 /**

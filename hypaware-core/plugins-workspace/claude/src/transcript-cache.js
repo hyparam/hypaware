@@ -23,8 +23,22 @@ import { loadTranscript, transcriptEntryFromRow } from './transcripts.js'
  * mtime change without growth. Anything else (rotation, truncation,
  * in-place rewrite) discards the state and re-reads from byte zero, so
  * the worst case is exactly the old behavior. Only complete
- * (newline-terminated) lines are consumed; a partially-written tail is
- * left for the next load, matching the reader's best-effort contract.
+ * (newline-terminated) lines are ever *consumed*: a partially-written
+ * tail must never advance the offset, or the completing bytes would be
+ * skipped. A trailing line that is already complete JSON but not yet
+ * newline-terminated is still *returned*, from a re-derived
+ * {@link TranscriptFileState.tail} that the offset never covers: the
+ * readline-based reader yields such a line, and silently dropping the
+ * newest line of a session that has stopped growing is exactly the
+ * kind of quiet under-projection this path must not introduce. The
+ * tail is re-parsed (never cached) on every load, so the line is
+ * emitted once from the tail and once, later, from `entries`, never
+ * twice in one load.
+ *
+ * Any read that fails partway poisons the freshness witnesses instead
+ * of keeping the short parse, so the next load re-reads from byte
+ * zero: a transient error must not truncate a file's cached view for
+ * the lifetime of the daemon.
  *
  * Memory: parsed entries are retained per file and evicted
  * least-recently-used once total consumed bytes exceed the budget,
@@ -33,7 +47,7 @@ import { loadTranscript, transcriptEntryFromRow } from './transcripts.js'
  */
 
 /**
- * @import { TranscriptEntry } from './types.js'
+ * @import { TranscriptEntry, TranscriptFileState } from './types.js'
  */
 
 /**
@@ -61,24 +75,12 @@ const COLD_PARSE_GATE_BYTES = 4 * 1024 * 1024
 const COLD_PARSE_CONCURRENCY = 2
 
 /**
- * @typedef {{
- *   ino: number,
- *   size: number,
- *   mtimeMs: number,
- *   consumed: number,
- *   entries: TranscriptEntry[],
- *   lastUsedMs: number,
- *   chain: Promise<void>,
- * }} FileState
- */
-
-/**
  * @param {{ maxRetainedBytes?: number, now?: () => number }} [opts]  injectable for tests
  */
 export function createTranscriptLoader(opts) {
   const maxRetainedBytes = opts?.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
   const now = opts?.now ?? Date.now
-  /** @type {Map<string, FileState>} */
+  /** @type {Map<string, TranscriptFileState>} */
   const files = new Map()
   const coldGate = createGate(COLD_PARSE_CONCURRENCY)
 
@@ -104,17 +106,18 @@ export function createTranscriptLoader(opts) {
   async function readCachedFile(filePath, out) {
     let state = files.get(filePath)
     if (!state) {
-      state = { ino: -1, size: 0, mtimeMs: 0, consumed: 0, entries: [], lastUsedMs: 0, chain: Promise.resolve() }
+      state = { ino: -1, size: 0, mtimeMs: 0, consumed: 0, entries: [], tail: [], lastUsedMs: 0, chain: Promise.resolve() }
       files.set(filePath, state)
     }
     // The proxy fires exchange finalizations without awaiting, so two
     // loads of one session overlap: serialize per file so appended
     // bytes are consumed exactly once.
-    const turn = state.chain.then(() => advance(filePath, /** @type {FileState} */ (state)))
+    const turn = state.chain.then(() => advance(filePath, /** @type {TranscriptFileState} */ (state)))
     state.chain = turn.then(() => undefined, () => undefined)
     await turn
     state.lastUsedMs = now()
     for (const entry of state.entries) out.push(entry)
+    for (const entry of state.tail) out.push(entry)
   }
 
   /**
@@ -123,15 +126,19 @@ export function createTranscriptLoader(opts) {
    * stopped looking append-only.
    *
    * @param {string} filePath
-   * @param {FileState} state
+   * @param {TranscriptFileState} state
    */
   async function advance(filePath, state) {
     let stat
     try {
       stat = await fsp.stat(filePath)
     } catch {
-      // Missing/unreadable: forget it, mirroring the uncached reader's
-      // yield-nothing behavior.
+      // Missing/unreadable: forget it, and drop what we had parsed, so
+      // this load yields nothing for the file just like the uncached
+      // reader does rather than serving a last stale copy.
+      state.consumed = 0
+      state.entries = []
+      state.tail = []
       files.delete(filePath)
       return
     }
@@ -148,12 +155,26 @@ export function createTranscriptLoader(opts) {
       state.consumed = 0
       state.entries = []
     }
+    state.tail = []
     const toParse = stat.size - state.consumed
-    if (toParse >= COLD_PARSE_GATE_BYTES) {
-      await coldGate(() => parseAppended(filePath, state, stat.size))
-    } else {
-      await parseAppended(filePath, state, stat.size)
+    const parsed = toParse >= COLD_PARSE_GATE_BYTES
+      ? await coldGate(() => parseAppended(filePath, state, stat.size))
+      : await parseAppended(filePath, state, stat.size)
+    if (!parsed.ok) {
+      // A short read must not look like a complete one: leaving the
+      // witnesses at the observed stat would make the next load call
+      // the file `fresh` and never revisit the bytes we failed to read.
+      // Poisoning them forces the reset branch (and a from-zero
+      // re-read) next time, which is the pre-cache behavior.
+      state.ino = -1
+      state.size = -1
+      state.mtimeMs = -1
+      return
     }
+    // A complete JSON value that has not been newline-terminated yet is
+    // returned but never consumed: the next load re-derives it, or
+    // consumes it for real once its newline lands.
+    state.tail = parseTail(parsed.rest)
     state.size = stat.size
     state.mtimeMs = stat.mtimeMs
     state.ino = stat.ino
@@ -162,25 +183,29 @@ export function createTranscriptLoader(opts) {
   /**
    * Parse `[state.consumed, sizeSnapshot)` into entries, consuming only
    * complete lines. `\n` (0x0A) never occurs inside a UTF-8 sequence,
-   * so byte-splitting before decoding is safe.
+   * so byte-splitting before decoding is safe. Returns the unconsumed
+   * trailing bytes, plus whether the region was read in full.
    *
    * @param {string} filePath
-   * @param {FileState} state
+   * @param {TranscriptFileState} state
    * @param {number} sizeSnapshot
+   * @returns {Promise<{ ok: boolean, rest: Buffer }>}
    */
   async function parseAppended(filePath, state, sizeSnapshot) {
-    if (sizeSnapshot <= state.consumed) return
+    const empty = Buffer.alloc(0)
+    if (sizeSnapshot <= state.consumed) return { ok: true, rest: empty }
     /** @type {fs.ReadStream} */
     let stream
     try {
       stream = fs.createReadStream(filePath, { start: state.consumed, end: sizeSnapshot - 1 })
     } catch {
-      return
+      return { ok: false, rest: empty }
     }
     stream.on('error', () => {})
     /** @type {Buffer} */
-    let carry = Buffer.alloc(0)
+    let carry = empty
     let seen = 0
+    let ok = true
     try {
       for await (const chunk of stream) {
         const data = carry.length > 0 ? Buffer.concat([carry, /** @type {Buffer} */ (chunk)]) : /** @type {Buffer} */ (chunk)
@@ -193,8 +218,13 @@ export function createTranscriptLoader(opts) {
         }
         carry = data.subarray(start)
       }
-    } catch { /* truncated mid-read: keep what parsed; offset advances only past complete lines */ }
+    } catch {
+      // Truncated mid-read: keep what parsed, but report the short read
+      // so the caller re-reads from zero next time.
+      ok = false
+    }
     state.consumed += seen - carry.length
+    return { ok, rest: carry }
   }
 
   /**
@@ -249,6 +279,36 @@ function createGate(limit) {
       waiters.shift()?.()
     }
   }
+}
+
+/**
+ * Entries for a trailing region that carries no newline. A line still
+ * being written is not valid JSON (a JSONL line is one complete value,
+ * so no proper prefix of it parses), which is what makes this safe to
+ * attempt on every load: a half-written tail yields nothing, a finished
+ * one yields its entry. The closing-bracket check just avoids paying
+ * `JSON.parse` on the common half-written case.
+ *
+ * @param {Buffer} rest
+ * @returns {TranscriptEntry[]}
+ */
+function parseTail(rest) {
+  let end = rest.length
+  while (end > 0 && isSpaceByte(rest[end - 1])) end--
+  if (end === 0) return []
+  const last = rest[end - 1]
+  if (last !== 0x7d && last !== 0x5d) return []
+  /** @type {TranscriptEntry[]} */
+  const entries = []
+  parseLine(rest.subarray(0, end), entries)
+  return entries
+}
+
+/**
+ * @param {number} byte
+ */
+function isSpaceByte(byte) {
+  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d
 }
 
 /**
