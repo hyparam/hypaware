@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0012, LLP 0014
+**Extended-by:** LLP 0318 (opt-in, bounded process/runtime diagnostic metrics)
 
 > How HypAware instruments itself. Lifts the "Self-Instrumentation Contract" from
 > the tombstoned implementation plan ([LLP 0018](./tombstones/0018-implementation-plan.plan.md))
