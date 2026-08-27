@@ -14,9 +14,9 @@ import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gat
  * `readRows`'s `partitionWhere` hint and its consumer, the telemetry
  * dedupe (`dedupeStoredPartIds`): the dedupe question "is this part_id
  * already committed?" only needs the date partitions the batch's rows
- * live in, so the scan is pruned to those dates (plus the previous day,
- * absorbing producer timestamp skew around midnight) instead of
- * re-reading the whole table per telemetry POST.
+ * live in, so the scan is pruned to those dates (plus the day on either
+ * side, absorbing producer timestamp skew around midnight in either
+ * direction) instead of re-reading the whole table per telemetry POST.
  *
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -88,20 +88,48 @@ test('readRows with a partitionWhere hint yields only the hinted date', async ()
   }
 })
 
-test('the telemetry dedupe still catches committed rows inside its pruned window', async () => {
+test('the telemetry dedupe still catches committed rows on either side of its date', async () => {
   const env = await stageStorage()
   try {
-    await env.storage.appendRows(env.tablePath, COLUMNS, [row('2026-05-01', 'm-old'), row('2026-05-02', 'm-new')])
+    await env.storage.appendRows(env.tablePath, COLUMNS, [
+      row('2026-05-01', 'm-early'),
+      row('2026-05-02', 'm-same'),
+      row('2026-05-03', 'm-late'),
+    ])
     await env.storage.flushTable(env.tablePath, { force: true })
 
     const batch = [
-      row('2026-05-02', 'm-new'), // duplicate, same date
-      row('2026-05-02', 'm-old'), // duplicate committed a day earlier (midnight skew)
+      row('2026-05-02', 'm-same'), // duplicate, same date
+      row('2026-05-02', 'm-early'), // committed a day earlier: the other producer's clock was behind
+      row('2026-05-02', 'm-late'), // committed a day later: it was ahead. Skew has no guaranteed sign
       row('2026-05-02', 'm-fresh'), // genuinely new
     ]
     const fresh = await dedupeStoredPartIds(batch, env.storage)
     assert.deepEqual(fresh.map((r) => r.message_id), ['m-fresh'],
-      'same-date and previous-day duplicates are dropped; the fresh row survives')
+      'duplicates on the day before AND the day after are dropped; the fresh row survives')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * Pins the pruned window itself, and is the only assertion here that can tell
+ * the pruned dedupe apart from the unpruned one: a committed copy further than
+ * a day from the batch's date is outside the scan and reads as fresh. That is
+ * the documented envelope of the hint (see `batchPartitionDates`), not a
+ * behaviour to widen casually - the miss is a real duplicate, and one that
+ * compaction's content-hash dedupe cannot collapse because the two copies
+ * disagree on `date`.
+ */
+test('the pruned window is bounded at one day on each side', async () => {
+  const env = await stageStorage()
+  try {
+    await env.storage.appendRows(env.tablePath, COLUMNS, [row('2026-05-05', 'm-far')])
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    const fresh = await dedupeStoredPartIds([row('2026-05-02', 'm-far')], env.storage)
+    assert.deepEqual(fresh.map((r) => r.message_id), ['m-far'],
+      'three days out is outside the scanned partitions, so the dedupe cannot see it')
   } finally {
     await env.cleanup()
   }

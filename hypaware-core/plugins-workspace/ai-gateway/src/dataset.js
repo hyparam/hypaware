@@ -568,11 +568,26 @@ export async function dedupeStoredPartIds(rows, storage) {
 
 /**
  * The `date` partition values that can hold a committed copy of these rows:
- * each row's own date plus the day before it, absorbing producer timestamp
- * skew around midnight (the proxy, backfill and OTEL stamp `date` from
- * timestamps they each observe for the same message). Returns undefined
+ * each row's own date plus the day on EITHER side of it, absorbing producer
+ * timestamp skew around midnight (the proxy, backfill and OTEL stamp `date`
+ * from timestamps they each observe for the same message). Returns undefined
  * (no pruning) when any row lacks a date, rather than guessing.
  *
+ * The window is symmetric because the skew has no guaranteed sign. The rows
+ * being deduped are the OTEL listener's, stamped from the client-emitted
+ * event timestamp; the committed copy they must find was stamped by another
+ * producer from a DIFFERENT observation of the same message, and that one can
+ * fall on either side of midnight relative to it: the proxy prefers a
+ * provider-supplied message timestamp (the API server's clock, which can run
+ * ahead of the client's) over its own `tsStart`, and Claude's backfill reads
+ * the transcript entry's timestamp, written when the message finalized, i.e.
+ * at or after the OTEL event for it. A one-sided window silently misses those,
+ * and nothing downstream catches the miss: a prune miss means the two copies
+ * disagree on `date`, so they are not byte-identical and compaction's
+ * content-hash dedupe cannot collapse them.
+ *
+ * @ref LLP 0311#date-partition [constrained-by]: pruning on `date` is exact
+ *   only because the cache's partition spec is identity on that column
  * @param {Record<string, unknown>[]} rows
  * @returns {string[] | undefined}
  */
@@ -582,10 +597,12 @@ function batchPartitionDates(rows) {
   for (const row of rows) {
     const date = row.date
     if (typeof date !== 'string' || date.length === 0) return undefined
+    const midnight = Date.parse(`${date}T00:00:00Z`)
+    if (Number.isNaN(midnight)) return undefined
     dates.add(date)
-    const prev = new Date(Date.parse(`${date}T00:00:00Z`) - 86_400_000)
-    if (Number.isNaN(prev.getTime())) return undefined
-    dates.add(prev.toISOString().slice(0, 10))
+    for (const offset of [-86_400_000, 86_400_000]) {
+      dates.add(new Date(midnight + offset).toISOString().slice(0, 10))
+    }
   }
   return [...dates]
 }
@@ -746,9 +763,16 @@ function canScanExistingRows(storage) {
  * `dates` prunes the scan to the date partitions that can hold the batch
  * being deduped (`readRows`'s `partitionWhere` hint). Without it every
  * telemetry batch re-read the whole table: on a months-deep cache a
- * multi-second scan per POST, arriving every few seconds. The hint is an
- * optimization only: a prune miss risks just the duplicate this dedupe
- * exists to prevent, which compaction's content-hash layer still collapses.
+ * multi-second scan per POST, arriving every few seconds.
+ *
+ * The hint is an optimization with respect to the SCAN, not with respect to
+ * the answer: a partition the batch can reach but the hint omits produces
+ * exactly the duplicate this dedupe exists to prevent, and that one survives
+ * downstream. Compaction's content-hash layer only collapses byte-identical
+ * rows, and a prune miss implies the two copies disagree on `date`. So the
+ * window `batchPartitionDates` computes has to cover every partition a
+ * committed copy can be in, and it hands back undefined (full scan) rather
+ * than narrow a batch it cannot bound.
  *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
