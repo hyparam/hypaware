@@ -38,7 +38,7 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { TranscriptEntry } from './types.js'
+ * @import { TranscriptEntry, TranscriptLoader } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -85,6 +85,7 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
  *   logger?: { warn(message: string, fields?: Record<string, unknown>): void, debug?: (m: string, f?: Record<string, unknown>) => void },
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   transcriptLoader?: TranscriptLoader,
  * }} opts
  * @returns {AiGatewayExchangeProjector}
  */
@@ -114,7 +115,7 @@ export function createClaudeExchangeProjector(opts) {
   // Incremental transcript reads for the projector's lifetime: the
   // per-exchange full reload was the daemon's dominant steady-state CPU
   // cost (and, held concurrently, its OOM), growing with session size.
-  const transcriptLoader = createTranscriptLoader()
+  const transcriptLoader = opts.transcriptLoader ?? createTranscriptLoader()
 
   return {
     name: 'claude-anthropic-messages',
@@ -647,7 +648,7 @@ export function anthropicUpstreamPreset() {
 }
 
 /**
- * @param {ReturnType<typeof createTranscriptLoader>} loader
+ * @param {TranscriptLoader} loader
  * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
  * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
  */
@@ -696,4 +697,3 @@ function parseHeaders(raw) {
     return undefined
   }
 }
-

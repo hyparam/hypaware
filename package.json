@@ -71,6 +71,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:types": "tsc -p tsconfig.build.json",
     "bench:icebird-real": "node --expose-gc benchmarks/icebird-real-data.mjs",
+    "bench:normal-cpu": "node benchmarks/normal-usage-cpu.mjs",
     "prepare": "npm run build:types",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },

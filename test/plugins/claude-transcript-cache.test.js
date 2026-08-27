@@ -60,6 +60,40 @@ test('a second load parses only the appended lines, reusing prior entries', asyn
   }
 })
 
+test('unchanged main and subagent files read zero bytes, then an append reads only its tail', async () => {
+  const env = await stage()
+  const realCreateReadStream = fs.createReadStream
+  try {
+    const loader = createTranscriptLoader()
+    const subDir = path.join(env.dir, SESSION, 'subagents')
+    const subFile = path.join(subDir, 'agent-1.jsonl')
+    await fsp.mkdir(subDir, { recursive: true })
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n')
+    await fsp.writeFile(subFile, line('u-sub-1', 'sub one', 2) + '\n')
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    await loader.load(opts)
+
+    let bytesRead = 0
+    fs.createReadStream = (/** @type {any[]} */ ...args) => {
+      const stream = Reflect.apply(realCreateReadStream, fs, args)
+      stream.on('data', (chunk) => { bytesRead += chunk.length })
+      return stream
+    }
+    const unchanged = await loader.load(opts)
+    assert.deepEqual(unchanged.map((e) => e.provider_uuid), ['u-1', 'u-sub-1'])
+    assert.equal(bytesRead, 0, 'an unchanged session must not reopen transcript contents')
+
+    const appended = line('u-sub-2', 'sub two', 3) + '\n'
+    await fsp.appendFile(subFile, appended)
+    const grown = await loader.load(opts)
+    assert.deepEqual(grown.map((e) => e.provider_uuid), ['u-1', 'u-sub-1', 'u-sub-2'])
+    assert.equal(bytesRead, Buffer.byteLength(appended), 'only the appended subagent tail is read')
+  } finally {
+    fs.createReadStream = realCreateReadStream
+    await env.cleanup()
+  }
+})
+
 test('truncation discards the cached state and re-reads from byte zero', async () => {
   const env = await stage()
   try {

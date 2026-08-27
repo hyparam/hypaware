@@ -213,6 +213,15 @@ export interface TranscriptEntry {
   timestampMs: number | undefined
 }
 
+export interface TranscriptLoader {
+  load(opts: {
+    projectsDir: string
+    sessionId: string
+    transcriptPath?: string
+    homeDir?: string
+  }): Promise<TranscriptEntry[]>
+}
+
 /**
  * One transcript file's incremental-read state, held by
  * `createTranscriptLoader`. `consumed` is a byte offset that always sits
