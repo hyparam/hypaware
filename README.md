@@ -200,9 +200,14 @@ out-of-memory failures, CPU spikes, garbage collection, and event-loop stalls:
 
 ```sh
 HYP_OTEL_RUNTIME_METRICS=1 \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319 \
 hyp daemon run --foreground
 ```
+
+Point the endpoint at your own collector, not back at HypAware. The bundled
+OpenTelemetry source listens on `127.0.0.1:4318` when you enable it, and it
+drops requests carrying HypAware's own `hypaware.self` resource marker, so
+exporting the diagnostics into it discards them rather than storing them.
 
 `HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS` changes the 30-second sampling interval.
 Values below 5000 are clamped to five seconds. Sampling starts only when a

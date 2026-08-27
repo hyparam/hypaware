@@ -10,7 +10,8 @@ import {
   PerformanceObserver,
 } from 'node:perf_hooks'
 
-import { nsToHrTime, nowUnixNano } from './runtime.js'
+import { normalizeKey } from './attrs.js'
+import { normalizeAttributes, nsToHrTime, nowUnixNano } from './runtime.js'
 
 /**
  * @import { MetricRecord, ObservabilityEnv } from '../../../src/core/observability/types.js'
@@ -156,8 +157,12 @@ function collectRuntimeMetrics({
   }
 
   const memory = process.memoryUsage()
-  for (const [area, value] of Object.entries(memory)) {
-    record('hyp_runtime_memory_bytes', value, 'By', { area })
+  for (const [key, value] of Object.entries(memory)) {
+    // Node names these in camelCase (`heapTotal`, `arrayBuffers`) while the
+    // explicit V8 areas below are snake_case. One dimension must not carry two
+    // casings, and normalizeKey keeps a future Node key in the same shape.
+    // @ref LLP 0021#the-attribute-contract [constrained-by]: one snake_case vocabulary per attribute
+    record('hyp_runtime_memory_bytes', value, 'By', { area: normalizeKey(key) })
   }
 
   const heap = v8.getHeapStatistics()
@@ -241,7 +246,7 @@ function metricRecord({ provider, collectedAt, name, value, unit, attributes, de
     kind: 'gauge',
     monotonic: false,
     value,
-    attributes,
+    attributes: normalizeAttributes(attributes),
     startTime: timestamp,
     endTime: timestamp,
   }
