@@ -11,9 +11,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
+
 import {
   appendRowsToTable,
   deleteMatchingRows,
+  physicalProjection,
   readRowsFromTable,
   currentSchema,
 } from '../../src/core/cache/iceberg/store.js'
@@ -59,6 +62,31 @@ async function makeTmpDir(prefix) {
   )
   await fs.mkdir(dir, { recursive: true })
   return dir
+}
+
+/**
+ * The one data file under `dir` whose PHYSICAL schema lacks `columnName`. The
+ * additive-evolution fixtures write exactly one such file, so the answer is
+ * unambiguous; this throws rather than guess if that stops being true.
+ *
+ * @param {string} dir @param {string} columnName
+ * @returns {Promise<string>}
+ */
+async function dataFileWithout(dir, columnName) {
+  const dataDir = path.join(dir, 'data')
+  const names = (await fs.readdir(dataDir)).filter((name) => name.endsWith('.parquet'))
+  /** @type {string[]} */
+  const matches = []
+  for (const name of names) {
+    const full = path.join(dataDir, name)
+    const metadata = await parquetMetadataAsync(await asyncBufferFromFile(full))
+    const fields = parquetSchema(metadata).children.map((child) => child.element.name)
+    if (!fields.includes(columnName)) matches.push(full)
+  }
+  if (matches.length !== 1) {
+    throw new Error(`expected one data file without '${columnName}', found ${matches.length}`)
+  }
+  return matches[0]
 }
 
 /** @param {string} dir @param {string} columnName */
@@ -312,6 +340,46 @@ test('purge deletes rows from a data file narrower than the evolved schema', asy
     assert.equal(purged.rowsDeleted, 2, 'both data files are purged, not only the wide one')
     assert.equal(purged.filesAffected, 2)
     assert.deepEqual(await readRowsFromTable(dir), [])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0029#in-place-evolution [tests]: the narrowest pre-evolution file is the one purge must still empty
+test('a projection narrowed to nothing still reads one row object per physical row', async () => {
+  // The library seam the purge above rests on, pinned where it lives rather
+  // than only through its effect. When a data file predates EVERY projected
+  // column, `physicalProjection` narrows to an empty list, and `hyp purge
+  // --all`'s unconditional predicate only empties that file if the read still
+  // yields a row per row. It does: hyparquet reads `columns: []` as "no
+  // COLUMNS", returning one bare `{}` per physical row. That reading is not
+  // forced by anything in this repo, and icebird's reader deliberately routes
+  // around the same shape (`icebird/src/read.js`, "hyparquet treats an empty
+  // `columns` array as no columns rather than all columns"), so a hyparquet
+  // that returned no rows for it would put `hyp purge` back to reporting
+  // success while sparing the file. Assert it here so that bump names itself
+  // instead of surfacing as a privacy-facing under-delete.
+  const dir = await makeTmpDir('empty-projection')
+  try {
+    await appendRowsToTable(dir, V1_COLUMNS, [
+      { conversation_id: 'c1', client_name: 'claude', date: '2026-06-16', message: 'old-a' },
+      { conversation_id: 'c1', client_name: 'claude', date: '2026-06-16', message: 'old-b' },
+    ], { declaration: DECLARATION })
+    await appendRowsToTable(dir, V2_COLUMNS, [
+      { conversation_id: 'c2', client_name: 'claude', date: '2026-06-16', message: 'new', agent_id: 'agent-7' },
+    ], { declaration: DECLARATION })
+
+    const narrow = await dataFileWithout(dir, 'agent_id')
+    const file = await asyncBufferFromFile(narrow)
+    const projection = await physicalProjection(file, ['agent_id'])
+    assert.deepEqual(projection.columns, [], 'the pre-evolution file carries none of the projection')
+
+    const rows = await parquetReadObjects({ file, metadata: projection.metadata, columns: projection.columns })
+    assert.equal(rows.length, Number(projection.metadata.num_rows), 'an empty projection still yields every row')
+    assert.equal(rows.length, 2)
+    for (const row of rows) {
+      assert.deepEqual(Object.keys(row), [], 'each row is a bare object, so an absent column reads undefined')
+    }
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

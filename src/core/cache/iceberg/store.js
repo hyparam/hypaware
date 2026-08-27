@@ -427,6 +427,18 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
  * keeps the pre-1.29 reading, where an absent column simply resolves to
  * `undefined` on the row.
  *
+ * The narrowing can reach EMPTY, and that case is load-bearing rather than
+ * degenerate: a data file predating every projected column is exactly the file
+ * `hyp purge --all` must still empty, and its unconditional predicate only
+ * fires if the read still yields a row per row. It does, because hyparquet
+ * reads `columns: []` as "no COLUMNS", handing back one bare `{}` per physical
+ * row, not as "no rows" or "every column". That is the one library behaviour
+ * this helper cannot re-derive from the footer, and icebird's own reader routes
+ * around the same shape rather than relying on it (`icebird/src/read.js`), so a
+ * hyparquet that reinterpreted it would silently restore the under-delete this
+ * helper exists to close. `cache-iceberg-schema-evolution.test.js` pins it at
+ * this seam so the bump that changed it names itself.
+ *
  * @ref LLP 0029#in-place-evolution [constrained-by]: evolution leaves older data files narrower than the table schema
  * @param {AsyncBuffer} file
  * @param {string[]} columns the projection the caller wants
