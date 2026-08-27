@@ -314,8 +314,8 @@ test('a seeding scan that could not read the table caches no verdict; a later ti
       for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
     }
     assert.equal(report.totalCompacted, 0, 'an unreadable table is not rewritten')
-    assert.notEqual(readCursorSync(part.path).pendingFallbacks, 0,
-      'a scan that failed must not be cached as a definitive zero')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'a scan that failed must not be cached at all, as a zero or as anything else')
 
     // Nothing about the partition changed, so the next tick still owes it
     // that scan - which now succeeds and routes to the sweep.

@@ -2172,7 +2172,15 @@ async function hasResettleCandidate(tableDir) {
     for await (const row of scanRowsFromTable(tableDir, ['attributes'])) {
       if (isGatewayFallbackRow(row)) return true
     }
-  } catch {
+  } catch (err) {
+    // Not rethrown: an unreadable table must not fail the partition's whole
+    // tick, and the caller's `undefined` already keeps the verdict uncached.
+    // But unknown re-scans on every growth tick until the read succeeds, so
+    // record WHAT failed - the caller's boolean cannot separate a transient
+    // EACCES from a permanently torn data file or a bug in this scan, and
+    // only the first of those clears itself. Without this the recurring
+    // whole-table decode is the only symptom, with nothing naming its cause.
+    getActiveSpan()?.setAttribute('resettle_scan_error', err instanceof Error ? err.message : String(err))
     return undefined
   }
   return false
