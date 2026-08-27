@@ -116,8 +116,8 @@ function constantSet(columns) {
  *   its cache and its archive both hold from being counted twice. The
  *   client has no such rule (a row lives in exactly one data file, and one
  *   file takes exactly one tier) and its `ai_gateway_messages` carries no
- *   such column at all, so on this side the name is inert and the read
- *   below simply skips it. It is listed because this constant is shared:
+ *   such column at all, so on this side the per-file projection drops it.
+ *   It is listed because this constant is shared:
  *   dropping it would starve the server's own exclusion, which is a wrong
  *   answer rather than a slower one.
  * - `part_id`, `message_id`, `message_created_at`: the hit's locator
@@ -126,11 +126,11 @@ function constantSet(columns) {
  * The chain triple (`session_id`, `agent_id`, `conversation_id`) is read
  * by the chain predicate and the hit too, and is already searchable.
  *
- * A column named here but absent from the file is skipped rather than
- * refused (hyparquet's object mode ignores an unknown name), so a
- * narrower schema, an older cache generation or the client's own
- * `ai_gateway_messages` (which carries no `received_at`), reads exactly
- * as it did before.
+ * Before either tier reads a file, `grep_service.js` intersects this list
+ * with the file's physical schema. That keeps a narrower schema, an older
+ * cache generation or the client's own `ai_gateway_messages` (which carries
+ * no `received_at`) readable under hyparquet versions that reject an unknown
+ * projected name.
  */
 export const SCAN_COLUMNS = [
   ...SEARCHABLE_COLUMNS,

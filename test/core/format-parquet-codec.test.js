@@ -4,6 +4,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import zlib from 'node:zlib'
 
+import { snappyUncompress } from 'hysnappy'
+
 import { resolveEncodeSettings } from '../../hypaware-core/plugins-workspace/format-parquet/src/index.js'
 
 const ZSTD_AVAILABLE = typeof zlib.zstdCompressSync === 'function'
@@ -22,12 +24,15 @@ function fakeLogger() {
   }
 }
 
-test('resolveEncodeSettings defaults to SNAPPY with no explicit compressors', () => {
+test('resolveEncodeSettings defaults to hysnappy compression', () => {
   const { logger, warnings } = fakeLogger()
   const r = resolveEncodeSettings(undefined, logger)
   assert.equal(r.codec, 'SNAPPY')
-  // SNAPPY is supplied by hyparquet-writer's own default compressors.
-  assert.equal(r.compressors, undefined)
+  assert.equal(typeof r.compressors?.SNAPPY, 'function')
+  const input = new TextEncoder().encode('hypaware'.repeat(64))
+  const out = r.compressors.SNAPPY(input)
+  assert.ok(out instanceof Uint8Array)
+  assert.deepEqual(snappyUncompress(out, input.length), input)
   assert.equal(r.pageSize, undefined)
   assert.equal(warnings.length, 0)
 })
@@ -50,7 +55,7 @@ test('resolveEncodeSettings falls back to SNAPPY and warns when ZSTD is unavaila
   const { logger, warnings } = fakeLogger()
   const r = resolveEncodeSettings({ codec: 'ZSTD' }, logger)
   assert.equal(r.codec, 'SNAPPY')
-  assert.equal(r.compressors, undefined)
+  assert.equal(typeof r.compressors?.SNAPPY, 'function')
   assert.equal(warnings.length, 1)
   assert.equal(warnings[0].fields.fallback_codec, 'SNAPPY')
 })
@@ -59,7 +64,7 @@ test('resolveEncodeSettings warns and falls back on an unknown codec', () => {
   const { logger, warnings } = fakeLogger()
   const r = resolveEncodeSettings({ codec: 'BROTLI' }, logger)
   assert.equal(r.codec, 'SNAPPY')
-  assert.equal(r.compressors, undefined)
+  assert.equal(typeof r.compressors?.SNAPPY, 'function')
   assert.equal(warnings.length, 1)
   assert.equal(warnings[0].fields.requested_codec, 'BROTLI')
 })
