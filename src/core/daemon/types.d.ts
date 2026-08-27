@@ -744,6 +744,8 @@ export interface DaemonInstallOptions {
   systemctl?: SystemctlAdapter
   /** macOS: override the launchctl user domain (e.g. gui/501). */
   userDomain?: string
+  /** Override the poll delay the installers use while waiting (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonUninstallOptions {
