@@ -414,6 +414,10 @@ function readTranscriptRange(filePath, start, end) {
       if (count === 0) break
       read += count
     }
+    // `read === 0` (the file shrank between stat and open) would make
+    // `lastIndexOf`'s negative byteOffset scan from the END of an
+    // `allocUnsafe` buffer, i.e. over uninitialized memory.
+    if (read === 0) return { offset: start, entries: [] }
     const completeEnd = buffer.lastIndexOf(10, read - 1)
     if (completeEnd < 0) return { offset: start, entries: [] }
     const entries = []
