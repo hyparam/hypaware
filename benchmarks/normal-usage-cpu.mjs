@@ -34,6 +34,7 @@ const PROFILES = Object.freeze({
     projectorWarmCalls: 3,
     concurrentSessions: 0,
     concurrentRows: 0,
+    dedupeFanOuts: [1, 200, 201, 300],
   },
   normal: {
     cacheRows: 300_000,
@@ -47,6 +48,7 @@ const PROFILES = Object.freeze({
     projectorWarmCalls: 6,
     concurrentSessions: 4,
     concurrentRows: 30_000,
+    dedupeFanOuts: [1, 50, 200, 201, 800],
   },
   stress: {
     cacheRows: 1_000_000,
@@ -60,8 +62,31 @@ const PROFILES = Object.freeze({
     projectorWarmCalls: 12,
     concurrentSessions: 10,
     concurrentRows: 100_000,
+    dedupeFanOuts: [1, 50, 200, 201, 1600],
   },
 })
+
+/**
+ * Committed rows per fixture session in `stageCache`. A session-scoped read
+ * returns every committed row of every session the batch names, so this is
+ * what turns a fan-out width into an expected row count.
+ */
+const FIXTURE_ROWS_PER_SESSION = 100
+
+/**
+ * The `IN`-list width past which the ai-gateway dedupe stops pushing the
+ * batch's sessions down and reads the partition unrestricted
+ * (`MAX_SCOPED_SESSION_IDS` in ai-gateway/src/dataset.js). Not imported: the
+ * value is deliberately private to that module, and the scenario reports the
+ * strategy it actually observed rather than predicting it from this number.
+ * It is here only to pick fan-out widths that straddle the crossover and to
+ * label the report.
+ *
+ * @ref LLP 0311#context [tests]: bounds on the leading `session_id` sort key
+ * prune ONE narrow lookup; this is the width at which a batch-wide list of
+ * them stops pruning anything and the scan reverts to a single full pass
+ */
+const SCOPED_SESSION_CAP = 200
 
 const CACHE_COLUMNS = Object.freeze([
   { name: 'session_id', type: 'STRING', nullable: false },
@@ -153,7 +178,7 @@ async function stageCache(root, rowCount) {
       const index = base + offset
       const messageId = `old-${index}`
       return {
-        session_id: `session-${Math.floor(index / 100)}`,
+        session_id: `session-${Math.floor(index / FIXTURE_ROWS_PER_SESSION)}`,
         conversation_id: null,
         cwd: '/benchmark',
         date: benchmarkDate(index),
@@ -181,25 +206,141 @@ async function stageCache(root, rowCount) {
 
 /**
  * Exercise the exact pre-write membership function used by the Claude OTEL
- * projected-exchange writer. Every batch uses new keys, the normal ingest
- * case and the worst case for an early-stop scan.
+ * projected-exchange writer, across a spread of batch FAN-OUT widths.
+ *
+ * Fan-out (the count of DISTINCT sessions in one batch) is the variable that
+ * governs this scan's cost, and it is the one the original single-session
+ * fixture held at 1. The dedupe pushes the batch's sessions down as a single
+ * `session_id IN (...)` predicate; Iceberg/hyparquet prune a chunk on that
+ * list only when EVERY listed value falls outside the chunk's bounds, and
+ * every surviving row is then matched by walking the whole list. So the
+ * scoped read is O(rows scanned x sessions) while the unrestricted read it
+ * replaces is O(rows). Past `MAX_SCOPED_SESSION_IDS` the dedupe stops pushing
+ * down and takes the unrestricted read, which caps that growth.
+ *
+ * Two fixture properties make the growth observable, and BOTH are required:
+ *
+ *  - fan-out varies (widths on each side of the cap), and
+ *  - the batch names sessions that are actually COMMITTED, spread across the
+ *    fixture's `session_id` range.
+ *
+ * The second is the subtle one. The pre-existing fixture named fresh sessions
+ * (`otel-session-N`), which sort lexically below every committed
+ * `session-N`, so every chunk pruned on bounds no matter how long the list
+ * grew and the scan stayed flat at ~2ms. Widening fan-out alone would still
+ * have measured nothing.
+ *
+ * Both properties are checked, not merely arranged: `assessTarget` requires
+ * the sweep to span both read strategies, and requires each scoped width to
+ * read EXACTLY `batches x width x FIXTURE_ROWS_PER_SESSION` committed rows.
+ * A batch that named uncommitted sessions would read far fewer and fail, so
+ * the fixture cannot quietly drift back to measuring nothing.
+ *
+ * Nothing here asserts a duration: read `median_to_full_read_ratio` per width.
+ * With the cap in place the widest scoped width stays in the neighbourhood of
+ * the full read (0.78x at `normal`, ~1.2x at `quick`, where a 200-session
+ * scope already covers two thirds of a 300-session fixture). If the cap were
+ * removed or widened, the ratio at the wide end climbs roughly linearly with
+ * fan-out, which is the regression this scenario exists to make visible.
  *
  * @param {ReturnType<typeof createQueryStorageService>} storage
  * @param {typeof PROFILES.normal} profile
  */
 async function measureOtelDedupe(storage, profile) {
+  // Whole sessions only. Every session a batch names must hold exactly
+  // FIXTURE_ROWS_PER_SESSION committed rows, or the scoped row-count check
+  // below cannot be the equality that proves the batch named committed
+  // sessions. A cache too small for one full session addresses none, and the
+  // report says so rather than measuring a short one.
+  const fixtureSessions = Math.floor(profile.cacheRows / FIXTURE_ROWS_PER_SESSION)
+  const requested = profile.dedupeFanOuts
+  // A width wider than the fixture has sessions cannot be built without
+  // repeating one, which would report a fan-out the batch does not have.
+  const fanOuts = requested.filter((width) => width <= fixtureSessions)
+  /** @type {Record<string, Record<string, unknown>>} */
+  const byFanOut = {}
+  for (const width of fanOuts) {
+    byFanOut[String(width)] = await measureOtelDedupeFanOut(storage, profile, width, fixtureSessions)
+  }
+  // The narrowest width that reverted to the unrestricted read IS the full
+  // read, so it doubles as the baseline every scoped width is compared to.
+  const fullRead = fanOuts
+    .map((width) => byFanOut[String(width)])
+    .find((entry) => entry.read_strategy === 'unrestricted')
+  const fullReadMedian = fullRead
+    ? /** @type {{ median: number }} */ (fullRead.timing_ms).median
+    : undefined
+  for (const entry of Object.values(byFanOut)) {
+    entry.median_to_full_read_ratio = fullReadMedian === undefined
+      ? null
+      : ratio(/** @type {{ median: number }} */ (entry.timing_ms).median, fullReadMedian)
+  }
+  const scopedWidths = fanOuts.filter((width) => byFanOut[String(width)].read_strategy === 'scoped')
+  const unrestrictedWidths = fanOuts.filter(
+    (width) => byFanOut[String(width)].read_strategy === 'unrestricted',
+  )
+  return {
+    batches: profile.ingestBatches,
+    cache_rows: profile.cacheRows,
+    // The local constant that picked the widths, NOT a reading of the shipped
+    // cap. `observed_cap_between` is the measured one: the shipped cap sits at
+    // or above the widest width still scoped and below the narrowest that
+    // reverted, so a cap that moved shows up here instead of hiding behind a
+    // stale number this file restated.
+    scoped_session_cap_assumed: SCOPED_SESSION_CAP,
+    observed_cap_between: [scopedWidths.at(-1) ?? null, unrestrictedWidths[0] ?? null],
+    fixture_sessions: fixtureSessions,
+    fixture_rows_per_session: FIXTURE_ROWS_PER_SESSION,
+    fan_outs: fanOuts,
+    fan_outs_skipped_above_fixture: requested.filter((width) => width > fixtureSessions),
+    full_read_median_ms: fullReadMedian ?? null,
+    fan_out: byFanOut,
+  }
+}
+
+/**
+ * One fan-out width: `ingestBatches` batches of `max(incomingRows, width)`
+ * rows spread over `width` distinct committed sessions.
+ *
+ * The sessions are drawn evenly across the fixture's whole `session_id`
+ * range, which is what a flush batch of concurrently active sessions looks
+ * like: their history is already committed, and they do not cluster into one
+ * corner of the sort key. One row is deliberately a twin of a committed row
+ * on a date far outside any recent-date window, so the scan must still find
+ * it through the session sort key; every other row is a fresh key, the
+ * steady-state ingest case.
+ *
+ * @param {ReturnType<typeof createQueryStorageService>} storage
+ * @param {typeof PROFILES.normal} profile
+ * @param {number} width
+ * @param {number} fixtureSessions
+ */
+async function measureOtelDedupeFanOut(storage, profile, width, fixtureSessions) {
   const observed = instrumentStorage(storage)
+  // At least two rows, whatever `--incoming-rows` says. The dedupe's
+  // committed scan stops early once every key in the batch has been accounted
+  // for, so a batch consisting solely of the committed twin ends the read one
+  // row in and the row-count equality in `assessTarget` cannot hold. One fresh
+  // key alongside the twin keeps the scan draining the sessions the batch
+  // named, which is also the shape a real flush batch has.
+  const rowsPerBatch = Math.max(profile.incomingRows, width, 2)
   const samples = []
   let rowsReturned = 0
+  /** @type {Set<string>} */
+  const sessions = new Set()
   for (let batchIndex = 0; batchIndex < profile.ingestBatches; batchIndex++) {
-    const rows = Array.from({ length: profile.incomingRows }, (_, rowIndex) => {
-      // One duplicate is deliberately far outside a recent-date window. The
-      // optimized lookup must still find it through the session sort key;
-      // every other row is a fresh key, the steady-state ingest case.
+    const rows = Array.from({ length: rowsPerBatch }, (_, rowIndex) => {
       const historicalDuplicate = batchIndex === 0 && rowIndex === 0
-      const messageId = historicalDuplicate ? 'old-0' : `otel-new-${batchIndex}-${rowIndex}`
+      // Evenly spaced, so consecutive rows land in chunks far apart in the
+      // sort key and no chunk can be pruned on the list's bounds.
+      const sessionIndex = Math.floor(((rowIndex % width) * fixtureSessions) / width)
+      const sessionId = `session-${sessionIndex}`
+      sessions.add(sessionId)
+      // Row 0 of batch 0 is the committed twin: `stageCache` writes `old-0`
+      // into `session-0`, and `sessionIndex` is 0 for row 0 at every width.
+      const messageId = historicalDuplicate ? 'old-0' : `otel-new-${width}-${batchIndex}-${rowIndex}`
       return {
-        session_id: historicalDuplicate ? 'session-0' : `otel-session-${batchIndex}`,
+        session_id: sessionId,
         conversation_id: null,
         cwd: '/benchmark',
         date: '2026-08-27',
@@ -216,17 +357,22 @@ async function measureOtelDedupe(storage, profile) {
     samples.push(measured.sample)
   }
   const committedRowsRead = observed.counts.committedRows
+  const incomingRows = profile.ingestBatches * rowsPerBatch
   return {
+    distinct_sessions: sessions.size,
+    // Observed, not predicted from SCOPED_SESSION_CAP: if the cap moves, the
+    // report follows the code rather than restating a stale constant.
+    read_strategy: observed.counts.targetedReads > 0 ? 'scoped' : 'unrestricted',
     batches: profile.ingestBatches,
-    incoming_rows: profile.ingestBatches * profile.incomingRows,
+    rows_per_batch: rowsPerBatch,
+    incoming_rows: incomingRows,
     rows_returned: rowsReturned,
-    historical_duplicate_rows_skipped:
-      profile.ingestBatches * profile.incomingRows - rowsReturned,
+    historical_duplicate_rows_skipped: incomingRows - rowsReturned,
     committed_rows_read: committedRowsRead,
     spooled_rows_read: observed.counts.spooledRows,
     targeted_reads: observed.counts.targetedReads,
     committed_table_passes: ratio(committedRowsRead, profile.cacheRows),
-    scan_amplification: ratio(committedRowsRead, profile.ingestBatches * profile.incomingRows),
+    scan_amplification: ratio(committedRowsRead, incomingRows),
     timing_ms: summarize(samples.map((sample) => sample.wallMs)),
     cpu_ms: summarize(samples.map((sample) => sample.cpuMs)),
   }
@@ -867,24 +1013,74 @@ function assessTarget(measured) {
   const checks = []
   const dedupe = measured['otel-dedupe']
   if (dedupe) {
+    // The check that keeps the scenario honest rather than merely green: a
+    // fan-out set entirely below the cap can never show the cost the cap
+    // exists to bound, which is exactly how the single-session fixture this
+    // replaced passed while measuring nothing (issue #1056).
+    const strategies = new Set(dedupe.fan_outs.map(
+      (/** @type {number} */ width) => dedupe.fan_out[String(width)]?.read_strategy,
+    ))
     checks.push({
-      name: 'otel_dedupe_uses_one_targeted_read_per_batch',
-      actual: dedupe.targeted_reads,
-      limit: dedupe.batches,
-      pass: dedupe.targeted_reads === dedupe.batches,
+      name: 'otel_dedupe_measures_both_sides_of_the_scoped_read_cap',
+      actual: strategies.size,
+      limit: 2,
+      pass: strategies.has('scoped') && strategies.has('unrestricted'),
     })
-    checks.push({
-      name: 'otel_dedupe_reads_only_the_matching_fixture_session',
-      actual: dedupe.committed_rows_read,
-      limit: 100,
-      pass: dedupe.committed_rows_read <= 100,
-    })
-    checks.push({
-      name: 'otel_dedupe_finds_same_session_duplicate_outside_recent_date_window',
-      actual: dedupe.historical_duplicate_rows_skipped,
-      limit: 1,
-      pass: dedupe.historical_duplicate_rows_skipped === 1,
-    })
+    for (const width of dedupe.fan_outs) {
+      const entry = dedupe.fan_out[String(width)]
+      if (!entry) continue
+      checks.push({
+        name: `otel_dedupe_fan_out_${width}_batches_carry_that_many_distinct_sessions`,
+        actual: entry.distinct_sessions,
+        limit: width,
+        pass: entry.distinct_sessions === width,
+      })
+      if (entry.read_strategy === 'scoped') {
+        checks.push({
+          name: `otel_dedupe_fan_out_${width}_uses_one_targeted_read_per_batch`,
+          actual: entry.targeted_reads,
+          limit: dedupe.batches,
+          pass: entry.targeted_reads === dedupe.batches,
+        })
+        // Equality, not an upper bound. An upper bound passes when the batch
+        // names sessions that are NOT committed: the scoped read returns
+        // almost nothing, the sweep stays flat, and every other check is still
+        // green - issue #1056 wearing a different hat. Each addressable
+        // fixture session holds exactly `fixture_rows_per_session` committed
+        // rows, so an honest batch hits this number on the nose and a batch
+        // that only overlaps the fixture falls short of it.
+        const scopedRows = dedupe.batches * width * dedupe.fixture_rows_per_session
+        checks.push({
+          name: `otel_dedupe_fan_out_${width}_reads_exactly_the_named_fixture_sessions`,
+          actual: entry.committed_rows_read,
+          limit: scopedRows,
+          pass: entry.committed_rows_read === scopedRows,
+        })
+      } else {
+        checks.push({
+          name: `otel_dedupe_fan_out_${width}_reverts_to_the_unrestricted_read`,
+          actual: entry.targeted_reads,
+          limit: 0,
+          pass: entry.targeted_reads === 0,
+        })
+        // The narrowest such width is the denominator of every
+        // `median_to_full_read_ratio`, so the ratios only mean anything if it
+        // really scanned the whole committed table once per batch.
+        const fullReadRows = dedupe.batches * dedupe.cache_rows
+        checks.push({
+          name: `otel_dedupe_fan_out_${width}_full_read_scans_the_whole_committed_table`,
+          actual: entry.committed_rows_read,
+          limit: fullReadRows,
+          pass: entry.committed_rows_read === fullReadRows,
+        })
+      }
+      checks.push({
+        name: `otel_dedupe_fan_out_${width}_finds_same_session_duplicate_outside_recent_date_window`,
+        actual: entry.historical_duplicate_rows_skipped,
+        limit: 1,
+        pass: entry.historical_duplicate_rows_skipped === 1,
+      })
+    }
   }
   const index = measured['session-index']
   if (index) {
@@ -949,7 +1145,7 @@ function parseArgs(argv) {
   let scenario = 'all'
   let keep = false
   let assertTarget = false
-  /** @type {Record<string, number>} */
+  /** @type {Record<string, number | number[]>} */
   const overrides = {}
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
@@ -958,6 +1154,7 @@ function parseArgs(argv) {
     else if (arg === '--cache-rows') overrides.cacheRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--ingest-batches') overrides.ingestBatches = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--incoming-rows') overrides.incomingRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
+    else if (arg === '--dedupe-fan-outs') overrides.dedupeFanOuts = positiveIntegerList(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--transcript-rows') overrides.transcriptRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--settlement-calls') overrides.settlementCalls = positiveInteger(requiredValue(argv, ++index, arg), arg)
     else if (arg === '--settlement-rows') overrides.settlementRows = positiveInteger(requiredValue(argv, ++index, arg), arg)
@@ -998,6 +1195,19 @@ function positiveInteger(value, flag) {
   return parsed
 }
 
+/**
+ * Ascending, deduplicated list of fan-out widths. Order matters to the
+ * report: the narrowest width that reverts to the unrestricted read is taken
+ * as the full-read baseline.
+ *
+ * @param {string} value @param {string} flag
+ */
+function positiveIntegerList(value, flag) {
+  const parts = value.split(',').map((part) => part.trim()).filter((part) => part.length > 0)
+  if (parts.length === 0) throw new Error(`${flag} requires a comma-separated list of positive integers`)
+  return [...new Set(parts.map((part) => positiveInteger(part, flag)))].sort((a, b) => a - b)
+}
+
 /** @param {string} value @param {string} flag */
 function nonNegativeInteger(value, flag) {
   const parsed = Number(value)
@@ -1023,6 +1233,7 @@ function usage() {
     `  --cache-rows N           override committed cache rows\n` +
     `  --ingest-batches N       override OTEL batches\n` +
     `  --incoming-rows N        override rows per OTEL batch\n` +
+    `  --dedupe-fan-outs LIST   override OTEL dedupe distinct-session widths\n` +
     `  --transcript-rows N      override Claude transcript rows\n` +
     `  --settlement-calls N     override bounded settlement calls\n` +
     `  --settlement-rows N      override rows per settlement call\n` +
