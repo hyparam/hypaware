@@ -66,6 +66,11 @@ const systemdPath = path.join(stateDir, 'systemd.json')
 const STOP_WAIT_MS = 5000
 const STOP_POLL_MS = 25
 
+// How long a shim waits for another shim's state lock, and how old a lock has
+// to be before it is assumed abandoned by a process that was killed mid-update.
+const LOCK_WAIT_MS = 15_000
+const LOCK_STALE_MS = 60_000
+
 const tool = process.argv[2]
 const args = process.argv.slice(3)
 
@@ -163,6 +168,114 @@ function writeState(file, value) {
   }
 }
 
+/**
+ * Read, change, and write a state file as one indivisible step.
+ *
+ * `writeState`'s rename fixes half the hazard: no reader sees a torn file.
+ * The other half is the lost update, and a rename does nothing for it. Two
+ * shims that each read, then each write, leave the second one's copy in
+ * place, silently dropping whatever the first committed - which is the very
+ * "erases the whole mock domain" outcome `writeState` is written to prevent.
+ *
+ * It is not theoretical. `bootout` blocks until the job has drained, so a
+ * `launchctl setenv NODE_USE_SYSTEM_CA 1` landing in that window is erased
+ * when the bootout writes back the domain it read seconds earlier. Delivering
+ * that variable to the next launch is the whole point of the attach path this
+ * mock exists to model, so losing it is a confident false negative.
+ *
+ * Anything that blocks - killing a job and waiting for it to go - stays
+ * outside the lock. Only the read-change-write is held.
+ *
+ * @template T
+ * @param {string} file
+ * @param {any} fallback
+ * @param {(state: any) => T} change
+ * @returns {T}
+ */
+function updateState(file, fallback, change) {
+  const release = acquireStateLock(file)
+  try {
+    const state = readState(file, fallback)
+    const result = change(state)
+    writeState(file, state)
+    return result
+  } finally {
+    release()
+  }
+}
+
+/**
+ * Take the lock guarding `file`, and hand back the call that releases it.
+ *
+ * A mock that deadlocks is worse than one that races, so a lock left behind
+ * by a shim that was killed mid-update is broken rather than waited on
+ * forever, and a wait that outlives its budget gives up and proceeds
+ * unlocked.
+ *
+ * @param {string} file
+ * @returns {() => void}
+ */
+function acquireStateLock(file) {
+  const lockPath = `${file}.lock`
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    const held = tryStateLock(lockPath)
+    if (held) return held
+    if (lockAgeMs(lockPath) > LOCK_STALE_MS || Date.now() >= deadline) {
+      try { fs.rmSync(lockPath, { force: true }) } catch { /* another shim broke it first */ }
+      return tryStateLock(lockPath) ?? (() => {})
+    }
+    sleepSync(STOP_POLL_MS)
+  }
+}
+
+/**
+ * @param {string} lockPath
+ * @returns {(() => void) | null}
+ */
+function tryStateLock(lockPath) {
+  let fd
+  try {
+    fd = fs.openSync(lockPath, 'wx')
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'EEXIST') return null
+    throw err
+  }
+  try { fs.writeSync(fd, `${process.pid}\n`) } catch { /* the pid is a courtesy */ }
+  try { fs.closeSync(fd) } catch { /* already closed */ }
+  return () => {
+    try { fs.rmSync(lockPath, { force: true }) } catch { /* already released */ }
+  }
+}
+
+/**
+ * @param {string} lockPath
+ */
+function lockAgeMs(lockPath) {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs
+  } catch {
+    // It was released while we looked at it, so it is not stale, it is gone.
+    return 0
+  }
+}
+
+/** @returns {SandboxLaunchdState} */
+function emptyLaunchd() {
+  return { services: {}, env: {} }
+}
+
+/** @returns {SandboxSystemdState} */
+function emptySystemd() {
+  return { units: {} }
+}
+
+/** @returns {SandboxKeychainState} */
+function emptyKeychain() {
+  return { certs: [] }
+}
+
 // ---------------------------------------------------------------- launchctl
 
 /**
@@ -171,26 +284,22 @@ function writeState(file, value) {
  */
 function launchctl(argv) {
   const sub = argv[0]
-  /** @type {SandboxLaunchdState} */
-  const state = readState(launchdPath, { services: {}, env: {} })
 
   if (sub === 'setenv') {
     const [, name, value] = argv
-    state.env[name] = value ?? ''
-    writeState(launchdPath, state)
+    updateState(launchdPath, emptyLaunchd(), (state) => { state.env[name] = value ?? '' })
     return { code: 0, note: `setenv ${name}` }
   }
 
   if (sub === 'unsetenv') {
     const name = argv[1]
-    delete state.env[name]
-    writeState(launchdPath, state)
+    updateState(launchdPath, emptyLaunchd(), (state) => { delete state.env[name] })
     return { code: 0, note: `unsetenv ${name}` }
   }
 
   if (sub === 'getenv') {
     const name = argv[1]
-    const value = state.env[name]
+    const value = readState(launchdPath, emptyLaunchd()).env[name]
     // Real launchctl prints nothing and still exits 0 for an unset variable.
     return { code: 0, out: value === undefined ? '' : `${value}\n` }
   }
@@ -199,36 +308,43 @@ function launchctl(argv) {
     const plist = argv[argv.length - 1]
     const label = labelFromPlistFile(plist)
     if (!label) return { code: 64, err: `Bootstrap failed: 64: unreadable plist ${plist}\n` }
-    // launchd refuses to bootstrap a label already in the domain, running or
-    // not; `installLaunchAgent` boots out first, so this only fires on a real
-    // double-bootstrap.
-    if (state.services[label]) {
-      return { code: 5, err: 'Bootstrap failed: 5: Input/output error\n', note: `already loaded ${label}` }
-    }
-    /** @type {SandboxService} */
-    const service = { label, plist, pid: null, loadedAt: new Date().toISOString() }
-    if (process.env.HYP_SANDBOX_SPAWN === '1') {
-      service.pid = startSupervisor(label, plist)
-      service.supervised = true
-    }
-    state.services[label] = service
-    writeState(launchdPath, state)
-    return { code: 0, note: `bootstrap ${label}${service.pid ? ` pid ${service.pid}` : ' (not spawned)'}` }
+    return updateState(launchdPath, emptyLaunchd(), (state) => {
+      // launchd refuses to bootstrap a label already in the domain, running or
+      // not; `installLaunchAgent` boots out first, so this only fires on a real
+      // double-bootstrap. Checking it inside the lock is what makes two racing
+      // bootstraps produce one service and one error 5 rather than two
+      // supervisors fighting over the port.
+      if (state.services[label]) {
+        return { code: 5, err: 'Bootstrap failed: 5: Input/output error\n', note: `already loaded ${label}` }
+      }
+      /** @type {SandboxService} */
+      const service = { label, plist, pid: null, loadedAt: new Date().toISOString() }
+      if (process.env.HYP_SANDBOX_SPAWN === '1') {
+        service.pid = startSupervisor(label, plist)
+        service.supervised = true
+      }
+      state.services[label] = service
+      return { code: 0, note: `bootstrap ${label}${service.pid ? ` pid ${service.pid}` : ' (not spawned)'}` }
+    })
   }
 
   if (sub === 'bootout') {
     const label = labelFromTarget(argv[argv.length - 1])
-    const service = label ? state.services[label] : undefined
+    // Read once, unlocked, only to find what to kill: the kill blocks for as
+    // long as the job takes to drain, and holding the lock across it would
+    // stall every other shim for the same seconds.
+    const service = label ? readState(launchdPath, emptyLaunchd()).services[label] : undefined
     if (!label || !service) return { code: 3, err: 'Boot-out failed: 3: No such process\n' }
     killService(label, service)
-    delete state.services[label]
-    writeState(launchdPath, state)
+    // Re-read under the lock rather than writing back the pre-wait copy, which
+    // would erase every setenv and bootstrap that landed during the wait.
+    updateState(launchdPath, emptyLaunchd(), (state) => { delete state.services[label] })
     return { code: 0, note: `bootout ${label}` }
   }
 
   if (sub === 'kickstart') {
     const label = labelFromTarget(argv[argv.length - 1])
-    const service = label ? state.services[label] : undefined
+    const service = label ? readState(launchdPath, emptyLaunchd()).services[label] : undefined
     if (!label || !service) {
       return { code: 3, err: `Could not find service "${label}" in domain for\n` }
     }
@@ -247,8 +363,14 @@ function launchctl(argv) {
           try { process.kill(child, 'SIGTERM') } catch { /* already gone */ }
         }
       } else if (!alivePid(service.pid)) {
-        service.pid = startSupervisor(label, service.plist)
-        writeState(launchdPath, state)
+        updateState(launchdPath, emptyLaunchd(), (state) => {
+          const entry = state.services[label]
+          // Re-check under the lock: another shim may have started one while
+          // this one was deciding to, and two supervisors for one label means
+          // two daemons on the port.
+          if (!entry || alivePid(entry.pid)) return
+          entry.pid = startSupervisor(label, entry.plist)
+        })
       }
     }
     return { code: 0, note: `kickstart ${label}` }
@@ -256,7 +378,7 @@ function launchctl(argv) {
 
   if (sub === 'print') {
     const label = labelFromTarget(argv[argv.length - 1])
-    const service = label ? state.services[label] : undefined
+    const service = label ? readState(launchdPath, emptyLaunchd()).services[label] : undefined
     if (!label || !service) {
       return {
         code: 113,
@@ -828,14 +950,12 @@ function parseSystemdWords(value) {
  */
 function security(argv) {
   const sub = argv[0]
-  /** @type {SandboxKeychainState} */
-  const state = readState(keychainPath, { certs: [] })
 
   if (sub === 'verify-cert') {
     const certPath = flagValue(argv, '-c')
     if (!certPath) return { code: 1, err: 'Error: no certificate given\n' }
     const digest = fileDigest(certPath)
-    const hit = state.certs.find((c) => c.sha256 === digest && c.trusted)
+    const hit = readState(keychainPath, emptyKeychain()).certs.find((c) => c.sha256 === digest && c.trusted)
     if (hit) return { code: 0, out: '...certificate verification successful.\n' }
     return {
       code: 1,
@@ -875,37 +995,39 @@ function security(argv) {
     if (!digest) return { code: 1, err: `SecCertificateCreateFromData: unreadable ${certPath}\n` }
     const commonName = certCommonName(certPath)
     const keychain = flagValue(argv, '-k') ?? ''
-    const without = state.certs.filter((c) => c.sha256 !== digest)
-    without.push({
-      cn: commonName,
-      path: certPath,
-      sha256: digest,
-      keychain,
-      trusted: true,
-      addedAt: new Date().toISOString(),
+    updateState(keychainPath, emptyKeychain(), (state) => {
+      const without = state.certs.filter((/** @type {{ sha256: string }} */ c) => c.sha256 !== digest)
+      without.push({
+        cn: commonName,
+        path: certPath,
+        sha256: digest,
+        keychain,
+        trusted: true,
+        addedAt: new Date().toISOString(),
+      })
+      state.certs = without
     })
-    state.certs = without
-    writeState(keychainPath, state)
     return { code: 0, note: `trusted ${commonName ?? certPath}` }
   }
 
   if (sub === 'delete-certificate') {
     const commonName = flagValue(argv, '-c')
-    const remaining = state.certs.filter((c) => c.cn !== commonName)
-    if (remaining.length === state.certs.length) {
-      return {
-        code: 1,
-        err: 'SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n',
+    return updateState(keychainPath, emptyKeychain(), (state) => {
+      const remaining = state.certs.filter((/** @type {{ cn: string | null }} */ c) => c.cn !== commonName)
+      if (remaining.length === state.certs.length) {
+        return {
+          code: 1,
+          err: 'SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n',
+        }
       }
-    }
-    state.certs = remaining
-    writeState(keychainPath, state)
-    return { code: 0, note: `deleted ${commonName}` }
+      state.certs = remaining
+      return { code: 0, note: `deleted ${commonName}` }
+    })
   }
 
   if (sub === 'find-certificate') {
     const commonName = flagValue(argv, '-c')
-    const hit = state.certs.find((c) => c.cn === commonName)
+    const hit = readState(keychainPath, emptyKeychain()).certs.find((c) => c.cn === commonName)
     if (!hit) {
       return {
         code: 44,
@@ -980,59 +1102,66 @@ function systemctl(argv) {
   const rest = argv.filter((a) => a !== '--user')
   const sub = rest[0]
   const unit = rest[1]
-  /** @type {SandboxSystemdState} */
-  const state = readState(systemdPath, { units: {} })
 
   if (sub === 'daemon-reload' || sub === 'reset-failed') return { code: 0 }
 
   if (sub === 'enable') {
-    const entry = state.units[unit] ?? { enabled: false, active: false, pid: null, changedAt: '' }
-    entry.enabled = true
-    entry.changedAt = new Date().toISOString()
-    state.units[unit] = entry
-    writeState(systemdPath, state)
+    updateState(systemdPath, emptySystemd(), (state) => {
+      const entry = state.units[unit] ?? newUnit()
+      entry.enabled = true
+      entry.changedAt = new Date().toISOString()
+      state.units[unit] = entry
+    })
     return { code: 0, note: `${sub} ${unit}` }
   }
 
   if (sub === 'start' || sub === 'restart') {
-    const entry = state.units[unit] ?? { enabled: false, active: false, pid: null, changedAt: '' }
-    if (sub === 'restart' && entry.pid) killService(unit, entry)
-    if (process.env.HYP_SANDBOX_SPAWN === '1' && !childPid(unit)) {
-      const unitPath = path.join(process.env.HOME ?? '', '.config', 'systemd', 'user', unit)
-      if (!fs.existsSync(unitPath)) return { code: 5, err: `Unit ${unit} not found.\n` }
-      entry.pid = startSystemdSupervisor(unit, unitPath)
+    if (sub === 'restart') {
+      // Outside the lock: this blocks until the unit has actually exited.
+      const previous = readState(systemdPath, emptySystemd()).units[unit]
+      if (previous && previous.pid) killService(unit, previous)
     }
-    entry.active = true
-    entry.changedAt = new Date().toISOString()
-    state.units[unit] = entry
-    writeState(systemdPath, state)
-    return { code: 0, note: `${sub} ${unit}` }
+    return updateState(systemdPath, emptySystemd(), (state) => {
+      const entry = state.units[unit] ?? newUnit()
+      if (process.env.HYP_SANDBOX_SPAWN === '1' && !childPid(unit)) {
+        const unitPath = path.join(process.env.HOME ?? '', '.config', 'systemd', 'user', unit)
+        if (!fs.existsSync(unitPath)) return { code: 5, err: `Unit ${unit} not found.\n` }
+        entry.pid = startSystemdSupervisor(unit, unitPath)
+      }
+      entry.active = true
+      entry.changedAt = new Date().toISOString()
+      state.units[unit] = entry
+      return { code: 0, note: `${sub} ${unit}` }
+    })
   }
 
   if (sub === 'stop') {
-    const entry = state.units[unit]
-    if (entry) {
-      killService(unit, entry)
-      entry.active = false
-      entry.pid = null
-      entry.changedAt = new Date().toISOString()
-      writeState(systemdPath, state)
+    const previous = readState(systemdPath, emptySystemd()).units[unit]
+    if (previous) {
+      killService(unit, previous)
+      updateState(systemdPath, emptySystemd(), (state) => {
+        const entry = state.units[unit]
+        if (!entry) return
+        entry.active = false
+        entry.pid = null
+        entry.changedAt = new Date().toISOString()
+      })
     }
     return { code: 0, note: `${sub} ${unit}` }
   }
 
   if (sub === 'disable') {
-    const entry = state.units[unit]
-    if (entry) {
+    updateState(systemdPath, emptySystemd(), (state) => {
+      const entry = state.units[unit]
+      if (!entry) return
       entry.enabled = false
       entry.changedAt = new Date().toISOString()
-      writeState(systemdPath, state)
-    }
+    })
     return { code: 0, note: `${sub} ${unit}` }
   }
 
   if (sub === 'is-active') {
-    const entry = state.units[unit]
+    const entry = readState(systemdPath, emptySystemd()).units[unit]
     const active = process.env.HYP_SANDBOX_SPAWN === '1'
       ? Boolean(entry && childPid(unit))
       : Boolean(entry && entry.active)
@@ -1040,12 +1169,13 @@ function systemctl(argv) {
   }
 
   if (sub === 'is-enabled') {
-    const enabled = Boolean(state.units[unit] && state.units[unit].enabled)
+    const entry = readState(systemdPath, emptySystemd()).units[unit]
+    const enabled = Boolean(entry && entry.enabled)
     return { code: enabled ? 0 : 1, out: `${enabled ? 'enabled' : 'disabled'}\n` }
   }
 
   if (sub === 'show') {
-    const entry = state.units[unit]
+    const entry = readState(systemdPath, emptySystemd()).units[unit]
     const pid = entry ? childPid(unit) : null
     const active = process.env.HYP_SANDBOX_SPAWN === '1' ? Boolean(pid) : Boolean(entry && entry.active)
     return {
@@ -1055,6 +1185,15 @@ function systemctl(argv) {
   }
 
   return { code: 0, note: `unhandled systemctl subcommand ${sub}` }
+}
+
+/**
+ * A unit the mock has not seen before.
+ *
+ * @returns {SandboxSystemdState['units'][string]}
+ */
+function newUnit() {
+  return { enabled: false, active: false, pid: null, changedAt: '' }
 }
 
 /**

@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -512,4 +512,133 @@ test('launchctl mock: a program that cannot be started is recorded, not swallowe
   assert.equal(notes.length, 1)
   assert.match(notes[0], /could not start .*no-such-program/)
   assert.equal(shim(root, 'launchctl', ['print', target], env).stdout.includes('state = running'), false)
+})
+
+test('launchctl mock: a setenv during a bootout survives the bootout', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  // `bootout` blocks until the job it signalled has actually drained. The
+  // domain it writes back when it returns has to be re-read after that wait,
+  // not the copy it read before: `hyp attach` setenvs NODE_USE_SYSTEM_CA and
+  // the daemon's reconciler runs on its own clock, so a setenv landing inside
+  // the wait is exactly the traffic this mock is here to model. Writing back
+  // the stale copy erases it, `getenv` then reports it unset, and the run
+  // blames HypAware for a value the mock threw away. `writeState`'s rename
+  // does not cover this: it stops torn reads, not lost updates.
+  const plist = writePlist(root, label, [
+    '/bin/sh', '-c', 'trap "sleep 1; exit 0" TERM; while :; do sleep 0.1; done',
+  ])
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  assert.ok(await waitForPid(root, target, env), 'the supervisor started the program')
+
+  const bootout = spawn(process.execPath, [SHIM, 'launchctl', 'bootout', target], {
+    env: { ...process.env, HYP_SANDBOX_ROOT: root, ...env },
+    stdio: 'ignore',
+  })
+  const booted = new Promise((resolve) => bootout.on('exit', resolve))
+  // Well inside the ~1s the trapped program spends draining.
+  await new Promise((resolve) => setTimeout(resolve, 300))
+
+  assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
+  assert.equal(
+    shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA'], env).stdout,
+    '1\n',
+    'the setenv committed while the bootout was still waiting'
+  )
+
+  await booted
+  assert.equal(
+    shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA'], env).stdout,
+    '1\n',
+    'the bootout did not write back the domain it read before it waited'
+  )
+  assert.equal(shim(root, 'launchctl', ['print', target], env).code, 113, 'the bootout still unloaded')
+})
+
+
+/**
+ * A pid that has exited but has not been reaped. It still answers signal 0 and
+ * shrugs off SIGKILL, which is exactly the state the sandbox's detached,
+ * orphaned supervisors end up in under a PID 1 that does not reap. Resolves to
+ * null when this host cannot produce one.
+ *
+ * @param {import('node:test').TestContext} t
+ * @returns {Promise<number | null>}
+ */
+async function unreapedPid(t) {
+  // `$| = 1` so the pid reaches us before the parent parks; perl does not reap
+  // on its own, so the child stays unreaped for as long as the parent lives.
+  const maker = spawn('perl', ['-e', '$| = 1; my $p = fork(); if ($p == 0) { exit 0 } print "$p\\n"; sleep 30;'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  t.after(() => { try { maker.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const pid = await new Promise((resolve) => {
+    let seen = ''
+    const done = setTimeout(() => resolve(null), 5000)
+    maker.on('error', () => { clearTimeout(done); resolve(null) })
+    maker.stdout.on('data', (chunk) => {
+      seen += chunk.toString('utf8')
+      if (!seen.includes('\n')) return
+      clearTimeout(done)
+      resolve(Number(seen.trim()))
+    })
+  })
+  if (!Number.isInteger(pid) || Number(pid) <= 0) return null
+
+  // Only useful if it really is unreaped, and the fork reports its pid before
+  // the child has finished exiting, so poll rather than read once: under the
+  // full suite's load a single read catches it still running and the test
+  // silently skips the thing it exists to cover. A host whose perl or /proc
+  // behaves differently still skips rather than asserting something it never
+  // managed to set up.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    let stat = ''
+    try { stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8') } catch { return null }
+    const close = stat.lastIndexOf(')')
+    if (close !== -1 && stat[close + 2] === 'Z') return Number(pid)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return null
+}
+
+test('hyp-sandbox: stopping does not wait on, or warn about, an unreaped pid', async (t) => {
+  const sandboxCli = fileURLToPath(new URL('../../scripts/sandbox/hyp-sandbox', import.meta.url))
+  const zombiePid = await unreapedPid(t)
+  if (zombiePid === null) {
+    t.skip('this host cannot produce an unreaped pid to stop')
+    return
+  }
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-sandbox-stop-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'state', 'launchd.json'),
+    `${JSON.stringify({ services: { 'com.example.gone': { pid: zombiePid } }, env: {} }, null, 2)}\n`
+  )
+
+  const started = Date.now()
+  const reset = spawnSync('bash', [sandboxCli, '--root', root, 'reset'], {
+    encoding: 'utf8',
+    input: 'y\n',
+    timeout: 60_000,
+  })
+  const elapsed = Date.now() - started
+
+  assert.equal(reset.status, 0, reset.stderr)
+  // `stop_everything` probes with signal 0 alone unless it also checks for an
+  // unreaped pid, and a corpse answers that probe forever. The visible cost is
+  // a reset that spends its whole 5s SIGTERM budget plus its 2s SIGKILL budget
+  // on a process that had already exited, then warns about survivors that are
+  // not there - the sandbox reporting a confident wrong answer about its own
+  // teardown, which is the one thing it must not do.
+  assert.doesNotMatch(
+    reset.stdout,
+    /still running after SIGKILL/,
+    'a pid that has already exited is gone, not a survivor to warn about'
+  )
+  assert.ok(elapsed < 5000, `reset spent ${elapsed}ms waiting on a pid that had already exited`)
+  assert.equal(fs.existsSync(root), false, 'the root is deleted once nothing is running')
 })
