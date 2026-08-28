@@ -5,8 +5,8 @@ import vm from 'node:vm'
 
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
-import { Attr, getActiveSpan, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
-import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
+import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
+import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
 import { normalizeScanColumn } from './scan-column.js'
 import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
@@ -421,6 +421,10 @@ export async function executeQuerySql(args) {
         const datasetsUsed = []
         /** @type {string[]} */
         const freshnessMessages = []
+        // Carried to the run metric so a fleet-wide broken cache is visible on
+        // the `status` dimension instead of counting as clean runs.
+        // @ref LLP 0322#degrade-reaches-the-signals [implements]: a degraded run is not recorded as an ok run
+        let refreshDegraded = false
         /** @type {LocalOnlyVisibilityReport} */
         const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
 
@@ -452,12 +456,13 @@ export async function executeQuerySql(args) {
             }
           }
 
-          await settlePendingCacheForQuery({
+          const settled = await settlePendingCacheForQuery({
             partitions,
             storage,
             refresh,
             messages: freshnessMessages,
           })
+          if (settled.degraded) refreshDegraded = true
 
           const source = await withSpan(
             'query.scan_dataset',
@@ -628,8 +633,9 @@ export async function executeQuerySql(args) {
             })
           }
 
-          instruments.queryRunsTotal.add(1, { status: 'ok' })
-          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+          const runStatus = refreshDegraded ? 'degraded' : 'ok'
+          instruments.queryRunsTotal.add(1, { status: runStatus })
+          instruments.queryDurationMs.record(Date.now() - start, { status: runStatus })
 
           return { columns, rows, datasets: datasetsUsed, freshnessMessages, localOnly }
         } catch (err) {
@@ -668,19 +674,36 @@ export async function executeQuerySql(args) {
  *   refresh: RefreshMode,
  *   messages: string[],
  * }} args
+ * @returns {Promise<{ degraded: boolean }>} whether any stream served
+ *   unrefreshed data because its flush failed or is cooling down
  */
 export async function settlePendingCacheForQuery(args) {
   const now = Date.now()
+  let degraded = false
   for (const partition of args.partitions) {
     if (!partition.tablePath) continue
     try {
       const info = await args.storage.pendingInfo(partition.tablePath)
       if (!info.pending) continue
       if (args.refresh === 'always') {
+        // Forced refresh never consults the stamp: freshness is the caller's
+        // stated requirement, so it gets the attempt and the original error.
         await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
         continue
       }
       if (args.refresh === 'never') continue
+      // A flush that failed inside the window is not retried. Nothing else in
+      // this loop remembers a failure: `lastFlushAtMs` only advances on
+      // success, so without the stamp the debounce below reads a null or
+      // ancient timestamp and reopens on every query, retrying a doomed
+      // append and stranding one more rotated spool file each time.
+      // @ref LLP 0322#stamp-the-failure [implements]: a standing failure stamp holds the automatic gate closed
+      const failedAtMs = info.flushFailedAtMs ?? null
+      if (failedAtMs !== null && now - failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS) {
+        reportRefreshCoolingDown(args.messages)
+        degraded = true
+        continue
+      }
       if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
         await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
         continue
@@ -700,8 +723,10 @@ export async function settlePendingCacheForQuery(args) {
       // @ref LLP 0321#decision [constrained-by]: the degrade covers a failed spool-to-cache move, not a storage service missing the move
       if (typeof args.storage.pendingInfo !== 'function' || typeof args.storage.flushTable !== 'function') throw err
       reportAutoRefreshFailure(err, args.messages)
+      degraded = true
     }
   }
+  return { degraded }
 }
 
 /**
@@ -725,9 +750,45 @@ function reportAutoRefreshFailure(err, messages) {
     error_message: errorMessage.slice(0, 512),
   })
   const span = getActiveSpan()
-  span?.setAttribute('status', 'degraded')
+  // `markSpanStatus` rather than a bare attribute write: `withSpan` reads its
+  // status code from the attributes the span opened with, so setting the
+  // attribute alone leaves a degraded query ending `OK` for anyone alerting
+  // on span status.
+  // @ref LLP 0322#degrade-reaches-the-signals [implements]: the degrade reaches the span status code, not only the attribute
+  markSpanStatus(span, 'degraded')
   span?.setAttribute('cache_refresh_failed', true)
   span?.addEvent('query.cache_refresh_failed', {
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+  })
+  if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
+    messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
+  }
+}
+
+/**
+ * A query that skipped its flush because a recent one failed is degraded for
+ * the same reason and says so the same way, so the user-facing warning does
+ * not flicker on and off with the cooldown window. Separable in telemetry by
+ * `cache_refresh_cooling_down`.
+ *
+ * @ref LLP 0322#stamp-the-failure [implements]: the cooled query still reports degraded, and is separable in telemetry
+ * @param {string[]} messages
+ */
+function reportRefreshCoolingDown(messages) {
+  getLogger('query').warn('query.cache_refresh_cooling_down', {
+    [Attr.COMPONENT]: 'query',
+    [Attr.OPERATION]: 'cache.refresh',
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+    status: 'degraded',
+    cooldown_ms: QUERY_FLUSH_FAILURE_COOLDOWN_MS,
+  })
+  const span = getActiveSpan()
+  markSpanStatus(span, 'degraded')
+  span?.setAttribute('cache_refresh_failed', true)
+  span?.setAttribute('cache_refresh_cooling_down', true)
+  span?.addEvent('query.cache_refresh_cooling_down', {
     [Attr.ERROR_KIND]: 'cache_refresh_failed',
     refresh_mode: 'auto',
   })

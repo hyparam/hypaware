@@ -125,6 +125,14 @@ export interface PendingInfo {
   pending: boolean
   pendingBytes: number
   lastFlushAtMs: number | null
+  /**
+   * When this table's last flush attempt threw, if one is recorded and
+   * readable. A pacing record for the automatic query gate, never a verdict
+   * about what the spool or the cache holds (LLP 0322#what-the-stamp-is-not).
+   * Optional so a storage stub that predates the stamp still satisfies the
+   * shape, and read as "no recent failure" when absent.
+   */
+  flushFailedAtMs?: number | null
 }
 
 export interface CacheSpool {

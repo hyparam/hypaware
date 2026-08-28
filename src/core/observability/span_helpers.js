@@ -9,6 +9,38 @@ import { context, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
  */
 
 /**
+ * Spans whose terminal status was declared during the run rather than at
+ * creation. Keyed on the span itself, so a helper called deep inside the
+ * body reaches the `withSpan` frame that owns the status code without
+ * threading a handle through every caller.
+ *
+ * @type {WeakMap<Span, string>}
+ */
+const declaredStatuses = new WeakMap()
+
+/**
+ * Declare a span's terminal status from inside its body, for work that
+ * finishes without throwing but did not finish cleanly.
+ *
+ * `withSpan` otherwise reads `status` from the attributes it was given when
+ * the span opened, so a later `setAttribute('status', ...)` lands as an
+ * attribute on a span that still ends `OK`. This is opt-in rather than a
+ * live re-read of the attribute on purpose: many spans in this repo write
+ * `status` late with values like `skipped` or `partial` whose status codes
+ * were never argued about, and reclassifying them as a side effect of one
+ * caller's need is not this helper's decision to make.
+ *
+ * @ref LLP 0322#degrade-reaches-the-signals [implements]: an opt-in terminal status, so only the call site that asks is reclassified
+ * @param {Span | null | undefined} span
+ * @param {string} status
+ */
+export function markSpanStatus(span, status) {
+  if (!span) return
+  span.setAttribute('status', status)
+  declaredStatuses.set(span, status)
+}
+
+/**
  * Run `fn` inside a span. Records the result on the span (status + any
  * thrown error) and propagates the original return value.
  *
@@ -30,7 +62,7 @@ export async function withSpan(name, attrs, fn, opts = {}) {
   return tracer.startActiveSpan(name, { attributes: sanitized }, async (span) => {
     try {
       const result = await fn(span)
-      const status = sanitized.status
+      const status = declaredStatuses.get(span) ?? sanitized.status
       if (typeof status !== 'string' || status === 'ok') {
         span.setStatus({ code: SpanStatusCode.OK })
       } else {

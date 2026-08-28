@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-28
 **Related:** LLP 0013, LLP 0015, LLP 0311
+**Extended-by:** LLP 0322 (#stamp-the-failure: the automatic degrade is paced by a failure stamp and the retry stops rotating a new spool file each time; #degrade-reaches-the-signals carries the degrade into the span status code and the `queryRunsTotal` dimension)
 
 > A query using automatic refresh still reads the last confirmed cache when
 > moving waiting spool rows into that cache fails. It gives one clear warning

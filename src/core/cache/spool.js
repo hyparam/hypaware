@@ -17,11 +17,19 @@ import { readProgress, removeProgress, streamFlushFile, writeProgress } from './
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 512 * 1024 * 1024
 export const QUERY_FLUSH_DEBOUNCE_MS = 2 * 60 * 1000
+// How long a failed flush holds the automatic query gate closed. Ten minutes,
+// not LLP 0319's six hours: the re-settle scan already had the hourly tick as
+// a cadence and needed a slower one, while the query gate has no cadence at
+// all, so this window is the cadence. Kept under the maintenance interval so a
+// repair that lands there is picked up by the next query in the same hour.
+// @ref LLP 0322#stamp-the-failure [implements]: the window a standing failure stamp holds the auto gate closed
+export const QUERY_FLUSH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000
 
 const ACTIVE_FILE = 'active.jsonl'
 const FLUSH_PREFIX = 'flush-'
 const FLUSH_SUFFIX = '.jsonl'
 const LAST_FLUSH_FILE = 'last-flush.json'
+const FLUSH_FAILURE_FILE = 'last-flush-failure.json'
 
 /**
  * @param {{
@@ -79,6 +87,66 @@ export function createCacheSpool(args) {
     const next = state.flushLock.catch(() => undefined).then(fn)
     state.flushLock = next.catch(() => undefined)
     return next
+  }
+
+  /**
+   * The flush body. Lifted out of `flushTable` so the failure stamp write
+   * and the stamp clear wrap every exit from it, the early return included.
+   *
+   * @param {string} tablePath
+   * @param {{ reason?: string, force?: boolean }} opts
+   * @returns {Promise<FlushResult>}
+   */
+  async function runFlush(tablePath, opts) {
+    const reason = opts.reason ?? 'manual'
+    // A rotation while a failure stands only adds a file to a set nothing
+    // is draining: the waiting files cannot be read past the append that
+    // rejected them, so the retry has the same work either way. Skipping
+    // it keeps the stranded set fixed instead of growing it once per
+    // attempt, and lets new rows coalesce in the active file.
+    // @ref LLP 0322#coalesce-the-retry [implements]: a retry under a standing stamp reuses the files already rotated
+    const stranded = listFlushFiles(tablePath)
+    const coalescing = stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
+    if (!coalescing) {
+      await withWriteLock(tablePath, async () => {
+        await rotateActiveFile(tablePath)
+      })
+    }
+
+    const files = coalescing ? stranded : listFlushFiles(tablePath)
+    if (files.length === 0) {
+      return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, droppedCount: 0, reason }
+    }
+
+    let rowCount = 0
+    let chunkCount = 0
+    let bytesWritten = 0
+    let malformedCount = 0
+    let droppedCount = 0
+    for (const filePath of files) {
+      const progress = await readProgress(filePath)
+      const startOffset = progress?.byteOffset ?? 0
+      const batchId = `flush-${Date.now()}-${process.pid}`
+      let fileMalformed = 0
+
+      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
+        const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+        rowCount += batch.chunk.rows.length
+        chunkCount += 1
+        bytesWritten += written.bytesWritten
+        droppedCount += written.droppedCount ?? 0
+        fileMalformed += batch.malformedCount
+        await writeProgress(filePath, batch.resumeOffset)
+      }
+
+      malformedCount += fileMalformed
+      await removeProgress(filePath)
+      await fs.rm(filePath, { force: true })
+    }
+    if (chunkCount > 0) {
+      await writeLastFlush(tablePath, { rowCount, bytesWritten })
+    }
+    return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, droppedCount, reason }
   }
 
   return {
@@ -142,45 +210,22 @@ export function createCacheSpool(args) {
 
     async flushTable(tablePath, opts = {}) {
       return withFlushLock(tablePath, async () => {
-        const reason = opts.reason ?? 'manual'
-        await withWriteLock(tablePath, async () => {
-          await rotateActiveFile(tablePath)
-        })
-
-        const files = listFlushFiles(tablePath)
-        if (files.length === 0) {
-          return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, droppedCount: 0, reason }
+        try {
+          const result = await runFlush(tablePath, opts)
+          // Any completed attempt retires the stamp, including one that found
+          // nothing to move: the stamp asserts that the last attempt failed,
+          // and this one did not.
+          // @ref LLP 0322#clearing [implements]: a flush that completed is the evidence that clears the stamp
+          await clearFlushFailure(tablePath)
+          return result
+        } catch (err) {
+          // Written before the rethrow so the error the caller sees is
+          // unchanged, and so the very next query can pace itself off a
+          // failure this process is about to forget.
+          // @ref LLP 0322#stamp-the-failure [implements]: the failed flush leaves the pacing record the query gate reads
+          await writeFlushFailure(tablePath, err)
+          throw err
         }
-
-        let rowCount = 0
-        let chunkCount = 0
-        let bytesWritten = 0
-        let malformedCount = 0
-        let droppedCount = 0
-        for (const filePath of files) {
-          const progress = await readProgress(filePath)
-          const startOffset = progress?.byteOffset ?? 0
-          const batchId = `flush-${Date.now()}-${process.pid}`
-          let fileMalformed = 0
-
-          for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
-            const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
-            rowCount += batch.chunk.rows.length
-            chunkCount += 1
-            bytesWritten += written.bytesWritten
-            droppedCount += written.droppedCount ?? 0
-            fileMalformed += batch.malformedCount
-            await writeProgress(filePath, batch.resumeOffset)
-          }
-
-          malformedCount += fileMalformed
-          await removeProgress(filePath)
-          await fs.rm(filePath, { force: true })
-        }
-        if (chunkCount > 0) {
-          await writeLastFlush(tablePath, { rowCount, bytesWritten })
-        }
-        return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, droppedCount, reason }
       })
     },
 
@@ -216,6 +261,7 @@ export function createCacheSpool(args) {
         pending: hasPendingSync(tablePath),
         pendingBytes: pendingBytesSync(tablePath),
         lastFlushAtMs: await readLastFlushAt(tablePath),
+        flushFailedAtMs: await readFlushFailedAt(tablePath),
       }
     },
 
@@ -492,6 +538,64 @@ async function readLastFlushAt(tablePath) {
     if (typeof parsed.flushedAt !== 'string') return null
     const ms = Date.parse(parsed.flushedAt)
     return Number.isFinite(ms) ? ms : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Record that this table's last flush attempt threw. Deliberately a separate
+ * file from `last-flush.json` rather than a poisoned `flushedAt`: the
+ * freshness line the user reads quotes that timestamp as the age of the last
+ * write to the cache, and a failed attempt is not one.
+ *
+ * @ref LLP 0322#what-the-stamp-is-not [implements]: pacing state kept apart from the freshness report it must not falsify
+ * @param {string} tablePath
+ * @param {unknown} err
+ */
+async function writeFlushFailure(tablePath, err) {
+  const message = err instanceof Error ? err.message : String(err)
+  try {
+    await fs.mkdir(spoolDir(tablePath), { recursive: true })
+    await atomicWriteJson(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), {
+      failedAt: new Date().toISOString(),
+      errorMessage: message.slice(0, 512),
+    })
+  } catch {
+    // The stamp is a pacing hint. Failing to write it costs an unpaced
+    // retry, never the error the caller is about to receive.
+  }
+}
+
+/**
+ * @param {string} tablePath
+ */
+async function clearFlushFailure(tablePath) {
+  try {
+    await fs.rm(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), { force: true })
+  } catch {
+    /* a stamp that outlives its removal only costs one delayed retry */
+  }
+}
+
+/**
+ * Absent, unparseable, or dated in the future by a clock that moved all read
+ * as "no recent failure", so the flush is attempted. Suppressing work on
+ * state this build cannot interpret is the direction that silently withholds
+ * rows; attempting it is only ever a cost.
+ *
+ * @ref LLP 0322#stamps-that-cannot-be-read [implements]: an uninterpretable stamp is no stamp
+ * @param {string} tablePath
+ * @returns {Promise<number | null>}
+ */
+async function readFlushFailedAt(tablePath) {
+  try {
+    const raw = await fs.readFile(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), 'utf8')
+    const parsed = /** @type {{ failedAt?: unknown }} */ (JSON.parse(raw))
+    if (typeof parsed.failedAt !== 'string') return null
+    const ms = Date.parse(parsed.failedAt)
+    if (!Number.isFinite(ms)) return null
+    return ms > Date.now() ? null : ms
   } catch {
     return null
   }
