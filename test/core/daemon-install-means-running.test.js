@@ -197,12 +197,18 @@ test('install fails loudly when launchd never spawns the agent', async () => {
 
   await assert.rejects(
     () => installLaunchAgent(darwinOpts(home, lc)),
-    (err) => err instanceof Error
-      && /never started it/.test(err.message)
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /never started it/)
       // The CLI prints the message and nothing else, so the message is where
       // "why" and "here is the log that says more" both have to live.
-      && /Could not find service/.test(err.message)
-      && /daemon\.err\.log/.test(err.message),
+      assert.match(err.message, /Could not find service/)
+      assert.match(err.message, /daemon\.err\.log/)
+      // A kickstart that really did fail still reports its code: only the
+      // meaningless `exitCode: 0` is dropped.
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, 3)
+      return true
+    },
   )
   assert.equal(count(lc.calls, 'kickstart'), 1, 'tried to force the spawn before giving up')
 })
@@ -252,10 +258,15 @@ test('systemd install fails loudly when the started unit has no MainPID', async 
 
   await assert.rejects(
     () => installSystemdUnit(linuxOpts(home, sc)),
-    (err) => err instanceof Error
-      && /never reported a running process/.test(err.message)
-      && /Unit hypaware\.service not found/.test(err.message)
-      && /daemon\.err\.log/.test(err.message),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /never reported a running process/)
+      assert.match(err.message, /Unit hypaware\.service not found/)
+      assert.match(err.message, /daemon\.err\.log/)
+      // A start that really did fail still reports its code.
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, 5)
+      return true
+    },
   )
   assert.ok(count(sc.calls, 'show') > 0, 'verified the running state through systemctl show')
   assert.equal(count(sc.calls, 'start'), 1, 'spent its one retry before giving up')
@@ -279,4 +290,126 @@ test('systemd install issues no extra start when restart already brought it up',
 
   assert.equal(count(sc.calls, 'restart'), 1, 'restarted once')
   assert.equal(count(sc.calls, 'start'), 0, 'no redundant start on a healthy unit')
+})
+
+// Deferred findings from the review of #1039 (issue #1041, items 3 and 4):
+// the "install never came up" failure has to point somewhere that actually
+// has an answer, and must not label itself with a success exit code.
+
+test('a launchd install that never spawned names launchctl print as the second place to look', async () => {
+  const home = tmpHome('la-where')
+  // The pended-spawn shape: every command exits 0, nothing ever runs, and
+  // daemon.err.log has no fresh line in it because the process never started.
+  // The log pointer alone can only show stale output from a previous run.
+  const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /daemon\.err\.log/)
+      // `StandardErrorPath` appends, so the log is never truncated: on a
+      // reinstall over a label that ran before, it is not empty, it is stale.
+      // Telling the operator it "stays empty when the job never ran" would
+      // send them to read a previous run's crash as if it were this one's.
+      assert.doesNotMatch(err.message, /stays empty/)
+      // The probe ends the message so it can be copy-pasted: a trailing `)`
+      // would ride along and launchctl would reject the target.
+      assert.match(err.message, /ask launchd itself: launchctl print gui\/501\/\S+$/)
+      return true
+    },
+  )
+})
+
+test('a launchd install that never spawned carries no exit code when launchctl exited 0', async () => {
+  const home = tmpHome('la-exit0')
+  const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      // A thrown install error tagged `exitCode: 0` reads as success to any
+      // caller that forwards the field as a process exit status. The kickstart
+      // really did exit 0, which is why there is no exit code to report here.
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, undefined)
+      return true
+    },
+  )
+})
+
+test('a systemd install that never spawned names systemctl status as the second place to look', async () => {
+  const home = tmpHome('sd-where')
+  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /daemon\.err\.log/)
+      // `StandardError=append:` never truncates either, so the same stale-log
+      // trap applies on Linux.
+      assert.doesNotMatch(err.message, /stays empty/)
+      assert.match(err.message, /ask systemd itself: systemctl --user status \S+\.service$/)
+      return true
+    },
+  )
+})
+
+test('a systemd install that never spawned carries no exit code when systemctl exited 0', async () => {
+  const home = tmpHome('sd-exit0')
+  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, undefined)
+      return true
+    },
+  )
+})
+
+// The reason clause is now followed by a sentence, not by ` (see ...)`, so a
+// service manager that ends its stderr with a period used to leave `..` in the
+// middle of the one message the operator has to read carefully.
+
+test('a systemd reason that ends in a period does not double up the sentence break', async () => {
+  const home = tmpHome('sd-dot')
+  // Verbatim shape of a real `systemctl --user start` failure: it ends in a period.
+  const sc = fakeSystemd({
+    spawnOnRestart: false,
+    spawnOnStart: false,
+    startStderr: 'Failed to start hypaware.service: Unit hypaware.service not found.',
+  })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      // The reason still arrives whole apart from the punctuation.
+      assert.match(err.message, /Unit hypaware\.service not found/)
+      assert.doesNotMatch(err.message, /\.\./)
+      return true
+    },
+  )
+})
+
+test('a launchd reason that ends in a period does not double up the sentence break', async () => {
+  const home = tmpHome('la-dot')
+  const lc = fakeLaunchd({
+    spawnOnBootstrap: false,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Could not find service "com.hyperparam.hypaware" in domain for user.',
+  })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /in domain for user/)
+      assert.doesNotMatch(err.message, /\.\./)
+      return true
+    },
+  )
 })

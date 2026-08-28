@@ -283,12 +283,27 @@ export async function installSystemdUnit(options) {
       // Say why, and where to look next: `hyp daemon install` prints only
       // the message, so a reason carried on the error alone never reaches
       // the person this failure exists to tell (`ensureOk` folds it in too).
-      const why = (startRes.stderr || '').trim()
+      // Trailing period stripped because the clause after it opens with the
+      // log path: real systemctl stderr ends in one ("Unit hypaware.service
+      // not found."), and "not found.. /path" reads as a typo in the one
+      // message whose job is to be read carefully.
+      const why = (startRes.stderr || '').trim().replace(/\.+$/, '')
+      // The log is the second place to look, not the first. The unit writes
+      // stderr with `StandardError=append:`, never truncating, so a unit
+      // systemd never spawned leaves whatever the previous run wrote sitting
+      // there looking current. Say that out loud, and end on `systemctl --user
+      // status`, which always has an answer and is copy-pasteable because
+      // nothing follows it.
       throw new SystemdUnitError(
         `started ${plan.unitName} but systemd never reported a running process`
           + `${why ? `: ${why}` : ''}`
-          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')})`,
-        { exitCode: startRes.exitCode, stderr: startRes.stderr },
+          + `. ${path.posix.join(plan.logDir, 'daemon.err.log')} is appended to across runs,`
+          + ` so when the unit never ran it holds only older output`
+          + `; ask systemd itself: systemctl --user status ${plan.unitName}`,
+        // No exit code when the start itself exited 0: a thrown error tagged
+        // `exitCode: 0` reads as success to any caller that forwards the
+        // field as a process exit status.
+        { exitCode: startRes.exitCode === 0 ? undefined : startRes.exitCode, stderr: startRes.stderr },
       )
     }
   }
