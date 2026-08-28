@@ -579,3 +579,82 @@ test('a staged metadata write is reclaimed on a table that has no snapshots yet'
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: the staging pass runs
+// ahead of the referenced-set walk and answers to no metadata, so a tick
+// whose metadata is too broken to load still reclaims. The walk's failure
+// then propagates, and before hyparam/hypaware#1040 it took the count of
+// that reclamation with it: the tick reported nothing removed on a tick that
+// removed files, and the failure is silent (a missing report field and a
+// missing span attribute, never an error).
+test('a metadata load that fails after the staging pass still reports what the pass released', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-loadfail-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+
+    const leak = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(leak, 'staged bytes that never published')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(leak, stale, stale)
+
+    // Break the metadata the sweep's referenced-set walk loads, without
+    // removing the published name: `tableExists` still answers yes, so the
+    // walk runs and throws where it parses.
+    const hint = (await fs.readFile(path.join(metadataDir, 'version-hint.text'), 'utf8')).trim()
+    const currentVersion = `v${hint}.metadata.json`
+    await fs.writeFile(path.join(metadataDir, currentVersion), 'not json at all')
+
+    // Thresholds no partition can meet, so nothing before the sweep tries a
+    // rewrite over the metadata this test just broke.
+    const swept = await maintainCache({
+      cacheRoot,
+      config: { compact_file_count: 100000, compact_avg_file_bytes: 1 },
+    })
+
+    assert.equal(await pathExists(leak), false, 'the staging pass reclaims the leak before the walk loads anything')
+    assert.equal(
+      swept.partitions[0].unreferencedFilesRemoved, 1,
+      'the count of what was already unlinked survives the walk failure'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: `tableExists` matches a
+// published `v<N>.metadata.json`, which a staging name is not, so a metadata
+// directory whose only entry is a staged file answers no. That is exactly
+// what a table's FIRST publish crashing between staging and `link` leaves
+// behind, and before hyparam/hypaware#1040 the sweep never entered the
+// directory: the leak's only reclaimer was gated on the very file whose
+// absence created it.
+test('a staged metadata write is reclaimed when it is the only metadata entry there is', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-only-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+
+    // Wind the table back to the shape a create that died between staging
+    // and `link` leaves: one staged name in `metadata/`, nothing published.
+    for (const name of await fs.readdir(metadataDir)) {
+      await fs.rm(path.join(metadataDir, name), { force: true })
+    }
+    const leak = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(leak, 'staged bytes that never published')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(leak, stale, stale)
+
+    const swept = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), false, 'the sweep enters a metadata directory holding only a staging name')
+    assert.equal(
+      swept.partitions[0].unreferencedFilesRemoved, 1,
+      'and reports the reclamation like any other'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
