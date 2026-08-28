@@ -8,8 +8,11 @@
  * degrade reaches the span status code and the run metric rather than
  * only an attribute nobody alerts on.
  *
- * These tests pin all four. Before LLP 0322 every one of them fails:
- * nothing remembered the failure, so the gate reopened on every query.
+ * These tests pin all four, plus the two edges the bound must not cross:
+ * a forced flush still rotates, so it never resolves having quietly left
+ * the newest rows in the spool (LLP 0321's strict `always`), and a
+ * declared status reaches the code on `runRoot` spans as well as
+ * `withSpan` ones.
  */
 
 import test from 'node:test'
@@ -20,7 +23,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { metrics, MeterProvider, TracerProvider } from '../../src/core/observability/runtime.js'
-import { withSpan } from '../../src/core/observability/index.js'
+import { markSpanStatus, runRoot, withSpan } from '../../src/core/observability/index.js'
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 import {
@@ -273,6 +276,48 @@ test('a retry under a standing failure stops minting one more flush file each ti
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
+test('a forced flush still rotates, so it never reports success having left rows behind', async () => {
+  const cacheRoot = await makeCacheRoot()
+  const tablePath = path.join(cacheRoot, 'ai_gateway_messages')
+  const state = { rejecting: true }
+  /** @type {number[]} */
+  const committed = []
+  const spool = createCacheSpool({
+    cacheRoot,
+    async appendChunk(_tablePath, _columns, rows) {
+      if (state.rejecting) throw new Error(PARTITION_ERROR)
+      for (const row of rows) committed.push(Number(row.id))
+      return { bytesWritten: rows.length }
+    },
+  })
+
+  // A failure strands one file and leaves a stamp.
+  await spool.append(tablePath, COLUMNS, [{ id: 1 }])
+  await assert.rejects(() => spool.flushTable(tablePath, { reason: 'daemon' }))
+  assert.equal(flushFileCount(tablePath), 1)
+
+  // Live capture keeps arriving in `active.jsonl` while the failure stands.
+  await spool.append(tablePath, COLUMNS, [{ id: 2 }])
+  state.rejecting = false
+
+  // `force` is what `--refresh always`, `hyp query refresh`, the post-backfill
+  // commit, and the sink export paths pass. Coalescing must not apply to them:
+  // returning `flushed: true` with row 2 still in the spool is the silent drop
+  // those callers flush to prevent, and breaks LLP 0321's strict `always`.
+  const forced = await spool.flushTable(tablePath, { force: true, reason: 'query_always' })
+  assert.equal(forced.flushed, true)
+  assert.deepEqual(
+    committed.sort((a, b) => a - b),
+    [1, 2],
+    'a forced flush commits the rows captured while the failure stood, not only the stranded ones'
+  )
+  const after = await spool.pendingInfo(tablePath)
+  assert.equal(after.pending, false, 'a forced flush that resolves leaves nothing waiting')
+  assert.equal(after.flushFailedAtMs ?? null, null)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
 test('the degrade reaches the span status code, and an ordinary late attribute does not', async () => {
   /** @type {any[]} */
   const captured = []
@@ -282,12 +327,17 @@ test('the degrade reaches the span status code, and an ordinary late attribute d
   })
   provider.register()
   try {
-    const { markSpanStatus } = await import('../../src/core/observability/index.js')
     await withSpan('test.degraded', { status: 'ok' }, async (span) => {
       markSpanStatus(span, 'degraded')
     })
     await withSpan('test.skipped', { status: 'ok' }, async (span) => {
       span.setAttribute('status', 'skipped')
+    })
+    // `markSpanStatus` takes a span, not a frame, so a caller cannot tell
+    // which helper opened the one it holds. Honoring the declaration in only
+    // one of the two would make it silently inert on every root span.
+    await runRoot('test.root_degraded', { status: 'ok' }, async (span) => {
+      markSpanStatus(span, 'degraded')
     })
   } finally {
     await provider.shutdown()
@@ -297,6 +347,10 @@ test('the degrade reaches the span status code, and an ordinary late attribute d
   assert.equal(degraded?.attributes.status, 'degraded')
   assert.equal(degraded?.status.code, 2, 'a declared degraded status ends the span as ERROR')
   assert.equal(degraded?.status.message, 'degraded')
+
+  const rootDegraded = captured.find((s) => s.name === 'test.root_degraded')
+  assert.equal(rootDegraded?.attributes.status, 'degraded')
+  assert.equal(rootDegraded?.status.code, 2, 'runRoot honors a declared status too')
 
   // The narrowness is the point: reclassifying every span that writes
   // `status` late would sweep up unrelated `skipped` and `partial` spans.

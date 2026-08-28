@@ -104,9 +104,22 @@ export function createCacheSpool(args) {
     // rejected them, so the retry has the same work either way. Skipping
     // it keeps the stranded set fixed instead of growing it once per
     // attempt, and lets new rows coalesce in the active file.
-    // @ref LLP 0322#coalesce-the-retry [implements]: a retry under a standing stamp reuses the files already rotated
+    //
+    // Never on a forced flush. `force` is the word every caller who needs
+    // "everything captured so far is committed once this resolves" passes:
+    // `--refresh always`, `hyp query refresh`, the post-backfill commit, and
+    // the sink export paths that read the table straight afterwards. Skipping
+    // the rotation for them would let a flush that succeeds against a
+    // repaired cache return `flushed: true` while the newest rows still sat
+    // in `active.jsonl` - the "reports success while silently dropping data"
+    // case those callers flush to avoid, and the strictness LLP 0321 settled
+    // for `always`. The unforced paths are the ones that repeat (the query
+    // gate, the size-threshold flush, the sink driver's discovery settle), so
+    // bounding those is what bounds the growth.
+    // @ref LLP 0322#coalesce-the-retry [implements]: an unforced retry under a standing stamp reuses the files already rotated
+    // @ref LLP 0321#decision [constrained-by]: forced refresh stays strict, so a forced flush always rotates
     const stranded = listFlushFiles(tablePath)
-    const coalescing = stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
+    const coalescing = opts.force !== true && stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
     if (!coalescing) {
       await withWriteLock(tablePath, async () => {
         await rotateActiveFile(tablePath)

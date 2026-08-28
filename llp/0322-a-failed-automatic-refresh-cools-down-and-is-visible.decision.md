@@ -113,18 +113,33 @@ Carried over verbatim from LLP 0319#unreadable-stamp-scans, for the same reason:
 suppressing work on state this build cannot interpret is the direction that
 silently withholds rows, while attempting it is only ever a cost.
 
-<a id="coalesce-the-retry"></a>**A retry under a standing stamp reuses the files
-already rotated instead of minting another.** When `flushTable` starts, finds a
-failure stamp, and finds flush files already waiting, it skips
-`rotateActiveFile`. New rows keep accumulating in `active.jsonl` and are picked
-up by the first rotation after the cache is repaired.
+<a id="coalesce-the-retry"></a>**An unforced retry under a standing stamp reuses
+the files already rotated instead of minting another.** When `flushTable` starts
+without `force`, finds a failure stamp, and finds flush files already waiting, it
+skips `rotateActiveFile`. New rows keep accumulating in `active.jsonl` and are
+picked up by the first rotation after the cache is repaired.
 
 This is the half the cooldown alone does not fix. The cooldown lowers the rate
-of rotations, but each one still strands one more file forever, and the daemon's
-scheduled flush does not consult the query gate at all. The rule removes the
-growth instead of slowing it: while a failure stands, the number of `flush-*`
-files is fixed at whatever the failure stranded, so the `pendingBytesSync` sweep
-stops growing too.
+of rotations, but each one still strands one more file forever, and the flushes
+the daemon schedules for itself (the spool's size threshold, the sink driver's
+discovery settle) do not consult the query gate at all. Those are the calls that
+repeat, and the rule removes their growth instead of slowing it: while a failure
+stands, the number of `flush-*` files is fixed at whatever the failure stranded,
+so the `pendingBytesSync` sweep stops growing too.
+
+**A forced flush always rotates.** `force` is what every caller passes that
+needs "everything captured so far is committed once this resolves":
+`--refresh always`, `hyp query refresh`, the commit after a backfill, and the
+sink and table-format export paths that read the table immediately afterwards.
+Suppressing their rotation would let a flush that succeeds against a
+freshly repaired cache return `flushed: true` having left the newest rows in
+`active.jsonl`, with no error and no warning - the "committing without the
+flushed rows would report success while silently dropping data" case the export
+paths flush to prevent, and a violation of the strictness LLP 0321#decision
+settled for `always` and this document claims to leave standing. Forced calls
+are user- or tick-paced rather than query-paced, so exempting them costs at most
+one stranded file per explicit request and does not restore the growth this rule
+exists to stop.
 
 Nothing is lost by not rotating. The rotation exists to close a file so it can
 be read, and the files already waiting cannot be read past their first append.
@@ -141,7 +156,9 @@ one:
 
 - `span_helpers` gains `markSpanStatus(span, status)`. It writes the `status`
   attribute as before and records the status as the span's terminal one;
-  `withSpan` reads that in preference to the creation-time snapshot. The
+  `withSpan` and `runRoot` both read that in preference to the creation-time
+  snapshot, because the helper takes a span rather than a frame and a caller
+  cannot tell which of the two opened the one it holds. The
   degrade path calls it, so a degraded query ends `SpanStatusCode.ERROR` with
   the status as its message.
 - `settlePendingCacheForQuery` returns whether it degraded, and the SQL run
@@ -179,7 +196,8 @@ about even though each individual query looked fine to the person who ran it.
   the daemon's next successful scheduled flush clears the stamp.
 - Rows captured while a failure stands sit in `active.jsonl` rather than in a
   rotated file. They are fsynced, counted toward the spool threshold, readable
-  by `readSpooledRows`, and flushed by the first attempt after the repair.
+  by `readSpooledRows`, and flushed by the first forced attempt, or by the first
+  unforced attempt after the repair has drained the stranded set.
 - Spans and run metrics for degraded queries change classification. A dashboard
   counting `queryRunsTotal{status="ok"}` as "all successful runs" will see
   degraded runs move to their own bucket, which is the correction, and error-rate
@@ -237,9 +255,11 @@ on one that completes; the cooldown gate skipping `flushTable` entirely inside
 the window and attempting it again once the window is past; an unreadable or
 future-dated stamp reading as "not cooling down"; the cooled query still
 reporting degraded; the suppressed rotation leaving the flush-file count fixed
-across repeated failing flushes under live appends; `withSpan` ending a
-`markSpanStatus`-marked span as `ERROR` while an ordinary late `setAttribute`
-is left alone; and `queryRunsTotal` carrying `status: 'degraded'`.
+across repeated failing flushes under live appends; a forced flush against a
+repaired cache still committing rows captured while the failure stood;
+`withSpan` and `runRoot` both ending a `markSpanStatus`-marked span as `ERROR`
+while an ordinary late `setAttribute` is left alone; and `queryRunsTotal`
+carrying `status: 'degraded'`.
 
 ## Extends {#extends}
 
