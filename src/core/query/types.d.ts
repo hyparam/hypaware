@@ -171,10 +171,13 @@ export interface OverviewRows {
 /**
  * Something the overview must say alongside its numbers, tagged by kind so
  * each caller can route it. `local-only` is required disclosure (LLP 0105);
- * `freshness` is advisory. `line` is preformatted and newline-terminated.
+ * `refresh-failed` is required too (LLP 0321: the result must never claim to
+ * be current when waiting rows could not be committed); `freshness` is the
+ * advisory debounce line and is the only kind a caller may drop. `line` is
+ * preformatted and newline-terminated.
  */
 export interface OverviewNotice {
-  kind: 'local-only' | 'freshness'
+  kind: 'local-only' | 'freshness' | 'refresh-failed'
   line: string
 }
 

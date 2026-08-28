@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0012, LLP 0014, LLP 0015
+**Extended-by:** LLP 0321
 
 > The always-on intrinsic store. Decomposed from `hypaware-design.md`
 > (Local Query Cache).

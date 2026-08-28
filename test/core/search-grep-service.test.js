@@ -459,6 +459,55 @@ test('rows captured into the spool are found after the freshness flush', async (
   )
 })
 
+test('automatic refresh searches confirmed rows when the spool cannot enter the hot cache', async () => {
+  // The blocked write is produced, not stubbed. A stubbed `flushTable` never
+  // rotates the spool or reaches `appendChunk`, so the retention assertion
+  // below would hold by construction rather than by the code under test.
+  // Here the committed table carries the shipped date-only spec while the
+  // running declaration still calls session_id a partition field, which is
+  // the exact 1.27-to-1.28 spec-evolution rejection LLP 0321 quotes.
+  const { cacheRoot } = await makeCache([[OLD]])
+  const shipped = aiGatewayDatasetRegistration().cachePartitioning
+  assert.ok(shipped, 'the gateway dataset declares cache partitioning')
+  const preDatePartition = {
+    source: shipped.source,
+    iceberg: {
+      fields: shipped.iceberg.fields.map((field) => (
+        field.column === 'session_id'
+          ? { column: 'session_id', transform: /** @type {const} */ ('identity'), required: true }
+          : field
+      )),
+    },
+  }
+  const storage = createQueryStorageService({
+    cacheRoot,
+    getDeclaration: (dataset) => (dataset === DATASET ? preDatePartition : undefined),
+  })
+  const spooled = mkRow({
+    date: '2026-08-13',
+    session_id: 'waiting',
+    content_text: 'waiting needle blocked by the old cache layout',
+  })
+  const labelTable = storage.cacheTablePath(DATASET, ['proxy_messages_v5'])
+  await storage.appendRows(labelTable, COLUMNS, [spooled])
+
+  const automatic = await grep(storage, { refresh: 'auto' })
+  assert.deepEqual(automatic.hits.map((hit) => hit.sessionId), ['s1'])
+  assert.deepEqual(automatic.freshnessMessages, [
+    'cache: refresh failed; using previously saved data; newer waiting rows may be missing',
+  ])
+  assert.equal((await storage.pendingInfo(labelTable)).pending, true, 'the failed flush leaves its rows in the spool')
+  /** @type {unknown[]} */
+  const retained = []
+  for await (const row of storage.readSpooledRows(DATASET)) retained.push(row.message_id)
+  assert.deepEqual(retained, [spooled.message_id], 'the waiting row is neither dropped nor acknowledged')
+
+  await assert.rejects(
+    () => grep(storage, { refresh: 'always' }),
+    /partition field "session_id" is new/
+  )
+})
+
 test('an empty cache answers empty and exhausted', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-grep-empty-'))
   const storage = createQueryStorageService({ cacheRoot })

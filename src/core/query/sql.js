@@ -5,7 +5,7 @@ import vm from 'node:vm'
 
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
-import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 import { normalizeScanColumn } from './scan-column.js'
 import { coerceTimestampLiterals } from './timestamp-literals.js'
@@ -36,6 +36,17 @@ const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
 
 /** How often the watchdog samples heap growth while a query runs. */
 const HEAP_WATCH_INTERVAL_MS = 100
+
+/**
+ * Exported so a caller that routes freshness lines by meaning can tell this
+ * one apart from the ordinary debounce staleness line. They arrive in the
+ * same `freshnessMessages` array and read alike, but only this one means
+ * rows are missing rather than merely a couple of minutes old.
+ *
+ * @ref LLP 0321#decision [implements]: the degrade emits one warning that newer waiting rows may be missing
+ */
+export const AUTO_REFRESH_FAILURE_MESSAGE =
+  'cache: refresh failed; using previously saved data; newer waiting rows may be missing'
 
 /**
  * Typed refusal for a query whose execution outgrew its heap budget.
@@ -662,20 +673,66 @@ export async function settlePendingCacheForQuery(args) {
   const now = Date.now()
   for (const partition of args.partitions) {
     if (!partition.tablePath) continue
-    const info = await args.storage.pendingInfo(partition.tablePath)
-    if (!info.pending) continue
-    if (args.refresh === 'always') {
-      await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
-      continue
+    try {
+      const info = await args.storage.pendingInfo(partition.tablePath)
+      if (!info.pending) continue
+      if (args.refresh === 'always') {
+        await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
+        continue
+      }
+      if (args.refresh === 'never') continue
+      if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
+        await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
+        continue
+      }
+      args.messages.push(
+        `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
+      )
+    } catch (err) {
+      if (args.refresh !== 'auto') throw err
+      // A storage service that never had the spool methods is a wiring bug,
+      // not the blocked spool-to-cache write the auto degrade is for. Told
+      // apart here rather than up front because the callers that legitimately
+      // pass a bare storage only ever reach this loop with no flushable
+      // table, so an eager capability check would reject them too. Swallowed,
+      // it would read as "cache: refresh failed" on every query forever while
+      // newly captured rows silently never arrived.
+      // @ref LLP 0321#decision [constrained-by]: the degrade covers a failed spool-to-cache move, not a storage service missing the move
+      if (typeof args.storage.pendingInfo !== 'function' || typeof args.storage.flushTable !== 'function') throw err
+      reportAutoRefreshFailure(err, args.messages)
     }
-    if (args.refresh === 'never') continue
-    if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
-      await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
-      continue
-    }
-    args.messages.push(
-      `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
-    )
+  }
+}
+
+/**
+ * An automatic freshness attempt is allowed to serve the last confirmed
+ * cache when its spool flush fails. The explicit `always` mode never reaches
+ * this helper: it preserves the original error because freshness was the
+ * caller's requirement, not a best effort.
+ *
+ * @ref LLP 0321#decision [implements]: auto refresh degrades to confirmed data, while forced refresh remains strict
+ * @param {unknown} err
+ * @param {string[]} messages
+ */
+function reportAutoRefreshFailure(err, messages) {
+  const errorMessage = err instanceof Error ? err.message : String(err)
+  getLogger('query').warn('query.cache_refresh_failed', {
+    [Attr.COMPONENT]: 'query',
+    [Attr.OPERATION]: 'cache.refresh',
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+    status: 'degraded',
+    error_message: errorMessage.slice(0, 512),
+  })
+  const span = getActiveSpan()
+  span?.setAttribute('status', 'degraded')
+  span?.setAttribute('cache_refresh_failed', true)
+  span?.addEvent('query.cache_refresh_failed', {
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+  })
+  if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
+    messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
   }
 }
 

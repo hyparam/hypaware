@@ -1,14 +1,147 @@
-# Acceptance procedures (opt-in, manual)
+# Acceptance procedures (manual)
 
-Acceptance checks are the third tier of the test model in `CLAUDE.md`. They
-use the packaged CLI, a real daemon, a real user home, and real client
-traffic, so they cannot run in CI and cannot run under the hermetic smoke
-harness (`hypaware-core/smoke/lib/harness.js` forces a temp `HYP_HOME` and
-`HYP_DEV_TELEMETRY=1`, which is the opposite of what these prove).
+Acceptance checks are the third tier of the test model in `AGENTS.md`. They
+cross boundaries the current-code hermetic harness cannot prove. Most use the
+packaged CLI, a real daemon, a real user home, and real client traffic. The
+`durable_cache_upgrade` procedure instead crosses two consecutive code
+versions under a disposable home. A fixture written by the candidate cannot
+replace either kind of check because it only proves the current code agrees
+with itself.
 
-Each procedure below is run by a human, on a machine that has the client
-installed, before a release that touched the relevant adapter. Record the
-result in the release notes. **Do not mark one passed unless you ran it.**
+Each procedure below is run by a human before a release that touched its
+boundary. Record the result in the release notes. **Do not mark one passed
+unless you ran it.**
+
+---
+
+## `durable_cache_upgrade`
+
+**What it proves:** that one affected stream can cross from the last released
+version to the candidate without losing confirmed rows or waiting spool rows;
+that the candidate performs its intended cache migration; that writes still
+work afterward; and that a blocked automatic refresh leaves confirmed data
+queryable while preserving the waiting rows.
+
+**What it does not prove:** migration speed on a production-sized cache,
+unaffected streams, every possible crash point, or client capture. Test each
+affected stream separately. Use a soak or fault-injection test when the change
+also claims one of those properties.
+
+**Required when:** a release changes a spool envelope or label, cache schema or
+partition declaration, generation/cursor format, or maintenance/compaction
+output. Sidecar-only changes use the same procedure when the sidecar writer can
+stop the spool-to-cache or cache-to-compaction path.
+
+**Requires:** the last released tag or package, the candidate checkout or
+package, separate dependency installs for both versions, and a unique test root
+under the platform temp directory (`${TMPDIR:-/tmp}`: the per-user
+`/var/folders/.../T` directory macOS sets, `/tmp` on Linux). The test root
+must contain the entire `HYP_HOME`. Never point either version at the
+operator's normal `~/.hyp`.
+
+**Related:** [LLP 0013](../llp/0013-local-query-cache.decision.md),
+[LLP 0311](../llp/0311-cache-date-partition.decision.md),
+[LLP 0321](../llp/0321-auto-refresh-serves-confirmed-cache.decision.md).
+
+### Steps
+
+1. Name the exact boundary before creating data. Record:
+
+   - previous version and candidate commit;
+   - affected dataset or stream;
+   - old and new durable shapes;
+   - the command or scheduled step that performs the migration;
+   - any query or sidecar surface that reads the changed files.
+
+   One run covers one stream. If two streams use different declarations or
+   migration hooks, they need two runs. This step is complete when every shape
+   assertion below has an expected old and new value.
+
+2. Create an isolated root and install both versions with their own exact
+   dependencies:
+
+   ```sh
+   UPGRADE_TMP="${TMPDIR:-/tmp}"
+   UPGRADE_ROOT=$(mktemp -d "${UPGRADE_TMP%/}/hypaware-durable-upgrade.XXXXXX")
+   mkdir -p "$UPGRADE_ROOT/previous" "$UPGRADE_ROOT/candidate" "$UPGRADE_ROOT/hyp-home"
+   export HYP_HOME="$UPGRADE_ROOT/hyp-home"
+   ```
+
+   Before any writer starts, assert that `HYP_HOME` begins with
+   `${UPGRADE_TMP%/}/hypaware-durable-upgrade.` and is not under `$HOME`. Keep
+   the previous release and candidate in separate directories so one dependency
+   tree cannot hide a package change in the other.
+
+3. Using the previous release's real storage writer, create:
+
+   - confirmed rows spanning every old partition or schema case the migration
+     must preserve;
+   - at least two distinct row identities whose exact values are recorded;
+   - at least one newer row left only in the real spool.
+
+   Use the release's dataset declaration and writer. Hand-written cursor,
+   metadata, Parquet, or spool files do not pass this procedure. Record the
+   confirmed identities, waiting identities, row count, live file count,
+   active generation, and old schema/partition metadata. This step is complete
+   when the confirmed rows are queryable by the previous release and the
+   waiting rows are absent from committed reads but present in the spool.
+
+4. Open the same `HYP_HOME` with the candidate, before running maintenance.
+   Force a refresh through the real query path, then query every affected read
+   surface. For a searchable dataset, run both SQL and grep.
+
+   Pass condition: the candidate reads every confirmed row, moves every
+   waiting row through the real spool-to-cache path, and returns the full
+   identity set exactly once. The active layout must still be the old layout
+   if migration belongs to maintenance rather than refresh.
+
+5. Run the real migration entrypoint. If the migration is scheduled
+   maintenance, call maintenance rather than its private rewrite helper.
+
+   Pass condition: the report says the intended migration ran, the active
+   generation changes only after the replacement is ready, the new
+   schema/partition/cursor metadata exactly matches the declared shape, and the
+   confirmed identity set and row count are unchanged. The previous generation
+   must follow the migration's stated retirement or rollback rule. Record live
+   file counts before and after. Sidecar generation may affect speed, but a
+   missing sidecar must not make the data unreadable.
+
+6. Write one new row with the candidate, force it through the spool, and query
+   it through every affected read surface.
+
+   Pass condition: the new identity appears exactly once beside every migrated
+   identity, the candidate writes only the new shape, and no migration runs a
+   second time after convergence.
+
+7. Exercise the blocked-write case against a readable confirmed cache. Use a
+   real incompatible declaration or format to make the spool-to-cache write
+   return the failure this release is meant to survive. Add a uniquely named
+   waiting row before querying.
+
+   Pass condition:
+
+   - automatic SQL, and grep when the stream supports it, return all confirmed
+     rows, omit the waiting row, and show the stale-data warning;
+   - forced refresh returns the original write error;
+   - the waiting identity remains readable from the spool after both failures;
+   - the active cache generation and confirmed row count do not change.
+
+8. Record the result in the release notes: both versions, stream, old and new
+   shapes, confirmed rows before and after, file counts before and after,
+   post-migration write result, forced error text, and waiting-spool result.
+   Remove only the exact `UPGRADE_ROOT` created in step 2.
+
+### Release blockers
+
+Any of these fails the procedure and blocks the release:
+
+- a confirmed identity is missing or duplicated at any stage;
+- a waiting identity disappears without becoming confirmed;
+- a query loses access to the confirmed cache because refresh failed;
+- the active generation changes before the replacement is complete;
+- the migration reports success while old layout metadata remains active;
+- the first candidate write fails after migration;
+- the next maintenance pass repeats a migration that claimed to converge.
 
 ---
 
